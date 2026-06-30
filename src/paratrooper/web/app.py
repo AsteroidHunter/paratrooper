@@ -32,6 +32,7 @@ from ..agent.config import Config, load_config
 from .auth import require_token, verify_token
 from .batching import ThreadCoordinator
 from .db import ThreadStore
+from .inbox import InboxStore, RedisInbox, new_key
 from .models import (
     JobMessage,
     PublishRequest,
@@ -42,7 +43,6 @@ from .models import (
 )
 from .publish import merge_pull_request, merge_token, owner_repo_from_remote, parse_pr_number
 from .queue import JobQueue, connect
-from .uploads import save_upload
 
 
 def _now() -> str:
@@ -55,6 +55,7 @@ class AppState:
     store: ThreadStore
     queue: JobQueue
     coordinator: ThreadCoordinator
+    inbox: InboxStore
     sockets: dict[str, set[WebSocket]] = field(default_factory=dict)
     relay_task: asyncio.Task | None = None
 
@@ -118,7 +119,10 @@ def _lifespan(injected: AppState | None):
             await queue.publish_interrupt(thread_id, job_id)
 
         coordinator = ThreadCoordinator(enqueue_cb, interrupt_cb)
-        state = AppState(config=config, store=store, queue=queue, coordinator=coordinator)
+        state = AppState(
+            config=config, store=store, queue=queue, coordinator=coordinator,
+            inbox=RedisInbox(queue.r),
+        )
         app.state.app_state = state
         state.relay_task = asyncio.ensure_future(_result_relay(state))
         try:
@@ -144,10 +148,9 @@ def create_app(injected: AppState | None = None) -> FastAPI:
     @app.post("/api/upload", response_model=UploadResponse, dependencies=[Depends(require_token)])
     async def upload(file: UploadFile) -> UploadResponse:
         content = await file.read()
-        key, size = await asyncio.to_thread(
-            save_upload, st().config.inbox, file.filename, content
-        )
-        return UploadResponse(inbox_key=key, content_type=file.content_type, size=size)
+        key = new_key(file.filename)
+        await st().inbox.put(key, content)  # cross-service store (Key Value on Render)
+        return UploadResponse(inbox_key=key, content_type=file.content_type, size=len(content))
 
     @app.post("/api/send", dependencies=[Depends(require_token)])
     async def send(req: SendRequest) -> dict:

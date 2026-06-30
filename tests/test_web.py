@@ -13,6 +13,7 @@ from paratrooper.web import ThreadCoordinator, ThreadStore, is_stop_word
 from paratrooper.web.app import AppState, create_app
 from paratrooper.web.auth import verify_token
 from paratrooper.web.batching import DEFAULT_WINDOW
+from paratrooper.web.inbox import DiskInbox, RedisInbox, new_key
 from paratrooper.web.models import ThreadMessage
 from paratrooper.web.publish import (
     PublishError,
@@ -157,6 +158,48 @@ def test_save_upload_key_and_traversal(tmp_path):
     delete_staged(tmp_path, key)  # idempotent (missing_ok)
 
 
+def test_new_key_extension():
+    assert new_key("photo.JPEG").endswith(".jpeg")
+    assert new_key("../evil").count("/") == 0
+
+
+def test_disk_inbox_roundtrip(tmp_path):
+    async def scenario():
+        ib = DiskInbox(tmp_path / "ib")
+        await ib.put("k.png", b"\x00\xff binary")
+        assert await ib.get("k.png") == b"\x00\xff binary"
+        await ib.delete("k.png")
+
+    _run(scenario())
+
+
+class _FakeRedis:
+    def __init__(self):
+        self.store: dict = {}
+
+    async def set(self, k, v, ex=None):
+        self.store[k] = v
+
+    async def get(self, k):
+        return self.store.get(k)
+
+    async def delete(self, k):
+        self.store.pop(k, None)
+
+
+def test_redis_inbox_preserves_binary_through_base64():
+    async def scenario():
+        ib = RedisInbox(_FakeRedis())
+        blob = bytes(range(256))  # all byte values, incl. non-utf8
+        await ib.put("k.webp", blob)
+        assert await ib.get("k.webp") == blob  # survives decode_responses=True
+        await ib.delete("k.webp")
+        with pytest.raises(KeyError):
+            await ib.get("k.webp")
+
+    _run(scenario())
+
+
 # --- publish (4.4) ------------------------------------------------------------
 
 def test_parse_pr_number():
@@ -205,6 +248,7 @@ def client(tmp_path, monkeypatch):
         store=ThreadStore(tmp_path / "threads.sqlite"),
         queue=object(),  # not exercised by these routes
         coordinator=_FakeCoordinator(),
+        inbox=DiskInbox(tmp_path / "inbox"),
     )
     app = create_app(injected=state)
     with TestClient(app) as c:

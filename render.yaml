@@ -1,0 +1,89 @@
+# Render Blueprint (checklist 5.1): web + worker + Key Value.
+#
+# Secrets are `sync: false` — set them in the Render dashboard at first deploy
+# (5.3, [YOU]). The persistent disk holds the thread DB; image blobs ride the
+# shared Key Value (see web/inbox.py) since a Render disk attaches to only one
+# service. After deploy, branch-protect `main` to require a PR before merge
+# (5.4 / Phase 0.2, [YOU]).
+
+services:
+  # --- web: socket + PWA + auth + uploads + threads + /publish ---
+  - type: web
+    name: paratrooper-web
+    runtime: docker
+    dockerfilePath: ./Dockerfile.web
+    dockerContext: .
+    plan: starter
+    region: oregon
+    healthCheckPath: /api/health
+    disk:
+      name: paratrooper-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PARATROOPER_CONFIG
+        value: config/paths.toml
+      - key: PARATROOPER_INBOX
+        value: /data/inbox  # thread DB derives as /data/threads.sqlite (persistent)
+      - key: PARATROOPER_SITE_ROOT
+        value: /data/_site_unused  # web doesn't use the checkout; satisfies load_config
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: paratrooper-kv
+          property: connectionString
+      - key: PARATROOPER_REMOTE
+        sync: false
+      - key: PARATROOPER_APP_TOKEN
+        sync: false
+      - key: PARATROOPER_GITHUB_TOKEN
+        sync: false
+      - key: PARATROOPER_MERGE_TOKEN
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false
+
+  # --- worker: Agent SDK + placement + Playwright + git ---
+  - type: worker
+    name: paratrooper-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile.worker
+    dockerContext: .
+    plan: standard  # ~2GB RAM for Chromium
+    region: oregon
+    envVars:
+      - key: PARATROOPER_CONFIG
+        value: config/paths.toml
+      - key: PARATROOPER_SITE_ROOT
+        value: /app/site_checkout  # cloned on boot from PARATROOPER_REMOTE
+      - key: PARATROOPER_INBOX
+        value: /tmp/paratrooper-inbox  # transient: blobs materialized from Key Value
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: paratrooper-kv
+          property: connectionString
+      - key: AGENT_AUTH
+        value: subscription  # manual mode, no fallback (Open Q#4)
+      - key: CLAUDE_CODE_OAUTH_TOKEN
+        sync: false
+      - key: PARATROOPER_GITHUB_TOKEN
+        sync: false
+      - key: PARATROOPER_REMOTE
+        sync: false
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
+
+  # --- Key Value: job queue + result pub/sub + interrupt + inbox blobs ---
+  - type: keyvalue
+    name: paratrooper-kv
+    plan: starter
+    region: oregon
+    ipAllowList: []  # internal (private network) only
+    maxmemoryPolicy: noeviction  # never silently drop a queued job

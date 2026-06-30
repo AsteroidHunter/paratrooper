@@ -68,26 +68,30 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     base = cfg_path.parent
     paths = raw.get("paths", {})
     site = raw.get("site", {})
-    try:
-        site_root = _resolve(base, paths["site_root"])
-        pins_dir = (
-            _resolve(base, paths["pins_dir"])
-            if "pins_dir" in paths
-            else site_root / "src" / "content" / "pins"
-        )
-        archive_dir = (
-            _resolve(base, paths["archive_dir"])
-            if "archive_dir" in paths
-            else pins_dir / "_archive"
-        )
-        inbox = _resolve(base, paths["inbox"])
-        changelog = (
-            _resolve(base, paths["changelog"])
-            if "changelog" in paths
-            else site_root / "paratrooper-changelog.jsonl"
-        )
-    except KeyError as exc:
-        raise ConfigError(f"missing required path key {exc} in [paths] of {cfg_path}") from exc
+
+    def _root(env_name: str, toml_key: str) -> Path:
+        # env wins over TOML so render.yaml can set per-service absolute paths
+        # without editing the committed (local-dev) config.
+        val = os.environ.get(env_name) or paths.get(toml_key)
+        if not val:
+            raise ConfigError(f"{toml_key}: set [paths].{toml_key} in {cfg_path} or ${env_name}")
+        return _resolve(base, val)
+
+    site_root = _root("PARATROOPER_SITE_ROOT", "site_root")
+    inbox = _root("PARATROOPER_INBOX", "inbox")
+    pins_dir = (
+        _resolve(base, paths["pins_dir"])
+        if "pins_dir" in paths
+        else site_root / "src" / "content" / "pins"
+    )
+    archive_dir = (
+        _resolve(base, paths["archive_dir"]) if "archive_dir" in paths else pins_dir / "_archive"
+    )
+    changelog = (
+        _resolve(base, paths["changelog"])
+        if "changelog" in paths
+        else site_root / "paratrooper-changelog.jsonl"
+    )
 
     return Config(
         inbox=inbox,

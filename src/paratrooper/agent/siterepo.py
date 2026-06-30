@@ -83,6 +83,25 @@ class SiteRepo:
             return url.replace("https://", f"https://x-access-token:{self._token}@", 1)
         return url
 
+    # --- bootstrap -----------------------------------------------------------
+
+    def ensure_checkout(self) -> None:
+        """Clone the site repo into ``root`` if it isn't already a checkout (the
+        worker's first-boot bootstrap). Needs a configured remote — the checkout
+        doesn't exist yet, so ``origin`` can't be read."""
+        if (self.root / ".git").is_dir():
+            return
+        if not self._remote:
+            raise GitError("cannot clone site repo: no remote configured (set PARATROOPER_REMOTE)")
+        self.root.parent.mkdir(parents=True, exist_ok=True)
+        clone = [
+            "git", "clone", "--branch", self.default_branch,
+            self._authed_remote(), str(self.root),
+        ]
+        proc = subprocess.run(clone, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise GitError(f"site clone failed: {proc.stderr.strip()}")
+
     # --- branch strategy (3.5) ----------------------------------------------
 
     def branch_name(self, *parts: str) -> str:

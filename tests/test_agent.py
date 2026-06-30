@@ -144,6 +144,30 @@ def test_load_config_missing_file():
         load_config("/no/such/config.toml")
 
 
+def test_load_config_env_overrides(tmp_path, monkeypatch):
+    # render.yaml sets absolute paths via env; TOML need not carry them
+    cfg_file = tmp_path / "paths.toml"
+    cfg_file.write_text('[site]\ndefault_branch = "main"\n')
+    monkeypatch.setenv("PARATROOPER_SITE_ROOT", str(tmp_path / "checkout"))
+    monkeypatch.setenv("PARATROOPER_INBOX", str(tmp_path / "inbox"))
+    cfg = load_config(cfg_file)
+    assert cfg.site_root == tmp_path / "checkout"
+    assert cfg.inbox == tmp_path / "inbox"
+    # default pins_dir follows the env-provided site_root
+    assert cfg.pins_dir == cfg.site_root / "src" / "content" / "pins"
+
+
+def test_ensure_checkout_noop_and_no_remote(tmp_path):
+    from paratrooper.agent.siterepo import GitError, SiteRepo
+
+    (tmp_path / ".git").mkdir()  # already a checkout
+    existing = SiteRepo(tmp_path, remote="https://github.com/o/r.git")
+    existing.ensure_checkout()  # no-op, no raise (already a checkout)
+    fresh = tmp_path / "fresh"
+    with pytest.raises(GitError, match="no remote"):
+        SiteRepo(fresh).ensure_checkout()
+
+
 # --- pins ---------------------------------------------------------------------
 
 def _make_pin(pins_dir, pin_id, data, *, image=None):

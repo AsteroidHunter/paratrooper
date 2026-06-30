@@ -1,0 +1,18 @@
+# keep build contexts small + avoid shipping local state/artifacts into images
+.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.git/
+node_modules/
+pwa/node_modules/
+pwa/dist/
+data/
+inbox/
+site_checkout/
+*.sqlite
+*.sqlite3
+.env
+.env.*
+.DS_Store
