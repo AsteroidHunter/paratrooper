@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -29,6 +30,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..agent.config import Config, load_config
+from . import push
 from .auth import require_token, verify_token
 from .batching import ThreadCoordinator
 from .db import ThreadStore
@@ -78,6 +80,21 @@ async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
             state.sockets.get(thread_id, set()).discard(ws)
 
 
+async def _maybe_push(state: AppState, result: ResultMessage) -> None:
+    """Wake a closed PWA on a terminal result (no-op if VAPID isn't configured)."""
+    cfg = push.config()
+    text = push.notification_text(result.kind)
+    if cfg is None or text is None:
+        return
+
+    def _send() -> None:
+        for sub in state.store.subscriptions():
+            if not push.send_push(sub, text, cfg):
+                state.store.remove_subscription(sub.get("endpoint", ""))
+
+    await asyncio.to_thread(_send)
+
+
 async def _result_relay(state: AppState) -> None:
     """Subscribe to all worker result channels: persist each to the thread and
     fan out to connected sockets; on 'done'/'error' release the thread's batch."""
@@ -95,6 +112,7 @@ async def _result_relay(state: AppState) -> None:
                 thread_id=thread_id, role="agent", body=body, ts=_now(), kind=result.kind,
             ))
             await _send_to_sockets(state, thread_id, result.model_dump())
+            await _maybe_push(state, result)
             if result.kind in ("done", "error"):
                 await state.coordinator.job_finished(thread_id)
     finally:
@@ -185,6 +203,18 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         )
         await asyncio.to_thread(state.store.add_message, published)
         return JSONResponse({"merged": True, "sha": result.get("sha")})
+
+    @app.get("/api/push/key", dependencies=[Depends(require_token)])
+    async def push_key() -> dict:
+        return {"key": push.public_key()}  # null when push isn't configured
+
+    @app.post("/api/push/subscribe", dependencies=[Depends(require_token)])
+    async def push_subscribe(subscription: dict) -> dict:
+        endpoint = subscription.get("endpoint")
+        if not endpoint:
+            raise HTTPException(status_code=400, detail="subscription missing endpoint")
+        await asyncio.to_thread(st().store.add_subscription, endpoint, json.dumps(subscription))
+        return {"ok": True}
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket) -> None:

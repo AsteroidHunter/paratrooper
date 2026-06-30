@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS messages (
     kind        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, seq);
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint     TEXT PRIMARY KEY,
+    subscription TEXT NOT NULL
+);
 """
 
 
@@ -93,6 +98,26 @@ class ThreadStore:
             (thread_id, n),
         )
         return msgs
+
+    # --- web push subscriptions (Phase 6) ---
+
+    def add_subscription(self, endpoint: str, subscription_json: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO push_subscriptions(endpoint, subscription) VALUES (?,?)",
+                (endpoint, subscription_json),
+            )
+            self._conn.commit()
+
+    def subscriptions(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT subscription FROM push_subscriptions").fetchall()
+        return [json.loads(r["subscription"]) for r in rows]
+
+    def remove_subscription(self, endpoint: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))
+            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

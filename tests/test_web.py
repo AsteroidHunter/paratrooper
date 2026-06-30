@@ -216,6 +216,31 @@ def test_owner_repo_from_remote():
     assert owner_repo_from_remote("git@github.com:o/r") == ("o", "r")
 
 
+# --- push (6.1) ---------------------------------------------------------------
+
+def test_push_config_off_when_unset(monkeypatch):
+    from paratrooper.web import push
+
+    monkeypatch.delenv("VAPID_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("VAPID_SUBJECT", raising=False)
+    assert push.config() is None  # feature is a no-op without VAPID
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "priv")
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:a@b.c")
+    cfg = push.config()
+    assert cfg and cfg.subject == "mailto:a@b.c"
+    assert push.notification_text("pr") and push.notification_text("log") is None
+
+
+def test_subscription_store(tmp_path):
+    store = ThreadStore(tmp_path / "t.sqlite")
+    store.add_subscription("https://push/abc", '{"endpoint": "https://push/abc"}')
+    store.add_subscription("https://push/abc", '{"endpoint": "https://push/abc", "v": 2}')  # upsert
+    subs = store.subscriptions()
+    assert len(subs) == 1 and subs[0]["v"] == 2
+    store.remove_subscription("https://push/abc")
+    assert store.subscriptions() == []
+
+
 # --- app routes (TestClient, injected state, no Redis) ------------------------
 
 class _FakeCoordinator:
@@ -282,3 +307,13 @@ def test_upload_and_send_flow(client):
     # the user message was persisted and is fetchable
     rows = client.get("/api/thread/d", headers=auth).json()["messages"]
     assert rows[-1]["role"] == "user" and rows[-1]["body"] == "add it"
+
+
+def test_push_routes(client, monkeypatch):
+    monkeypatch.delenv("VAPID_PUBLIC_KEY", raising=False)
+    auth = {"Authorization": "Bearer tok"}
+    assert client.get("/api/push/key", headers=auth).json() == {"key": None}  # not configured
+    sub = {"endpoint": "https://push.example/xyz", "keys": {"p256dh": "k", "auth": "a"}}
+    assert client.post("/api/push/subscribe", headers=auth, json=sub).json() == {"ok": True}
+    assert client.app.state.app_state.store.subscriptions() == [sub]
+    assert client.post("/api/push/subscribe", headers=auth, json={}).status_code == 400

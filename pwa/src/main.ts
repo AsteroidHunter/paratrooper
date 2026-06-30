@@ -52,7 +52,9 @@ function renderChat(): void {
       <span class="title">Paratrooper</span>
       <button id="reset" class="ghost" title="Forget token">⎋</button>
     </header>
-    <main id="thread" class="thread"></main>
+    <main id="thread" class="thread">
+      <div class="empty">Send a photo, link, or song to update the board. 🪂</div>
+    </main>
     <form id="compose" class="compose">
       <label class="attach" title="Add photo">＋
         <input id="files" type="file" accept="image/*" multiple hidden />
@@ -77,6 +79,7 @@ const threadEl = () => document.getElementById("thread")!;
 // --- rendering ---------------------------------------------------------------
 
 function bubble(role: string, cls: string): HTMLDivElement {
+  threadEl().querySelector(".empty")?.remove(); // clear the empty-state hint
   const div = document.createElement("div");
   div.className = `msg ${role} ${cls}`;
   threadEl().appendChild(div);
@@ -184,10 +187,55 @@ async function publish(pr: string): Promise<void> {
   });
 }
 
+// --- web push (Phase 6): subscribe, re-register on every reopen -------------
+
+function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
+  const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+  const normalized = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(normalized);
+  const out = new Uint8Array(new ArrayBuffer(raw.length)); // explicit ArrayBuffer -> BufferSource
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+async function setupPush(reg: ServiceWorkerRegistration): Promise<void> {
+  if (!("PushManager" in window) || !token) return;
+  let key: string | null;
+  try {
+    const r = await fetch("/api/push/key", { headers: authHeaders() });
+    if (!r.ok) return;
+    key = (await r.json()).key;
+  } catch {
+    return;
+  }
+  if (!key) return; // push not configured server-side
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    if (Notification.permission === "denied") return;
+    if ((await Notification.requestPermission()) !== "granted") return;
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(key),
+    });
+  }
+  await fetch("/api/push/subscribe", {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(sub),
+  });
+}
+
 // --- boot --------------------------------------------------------------------
 
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+  window.addEventListener("load", async () => {
+    try {
+      const reg = await navigator.serviceWorker.register("/sw.js");
+      await setupPush(reg);
+    } catch {
+      /* push/SW are best-effort */
+    }
+  });
 }
 
 if (token) {

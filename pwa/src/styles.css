@@ -85,6 +85,7 @@ html, body, #app {
 .msg.pr a { color: #93c5fd; }
 .publish { display: block; margin-top: 0.5rem; }
 .filechip { display: inline-block; margin-top: 0.3rem; font-size: 0.8rem; opacity: 0.85; }
+.empty { margin: auto; color: var(--muted); text-align: center; padding: 2rem 1rem; }
 
 /* compose */
 .compose {

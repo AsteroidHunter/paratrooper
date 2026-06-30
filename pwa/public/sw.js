@@ -38,3 +38,27 @@ self.addEventListener("fetch", (event) => {
     caches.match(request).then((cached) => cached ?? fetch(request))
   );
 });
+
+// --- web push (Phase 6) ---
+self.addEventListener("push", (event) => {
+  const body = event.data ? event.data.text() : "Paratrooper update";
+  event.waitUntil(
+    self.registration.showNotification("Paratrooper", {
+      body,
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) {
+        if ("focus" in client) return client.focus();
+      }
+      return self.clients.openWindow("/");
+    })
+  );
+});
