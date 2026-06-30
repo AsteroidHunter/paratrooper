@@ -1,0 +1,221 @@
+"""FastAPI web service: PWA host + auth gate + uploads + threads + socket + publish.
+
+Holds the socket, serves the PWA, gates every request/socket on the shared token,
+stages uploads to the inbox, persists threads to SQLite, debounce-batches messages
+into worker jobs over the Key Value queue, relays streamed results back over the
+socket, and owns the /publish merge authority.
+
+``create_app`` accepts injected state so tests run without Redis; in production
+the lifespan connects Key Value and starts the result-relay task.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from ..agent.config import Config, load_config
+from .auth import require_token, verify_token
+from .batching import ThreadCoordinator
+from .db import ThreadStore
+from .models import (
+    JobMessage,
+    PublishRequest,
+    ResultMessage,
+    SendRequest,
+    ThreadMessage,
+    UploadResponse,
+)
+from .publish import merge_pull_request, merge_token, owner_repo_from_remote, parse_pr_number
+from .queue import JobQueue, connect
+from .uploads import save_upload
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+@dataclass
+class AppState:
+    config: Config
+    store: ThreadStore
+    queue: JobQueue
+    coordinator: ThreadCoordinator
+    sockets: dict[str, set[WebSocket]] = field(default_factory=dict)
+    relay_task: asyncio.Task | None = None
+
+
+async def _enqueue_job(
+    state: AppState, thread_id: str, job_id: str, text: str, attachments: list[str]
+) -> None:
+    context = [f"{m.role}: {m.body}" for m in state.store.recent(thread_id, n=10) if m.body]
+    job = JobMessage(
+        job_id=job_id, thread_id=thread_id, text=text, attachments=attachments, context=context
+    )
+    await state.queue.enqueue(job)
+
+
+async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
+    for ws in list(state.sockets.get(thread_id, set())):
+        try:
+            await ws.send_json(data)
+        except Exception:
+            state.sockets.get(thread_id, set()).discard(ws)
+
+
+async def _result_relay(state: AppState) -> None:
+    """Subscribe to all worker result channels: persist each to the thread and
+    fan out to connected sockets; on 'done'/'error' release the thread's batch."""
+    pubsub = state.queue.r.pubsub()
+    await pubsub.psubscribe("paratrooper:results:*")
+    try:
+        async for message in pubsub.listen():
+            if message.get("type") != "pmessage":
+                continue
+            channel = message["channel"]
+            thread_id = channel.rsplit(":", 1)[-1]
+            result = ResultMessage.model_validate_json(message["data"])
+            body = result.payload if isinstance(result.payload, str) else ""
+            state.store.add_message(ThreadMessage(
+                thread_id=thread_id, role="agent", body=body, ts=_now(), kind=result.kind,
+            ))
+            await _send_to_sockets(state, thread_id, result.model_dump())
+            if result.kind in ("done", "error"):
+                await state.coordinator.job_finished(thread_id)
+    finally:
+        await pubsub.aclose()
+
+
+def _lifespan(injected: AppState | None):
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if injected is not None:
+            app.state.app_state = injected
+            yield
+            return
+        config = load_config()
+        store = ThreadStore(config.inbox.parent / "threads.sqlite")
+        queue = JobQueue(connect())
+
+        async def enqueue_cb(thread_id, job_id, text, attachments):
+            await _enqueue_job(app.state.app_state, thread_id, job_id, text, attachments)
+
+        async def interrupt_cb(thread_id, job_id):
+            await queue.publish_interrupt(thread_id, job_id)
+
+        coordinator = ThreadCoordinator(enqueue_cb, interrupt_cb)
+        state = AppState(config=config, store=store, queue=queue, coordinator=coordinator)
+        app.state.app_state = state
+        state.relay_task = asyncio.ensure_future(_result_relay(state))
+        try:
+            yield
+        finally:
+            if state.relay_task:
+                state.relay_task.cancel()
+            store.close()
+
+    return lifespan
+
+
+def create_app(injected: AppState | None = None) -> FastAPI:
+    app = FastAPI(title="Paratrooper", lifespan=_lifespan(injected))
+
+    def st() -> AppState:
+        return app.state.app_state
+
+    @app.get("/api/health")
+    async def health() -> dict:
+        return {"ok": True}
+
+    @app.post("/api/upload", response_model=UploadResponse, dependencies=[Depends(require_token)])
+    async def upload(file: UploadFile) -> UploadResponse:
+        content = await file.read()
+        key, size = await asyncio.to_thread(
+            save_upload, st().config.inbox, file.filename, content
+        )
+        return UploadResponse(inbox_key=key, content_type=file.content_type, size=size)
+
+    @app.post("/api/send", dependencies=[Depends(require_token)])
+    async def send(req: SendRequest) -> dict:
+        state = st()
+        msg = ThreadMessage(
+            thread_id=req.thread_id, role="user", body=req.text,
+            attachments=req.attachments, ts=_now(),
+        )
+        await asyncio.to_thread(state.store.add_message, msg)
+        status = await state.coordinator.handle_message(req.thread_id, req.text, req.attachments)
+        return {"status": status}
+
+    @app.get("/api/thread/{thread_id}", dependencies=[Depends(require_token)])
+    async def thread(thread_id: str, since: int = 0) -> dict:
+        rows = await asyncio.to_thread(st().store.messages, thread_id, since_seq=since)
+        return {"messages": [{"seq": seq, **m.model_dump()} for seq, m in rows]}
+
+    @app.post("/api/publish", dependencies=[Depends(require_token)])
+    async def publish(req: PublishRequest) -> JSONResponse:
+        state = st()
+        remote = state.config.remote
+        if not remote:
+            raise HTTPException(status_code=400, detail="site remote not configured")
+        owner, repo = owner_repo_from_remote(remote)
+        number = parse_pr_number(req.pr)
+        result = await asyncio.to_thread(
+            merge_pull_request, owner, repo, number, token=merge_token()
+        )
+        published = ThreadMessage(
+            thread_id=req.thread_id, role="system",
+            body=f"published PR #{number}", ts=_now(), kind="published",
+        )
+        await asyncio.to_thread(state.store.add_message, published)
+        return JSONResponse({"merged": True, "sha": result.get("sha")})
+
+    @app.websocket("/ws")
+    async def ws(websocket: WebSocket) -> None:
+        token = websocket.query_params.get("token")
+        thread_id = websocket.query_params.get("thread", "default")
+        since = int(websocket.query_params.get("since", "0"))
+        if not verify_token(token):
+            await websocket.close(code=4401)
+            return
+        await websocket.accept()
+        state = st()
+        state.sockets.setdefault(thread_id, set()).add(websocket)
+        # catch-up: replay everything the client missed
+        for seq, m in await asyncio.to_thread(state.store.messages, thread_id, since_seq=since):
+            await websocket.send_json({"seq": seq, **m.model_dump()})
+        try:
+            while True:
+                await websocket.receive_text()  # client keepalive / pings; sends go via POST
+        except WebSocketDisconnect:
+            pass
+        finally:
+            state.sockets.get(thread_id, set()).discard(websocket)
+
+    # serve the built PWA if present (mounted last so /api and /ws win)
+    pwa_dist = _pwa_dist()
+    if pwa_dist is not None:
+        app.mount("/", StaticFiles(directory=str(pwa_dist), html=True), name="pwa")
+
+    return app
+
+
+def _pwa_dist():
+    from pathlib import Path
+
+    # repo_root/pwa/dist ; this file is src/paratrooper/web/app.py
+    candidate = Path(__file__).resolve().parents[3] / "pwa" / "dist"
+    return candidate if candidate.is_dir() else None

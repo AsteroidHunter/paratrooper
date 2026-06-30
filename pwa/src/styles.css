@@ -1,0 +1,120 @@
+:root {
+  --bg: #0b0b0c;
+  --panel: #161618;
+  --user: #2563eb;
+  --agent: #2a2a2e;
+  --text: #f2f2f4;
+  --muted: #9a9aa2;
+  --error: #ef4444;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+#app { display: flex; flex-direction: column; }
+
+/* token gate */
+.gate {
+  margin: auto;
+  max-width: 22rem;
+  padding: 2rem 1.5rem;
+  text-align: center;
+}
+.gate input {
+  width: 100%;
+  margin: 0.75rem 0;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid #333;
+  border-radius: 0.6rem;
+  background: var(--panel);
+  color: var(--text);
+}
+.gate button, .compose .send, .publish {
+  border: none;
+  border-radius: 0.6rem;
+  background: var(--user);
+  color: white;
+  padding: 0.6rem 1rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+/* chat shell */
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: max(0.6rem, env(safe-area-inset-top)) 1rem 0.6rem;
+  border-bottom: 1px solid #222;
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+}
+.bar .title { font-weight: 700; }
+.ghost { background: none; border: none; color: var(--muted); font-size: 1.1rem; cursor: pointer; }
+
+.thread {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.msg {
+  max-width: 80%;
+  padding: 0.55rem 0.8rem;
+  border-radius: 1.1rem;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+}
+.msg.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 0.3rem; }
+.msg.agent { align-self: flex-start; background: var(--agent); border-bottom-left-radius: 0.3rem; }
+.msg.log { background: none; color: var(--muted); font-size: 0.85rem; padding: 0.1rem 0.3rem; }
+.msg.error { background: #3b1111; color: var(--error); }
+.msg.shot img { max-width: 100%; border-radius: 0.6rem; display: block; }
+.msg.pr a { color: #93c5fd; }
+.publish { display: block; margin-top: 0.5rem; }
+.filechip { display: inline-block; margin-top: 0.3rem; font-size: 0.8rem; opacity: 0.85; }
+
+/* compose */
+.compose {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  padding: 0.6rem 0.8rem calc(0.6rem + env(safe-area-inset-bottom));
+  border-top: 1px solid #222;
+  background: var(--panel);
+}
+.compose textarea {
+  flex: 1;
+  resize: none;
+  max-height: 8rem;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid #333;
+  border-radius: 1.1rem;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.attach {
+  display: grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 50%;
+  background: var(--agent);
+  font-size: 1.3rem;
+  cursor: pointer;
+  flex: none;
+}
+.compose .send { width: 2.4rem; height: 2.4rem; padding: 0; border-radius: 50%; font-size: 1.2rem; flex: none; }
