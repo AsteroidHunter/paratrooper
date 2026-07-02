@@ -45,6 +45,7 @@ from .models import (
 )
 from .publish import merge_pull_request, merge_token, owner_repo_from_remote, parse_pr_number
 from .queue import JobQueue, connect
+from .render_control import RenderControl
 
 
 def _now() -> str:
@@ -58,6 +59,7 @@ class AppState:
     queue: JobQueue
     coordinator: ThreadCoordinator
     inbox: InboxStore
+    render: RenderControl | None = None  # set -> worker wakes/sleeps per job
     sockets: dict[str, set[WebSocket]] = field(default_factory=dict)
     relay_task: asyncio.Task | None = None
 
@@ -70,6 +72,18 @@ async def _enqueue_job(
         job_id=job_id, thread_id=thread_id, text=text, attachments=attachments, context=context
     )
     await state.queue.enqueue(job)
+    if state.render:  # wake the worker; the job waits durably in the list meanwhile
+        await state.render.resume_worker()
+
+
+async def _maybe_suspend_worker(state: AppState) -> None:
+    """Sleep the worker once nothing needs it: no running job, no buffered
+    batch, no job still waiting in the queue."""
+    if state.render is None or state.coordinator.has_pending():
+        return
+    if await state.queue.pending_jobs() > 0:
+        return
+    await state.render.suspend_worker()
 
 
 async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
@@ -114,7 +128,10 @@ async def _result_relay(state: AppState) -> None:
             await _send_to_sockets(state, thread_id, result.model_dump())
             await _maybe_push(state, result)
             if result.kind in ("done", "error"):
+                # job_finished first: it re-arms the timer for any buffered batch,
+                # so has_pending() correctly blocks the suspend in that case
                 await state.coordinator.job_finished(thread_id)
+                await _maybe_suspend_worker(state)
     finally:
         await pubsub.aclose()
 
@@ -140,6 +157,7 @@ def _lifespan(injected: AppState | None):
         state = AppState(
             config=config, store=store, queue=queue, coordinator=coordinator,
             inbox=RedisInbox(queue.r),
+            render=RenderControl.from_env(),  # None -> worker stays always-on
         )
         app.state.app_state = state
         state.relay_task = asyncio.ensure_future(_result_relay(state))

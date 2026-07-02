@@ -33,6 +33,8 @@ agent = [
 # Web service: FastAPI socket/PWA host + queue + push.
 web = [
     "fastapi>=0.110",
+    "httpx>=0.27",  # /publish merge calls + Render suspend/resume
+
     "uvicorn[standard]>=0.29",
     "python-multipart>=0.0.9",
     "websockets>=12.0",

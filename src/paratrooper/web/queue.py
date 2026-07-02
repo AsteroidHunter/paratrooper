@@ -49,6 +49,10 @@ class JobQueue:
         _key, raw = res
         return JobMessage.model_validate_json(raw)
 
+    async def pending_jobs(self) -> int:
+        """Jobs still waiting in the list (worker not yet picked them up)."""
+        return int(await self.r.llen(JOBS_KEY))
+
     # --- results (worker -> web) ---
     async def publish_result(self, thread_id: str, result: ResultMessage) -> None:
         await self.r.publish(_results_channel(thread_id), result.model_dump_json())
