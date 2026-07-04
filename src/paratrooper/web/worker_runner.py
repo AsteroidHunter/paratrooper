@@ -12,7 +12,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import logging
 from pathlib import Path
+
+from redis import exceptions as redis_exc
 
 from ..agent.config import Config, github_token, load_config
 from ..agent.siterepo import SiteRepo
@@ -20,6 +23,11 @@ from ..agent.worker import Job, run_job
 from .inbox import DiskInbox, RedisInbox
 from .models import JobMessage, ResultMessage
 from .queue import JobQueue, connect
+
+logger = logging.getLogger(__name__)
+
+# transient transport failures: retry with a short pause, never kill the process
+_REDIS_TRANSIENT = (redis_exc.ConnectionError, redis_exc.TimeoutError)
 
 
 def _screenshot_data_uri(path: str) -> str:
@@ -94,10 +102,16 @@ class Worker:
             await self._cleanup(msg.attachments)
 
     async def _interrupt_listener(self) -> None:
-        async for thread_id, job_id in self.queue.subscribe_interrupts():
-            if thread_id == self._current_thread and (job_id in (None, self._current_job)):
-                if self._task and not self._task.done():
-                    self._task.cancel()
+        while True:  # re-subscribe after transient redis drops
+            try:
+                async for thread_id, job_id in self.queue.subscribe_interrupts():
+                    current = thread_id == self._current_thread
+                    if current and job_id in (None, self._current_job):
+                        if self._task and not self._task.done():
+                            self._task.cancel()
+            except _REDIS_TRANSIENT as exc:
+                logger.warning("interrupt listener redis error, resubscribing: %s", exc)
+                await asyncio.sleep(2)
 
     def _bootstrap_checkout(self) -> None:
         """Clone the site repo on first boot (idempotent)."""
@@ -114,7 +128,12 @@ class Worker:
         listener = asyncio.ensure_future(self._interrupt_listener())
         try:
             while True:
-                msg = await self.queue.dequeue(timeout=idle_timeout)
+                try:
+                    msg = await self.queue.dequeue(timeout=idle_timeout)
+                except _REDIS_TRANSIENT as exc:
+                    logger.warning("dequeue redis error, retrying: %s", exc)
+                    await asyncio.sleep(2)
+                    continue
                 if msg is None:
                     continue
                 self._current_thread, self._current_job = msg.thread_id, msg.job_id
