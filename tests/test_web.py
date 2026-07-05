@@ -263,6 +263,7 @@ def client(tmp_path, monkeypatch):
         site_root=tmp_path / "site",
         pins_dir=tmp_path / "pins",
         archive_dir=tmp_path / "arch",
+        later_dir=tmp_path / "later",
         changelog=tmp_path / "cl.jsonl",
         remote="https://github.com/AsteroidHunter/webpage.git",
         default_branch="main",

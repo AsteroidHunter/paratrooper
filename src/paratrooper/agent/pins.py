@@ -122,16 +122,21 @@ def write_pin(pins_dir: Path, pin_id: str, data: dict) -> Path:
     return folder
 
 
-def archive_pin(pins_dir: Path, archive_dir: Path, pin_id: str) -> Path:
-    """Move a pin folder into the archive (the 'remove from board' operation).
-    Returns the new path. Raises if the pin doesn't exist or the destination is
-    occupied (never clobber an archived pin)."""
-    src = pin_folder(pins_dir, pin_id)
+def move_pin(src_dir: Path, dst_dir: Path, pin_id: str) -> Path:
+    """Move a pin folder between stages (on-display / off-display / for-later).
+    Returns the new path. Raises if the pin doesn't exist at the source or the
+    destination is occupied (never clobber)."""
+    src = pin_folder(src_dir, pin_id)
     if not src.is_dir():
-        raise PinError(f"cannot archive '{pin_id}': folder not found ({src})")
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    dst = archive_dir / pin_id
+        raise PinError(f"cannot move '{pin_id}': folder not found ({src})")
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / pin_id
     if dst.exists():
-        raise PinError(f"archive already holds '{pin_id}' ({dst}); refusing to overwrite")
+        raise PinError(f"destination already holds '{pin_id}' ({dst}); refusing to overwrite")
     shutil.move(str(src), str(dst))
     return dst
+
+
+def archive_pin(pins_dir: Path, archive_dir: Path, pin_id: str) -> Path:
+    """Archive = move on-display -> off-display."""
+    return move_pin(pins_dir, archive_dir, pin_id)

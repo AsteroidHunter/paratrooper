@@ -132,10 +132,13 @@ def test_load_config_resolves_paths(tmp_path):
     )
     cfg = load_config(cfg_file)
     assert cfg.site_root == (tmp_path / "site").resolve()
-    assert cfg.pins_dir == cfg.site_root / "src" / "content" / "pins"  # default under site_root
-    # default archive must be OUTSIDE pins_dir (Astro's glob would render it)
-    assert cfg.archive_dir == cfg.site_root / "archived-pins"
+    content = cfg.site_root / "src" / "content"
+    assert cfg.pins_dir == content / "pins-on-display"
+    # the other stages must be OUTSIDE pins_dir (Astro's glob would render them)
+    assert cfg.archive_dir == content / "pins-off-display"
+    assert cfg.later_dir == content / "pins-for-later"
     assert cfg.pins_dir not in cfg.archive_dir.parents
+    assert cfg.pins_dir not in cfg.later_dir.parents
     assert cfg.inbox == (tmp_path / "inbox").resolve()
     assert cfg.default_branch == "main"
     assert cfg.branch_prefix == "paratrooper"
@@ -156,7 +159,7 @@ def test_load_config_env_overrides(tmp_path, monkeypatch):
     assert cfg.site_root == tmp_path / "checkout"
     assert cfg.inbox == tmp_path / "inbox"
     # default pins_dir follows the env-provided site_root
-    assert cfg.pins_dir == cfg.site_root / "src" / "content" / "pins"
+    assert cfg.pins_dir == cfg.site_root / "src" / "content" / "pins-on-display"
 
 
 def test_ensure_checkout_noop_and_no_remote(tmp_path):
@@ -294,6 +297,7 @@ def test_build_tool_server(tmp_path):
         site_root=tmp_path / "site",
         pins_dir=tmp_path / "pins",
         archive_dir=tmp_path / "arch",
+        later_dir=tmp_path / "later",
         changelog=tmp_path / "cl.jsonl",
         remote=None,
         default_branch="main",
@@ -309,6 +313,7 @@ def test_build_tool_server(tmp_path):
     assert server["name"] == "paratrooper"
     assert "mcp__paratrooper__place_pin" in names
     assert "mcp__paratrooper__open_pr" in names
+    assert "mcp__paratrooper__move_pin" in names
     assert len(names) == 11
 
 
@@ -326,3 +331,22 @@ def test_push_refuses_default_branch(tmp_path):
     repo = SiteRepo(tmp_path, default_branch="main")
     with pytest.raises(GitError, match="default branch"):
         repo.push_branch("main")
+
+
+def test_move_pin_between_stages(tmp_path):
+    on, off, later = tmp_path / "on", tmp_path / "off", tmp_path / "later"
+    pins.write_pin(later, "future", {
+        "type": "image", "notes": "goes up next month",
+        "position": {"x": 50, "y": 50}, "size": {"w": 10, "h": 10},
+    })
+    # for-later -> on-display (publish)
+    dst = pins.move_pin(later, on, "future")
+    assert dst == on / "future" and not (later / "future").exists()
+    # on-display -> off-display (archive)
+    pins.move_pin(on, off, "future")
+    assert (off / "future" / "index.json").is_file()
+    # collision guard: put a fresh one on display, try to archive onto the old
+    pins.write_pin(on, "future", {"type": "text", "text": "v2",
+                                  "position": {"x": 50, "y": 50}, "size": {"w": 10, "h": 10}})
+    with pytest.raises(pins.PinError, match="refusing to overwrite"):
+        pins.move_pin(on, off, "future")

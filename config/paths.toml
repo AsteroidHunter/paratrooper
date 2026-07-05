@@ -5,10 +5,10 @@
 [paths]
 # The website repo checkout the worker edits (cloned here at deploy/setup time).
 site_root = "../site_checkout"
-# pins_dir / archive_dir default under site_root if omitted:
-#   pins_dir    = "<site_root>/src/content/pins"
-#   archive_dir = "<site_root>/archived-pins"   (MUST stay outside src/content/pins —
-#                  Astro's glob loader would render archived pins otherwise)
+# Pin stage folders default under <site_root>/src/content/ if omitted:
+#   pins_dir    = ".../pins-on-display"   (the rendered board — the Astro glob base)
+#   archive_dir = ".../pins-off-display"  (archived; sibling of the glob base, not rendered)
+#   later_dir   = ".../pins-for-later"    (staged for future publishing, not rendered)
 # changelog defaults to "<site_root>/paratrooper-changelog.jsonl" if omitted.
 
 # Staged uploads (raw photos). On Render this is a persistent disk mount.

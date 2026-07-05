@@ -34,12 +34,19 @@ class ConfigError(RuntimeError):
 
 @dataclass
 class Config:
-    """Resolved worker configuration. Folders are absolute paths."""
+    """Resolved worker configuration. Folders are absolute paths.
+
+    Pin stages (user-defined layout, all under ``src/content/``): the rendered
+    board lives in ``pins-on-display`` (the only dir Astro's glob loads),
+    archived pins move to ``pins-off-display``, and pins staged for future
+    publishing wait in ``pins-for-later``.
+    """
 
     inbox: Path  # staging dir for uploaded photos (persistent disk on Render)
     site_root: Path  # the website repo checkout root
-    pins_dir: Path  # pins directory inside the site checkout
-    archive_dir: Path  # archived pin folders move here
+    pins_dir: Path  # pins-on-display: the rendered board
+    archive_dir: Path  # pins-off-display: archived pins move here
+    later_dir: Path  # pins-for-later: staged for future publishing
     changelog: Path  # the paratrooper changelog, committed in the website repo
     remote: str | None  # site repo git remote URL (None => use the checkout's origin)
     default_branch: str  # the branch the agent must never push to (merge target)
@@ -79,18 +86,23 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
 
     site_root = _root("PARATROOPER_SITE_ROOT", "site_root")
     inbox = _root("PARATROOPER_INBOX", "inbox")
+    content = site_root / "src" / "content"
+    # Only pins-on-display is inside the Astro glob base; the other two stages
+    # are siblings so they never render.
     pins_dir = (
         _resolve(base, paths["pins_dir"])
         if "pins_dir" in paths
-        else site_root / "src" / "content" / "pins"
+        else content / "pins-on-display"
     )
-    # Default archive lives OUTSIDE the pins dir: Astro's glob loader has no
-    # underscore convention, so anything under src/content/pins — including a
-    # pins/_archive/ folder — would still load and render on the board.
     archive_dir = (
         _resolve(base, paths["archive_dir"])
         if "archive_dir" in paths
-        else site_root / "archived-pins"
+        else content / "pins-off-display"
+    )
+    later_dir = (
+        _resolve(base, paths["later_dir"])
+        if "later_dir" in paths
+        else content / "pins-for-later"
     )
     changelog = (
         _resolve(base, paths["changelog"])
@@ -103,6 +115,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         site_root=site_root,
         pins_dir=pins_dir,
         archive_dir=archive_dir,
+        later_dir=later_dir,
         changelog=changelog,
         remote=site.get("remote") or os.environ.get("PARATROOPER_REMOTE"),
         default_branch=site.get("default_branch", DEFAULT_BRANCH),
