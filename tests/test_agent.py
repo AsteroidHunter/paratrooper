@@ -133,7 +133,9 @@ def test_load_config_resolves_paths(tmp_path):
     cfg = load_config(cfg_file)
     assert cfg.site_root == (tmp_path / "site").resolve()
     assert cfg.pins_dir == cfg.site_root / "src" / "content" / "pins"  # default under site_root
-    assert cfg.archive_dir == cfg.pins_dir / "_archive"
+    # default archive must be OUTSIDE pins_dir (Astro's glob would render it)
+    assert cfg.archive_dir == cfg.site_root / "archived-pins"
+    assert cfg.pins_dir not in cfg.archive_dir.parents
     assert cfg.inbox == (tmp_path / "inbox").resolve()
     assert cfg.default_branch == "main"
     assert cfg.branch_prefix == "paratrooper"

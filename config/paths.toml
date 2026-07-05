@@ -7,7 +7,8 @@
 site_root = "../site_checkout"
 # pins_dir / archive_dir default under site_root if omitted:
 #   pins_dir    = "<site_root>/src/content/pins"
-#   archive_dir = "<site_root>/src/content/pins/_archive"
+#   archive_dir = "<site_root>/archived-pins"   (MUST stay outside src/content/pins —
+#                  Astro's glob loader would render archived pins otherwise)
 # changelog defaults to "<site_root>/paratrooper-changelog.jsonl" if omitted.
 
 # Staged uploads (raw photos). On Render this is a persistent disk mount.

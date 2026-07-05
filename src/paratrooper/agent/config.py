@@ -84,8 +84,13 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         if "pins_dir" in paths
         else site_root / "src" / "content" / "pins"
     )
+    # Default archive lives OUTSIDE the pins dir: Astro's glob loader has no
+    # underscore convention, so anything under src/content/pins — including a
+    # pins/_archive/ folder — would still load and render on the board.
     archive_dir = (
-        _resolve(base, paths["archive_dir"]) if "archive_dir" in paths else pins_dir / "_archive"
+        _resolve(base, paths["archive_dir"])
+        if "archive_dir" in paths
+        else site_root / "archived-pins"
     )
     changelog = (
         _resolve(base, paths["changelog"])
