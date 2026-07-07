@@ -240,7 +240,21 @@ async function send(): Promise<void> {
   const files = [...pendingFiles];
   if (!text && files.length === 0) return;
 
-  sendBtn.disabled = true; // photo uploads can take seconds
+  // INSTANT feedback on tap: bubbles + typing dots appear immediately; the
+  // uploads/POST happen behind them. A failure is reported as an error bubble.
+  for (const file of files) {
+    const div = bubble("user", "shot");
+    const img = document.createElement("img");
+    img.src = URL.createObjectURL(file);
+    div.appendChild(img);
+  }
+  if (text) render({ role: "user", body: text, attachments: [] });
+  showTyping();
+  textEl.value = "";
+  pendingFiles = [];
+  renderPending();
+
+  sendBtn.disabled = true; // no double-fire while the network work runs
   try {
     const keys: string[] = [];
     for (const file of files) {
@@ -250,12 +264,14 @@ async function send(): Promise<void> {
       try {
         r = await fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd });
       } catch (e) {
-        bubble("agent", "error").textContent = `⚠ upload of ${file.name} failed: ${e}`;
-        return; // nothing sent; pending chips stay so you can retry
+        hideTyping();
+        bubble("agent", "error").textContent = `⚠ not sent — upload of ${file.name} failed: ${e}`;
+        return;
       }
       if (!r.ok) {
+        hideTyping();
         bubble("agent", "error").textContent =
-          `⚠ upload of ${file.name} failed (${r.status} ${r.statusText})`;
+          `⚠ not sent — upload of ${file.name} failed (${r.status} ${r.statusText})`;
         return;
       }
       keys.push((await r.json()).inbox_key);
@@ -266,23 +282,12 @@ async function send(): Promise<void> {
       body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
     });
     if (!resp.ok) {
-      bubble("agent", "error").textContent = `⚠ send failed (${resp.status})`;
+      hideTyping();
+      bubble("agent", "error").textContent = `⚠ not sent (${resp.status})`;
       return;
     }
     const { seq } = await resp.json();
     if (seq && seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
-    // optimistic render: photos as sent image bubbles (iMessage style), then text
-    for (const file of files) {
-      const div = bubble("user", "shot");
-      const img = document.createElement("img");
-      img.src = URL.createObjectURL(file);
-      div.appendChild(img);
-    }
-    if (text) render({ role: "user", body: text, attachments: [] });
-    showTyping();
-    textEl.value = "";
-    pendingFiles = [];
-    renderPending();
   } finally {
     sendBtn.disabled = false;
   }
