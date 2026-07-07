@@ -77,8 +77,24 @@ async def _enqueue_job(
         job_id=job_id, thread_id=thread_id, text=text, attachments=attachments, context=context
     )
     await state.queue.enqueue(job)
+    # durable marker: every user message at/below this seq is covered by a job,
+    # so boot-recovery knows exactly what a restart swallowed
+    await asyncio.to_thread(state.store.add_message, ThreadMessage(
+        thread_id=thread_id, role="system", body=job_id, ts=_now(), kind="job",
+    ))
     if state.render:  # wake the worker; the job waits durably in the list meanwhile
         await state.render.resume_worker()
+
+
+async def recover_unprocessed(state: AppState) -> int:
+    """Feed user messages that a restart swallowed (sent, persisted, but never
+    enqueued) back into the coordinator. Returns how many were recovered."""
+    rows = await asyncio.to_thread(state.store.unprocessed_user_messages)
+    for thread_id, m in rows:
+        await state.coordinator.handle_message(thread_id, m.body, m.attachments)
+    if rows:
+        logger.info("recovered %d unprocessed message(s) after restart", len(rows))
+    return len(rows)
 
 
 async def _maybe_suspend_worker(state: AppState) -> None:
@@ -177,6 +193,7 @@ def _lifespan(injected: AppState | None):
         )
         app.state.app_state = state
         state.relay_task = asyncio.ensure_future(_result_relay(state))
+        await recover_unprocessed(state)  # restart swallowed nothing silently
         try:
             yield
         finally:

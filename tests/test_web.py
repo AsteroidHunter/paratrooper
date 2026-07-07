@@ -466,3 +466,61 @@ def test_push_routes(client, monkeypatch):
     assert client.post("/api/push/subscribe", headers=auth, json=sub).json() == {"ok": True}
     assert client.app.state.app_state.store.subscriptions() == [sub]
     assert client.post("/api/push/subscribe", headers=auth, json={}).status_code == 400
+
+
+def test_watchdog_clears_stuck_job():
+    """A job whose done/error never arrived must not block the thread forever."""
+    async def scenario():
+        enq, intr, enqueued, _ = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.02, job_deadline=0.05)
+        await coord.handle_message("d", "first", [])
+        await asyncio.sleep(0.05)  # fires -> running
+        assert len(enqueued) == 1 and coord.has_pending()
+        await asyncio.sleep(0.06)  # deadline passes, no done ever arrives
+        await coord.handle_message("d", "second", [])  # watchdog unblocks
+        await asyncio.sleep(0.05)
+        assert [e["text"] for e in enqueued] == ["first", "second"]
+
+    _run(scenario())
+
+
+def test_unprocessed_user_messages(tmp_path):
+    """Messages after the last job marker are the ones a restart swallowed."""
+    store = ThreadStore(tmp_path / "t.sqlite")
+
+    def add(role, body, kind=None, thread="d"):
+        return store.add_message(ThreadMessage(
+            thread_id=thread, role=role, body=body, ts="2026-07-06T00:00:00Z", kind=kind,
+        ))
+
+    add("user", "covered msg")
+    add("system", "job-abc", kind="job")  # marker: everything above is covered
+    add("agent", "reply", kind="done")
+    add("user", "swallowed one")
+    add("user", "swallowed two")
+    add("user", "other thread msg", thread="e")  # no marker in e at all
+    got = store.unprocessed_user_messages()
+    assert [(t, m.body) for t, m in got] == [
+        ("d", "swallowed one"), ("d", "swallowed two"), ("e", "other thread msg"),
+    ]
+
+
+def test_recover_unprocessed_feeds_coordinator(tmp_path):
+    from paratrooper.web.app import recover_unprocessed
+
+    store = ThreadStore(tmp_path / "t.sqlite")
+    store.add_message(ThreadMessage(
+        thread_id="d", role="user", body="lost msg", ts="2026-07-06T00:00:00Z",
+    ))
+    coord = _FakeCoordinator()
+    state = AppState(
+        config=None, store=store, queue=object(), coordinator=coord,
+        inbox=DiskInbox(tmp_path / "ib"),
+    )
+
+    async def scenario():
+        n = await recover_unprocessed(state)
+        assert n == 1
+        assert coord.calls == [("d", "lost msg", [])]
+
+    _run(scenario())

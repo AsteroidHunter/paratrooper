@@ -158,6 +158,7 @@ function render(m: ServerMsg): void {
   }
   const kind = m.kind ?? "log";
   const value = (typeof m.payload === "string" ? m.payload : undefined) ?? m.body ?? "";
+  if (kind === "job") return; // internal enqueue marker, not a message
   if (kind === "working") {
     jobActive = true;
     setReceipt("Read"); // the agent has picked it up
