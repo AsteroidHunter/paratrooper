@@ -30,6 +30,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 from redis import exceptions as redis_exc
 
 from ..agent.config import Config, load_config
@@ -150,7 +151,14 @@ async def _result_relay(state: AppState) -> None:
                     continue
                 channel = message["channel"]
                 thread_id = channel.rsplit(":", 1)[-1]
-                result = ResultMessage.model_validate_json(message["data"])
+                try:
+                    result = ResultMessage.model_validate_json(message["data"])
+                except ValidationError:
+                    # a malformed result (e.g. version skew mid-deploy: a worker
+                    # emitting a kind this web build doesn't know) must never
+                    # kill the relay task — skip it, keep relaying
+                    logger.warning("relay: skipped unparseable result on %s", channel)
+                    continue
                 if result.kind in ("working", "typing"):  # ephemeral: sockets only
                     await _send_to_sockets(state, thread_id, result.model_dump())
                     continue

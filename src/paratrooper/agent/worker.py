@@ -120,6 +120,10 @@ async def run_job(
     except ConfigError:
         spotify_creds = None  # Spotify name-search is optional; links still resolve
 
+    async def emit_update(text: str) -> None:
+        # the post_update tool's live channel: an agent-authored interim bubble
+        await emit("update", text)
+
     # No branch yet: the agent creates one via the start_branch tool only when
     # it actually changes the board — pure conversation never touches git.
     ctx = ToolContext(
@@ -127,6 +131,7 @@ async def run_job(
         repo=repo,
         changelog=changelog,
         spotify_creds=spotify_creds,
+        emit_update=emit_update,
     )
     server, tool_names = build_tool_server(ctx)
     guard = make_main_guard_hook(config.default_branch)

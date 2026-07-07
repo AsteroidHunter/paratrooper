@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-ResultKind = Literal["working", "typing", "log", "screenshot", "pr", "done", "error"]
+ResultKind = Literal["working", "typing", "log", "screenshot", "pr", "update", "done", "error"]
 
 
 class JobMessage(BaseModel):
@@ -29,7 +29,8 @@ class JobMessage(BaseModel):
 
 class ResultMessage(BaseModel):
     """worker -> web (streamed). ``screenshot`` payload carries an image ref;
-    ``pr`` carries {branch, url}."""
+    ``pr`` carries {branch, url}; ``update`` carries a short agent-authored
+    interim text (the post_update tool) that lands as a normal bubble mid-job."""
 
     job_id: str
     kind: ResultKind
@@ -44,7 +45,7 @@ class ThreadMessage(BaseModel):
     body: str = ""
     attachments: list[str] = Field(default_factory=list)
     ts: str  # ISO-8601
-    kind: str | None = None  # for agent messages: log|screenshot|pr|done|error
+    kind: str | None = None  # for agent messages: log|screenshot|pr|update|done|error
 
 
 class UploadResponse(BaseModel):
