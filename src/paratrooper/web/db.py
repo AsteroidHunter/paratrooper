@@ -97,6 +97,33 @@ class ThreadStore:
             for r in rows
         ]
 
+    def messages_page(
+        self, thread_id: str, *, before_seq: int | None = None, limit: int = 50
+    ) -> list[tuple[int, ThreadMessage]]:
+        """The ``limit`` messages immediately before ``before_seq`` (or the
+        newest when None), oldest-first with seqs — the recent-first initial
+        window and each pull-down-for-older page."""
+        if before_seq is None:
+            sql = ("SELECT * FROM (SELECT * FROM messages WHERE thread_id=? "
+                   "ORDER BY seq DESC LIMIT ?) ORDER BY seq")
+            params: tuple = (thread_id, limit)
+        else:
+            sql = ("SELECT * FROM (SELECT * FROM messages WHERE thread_id=? AND seq<? "
+                   "ORDER BY seq DESC LIMIT ?) ORDER BY seq")
+            params = (thread_id, before_seq, limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            (
+                r["seq"],
+                ThreadMessage(
+                    thread_id=r["thread_id"], role=r["role"], body=r["body"],
+                    attachments=json.loads(r["attachments"]), ts=r["ts"], kind=r["kind"],
+                ),
+            )
+            for r in rows
+        ]
+
     def recent(self, thread_id: str, *, n: int = 10) -> list[ThreadMessage]:
         """The last ``n`` messages (oldest-first) — used as job context."""
         msgs = self._rows(

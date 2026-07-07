@@ -10,6 +10,8 @@ const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
 let token = localStorage.getItem(TOKEN_KEY) ?? "";
 let lastSeq = 0;
+let oldestSeq = 0; // lowest seq rendered; the ?before= cursor for older pages
+let loadingOlder = false;
 let ws: WebSocket | null = null;
 let closingOnPurpose = false; // logout: suppress the auto-reconnect
 
@@ -102,6 +104,7 @@ function renderChat(): void {
   const thread = document.getElementById("thread")!;
   thread.addEventListener("scroll", () => {
     if (nearBottom()) document.getElementById("jump")?.classList.remove("show");
+    if (thread.scrollTop < 40) void loadOlder(); // pull at top -> older page
   });
   document.getElementById("jump")!.addEventListener("click", () => {
     document.getElementById("jump")!.classList.remove("show");
@@ -143,10 +146,56 @@ function renderChat(): void {
   };
   thread.addEventListener("touchend", endPeek);
   thread.addEventListener("touchcancel", endPeek);
-  // fresh thread DOM: reset run/stamp tracking so replay stamps correctly
+  // fresh thread DOM: reset run/stamp/pagination tracking
   lastBubbleSide = null;
   lastBubbleAt = 0;
   lastStampAt = 0;
+  oldestSeq = 0;
+}
+
+// --- older history (recent-first: the socket sends a window, we page back) ----
+
+async function loadOlder(): Promise<void> {
+  if (loadingOlder || oldestSeq <= 1) return; // 0 = nothing rendered yet, 1 = at the top
+  loadingOlder = true;
+  try {
+    const r = await fetch(`/api/history/${THREAD_ID}?before=${oldestSeq}&limit=50`, {
+      headers: authHeaders(),
+    });
+    if (!r.ok) return;
+    const { messages } = (await r.json()) as { messages: ServerMsg[] };
+    if (!messages.length) {
+      oldestSeq = 1; // top of thread reached; stop asking
+      return;
+    }
+    const t = threadEl();
+    // rebuild: render the older page into the emptied thread, then re-attach
+    // the existing bubbles and put the viewport back where it was
+    const keep = document.createDocumentFragment();
+    while (t.firstChild) keep.appendChild(t.firstChild);
+    const prevScroll = t.scrollTop;
+    const prevSide = lastBubbleSide;
+    const prevAt = lastBubbleAt;
+    const prevStamp = lastStampAt;
+    const prevSuppress = suppressAnim;
+    lastBubbleSide = null;
+    lastBubbleAt = 0;
+    lastStampAt = 0;
+    suppressAnim = true;
+    for (const m of messages) {
+      if (m.seq && (oldestSeq === 0 || m.seq < oldestSeq)) oldestSeq = m.seq;
+      render(m);
+    }
+    lastBubbleSide = prevSide;
+    lastBubbleAt = prevAt;
+    lastStampAt = prevStamp;
+    suppressAnim = prevSuppress;
+    const olderHeight = t.scrollHeight;
+    t.appendChild(keep);
+    t.scrollTop = olderHeight + prevScroll; // previously-visible row stays put
+  } finally {
+    loadingOlder = false;
+  }
 }
 
 // --- pending attachments (picked but not yet sent) -----------------------------
@@ -431,6 +480,7 @@ function connect(): void {
     if (!document.getElementById("thread")) return; // gate is showing; don't consume
     const m = JSON.parse(e.data) as ServerMsg;
     if (m.seq && m.seq > lastSeq) lastSeq = m.seq;
+    if (m.seq && (oldestSeq === 0 || m.seq < oldestSeq)) oldestSeq = m.seq;
     render(m);
   };
   ws.onclose = () => {

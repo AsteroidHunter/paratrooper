@@ -284,6 +284,14 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         rows = await asyncio.to_thread(st().store.messages, thread_id, since_seq=since)
         return {"messages": [{"seq": seq, **m.model_dump()} for seq, m in rows]}
 
+    @app.get("/api/history/{thread_id}", dependencies=[Depends(require_token)])
+    async def history(thread_id: str, before: int, limit: int = 50) -> dict:
+        """One older page for pull-down-at-top (oldest-first, like the socket)."""
+        rows = await asyncio.to_thread(
+            st().store.messages_page, thread_id, before_seq=before, limit=min(limit, 200)
+        )
+        return {"messages": [{"seq": seq, **m.model_dump()} for seq, m in rows]}
+
     @app.post("/api/publish", dependencies=[Depends(require_token)])
     async def publish(req: PublishRequest) -> JSONResponse:
         state = st()
@@ -341,7 +349,14 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         state = st()
         state.sockets.setdefault(thread_id, set()).add(websocket)
         # catch-up: replay everything the client missed
-        for seq, m in await asyncio.to_thread(state.store.messages, thread_id, since_seq=since):
+        if since == 0:
+            # fresh login: only the recent window — older pages come via
+            # /api/history as the user pulls down (a year of thread should
+            # not replay on every reinstall)
+            rows = await asyncio.to_thread(state.store.messages_page, thread_id, limit=50)
+        else:
+            rows = await asyncio.to_thread(state.store.messages, thread_id, since_seq=since)
+        for seq, m in rows:
             await websocket.send_json({"seq": seq, **m.model_dump()})
         try:
             while True:

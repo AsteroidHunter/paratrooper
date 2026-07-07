@@ -313,6 +313,64 @@ def test_upload_and_send_flow(client):
     assert rows[-1]["role"] == "user" and rows[-1]["body"] == "add it"
 
 
+def _seed(store, thread_id, n, prefix="m"):
+    return [
+        store.add_message(ThreadMessage(
+            thread_id=thread_id, role="user", body=f"{prefix}{i}",
+            ts="2026-07-07T00:00:00+00:00",
+        ))
+        for i in range(n)
+    ]
+
+
+def test_messages_page_paginates_backwards(tmp_path):
+    store = ThreadStore(tmp_path / "t.sqlite")
+    _seed(store, "other", 3)  # global AUTOINCREMENT: other threads shift seqs
+    seqs = _seed(store, "d", 10)
+
+    newest = store.messages_page("d", limit=4)
+    assert [m.body for _, m in newest] == ["m6", "m7", "m8", "m9"]  # oldest-first
+    older = store.messages_page("d", before_seq=newest[0][0], limit=4)
+    assert [m.body for _, m in older] == ["m2", "m3", "m4", "m5"]
+    first = store.messages_page("d", before_seq=older[0][0], limit=4)
+    assert [m.body for _, m in first] == ["m0", "m1"]
+    assert store.messages_page("d", before_seq=seqs[0]) == []  # top reached
+
+
+def test_history_route_and_cursor_stability(client):
+    auth = {"Authorization": "Bearer tok"}
+    store = client.app.state.app_state.store
+    seqs = _seed(store, "d", 6)
+
+    assert client.get("/api/history/d", params={"before": seqs[3]}).status_code == 401
+    page = client.get(
+        "/api/history/d", headers=auth, params={"before": seqs[3], "limit": 2}
+    ).json()["messages"]
+    assert [m["body"] for m in page] == ["m1", "m2"]
+
+    # live rows arriving after a page is cut don't disturb either cursor:
+    # the same ?before page is identical, and ?since still yields only the new row
+    new_seq = store.add_message(ThreadMessage(
+        thread_id="d", role="agent", body="fresh", ts="2026-07-07T00:00:01+00:00", kind="done",
+    ))
+    again = client.get(
+        "/api/history/d", headers=auth, params={"before": seqs[3], "limit": 2}
+    ).json()["messages"]
+    assert again == page
+    since = client.get(f"/api/thread/d?since={seqs[-1]}", headers=auth).json()["messages"]
+    assert [m["seq"] for m in since] == [new_seq]
+
+
+def test_ws_fresh_login_gets_bounded_window(client):
+    store = client.app.state.app_state.store
+    _seed(store, "d", 60)
+    with client.websocket_connect("/ws?token=tok&thread=d&since=0") as sock:
+        first = sock.receive_json()
+        assert first["body"] == "m10"  # 60 rows, window of 50 -> starts at m10
+        for i in range(11, 60):
+            assert sock.receive_json()["body"] == f"m{i}"
+
+
 def _png_bytes(size=(640, 480), color=(200, 60, 60)) -> bytes:
     from io import BytesIO
 
