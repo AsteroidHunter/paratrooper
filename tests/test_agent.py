@@ -315,7 +315,8 @@ def test_build_tool_server(tmp_path):
     assert "mcp__paratrooper__open_pr" in names
     assert "mcp__paratrooper__move_pin" in names
     assert "mcp__paratrooper__start_branch" in names
-    assert len(names) == 12
+    assert "mcp__paratrooper__post_update" in names
+    assert len(names) == 13
 
 
 # --- siterepo (pure parts) ---------------------------------------------------
@@ -403,6 +404,108 @@ def test_mutating_tools_require_branch(tmp_path):
         out = asyncio.run(handlers[name](args))
         assert out.get("is_error"), f"{name} ran without a branch"
         assert "start_branch" in out["content"][0]["text"]
+
+
+def test_post_update_tool(tmp_path):
+    """post_update pushes an interim 'update' through the live channel; empty
+    text is refused; without a channel (CLI/offline runs) it no-ops quietly."""
+    from paratrooper.agent.config import Config
+    import paratrooper.agent.tools as tools_mod
+
+    cfg = Config(
+        inbox=tmp_path / "inbox",
+        site_root=tmp_path / "site",
+        pins_dir=tmp_path / "pins",
+        archive_dir=tmp_path / "arch",
+        later_dir=tmp_path / "later",
+        changelog=tmp_path / "cl.jsonl",
+        remote=None,
+        default_branch="main",
+        branch_prefix="paratrooper",
+    )
+    sent: list[str] = []
+
+    async def channel(text: str) -> None:
+        sent.append(text)
+
+    ctx = ToolContext(
+        config=cfg,
+        repo=SiteRepo(cfg.site_root),
+        changelog=memory.Changelog(cfg.changelog),
+        emit_update=channel,
+    )
+    handlers = {}
+    orig = tools_mod.create_sdk_mcp_server
+
+    def capture(name, version, tools):
+        for t in tools:
+            handlers[t.name] = t.handler
+        return orig(name=name, version=version, tools=tools)
+
+    tools_mod.create_sdk_mcp_server = lambda name, version, tools: capture(name, version, tools)
+    try:
+        build_tool_server(ctx)
+    finally:
+        tools_mod.create_sdk_mcp_server = orig
+
+    out = asyncio.run(handlers["post_update"]({"text": "On it, adding the pin now."}))
+    assert not out.get("is_error")
+    assert sent == ["On it, adding the pin now."]
+
+    out = asyncio.run(handlers["post_update"]({"text": "   "}))
+    assert out.get("is_error")
+
+    ctx.emit_update = None  # offline run: degrade, don't error the agent
+    out = asyncio.run(handlers["post_update"]({"text": "hello"}))
+    assert not out.get("is_error")
+    assert sent == ["On it, adding the pin now."]
+
+
+def test_run_job_wires_live_update_channel(tmp_path, monkeypatch):
+    """run_job must hand the tool server a live emit_update channel: what
+    post_update sends has to reach on_event as an 'update' result mid-job,
+    before the final 'done'."""
+    import paratrooper.agent.worker as worker_mod
+    from paratrooper.agent.config import Config
+
+    captured: dict = {}
+    events: list[dict] = []
+
+    def fake_build_tool_server(ctx):
+        captured["ctx"] = ctx
+        return {"name": "paratrooper"}, []
+
+    async def fake_query(*, prompt, options):
+        # stand-in for the agent calling post_update mid-session
+        await captured["ctx"].emit_update("On it.")
+        if False:
+            yield
+
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "github_token", lambda: "gh-test-token")
+    monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
+    monkeypatch.setattr(worker_mod, "query", fake_query)
+
+    cfg = Config(
+        inbox=tmp_path / "inbox",
+        site_root=tmp_path / "site",
+        pins_dir=tmp_path / "pins",
+        archive_dir=tmp_path / "arch",
+        later_dir=tmp_path / "later",
+        changelog=tmp_path / "cl.jsonl",
+        remote=None,
+        default_branch="main",
+        branch_prefix="paratrooper",
+    )
+    job = worker_mod.Job(job_id="j1", thread_id="t1", text="add the pin")
+    result = asyncio.run(worker_mod.run_job(job, config=cfg, on_event=events.append))
+
+    assert result.status == "done"
+    kinds = [e["kind"] for e in events]
+    assert "update" in kinds
+    assert kinds.index("update") < kinds.index("done")
+    update = next(e for e in events if e["kind"] == "update")
+    assert update == {"job_id": "j1", "kind": "update", "payload": "On it."}
 
 
 def test_is_text_delta_classifier():
