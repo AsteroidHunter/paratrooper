@@ -123,6 +123,10 @@ function render(m: ServerMsg): void {
     return; // consecutive duplicate of the same reply
   }
   if (kind === "log" || kind === "done") lastAgentText = value.trim();
+  if (role === "system") {
+    bubble("system", "line").textContent = value || "✓";
+    return;
+  }
   if (kind === "screenshot" && value) {
     const div = bubble("agent", "shot");
     const img = document.createElement("img");
@@ -140,10 +144,9 @@ function render(m: ServerMsg): void {
     div.appendChild(publishBtn);
   } else if (kind === "error") {
     bubble("agent", "error").textContent = `⚠ ${value}`;
-  } else if (kind === "done") {
-    bubble("agent", "text done").textContent = value;
   } else {
-    bubble("agent", "log").textContent = value;
+    // the agent's words — a real received bubble (log and done alike)
+    bubble("agent", "text").textContent = value;
   }
 }
 
