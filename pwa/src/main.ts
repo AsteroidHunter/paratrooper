@@ -4,7 +4,7 @@ import "./styles.css";
 
 declare const __BUILT_AT__: string;
 
-const APP_VERSION = "0.1.2";
+const APP_VERSION = "0.1.3";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -145,7 +145,6 @@ function prUrl(payload: unknown, body?: string): string | null {
 }
 
 let lastAgentText = "";
-let jobActive = false;
 
 function render(m: ServerMsg): void {
   const role = m.role ?? "agent";
@@ -160,22 +159,17 @@ function render(m: ServerMsg): void {
   const value = (typeof m.payload === "string" ? m.payload : undefined) ?? m.body ?? "";
   if (kind === "job") return; // internal enqueue marker, not a message
   if (kind === "working") {
-    jobActive = true;
-    setReceipt("Read"); // the agent has picked it up
-    showStatus(); // running tools, not composing: subtle line, no dots
+    setReceipt("Read"); // the agent has picked it up; otherwise silence
     return;
   }
   if (kind === "typing") {
-    hideStatus();
-    showTyping(); // the agent is actually writing a message
+    showTyping(); // the agent is writing (dots self-expire if it wasn't for you)
     return;
   }
   if (kind === "done" || kind === "error") {
-    jobActive = false;
     hideTyping();
-    hideStatus();
   } else {
-    hideTyping(); // a bubble replaces the dots...
+    hideTyping(); // a bubble replaces the dots
   }
   if (kind === "done" && !value.trim()) return; // job-complete signal, text already shown
   if ((kind === "log" || kind === "done") && value.trim() && value.trim() === lastAgentText) {
@@ -207,7 +201,6 @@ function render(m: ServerMsg): void {
     // the agent's words — a real received bubble (log and done alike)
     bubble("agent", "text").textContent = value;
   }
-  if (jobActive) showStatus(); // still working: subtle status below the bubble
 }
 
 function chip(label: string): HTMLSpanElement {
@@ -234,28 +227,15 @@ function setReceipt(state: "Delivered" | "Read"): void {
   t.scrollTop = t.scrollHeight;
 }
 
-// --- working status (subtle centered line while the agent runs tools) ----------
-
-function showStatus(): void {
-  if (document.getElementById("status")) return;
-  const el = document.createElement("div");
-  el.id = "status";
-  el.className = "msg status";
-  el.textContent = "working on it…";
-  const t = document.getElementById("thread");
-  if (t) {
-    t.appendChild(el);
-    t.scrollTop = t.scrollHeight;
-  }
-}
-
-function hideStatus(): void {
-  document.getElementById("status")?.remove();
-}
-
 // --- typing indicator (dots = the agent is COMPOSING text, like iMessage) ------
+// Dots self-expire: the agent's internal notes also count as "composing" but
+// never become messages, so dots that lead nowhere fade out on their own.
+
+let typingExpiry: ReturnType<typeof setTimeout> | null = null;
 
 function showTyping(): void {
+  if (typingExpiry) clearTimeout(typingExpiry);
+  typingExpiry = setTimeout(hideTyping, 15000);
   if (document.getElementById("typing")) return;
   const el = document.createElement("div");
   el.id = "typing";
@@ -269,6 +249,8 @@ function showTyping(): void {
 }
 
 function hideTyping(): void {
+  if (typingExpiry) clearTimeout(typingExpiry);
+  typingExpiry = null;
   document.getElementById("typing")?.remove();
 }
 

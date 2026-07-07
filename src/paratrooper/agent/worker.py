@@ -150,21 +150,17 @@ async def run_job(
     )
 
     result_text = ""
-    last_streamed = ""
     typing_announced = False
     try:
         async for message in query(prompt=_build_prompt(job), options=options):
             if isinstance(message, StreamEvent):
                 if not typing_announced and _is_text_delta(message.event):
-                    typing_announced = True  # once per message; the bubble resets it
+                    typing_announced = True  # once per composition
                     await emit("typing", None)
             elif isinstance(message, AssistantMessage):
+                # interim assistant text is the agent narrating its work — NOT a
+                # message for Akash. Only the final reply (ResultMessage) is.
                 typing_announced = False
-                for block in getattr(message, "content", []):
-                    text = getattr(block, "text", None)
-                    if text and text.strip() != last_streamed:
-                        last_streamed = text.strip()
-                        await emit("log", text)
             elif isinstance(message, ResultMessage):
                 result_text = getattr(message, "result", "") or ""
     except Exception as exc:  # SDK/transport error -> visible job failure
@@ -175,10 +171,7 @@ async def run_job(
         await emit("screenshot", ctx.last_screenshot)
     if ctx.last_pr:
         await emit("pr", {"branch": ctx.branch, "url": ctx.last_pr})
-    # 'done' closes the job; blank its payload when the final text merely repeats
-    # the last streamed message, so the phone doesn't show the same reply twice
-    done_text = "" if result_text.strip() == last_streamed else result_text
-    await emit("done", done_text)
+    await emit("done", result_text)  # the ONE reply bubble for this job
 
     return JobResult(
         job_id=job.job_id,
