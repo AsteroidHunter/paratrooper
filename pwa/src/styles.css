@@ -209,7 +209,23 @@ html, body {
 
 .msg.shot { padding: 0; background: none; }
 .msg.user.shot { align-self: flex-end; }
-.msg.shot img { max-width: 100%; border-radius: 14px; display: block; }
+.msg.shot img { max-width: 100%; border-radius: 14px; display: block; cursor: zoom-in; }
+
+/* tap-to-zoom overlay */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.88);
+  cursor: zoom-out;
+}
+.lightbox img {
+  max-width: 96vw;
+  max-height: 92vh;
+  border-radius: 6px;
+}
 
 /* system lines (e.g. "published") — centered, small, gray, like iMessage's
    "Delivered"/date stamps */

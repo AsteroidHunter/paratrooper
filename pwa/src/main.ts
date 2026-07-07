@@ -274,13 +274,46 @@ function prUrl(payload: unknown, body?: string): string | null {
 
 let lastAgentText = "";
 
+function thumbUrl(key: string): string {
+  return `/api/thumb/${encodeURIComponent(key)}?token=${encodeURIComponent(token)}`;
+}
+
+function openLightbox(src: string): void {
+  const overlay = document.createElement("div");
+  overlay.className = "lightbox";
+  const img = document.createElement("img");
+  img.src = src;
+  overlay.appendChild(img);
+  overlay.addEventListener("click", () => overlay.remove());
+  document.body.appendChild(overlay);
+}
+
 function render(m: ServerMsg): void {
   const role = m.role ?? "agent";
   const tsMs = m.ts ? Date.parse(m.ts) : undefined;
   if (role === "user") {
-    const div = bubble("user", "text", tsMs);
-    div.textContent = m.body ?? "";
-    (m.attachments ?? []).forEach(() => div.appendChild(chip("📎 photo")));
+    // photos render as their own frameless bubbles (same shape as the send
+    // echo); pre-thumbnail history 404s and falls back to the old chip
+    (m.attachments ?? []).forEach((key) => {
+      const div = bubble("user", "shot", tsMs);
+      const img = document.createElement("img");
+      img.src = thumbUrl(key);
+      img.alt = "photo";
+      img.onload = () => {
+        if (nearBottom()) scrollToBottom();
+      };
+      img.onerror = () => {
+        div.classList.replace("shot", "text");
+        div.appendChild(chip("📎 photo"));
+        img.remove();
+      };
+      img.addEventListener("click", () => openLightbox(img.src));
+      div.appendChild(img);
+    });
+    if (m.body) {
+      const div = bubble("user", "text", tsMs);
+      div.textContent = m.body;
+    }
     lastAgentText = "";
     return;
   }
@@ -315,6 +348,7 @@ function render(m: ServerMsg): void {
     img.src = value;
     img.alt = "board preview";
     img.onload = () => scrollToBottom(); // height lands after decode
+    img.addEventListener("click", () => openLightbox(value));
     div.appendChild(img);
   } else if (kind === "pr") {
     const url = prUrl(m.payload, m.body);
@@ -418,6 +452,7 @@ async function send(): Promise<void> {
     const div = bubble("user", "shot");
     const img = document.createElement("img");
     img.src = URL.createObjectURL(file);
+    img.addEventListener("click", () => openLightbox(img.src));
     div.appendChild(img);
   }
   if (text) render({ role: "user", body: text, attachments: [] });

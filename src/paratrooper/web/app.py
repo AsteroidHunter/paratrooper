@@ -24,6 +24,7 @@ from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
+    Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -57,6 +58,7 @@ from .publish import (
 )
 from .queue import JobQueue, connect
 from .render_control import RenderControl
+from .thumbs import make_thumbnail
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +249,24 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         content = await file.read()
         key = new_key(file.filename)
         await st().inbox.put(key, content)  # cross-service store (Key Value on Render)
+        # persist a small preview NOW — the inbox blob expires in ~24h and this
+        # is the only pixel record history replay will have
+        thumb = await asyncio.to_thread(make_thumbnail, content)
+        if thumb is not None:
+            await asyncio.to_thread(st().store.add_thumbnail, key, thumb, ts=_now())
         return UploadResponse(inbox_key=key, content_type=file.content_type, size=len(content))
+
+    @app.get("/api/thumb/{key}")
+    async def thumb(key: str, token: str = "") -> Response:
+        # token rides the query string like /ws does: <img src> can't set headers
+        if not verify_token(token):
+            raise HTTPException(status_code=401, detail="bad token")
+        row = await asyncio.to_thread(st().store.thumbnail, key)
+        if row is None:
+            raise HTTPException(status_code=404, detail="no thumbnail")
+        data, content_type = row
+        return Response(content=data, media_type=content_type,
+                        headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
     @app.post("/api/send", dependencies=[Depends(require_token)])
     async def send(req: SendRequest) -> dict:

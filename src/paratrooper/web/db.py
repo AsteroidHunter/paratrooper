@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     endpoint     TEXT PRIMARY KEY,
     subscription TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS attachments (
+    key          TEXT PRIMARY KEY,   -- inbox key already stored in messages.attachments
+    thumb        BLOB NOT NULL,      -- small webp; the only pixels that outlive the inbox TTL
+    content_type TEXT NOT NULL DEFAULT 'image/webp',
+    ts           TEXT NOT NULL
+);
 """
 
 
@@ -127,6 +134,24 @@ class ThreadStore:
             )
             for r in rows
         ]
+
+    # --- attachment thumbnails (photo history survives the inbox TTL) ---
+
+    def add_thumbnail(self, key: str, thumb: bytes, *, ts: str,
+                      content_type: str = "image/webp") -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO attachments(key, thumb, content_type, ts) VALUES (?,?,?,?)",
+                (key, thumb, content_type, ts),
+            )
+            self._conn.commit()
+
+    def thumbnail(self, key: str) -> tuple[bytes, str] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT thumb, content_type FROM attachments WHERE key=?", (key,)
+            ).fetchone()
+        return (row["thumb"], row["content_type"]) if row else None
 
     # --- web push subscriptions (Phase 6) ---
 

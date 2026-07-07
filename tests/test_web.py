@@ -313,6 +313,61 @@ def test_upload_and_send_flow(client):
     assert rows[-1]["role"] == "user" and rows[-1]["body"] == "add it"
 
 
+def _png_bytes(size=(640, 480), color=(200, 60, 60)) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_make_thumbnail_downscales_and_rejects_non_images():
+    from PIL import Image
+
+    from paratrooper.web.thumbs import THUMB_EDGE, make_thumbnail
+
+    thumb = make_thumbnail(_png_bytes())
+    assert thumb is not None
+    from io import BytesIO
+
+    im = Image.open(BytesIO(thumb))
+    assert im.format == "WEBP" and max(im.size) <= THUMB_EDGE
+    assert make_thumbnail(b"not an image") is None
+
+
+def test_thumbnail_store_roundtrip(tmp_path):
+    store = ThreadStore(tmp_path / "t.sqlite")
+    store.add_thumbnail("inbox/abc.png", b"webpbytes", ts="2026-07-07T00:00:00+00:00")
+    data, ctype = store.thumbnail("inbox/abc.png")
+    assert data == b"webpbytes" and ctype == "image/webp"
+    assert store.thumbnail("inbox/missing.png") is None
+
+
+def test_thumb_route_serves_persisted_previews(client):
+    auth = {"Authorization": "Bearer tok"}
+    up = client.post(
+        "/api/upload", headers=auth, files={"file": ("p.png", _png_bytes(), "image/png")}
+    )
+    key = up.json()["inbox_key"]
+
+    # <img src> can't set headers, so the token rides the query string like /ws
+    ok = client.get(f"/api/thumb/{key}", params={"token": "tok"})
+    assert ok.status_code == 200 and ok.headers["content-type"] == "image/webp"
+
+    assert client.get(f"/api/thumb/{key}").status_code == 401
+    assert client.get(f"/api/thumb/{key}", params={"token": "wrong"}).status_code == 401
+    assert client.get("/api/thumb/nope.png", params={"token": "tok"}).status_code == 404
+
+    # a non-image upload stores no thumbnail: history keeps its chip via 404
+    up2 = client.post(
+        "/api/upload", headers=auth, files={"file": ("f.txt", b"plain text", "text/plain")}
+    )
+    key2 = up2.json()["inbox_key"]
+    assert client.get(f"/api/thumb/{key2}", params={"token": "tok"}).status_code == 404
+
+
 # --- image contracts: each Docker image must import without the other's deps ---
 
 def _import_in_subprocess(blocked_module: str, import_target: str) -> None:
