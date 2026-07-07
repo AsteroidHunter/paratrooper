@@ -59,12 +59,12 @@ function renderChat(): void {
     <main id="thread" class="thread">
       <div class="empty">Send a photo, link, or song to update the board. 🪂</div>
     </main>
+    <div id="pending" class="pending"></div>
     <form id="compose" class="compose">
-      <label class="attach" title="Add photo">＋
-        <input id="files" type="file" accept="image/*" multiple hidden />
-      </label>
+      <button type="button" id="attach" class="attach" title="Add photo">＋</button>
+      <input id="files" type="file" accept="image/*" multiple hidden />
       <textarea id="text" rows="1" placeholder="Message Paratrooper…"></textarea>
-      <button type="submit" class="send">↑</button>
+      <button type="submit" id="sendbtn" class="send">↑</button>
     </form>`;
   document.getElementById("reset")!.addEventListener("click", () => {
     localStorage.removeItem(TOKEN_KEY);
@@ -75,10 +75,42 @@ function renderChat(): void {
     ws = null;
     renderTokenGate();
   });
+  const filesEl = document.getElementById("files") as HTMLInputElement;
+  document.getElementById("attach")!.addEventListener("click", () => filesEl.click());
+  filesEl.addEventListener("change", () => {
+    pendingFiles.push(...Array.from(filesEl.files ?? []));
+    filesEl.value = ""; // allow re-picking the same file
+    renderPending();
+  });
   document.getElementById("compose")!.addEventListener("submit", (e) => {
     e.preventDefault();
     void send();
   });
+}
+
+// --- pending attachments (picked but not yet sent) -----------------------------
+
+let pendingFiles: File[] = [];
+
+function renderPending(): void {
+  const box = document.getElementById("pending");
+  if (!box) return;
+  box.innerHTML = "";
+  pendingFiles.forEach((f, i) => {
+    const chipEl = document.createElement("span");
+    chipEl.className = "pchip";
+    chipEl.textContent = `📎 ${f.name} `;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.textContent = "✕";
+    x.addEventListener("click", () => {
+      pendingFiles.splice(i, 1);
+      renderPending();
+    });
+    chipEl.appendChild(x);
+    box.appendChild(chipEl);
+  });
+  box.style.display = pendingFiles.length ? "flex" : "none";
 }
 
 const threadEl = () => document.getElementById("thread")!;
@@ -200,31 +232,50 @@ function connect(): void {
 
 async function send(): Promise<void> {
   const textEl = document.getElementById("text") as HTMLTextAreaElement;
-  const filesEl = document.getElementById("files") as HTMLInputElement;
+  const sendBtn = document.getElementById("sendbtn") as HTMLButtonElement;
   const text = textEl.value.trim();
-  const files = Array.from(filesEl.files ?? []);
+  const files = [...pendingFiles];
   if (!text && files.length === 0) return;
 
-  const keys: string[] = [];
-  for (const file of files) {
-    const fd = new FormData();
-    fd.append("file", file);
-    const r = await fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd });
-    if (r.ok) keys.push((await r.json()).inbox_key);
-  }
-  const resp = await fetch("/api/send", {
-    method: "POST",
-    headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
-  });
-  if (resp.ok) {
+  sendBtn.disabled = true; // photo uploads can take seconds
+  try {
+    const keys: string[] = [];
+    for (const file of files) {
+      const fd = new FormData();
+      fd.append("file", file);
+      let r: Response;
+      try {
+        r = await fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd });
+      } catch (e) {
+        bubble("agent", "error").textContent = `⚠ upload of ${file.name} failed: ${e}`;
+        return; // nothing sent; pending chips stay so you can retry
+      }
+      if (!r.ok) {
+        bubble("agent", "error").textContent =
+          `⚠ upload of ${file.name} failed (${r.status} ${r.statusText})`;
+        return;
+      }
+      keys.push((await r.json()).inbox_key);
+    }
+    const resp = await fetch("/api/send", {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
+    });
+    if (!resp.ok) {
+      bubble("agent", "error").textContent = `⚠ send failed (${resp.status})`;
+      return;
+    }
     const { seq } = await resp.json();
     if (seq && seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
+    render({ role: "user", body: text, attachments: keys }); // optimistic
+    showTyping();
+    textEl.value = "";
+    pendingFiles = [];
+    renderPending();
+  } finally {
+    sendBtn.disabled = false;
   }
-  render({ role: "user", body: text, attachments: keys }); // optimistic
-  showTyping();
-  textEl.value = "";
-  filesEl.value = "";
 }
 
 async function publish(pr: string): Promise<void> {

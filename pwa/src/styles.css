@@ -233,3 +233,30 @@ html, body, #app {
 }
 
 .buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }
+
+/* pending attachment chips (picked, not yet sent) */
+.pending {
+  display: none;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  padding: 0.4rem 0.75rem 0;
+  background: var(--bar);
+}
+.pchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--received);
+  color: var(--received-text);
+  border-radius: 12px;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+.pchip button {
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 2px;
+}
