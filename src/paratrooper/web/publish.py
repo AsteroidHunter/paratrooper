@@ -58,6 +58,37 @@ def parse_pr_number(pr: str) -> int:
     raise PublishError(f"cannot parse a PR number from {pr!r}")
 
 
+def _headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def find_open_pr(owner: str, repo: str, *, token: str, branch_prefix: str = "") -> dict:
+    """Resolve THE open agent PR when the phone lost the ref (pr rows persisted
+    as ``body=""`` before payloads were serialized). Exactly one open PR may
+    match the branch prefix; zero or several is a :class:`PublishError` — never
+    guess which PR a Publish tap meant."""
+    resp = httpx.get(
+        f"{_GITHUB_API}/repos/{owner}/{repo}/pulls",
+        headers=_headers(token),
+        params={"state": "open", "per_page": 30},
+        timeout=30.0,
+    )
+    if resp.status_code != 200:
+        raise PublishError(f"PR lookup failed ({resp.status_code}): {resp.text}")
+    prs = resp.json()
+    if branch_prefix:
+        prs = [p for p in prs if str(p.get("head", {}).get("ref", "")).startswith(branch_prefix)]
+    if not prs:
+        raise PublishError("no open PR to publish")
+    if len(prs) > 1:
+        raise PublishError(f"{len(prs)} open PRs; ask the agent which one to publish")
+    return prs[0]
+
+
 def merge_pull_request(
     owner: str, repo: str, number: int, *, token: str, method: str = "squash"
 ) -> dict:
@@ -65,11 +96,7 @@ def merge_pull_request(
     reports the PR isn't mergeable."""
     resp = httpx.put(
         f"{_GITHUB_API}/repos/{owner}/{repo}/pulls/{number}/merge",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=_headers(token),
         json={"merge_method": method},
         timeout=30.0,
     )

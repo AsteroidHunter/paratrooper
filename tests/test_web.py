@@ -4,6 +4,7 @@ publish parsing, and the FastAPI routes (with injected state, no Redis)."""
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -689,3 +690,98 @@ def test_publish_success_persists_confirmation(client, monkeypatch):
     assert r.json() == {"merged": True, "sha": "abc123"}
     rows = client.get("/api/thread/d", headers=auth).json()["messages"]
     assert rows[-1]["kind"] == "published" and "PR #7" in rows[-1]["body"]
+
+
+# --- pr ref must survive persistence + empty-ref publish (the replay bug) ------
+
+def test_result_body_serializes_structured_payloads():
+    from paratrooper.web.app import result_body
+    from paratrooper.web.models import ResultMessage
+
+    assert result_body(ResultMessage(job_id="j", kind="done", payload="all set")) == "all set"
+    assert result_body(ResultMessage(job_id="j", kind="done")) == ""
+    pr = ResultMessage(
+        job_id="j", kind="pr",
+        payload={"branch": "paratrooper/x", "url": "https://github.com/o/r/pull/9"},
+    )
+    assert json.loads(result_body(pr))["url"] == "https://github.com/o/r/pull/9"
+
+
+def test_find_open_pr_resolves_single_prefixed_pr(monkeypatch):
+    import httpx as _httpx
+
+    from paratrooper.web import publish as pub
+
+    prs = [
+        {"number": 3, "head": {"ref": "dependabot/npm"}},
+        {"number": 2, "head": {"ref": "paratrooper/desert-new-photo"}},
+    ]
+
+    def fake_get(url, **kw):
+        return _httpx.Response(200, json=prs, request=_httpx.Request("GET", url))
+
+    monkeypatch.setattr(pub.httpx, "get", fake_get)
+    found = pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper")
+    assert found["number"] == 2
+
+
+def test_find_open_pr_zero_or_many_is_an_error(monkeypatch):
+    import httpx as _httpx
+
+    from paratrooper.web import publish as pub
+
+    def fake_empty(url, **kw):
+        return _httpx.Response(200, json=[], request=_httpx.Request("GET", url))
+
+    monkeypatch.setattr(pub.httpx, "get", fake_empty)
+    with pytest.raises(PublishError, match="no open PR"):
+        pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper")
+
+    two = [
+        {"number": 1, "head": {"ref": "paratrooper/a"}},
+        {"number": 2, "head": {"ref": "paratrooper/b"}},
+    ]
+
+    def fake_two(url, **kw):
+        return _httpx.Response(200, json=two, request=_httpx.Request("GET", url))
+
+    monkeypatch.setattr(pub.httpx, "get", fake_two)
+    with pytest.raises(PublishError, match="2 open PRs"):
+        pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper")
+
+
+def test_publish_empty_ref_resolves_open_pr(client, monkeypatch):
+    """A replayed pr bubble (body persisted as "" pre-fix) still publishes: the
+    server resolves the one open agent PR instead of 409ing on the empty ref."""
+    import paratrooper.web.app as app_mod
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
+    seen = {}
+
+    def fake_find(owner, repo, *, token, branch_prefix=""):
+        seen["prefix"] = branch_prefix
+        return {"number": 2, "head": {"ref": "paratrooper/desert-new-photo"}}
+
+    monkeypatch.setattr(app_mod, "find_open_pr", fake_find)
+    monkeypatch.setattr(app_mod, "merge_pull_request", lambda *a, **kw: {"sha": "d34d"})
+    auth = {"Authorization": "Bearer tok"}
+    r = client.post("/api/publish", headers=auth, json={"thread_id": "d", "pr": ""})
+    assert r.status_code == 200 and r.json()["merged"] is True
+    assert seen["prefix"] == "paratrooper"
+    rows = client.get("/api/thread/d", headers=auth).json()["messages"]
+    assert "PR #2" in rows[-1]["body"]
+
+
+def test_publish_empty_ref_with_no_open_pr_is_409(client, monkeypatch):
+    import paratrooper.web.app as app_mod
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
+
+    def none_found(*a, **kw):
+        raise PublishError("no open PR to publish")
+
+    monkeypatch.setattr(app_mod, "find_open_pr", none_found)
+    auth = {"Authorization": "Bearer tok"}
+    r = client.post("/api/publish", headers=auth, json={"thread_id": "d", "pr": ""})
+    assert r.status_code == 409
+    assert "no open PR" in r.json()["detail"]
