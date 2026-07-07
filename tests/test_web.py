@@ -885,6 +885,26 @@ def test_publish_empty_ref_resolves_open_pr(client, monkeypatch):
     assert "PR #2" in rows[-1]["body"]
 
 
+def test_ws_token_redacted_from_uvicorn_logs(client):
+    """The /ws accept line uvicorn logs must never contain the real bearer token
+    (verified leaking into Render logs on every reconnect before this filter)."""
+    import logging
+
+    lg = logging.getLogger("uvicorn.error")
+    record = lg.makeRecord(
+        lg.name, logging.INFO, __file__, 0,
+        '%s - "WebSocket %s" [accepted]',
+        ("1.2.3.4:5", "/ws?token=s3cr3ttok3n&thread=default&since=76"),
+        None,
+    )
+    for f in lg.filters:
+        f.filter(record)
+    rendered = record.getMessage()
+    assert "s3cr3ttok3n" not in rendered
+    assert "token=REDACTED" in rendered
+    assert "thread=default" in rendered  # only the secret is scrubbed
+
+
 def test_publish_empty_ref_with_no_open_pr_is_409(client, monkeypatch):
     import paratrooper.web.app as app_mod
 
