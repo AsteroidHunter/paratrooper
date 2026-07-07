@@ -55,10 +55,20 @@ class Worker:
 
     async def _materialize(self, keys: list[str]) -> None:
         """Pull staged uploads from the shared store onto the worker's local
-        inbox so the image tool can read them as plain files."""
+        inbox so the image tool can read them as plain files. Missing/expired
+        blobs raise a clear, user-facing error instead of a bare KeyError."""
         local = DiskInbox(self._cfg().inbox)
+        missing = []
         for key in keys:
-            await local.put(key, await self.inbox.get(key))
+            try:
+                await local.put(key, await self.inbox.get(key))
+            except KeyError:
+                missing.append(key)
+        if missing:
+            raise RuntimeError(
+                f"{len(missing)} attached photo(s) expired from staging before I could "
+                "process them. please re-send the photo(s)."
+            )
 
     async def _cleanup(self, keys: list[str]) -> None:
         local = DiskInbox(self._cfg().inbox)
@@ -102,6 +112,15 @@ class Worker:
                 ResultMessage(job_id=msg.job_id, kind="error", payload="interrupted"),
             )
             raise
+        except Exception as exc:
+            # a failed job must surface to the phone AND must not kill the
+            # worker loop (an uncaught KeyError here once took the whole
+            # service down, silently eating the queued messages)
+            logger.exception("job %s failed", msg.job_id)
+            await self.queue.publish_result(
+                msg.thread_id,
+                ResultMessage(job_id=msg.job_id, kind="error", payload=str(exc)),
+            )
         finally:
             await self._cleanup(msg.attachments)
 
@@ -142,7 +161,9 @@ class Worker:
                     continue
                 self._current_thread, self._current_job = msg.thread_id, msg.job_id
                 self._task = asyncio.ensure_future(self._run_one(msg))
-                with contextlib.suppress(asyncio.CancelledError):
+                # CancelledError = interrupt; anything else was already reported
+                # by _run_one — either way the loop must survive
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._task
                 self._current_thread = self._current_job = self._task = None
         finally:

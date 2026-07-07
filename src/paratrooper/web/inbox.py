@@ -19,7 +19,7 @@ from typing import Protocol
 from .uploads import _safe_ext
 
 INBOX_PREFIX = "paratrooper:inbox:"
-DEFAULT_TTL = 3600  # seconds — staged uploads are short-lived
+DEFAULT_TTL = 24 * 3600  # staged uploads must survive deploys + queue waits
 
 
 def new_key(filename: str | None) -> str:

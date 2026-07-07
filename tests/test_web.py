@@ -524,3 +524,41 @@ def test_recover_unprocessed_feeds_coordinator(tmp_path):
         assert coord.calls == [("d", "lost msg", [])]
 
     _run(scenario())
+
+
+def test_failed_job_reports_error_and_spares_the_loop(tmp_path):
+    """The production incident: an expired attachment raised KeyError, which
+    killed the whole worker and silently ate the queue. A failing job must
+    publish a visible error and leave the loop alive."""
+    from paratrooper.web.models import JobMessage
+    from paratrooper.web.worker_runner import Worker
+
+    published = []
+
+    class _FakeQueue:
+        def __init__(self):
+            self.r = _FakeRedis()  # empty store -> attachment lookup misses
+
+        async def publish_result(self, thread_id, result):
+            published.append(result)
+
+    from paratrooper.agent.config import Config
+
+    cfg = Config(
+        inbox=tmp_path / "inbox", site_root=tmp_path / "site",
+        pins_dir=tmp_path / "pins", archive_dir=tmp_path / "arch",
+        later_dir=tmp_path / "later", changelog=tmp_path / "cl.jsonl",
+        remote=None, default_branch="main", branch_prefix="paratrooper",
+    )
+    w = Worker(_FakeQueue())
+    w._config = cfg  # skip load_config
+    msg = JobMessage(job_id="j1", thread_id="d", text="add this",
+                     attachments=["expired-key.jpeg"])
+
+    _run(w._run_one(msg))  # must NOT raise
+
+    kinds = [r.kind for r in published]
+    assert kinds[0] == "working"
+    assert "error" in kinds
+    err = next(r for r in published if r.kind == "error")
+    assert "expired" in str(err.payload)
