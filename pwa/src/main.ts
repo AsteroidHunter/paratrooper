@@ -2,6 +2,8 @@
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
 
+declare const __BUILT_AT__: string;
+
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
 let token = localStorage.getItem(TOKEN_KEY) ?? "";
@@ -33,6 +35,7 @@ function renderTokenGate(): void {
       <p>Enter your access token to connect.</p>
       <input id="token-input" type="password" placeholder="access token" autocomplete="off" />
       <button id="token-save">Connect</button>
+      <p class="buildstamp">ui build ${__BUILT_AT__}</p>
     </div>`;
   const input = document.getElementById("token-input") as HTMLInputElement;
   document.getElementById("token-save")!.addEventListener("click", () => {
@@ -286,6 +289,10 @@ if ("serviceWorker" in navigator) {
 if (token) {
   renderChat();
   connect();
+  void fetch("/api/health").then(async (r) => {
+    const v = (await r.json()).version;
+    console.log(`paratrooper ui ${__BUILT_AT__} / server ${v}`);
+  });
 } else {
   renderTokenGate();
 }

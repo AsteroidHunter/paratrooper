@@ -282,7 +282,8 @@ def client(tmp_path, monkeypatch):
 
 
 def test_health_open(client):
-    assert client.get("/api/health").json() == {"ok": True}
+    body = client.get("/api/health").json()
+    assert body["ok"] is True and "version" in body
 
 
 def test_auth_required(client):

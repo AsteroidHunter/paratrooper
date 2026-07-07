@@ -231,3 +231,5 @@ html, body, #app {
   cursor: pointer;
   flex: none;
 }
+
+.buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }

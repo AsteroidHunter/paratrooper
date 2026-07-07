@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -191,7 +192,9 @@ def create_app(injected: AppState | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health() -> dict:
-        return {"ok": True}
+        # Render injects RENDER_GIT_COMMIT; 'dev' locally. Ground truth for
+        # "which code is actually serving" — no more guessing.
+        return {"ok": True, "version": os.environ.get("RENDER_GIT_COMMIT", "dev")[:7]}
 
     @app.post("/api/upload", response_model=UploadResponse, dependencies=[Depends(require_token)])
     async def upload(file: UploadFile) -> UploadResponse:
