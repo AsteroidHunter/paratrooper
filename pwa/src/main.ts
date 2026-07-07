@@ -107,6 +107,46 @@ function renderChat(): void {
     document.getElementById("jump")!.classList.remove("show");
     scrollToBottom(true);
   });
+  // swipe-left to peek per-message times (iMessage): drag pulls the thread
+  // left via --peek, labels fade in, everything springs back on release
+  let startX = 0;
+  let startY = 0;
+  let axis: "h" | "v" | null = null;
+  thread.addEventListener(
+    "touchstart",
+    (e) => {
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      axis = null;
+    },
+    { passive: true },
+  );
+  thread.addEventListener(
+    "touchmove",
+    (e) => {
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (!axis) {
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+        axis = Math.abs(dx) > Math.abs(dy) ? "h" : "v";
+        if (axis === "h") thread.classList.add("dragging");
+      }
+      if (axis !== "h") return;
+      e.preventDefault(); // we own the horizontal gesture; vertical stays native
+      thread.style.setProperty("--peek", `${Math.max(Math.min(dx, 0), -72)}px`);
+    },
+    { passive: false },
+  );
+  const endPeek = () => {
+    thread.classList.remove("dragging");
+    thread.style.setProperty("--peek", "0px");
+  };
+  thread.addEventListener("touchend", endPeek);
+  thread.addEventListener("touchcancel", endPeek);
+  // fresh thread DOM: reset run/stamp tracking so replay stamps correctly
+  lastBubbleSide = null;
+  lastBubbleAt = 0;
+  lastStampAt = 0;
 }
 
 // --- pending attachments (picked but not yet sent) -----------------------------
@@ -161,6 +201,40 @@ let lastBubbleSide: string | null = null;
 let lastBubbleAt = 0;
 const RUN_GAP_MS = 60_000;
 
+// centered "Today 2:31 PM" stamps at conversation gaps, like iMessage
+let lastStampAt = 0;
+const STAMP_GAP_MS = 60 * 60_000;
+
+function fmtTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function fmtStampDay(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOf(now) - startOf(d)) / 86_400_000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return d.toLocaleDateString([], { weekday: "long" });
+  return d.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    year: d.getFullYear() === now.getFullYear() ? undefined : "numeric",
+  });
+}
+
+function maybeStamp(at: number): void {
+  if (at - lastStampAt <= STAMP_GAP_MS) return;
+  lastStampAt = at;
+  const s = document.createElement("div");
+  s.className = "stamp";
+  const day = document.createElement("b");
+  day.textContent = fmtStampDay(at);
+  s.append(day, ` ${fmtTime(at)}`);
+  threadEl().appendChild(s);
+}
+
 // entrance animation + smooth scroll are for LIVE messages only; a reconnect
 // replaying fifty bubbles must not pop each one
 let suppressAnim = true;
@@ -169,6 +243,7 @@ function bubble(role: string, cls: string, tsMs?: number): HTMLDivElement {
   threadEl().querySelector(".empty")?.remove(); // clear the empty-state hint
   const wasNear = nearBottom();
   const at = tsMs ?? Date.now();
+  maybeStamp(at);
   const cont =
     (role === "user" || role === "agent") &&
     role === lastBubbleSide &&
@@ -177,6 +252,7 @@ function bubble(role: string, cls: string, tsMs?: number): HTMLDivElement {
   lastBubbleAt = at;
   const div = document.createElement("div");
   div.className = `msg ${role} ${cls}${cont ? " cont" : ""}${suppressAnim ? "" : " anim"}`;
+  if (role !== "system") div.dataset.time = fmtTime(at); // swipe-to-reveal label
   threadEl().appendChild(div);
   if (wasNear || role === "user") scrollToBottom();
   else document.getElementById("jump")?.classList.add("show");

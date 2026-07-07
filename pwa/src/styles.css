@@ -129,10 +129,43 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  touch-action: pan-y; /* horizontal drags belong to the time-peek gesture */
 }
+
+/* swipe-to-peek: children track --peek (set by JS during the drag) and spring
+   back through the transition; time labels ride each bubble's right edge */
+.thread > * {
+  transform: translateX(var(--peek, 0px));
+  transition: transform 0.25s ease;
+}
+.thread.dragging > * { transition: none; }
+.msg[data-time]::after {
+  content: attr(data-time);
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  padding-left: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.thread.dragging .msg[data-time]::after { opacity: 1; }
+
+/* centered "Today 2:31 PM" gap stamps */
+.stamp {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 10px 0 2px;
+}
+.stamp b { font-weight: 600; }
 
 /* --- bubbles (iMessage geometry) --- */
 .msg {
+  position: relative; /* anchors the swipe-to-peek time label */
   max-width: 75%;
   padding: 10px 16px;
   font-size: 17px;
