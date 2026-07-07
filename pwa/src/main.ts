@@ -4,6 +4,8 @@ import "./styles.css";
 
 declare const __BUILT_AT__: string;
 
+const APP_VERSION = "0.1";
+
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
 let token = localStorage.getItem(TOKEN_KEY) ?? "";
@@ -53,7 +55,7 @@ function renderTokenGate(): void {
 function renderChat(): void {
   app.innerHTML = `
     <header class="bar">
-      <span class="title">Paratrooper</span>
+      <span class="title">Paratrooper <span class="ver">v${APP_VERSION}</span></span>
       <button id="reset" class="ghost" title="Forget token">⎋</button>
     </header>
     <main id="thread" class="thread">
@@ -158,7 +160,8 @@ function render(m: ServerMsg): void {
   const value = (typeof m.payload === "string" ? m.payload : undefined) ?? m.body ?? "";
   if (kind === "working") {
     jobActive = true;
-    showTyping(); // the agent is actually on it now
+    setReceipt("Read"); // the agent has picked it up
+    showTyping(); // and is on it now
     return;
   }
   if (kind === "done" || kind === "error") {
@@ -205,6 +208,23 @@ function chip(label: string): HTMLSpanElement {
   s.className = "filechip";
   s.textContent = label;
   return s;
+}
+
+// --- delivery receipt (single stamp under the most recent sent message) --------
+
+function setReceipt(state: "Delivered" | "Read"): void {
+  const t = document.getElementById("thread");
+  if (!t) return;
+  document.getElementById("receipt")?.remove();
+  const el = document.createElement("div");
+  el.id = "receipt";
+  el.className = "receipt";
+  el.textContent = state;
+  // sits under the last user bubble; if the dots are up, keep them below it
+  const typing = document.getElementById("typing");
+  if (typing) t.insertBefore(el, typing);
+  else t.appendChild(el);
+  t.scrollTop = t.scrollHeight;
 }
 
 // --- typing indicator ---------------------------------------------------------
@@ -299,6 +319,7 @@ async function send(): Promise<void> {
     }
     const { seq } = await resp.json();
     if (seq && seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
+    setReceipt("Delivered"); // the server has it
   } finally {
     sendBtn.disabled = false;
   }
