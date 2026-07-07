@@ -4,7 +4,7 @@ import "./styles.css";
 
 declare const __BUILT_AT__: string;
 
-const APP_VERSION = "0.1.1";
+const APP_VERSION = "0.1.2";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -162,12 +162,18 @@ function render(m: ServerMsg): void {
   if (kind === "working") {
     jobActive = true;
     setReceipt("Read"); // the agent has picked it up
-    showTyping(); // and is on it now
+    showStatus(); // running tools, not composing: subtle line, no dots
+    return;
+  }
+  if (kind === "typing") {
+    hideStatus();
+    showTyping(); // the agent is actually writing a message
     return;
   }
   if (kind === "done" || kind === "error") {
     jobActive = false;
     hideTyping();
+    hideStatus();
   } else {
     hideTyping(); // a bubble replaces the dots...
   }
@@ -201,7 +207,7 @@ function render(m: ServerMsg): void {
     // the agent's words — a real received bubble (log and done alike)
     bubble("agent", "text").textContent = value;
   }
-  if (jobActive) showTyping(); // still working: dots return below the bubble
+  if (jobActive) showStatus(); // still working: subtle status below the bubble
 }
 
 function chip(label: string): HTMLSpanElement {
@@ -228,7 +234,26 @@ function setReceipt(state: "Delivered" | "Read"): void {
   t.scrollTop = t.scrollHeight;
 }
 
-// --- typing indicator ---------------------------------------------------------
+// --- working status (subtle centered line while the agent runs tools) ----------
+
+function showStatus(): void {
+  if (document.getElementById("status")) return;
+  const el = document.createElement("div");
+  el.id = "status";
+  el.className = "msg status";
+  el.textContent = "working on it…";
+  const t = document.getElementById("thread");
+  if (t) {
+    t.appendChild(el);
+    t.scrollTop = t.scrollHeight;
+  }
+}
+
+function hideStatus(): void {
+  document.getElementById("status")?.remove();
+}
+
+// --- typing indicator (dots = the agent is COMPOSING text, like iMessage) ------
 
 function showTyping(): void {
   if (document.getElementById("typing")) return;
@@ -308,11 +333,18 @@ async function send(): Promise<void> {
       }
       keys.push((await r.json()).inbox_key);
     }
-    const resp = await fetch("/api/send", {
-      method: "POST",
-      headers: { ...authHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch("/api/send", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
+      });
+    } catch (e) {
+      hideTyping();
+      bubble("agent", "error").textContent = `⚠ not sent, server unreachable: ${e}`;
+      return;
+    }
     if (!resp.ok) {
       hideTyping();
       bubble("agent", "error").textContent = `⚠ not sent (${resp.status})`;

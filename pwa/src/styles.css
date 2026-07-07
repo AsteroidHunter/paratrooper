@@ -288,3 +288,14 @@ html, body {
   font-weight: 600;
   padding: 1px 4px 0;
 }
+
+/* working status: subtle centered line while the agent runs tools (dots are
+   reserved for actual text composition, like iMessage) */
+.msg.status {
+  align-self: center;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+  padding: 4px 0;
+}

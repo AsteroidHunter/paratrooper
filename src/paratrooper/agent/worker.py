@@ -21,6 +21,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     HookMatcher,
     ResultMessage,
+    StreamEvent,
     query,
 )
 
@@ -60,6 +61,14 @@ class JobResult:
     screenshot: str | None = None
     result_text: str = ""
     error: str | None = None
+
+
+def _is_text_delta(raw_event: dict) -> bool:
+    """True when a raw API stream event is the agent writing message text (as
+    opposed to tool calls/thinking) — the moment the phone should show dots."""
+    if raw_event.get("type") != "content_block_delta":
+        return False
+    return (raw_event.get("delta") or {}).get("type") == "text_delta"
 
 
 def _build_prompt(job: Job) -> str:
@@ -135,13 +144,22 @@ async def run_job(
         # a single oversized CLI message (e.g. an image read) overflows the
         # default 1MB json buffer and kills the whole job — give it headroom
         max_buffer_size=10 * 1024 * 1024,
+        # stream partials so we can signal "composing text" (typing dots) as
+        # distinct from "running tools" (status line)
+        include_partial_messages=True,
     )
 
     result_text = ""
     last_streamed = ""
+    typing_announced = False
     try:
         async for message in query(prompt=_build_prompt(job), options=options):
-            if isinstance(message, AssistantMessage):
+            if isinstance(message, StreamEvent):
+                if not typing_announced and _is_text_delta(message.event):
+                    typing_announced = True  # once per message; the bubble resets it
+                    await emit("typing", None)
+            elif isinstance(message, AssistantMessage):
+                typing_announced = False
                 for block in getattr(message, "content", []):
                     text = getattr(block, "text", None)
                     if text and text.strip() != last_streamed:

@@ -403,3 +403,17 @@ def test_mutating_tools_require_branch(tmp_path):
         out = asyncio.run(handlers[name](args))
         assert out.get("is_error"), f"{name} ran without a branch"
         assert "start_branch" in out["content"][0]["text"]
+
+
+def test_is_text_delta_classifier():
+    """Typing dots must fire only on message-text streaming, not tool/thinking
+    deltas."""
+    from paratrooper.agent.worker import _is_text_delta
+
+    text = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "h"}}
+    tool = {"type": "content_block_delta", "delta": {"type": "input_json_delta"}}
+    assert _is_text_delta(text)
+    assert not _is_text_delta(tool)
+    assert not _is_text_delta({"type": "content_block_delta", "delta": {"type": "thinking_delta"}})
+    assert not _is_text_delta({"type": "content_block_start"})
+    assert not _is_text_delta({})

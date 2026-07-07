@@ -562,3 +562,99 @@ def test_failed_job_reports_error_and_spares_the_loop(tmp_path):
     assert "error" in kinds
     err = next(r for r in published if r.kind == "error")
     assert "expired" in str(err.payload)
+
+
+def test_shutdown_requeues_job_without_user_facing_noise(tmp_path, monkeypatch):
+    """A deploy SIGTERM killed a job mid-screenshot and blocked its thread for
+    11 hours. On shutdown-cancel the job must be requeued whole: no 'interrupted'
+    error published, staged attachments kept for the re-run."""
+    from paratrooper.web.models import JobMessage
+    from paratrooper.web.worker_runner import Worker
+
+    published, requeued = [], []
+
+    class _FakeQueue:
+        def __init__(self):
+            self.r = _FakeRedis()
+
+        async def publish_result(self, thread_id, result):
+            published.append(result)
+
+        async def requeue_front(self, job):
+            requeued.append(job.job_id)
+
+    from paratrooper.agent.config import Config
+
+    cfg = Config(
+        inbox=tmp_path / "inbox", site_root=tmp_path / "site",
+        pins_dir=tmp_path / "pins", archive_dir=tmp_path / "arch",
+        later_dir=tmp_path / "later", changelog=tmp_path / "cl.jsonl",
+        remote=None, default_branch="main", branch_prefix="paratrooper",
+    )
+    q = _FakeQueue()
+    w = Worker(q)
+    w._config = cfg
+    # stage an attachment so we can assert it survives a shutdown-cancel
+    _run(w.inbox.put("k.jpeg", b"img"))
+    msg = JobMessage(job_id="j1", thread_id="d", text="add", attachments=["k.jpeg"])
+
+    # pin the job in-flight so the cancel deterministically lands mid-run
+    import paratrooper.web.worker_runner as wr
+
+    async def slow_run_job(*a, **kw):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(wr, "run_job", slow_run_job)
+
+    async def scenario():
+        w._shutting_down = True  # simulate SIGTERM arriving
+        task = asyncio.ensure_future(w._run_one(msg))
+        await asyncio.sleep(0.05)  # let it reach run_job and park there
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(scenario())
+    kinds = [r.kind for r in published]
+    assert "error" not in kinds  # no fake 'interrupted' bubble on deploys
+    assert _run(w.inbox.get("k.jpeg")) == b"img"  # attachment kept for the re-run
+
+
+def test_requeue_front_puts_job_next_in_line():
+    from paratrooper.web.models import JobMessage
+    from paratrooper.web.queue import JobQueue
+
+    calls = []
+
+    class _R:
+        async def rpush(self, key, val):
+            calls.append(("rpush", key))
+
+    q = JobQueue(_R())
+    _run(q.requeue_front(JobMessage(job_id="j", thread_id="d", text="x")))
+    assert calls == [("rpush", "paratrooper:jobs")]  # consumption end of the list
+
+
+def test_open_pr_returns_existing_pr(monkeypatch, tmp_path):
+    """Pushing more commits to a branch that already has a PR must yield that
+    PR's URL (the phone's Publish button depends on it), not a 422 error."""
+    import httpx as _httpx
+
+    from paratrooper.agent import siterepo as sr
+
+    def fake_post(url, **kw):
+        return _httpx.Response(
+            422, text='{"message": "A pull request already exists for x."}',
+            request=_httpx.Request("POST", url),
+        )
+
+    def fake_get(url, **kw):
+        return _httpx.Response(
+            200, json=[{"html_url": "https://github.com/o/r/pull/7"}],
+            request=_httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(sr.httpx, "post", fake_post)
+    monkeypatch.setattr(sr.httpx, "get", fake_get)
+    repo = sr.SiteRepo(tmp_path, github_token="tok", remote="https://github.com/o/r.git")
+    assert repo.open_pr("paratrooper/x", "t") == "https://github.com/o/r/pull/7"
