@@ -28,7 +28,6 @@ from .auth import configure_auth
 from .config import Config, ConfigError, github_token, load_config, spotify_credentials
 from .hooks import make_main_guard_hook
 from .memory import Changelog, format_digest
-from .pins import slugify
 from .prompt import build_system_prompt
 from .siterepo import SiteRepo
 from .tools import SERVER_NAME, ToolContext, build_tool_server
@@ -112,14 +111,12 @@ async def run_job(
     except ConfigError:
         spotify_creds = None  # Spotify name-search is optional; links still resolve
 
-    branch = repo.prepare_branch(slugify(job.pin_hint or ""), slugify(job.text)[:30])
-    await emit("log", f"branch {branch}")
-
+    # No branch yet: the agent creates one via the start_branch tool only when
+    # it actually changes the board — pure conversation never touches git.
     ctx = ToolContext(
         config=config,
         repo=repo,
         changelog=changelog,
-        branch=branch,
         spotify_creds=spotify_creds,
     )
     server, tool_names = build_tool_server(ctx)
@@ -138,29 +135,34 @@ async def run_job(
     )
 
     result_text = ""
+    last_streamed = ""
     try:
         async for message in query(prompt=_build_prompt(job), options=options):
             if isinstance(message, AssistantMessage):
                 for block in getattr(message, "content", []):
                     text = getattr(block, "text", None)
-                    if text:
+                    if text and text.strip() != last_streamed:
+                        last_streamed = text.strip()
                         await emit("log", text)
             elif isinstance(message, ResultMessage):
                 result_text = getattr(message, "result", "") or ""
     except Exception as exc:  # SDK/transport error -> visible job failure
         await emit("error", str(exc))
-        return JobResult(job.job_id, "error", branch=branch, error=str(exc))
+        return JobResult(job.job_id, "error", branch=ctx.branch, error=str(exc))
 
     if ctx.last_screenshot:
         await emit("screenshot", ctx.last_screenshot)
     if ctx.last_pr:
-        await emit("pr", {"branch": branch, "url": ctx.last_pr})
-    await emit("done", result_text)
+        await emit("pr", {"branch": ctx.branch, "url": ctx.last_pr})
+    # 'done' closes the job; blank its payload when the final text merely repeats
+    # the last streamed message, so the phone doesn't show the same reply twice
+    done_text = "" if result_text.strip() == last_streamed else result_text
+    await emit("done", done_text)
 
     return JobResult(
         job_id=job.job_id,
         status="done",
-        branch=branch,
+        branch=ctx.branch,
         pr=ctx.last_pr,
         screenshot=ctx.last_screenshot,
         result_text=result_text,

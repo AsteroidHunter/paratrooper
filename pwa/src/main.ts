@@ -7,6 +7,7 @@ const THREAD_ID = "default"; // single user, single thread in v1
 let token = localStorage.getItem(TOKEN_KEY) ?? "";
 let lastSeq = 0;
 let ws: WebSocket | null = null;
+let closingOnPurpose = false; // logout: suppress the auto-reconnect
 
 interface ServerMsg {
   seq?: number;
@@ -65,7 +66,10 @@ function renderChat(): void {
   document.getElementById("reset")!.addEventListener("click", () => {
     localStorage.removeItem(TOKEN_KEY);
     token = "";
+    lastSeq = 0; // full replay on next login
+    closingOnPurpose = true;
     ws?.close();
+    ws = null;
     renderTokenGate();
   });
   document.getElementById("compose")!.addEventListener("submit", (e) => {
@@ -100,16 +104,25 @@ function prUrl(payload: unknown, body?: string): string | null {
   }
 }
 
+let lastAgentText = "";
+
 function render(m: ServerMsg): void {
   const role = m.role ?? "agent";
   if (role === "user") {
     const div = bubble("user", "text");
     div.textContent = m.body ?? "";
     (m.attachments ?? []).forEach(() => div.appendChild(chip("📎 photo")));
+    lastAgentText = "";
     return;
   }
   const kind = m.kind ?? "log";
   const value = (typeof m.payload === "string" ? m.payload : undefined) ?? m.body ?? "";
+  if (kind === "done" || kind === "error") hideTyping();
+  if (kind === "done" && !value.trim()) return; // job-complete signal, text already shown
+  if ((kind === "log" || kind === "done") && value.trim() && value.trim() === lastAgentText) {
+    return; // consecutive duplicate of the same reply
+  }
+  if (kind === "log" || kind === "done") lastAgentText = value.trim();
   if (kind === "screenshot" && value) {
     const div = bubble("agent", "shot");
     const img = document.createElement("img");
@@ -141,18 +154,42 @@ function chip(label: string): HTMLSpanElement {
   return s;
 }
 
+// --- typing indicator ---------------------------------------------------------
+
+function showTyping(): void {
+  if (document.getElementById("typing")) return;
+  const el = document.createElement("div");
+  el.id = "typing";
+  el.className = "msg agent typing";
+  el.innerHTML = "<span></span><span></span><span></span>";
+  const t = document.getElementById("thread");
+  if (t) {
+    t.appendChild(el);
+    t.scrollTop = t.scrollHeight;
+  }
+}
+
+function hideTyping(): void {
+  document.getElementById("typing")?.remove();
+}
+
 // --- networking --------------------------------------------------------------
 
 function connect(): void {
+  closingOnPurpose = false;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/ws?token=${encodeURIComponent(token)}&thread=${THREAD_ID}&since=${lastSeq}`;
   ws = new WebSocket(url);
   ws.onmessage = (e) => {
+    if (!document.getElementById("thread")) return; // gate is showing; don't consume
     const m = JSON.parse(e.data) as ServerMsg;
     if (m.seq && m.seq > lastSeq) lastSeq = m.seq;
     render(m);
   };
-  ws.onclose = () => setTimeout(connect, 2000); // reconnect; catch-up via ?since=
+  ws.onclose = () => {
+    if (closingOnPurpose || !token) return; // logout: stay closed
+    setTimeout(connect, 2000); // dropped: reconnect; catch-up via ?since=
+  };
 }
 
 async function send(): Promise<void> {
@@ -169,12 +206,17 @@ async function send(): Promise<void> {
     const r = await fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd });
     if (r.ok) keys.push((await r.json()).inbox_key);
   }
-  await fetch("/api/send", {
+  const resp = await fetch("/api/send", {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
   });
+  if (resp.ok) {
+    const { seq } = await resp.json();
+    if (seq && seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
+  }
   render({ role: "user", body: text, attachments: keys }); // optimistic
+  showTyping();
   textEl.value = "";
   filesEl.value = "";
 }

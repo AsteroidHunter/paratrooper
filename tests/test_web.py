@@ -301,7 +301,8 @@ def test_upload_and_send_flow(client):
         "/api/send", headers=auth,
         json={"thread_id": "d", "text": "add it", "attachments": [key]},
     )
-    assert sent.json() == {"status": "buffered"}
+    body = sent.json()
+    assert body["status"] == "buffered" and body["seq"] >= 1
     calls = client.app.state.app_state.coordinator.calls
     assert calls == [("d", "add it", [key])]
 
