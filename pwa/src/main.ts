@@ -4,7 +4,7 @@ import "./styles.css";
 
 declare const __BUILT_AT__: string;
 
-const APP_VERSION = "0.1.3";
+const APP_VERSION = "0.1.4";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -193,7 +193,7 @@ function render(m: ServerMsg): void {
     const publishBtn = document.createElement("button");
     publishBtn.textContent = "Publish";
     publishBtn.className = "publish";
-    publishBtn.addEventListener("click", () => void publish(url ?? ""));
+    publishBtn.addEventListener("click", () => void publish(url ?? "", publishBtn));
     div.appendChild(publishBtn);
   } else if (kind === "error") {
     bubble("agent", "error").textContent = `⚠ ${value}`;
@@ -340,12 +340,43 @@ async function send(): Promise<void> {
   }
 }
 
-async function publish(pr: string): Promise<void> {
-  await fetch("/api/publish", {
-    method: "POST",
-    headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ thread_id: THREAD_ID, pr }),
-  });
+let publishing = false;
+
+async function publish(pr: string, btn: HTMLButtonElement): Promise<void> {
+  if (publishing) return; // one merge at a time; repeat taps do nothing
+  publishing = true;
+  btn.disabled = true;
+  btn.textContent = "Publishing…";
+  try {
+    let resp: Response;
+    try {
+      resp = await fetch("/api/publish", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ thread_id: THREAD_ID, pr }),
+      });
+    } catch (e) {
+      bubble("agent", "error").textContent = `⚠ publish failed, server unreachable: ${e}`;
+      btn.disabled = false;
+      btn.textContent = "Publish";
+      return;
+    }
+    if (!resp.ok) {
+      let detail = `${resp.status} ${resp.statusText}`;
+      try {
+        detail = (await resp.json()).detail ?? detail;
+      } catch {
+        /* keep the status text */
+      }
+      bubble("agent", "error").textContent = `⚠ publish failed: ${detail}`;
+      btn.disabled = false;
+      btn.textContent = "Publish";
+      return;
+    }
+    btn.textContent = "Published ✓"; // stays disabled; server also pushes a stamp
+  } finally {
+    publishing = false;
+  }
 }
 
 // --- web push (Phase 6): subscribe, re-register on every reopen -------------
@@ -387,6 +418,8 @@ async function setupPush(reg: ServiceWorkerRegistration): Promise<void> {
 }
 
 // --- boot --------------------------------------------------------------------
+
+window.visualViewport?.addEventListener("resize", () => window.scrollTo(0, 0));
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {

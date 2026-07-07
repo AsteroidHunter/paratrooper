@@ -46,7 +46,13 @@ from .models import (
     ThreadMessage,
     UploadResponse,
 )
-from .publish import merge_pull_request, merge_token, owner_repo_from_remote, parse_pr_number
+from .publish import (
+    PublishError,
+    merge_pull_request,
+    merge_token,
+    owner_repo_from_remote,
+    parse_pr_number,
+)
 from .queue import JobQueue, connect
 from .render_control import RenderControl
 
@@ -245,16 +251,22 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         remote = state.config.remote
         if not remote:
             raise HTTPException(status_code=400, detail="site remote not configured")
-        owner, repo = owner_repo_from_remote(remote)
-        number = parse_pr_number(req.pr)
-        result = await asyncio.to_thread(
-            merge_pull_request, owner, repo, number, token=merge_token()
-        )
+        try:
+            owner, repo = owner_repo_from_remote(remote)
+            number = parse_pr_number(req.pr)
+            result = await asyncio.to_thread(
+                merge_pull_request, owner, repo, number, token=merge_token()
+            )
+        except PublishError as exc:
+            # surface WHY (already merged, conflicts, bad PR ref) instead of a 500
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         published = ThreadMessage(
             thread_id=req.thread_id, role="system",
             body=f"published PR #{number}", ts=_now(), kind="published",
         )
-        await asyncio.to_thread(state.store.add_message, published)
+        seq = await asyncio.to_thread(state.store.add_message, published)
+        # live confirmation on the phone, not just a row in history
+        await _send_to_sockets(state, req.thread_id, {"seq": seq, **published.model_dump()})
         return JSONResponse({"merged": True, "sha": result.get("sha")})
 
     @app.get("/api/push/key", dependencies=[Depends(require_token)])

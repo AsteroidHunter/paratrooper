@@ -658,3 +658,34 @@ def test_open_pr_returns_existing_pr(monkeypatch, tmp_path):
     monkeypatch.setattr(sr.httpx, "get", fake_get)
     repo = sr.SiteRepo(tmp_path, github_token="tok", remote="https://github.com/o/r.git")
     assert repo.open_pr("paratrooper/x", "t") == "https://github.com/o/r/pull/7"
+
+
+def test_publish_maps_error_to_409_with_detail(client, monkeypatch):
+    """A failed merge must tell the phone WHY (409 + detail), not 500."""
+    import paratrooper.web.app as app_mod
+    from paratrooper.web.publish import PublishError
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
+
+    def boom(*a, **kw):
+        raise PublishError("merge failed (405): Pull Request is not mergeable")
+
+    monkeypatch.setattr(app_mod, "merge_pull_request", boom)
+    auth = {"Authorization": "Bearer tok"}
+    r = client.post("/api/publish", headers=auth,
+                    json={"thread_id": "d", "pr": "https://github.com/o/r/pull/3"})
+    assert r.status_code == 409
+    assert "not mergeable" in r.json()["detail"]
+
+
+def test_publish_success_persists_confirmation(client, monkeypatch):
+    import paratrooper.web.app as app_mod
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
+    monkeypatch.setattr(app_mod, "merge_pull_request", lambda *a, **kw: {"sha": "abc123"})
+    auth = {"Authorization": "Bearer tok"}
+    r = client.post("/api/publish", headers=auth,
+                    json={"thread_id": "d", "pr": "7"})
+    assert r.json() == {"merged": True, "sha": "abc123"}
+    rows = client.get("/api/thread/d", headers=auth).json()["messages"]
+    assert rows[-1]["kind"] == "published" and "PR #7" in rows[-1]["body"]
