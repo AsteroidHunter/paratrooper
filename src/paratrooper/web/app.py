@@ -129,6 +129,9 @@ async def _result_relay(state: AppState) -> None:
                 channel = message["channel"]
                 thread_id = channel.rsplit(":", 1)[-1]
                 result = ResultMessage.model_validate_json(message["data"])
+                if result.kind == "working":  # ephemeral status: sockets only
+                    await _send_to_sockets(state, thread_id, result.model_dump())
+                    continue
                 body = result.payload if isinstance(result.payload, str) else ""
                 seq = state.store.add_message(ThreadMessage(
                     thread_id=thread_id, role="agent", body=body, ts=_now(), kind=result.kind,

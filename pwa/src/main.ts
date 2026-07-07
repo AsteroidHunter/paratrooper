@@ -143,6 +143,7 @@ function prUrl(payload: unknown, body?: string): string | null {
 }
 
 let lastAgentText = "";
+let jobActive = false;
 
 function render(m: ServerMsg): void {
   const role = m.role ?? "agent";
@@ -155,7 +156,17 @@ function render(m: ServerMsg): void {
   }
   const kind = m.kind ?? "log";
   const value = (typeof m.payload === "string" ? m.payload : undefined) ?? m.body ?? "";
-  if (kind === "done" || kind === "error") hideTyping();
+  if (kind === "working") {
+    jobActive = true;
+    showTyping(); // the agent is actually on it now
+    return;
+  }
+  if (kind === "done" || kind === "error") {
+    jobActive = false;
+    hideTyping();
+  } else {
+    hideTyping(); // a bubble replaces the dots...
+  }
   if (kind === "done" && !value.trim()) return; // job-complete signal, text already shown
   if ((kind === "log" || kind === "done") && value.trim() && value.trim() === lastAgentText) {
     return; // consecutive duplicate of the same reply
@@ -186,6 +197,7 @@ function render(m: ServerMsg): void {
     // the agent's words — a real received bubble (log and done alike)
     bubble("agent", "text").textContent = value;
   }
+  if (jobActive) showTyping(); // still working: dots return below the bubble
 }
 
 function chip(label: string): HTMLSpanElement {
@@ -249,7 +261,6 @@ async function send(): Promise<void> {
     div.appendChild(img);
   }
   if (text) render({ role: "user", body: text, attachments: [] });
-  showTyping();
   textEl.value = "";
   pendingFiles = [];
   renderPending();

@@ -89,6 +89,10 @@ class Worker:
             await self._on_event(msg.thread_id, event)
 
         try:
+            # the agent is now actually on it -> phone shows typing dots
+            await self.queue.publish_result(
+                msg.thread_id, ResultMessage(job_id=msg.job_id, kind="working")
+            )
             await self._materialize(msg.attachments)
             await run_job(job, config=self._cfg(), auth_mode=self.auth_mode, on_event=on_event)
         except asyncio.CancelledError:
