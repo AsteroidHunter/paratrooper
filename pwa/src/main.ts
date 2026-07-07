@@ -20,6 +20,7 @@ interface ServerMsg {
   attachments?: string[];
   kind?: string | null;
   payload?: unknown;
+  ts?: string; // ISO-8601 on replayed history; live results carry none (client clock is fine)
 }
 
 const app = document.getElementById("app")!;
@@ -55,12 +56,16 @@ function renderTokenGate(): void {
 function renderChat(): void {
   app.innerHTML = `
     <header class="bar">
-      <span class="title">Paratrooper <span class="ver">v${APP_VERSION}</span></span>
+      <div class="contact">
+        <img class="avatar" src="/icon-192.png" alt="" />
+        <span class="title">Paratrooper <span class="ver">v${APP_VERSION}</span></span>
+      </div>
       <button id="reset" class="ghost" title="Forget token">⎋</button>
     </header>
     <main id="thread" class="thread">
       <div class="empty">Send a photo, link, or song to update the board. 🪂</div>
     </main>
+    <button type="button" id="jump" class="jump" title="Jump to latest">↓</button>
     <div id="pending" class="pending"></div>
     <form id="compose" class="compose">
       <button type="button" id="attach" class="attach" title="Add photo">＋</button>
@@ -87,6 +92,20 @@ function renderChat(): void {
   document.getElementById("compose")!.addEventListener("submit", (e) => {
     e.preventDefault();
     void send();
+  });
+  // compose grows with content like iMessage (1 -> ~5 lines, then inner scroll)
+  const textEl = document.getElementById("text") as HTMLTextAreaElement;
+  textEl.addEventListener("input", () => {
+    textEl.style.height = "auto";
+    textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
+  });
+  const thread = document.getElementById("thread")!;
+  thread.addEventListener("scroll", () => {
+    if (nearBottom()) document.getElementById("jump")?.classList.remove("show");
+  });
+  document.getElementById("jump")!.addEventListener("click", () => {
+    document.getElementById("jump")!.classList.remove("show");
+    scrollToBottom(true);
   });
 }
 
@@ -120,14 +139,47 @@ function renderPending(): void {
 
 const threadEl = () => document.getElementById("thread")!;
 
+// --- scrolling: glide when following the tail, chevron when reading history ----
+
+function nearBottom(): boolean {
+  const t = threadEl();
+  return t.scrollHeight - t.scrollTop - t.clientHeight < 150;
+}
+
+function scrollToBottom(force = false): void {
+  const t = threadEl();
+  // replay bursts (suppressAnim) jump instantly; live messages glide
+  t.scrollTo({ top: t.scrollHeight, behavior: suppressAnim || force ? "auto" : "smooth" });
+}
+
 // --- rendering ---------------------------------------------------------------
 
-function bubble(role: string, cls: string): HTMLDivElement {
+// iMessage clustering: consecutive same-sender bubbles inside RUN_GAP_MS form a
+// run — continuations tighten spacing and the sender-side top corner. System
+// lines break runs.
+let lastBubbleSide: string | null = null;
+let lastBubbleAt = 0;
+const RUN_GAP_MS = 60_000;
+
+// entrance animation + smooth scroll are for LIVE messages only; a reconnect
+// replaying fifty bubbles must not pop each one
+let suppressAnim = true;
+
+function bubble(role: string, cls: string, tsMs?: number): HTMLDivElement {
   threadEl().querySelector(".empty")?.remove(); // clear the empty-state hint
+  const wasNear = nearBottom();
+  const at = tsMs ?? Date.now();
+  const cont =
+    (role === "user" || role === "agent") &&
+    role === lastBubbleSide &&
+    at - lastBubbleAt < RUN_GAP_MS;
+  lastBubbleSide = role === "system" ? null : role;
+  lastBubbleAt = at;
   const div = document.createElement("div");
-  div.className = `msg ${role} ${cls}`;
+  div.className = `msg ${role} ${cls}${cont ? " cont" : ""}${suppressAnim ? "" : " anim"}`;
   threadEl().appendChild(div);
-  threadEl().scrollTop = threadEl().scrollHeight;
+  if (wasNear || role === "user") scrollToBottom();
+  else document.getElementById("jump")?.classList.add("show");
   return div;
 }
 
@@ -148,8 +200,9 @@ let lastAgentText = "";
 
 function render(m: ServerMsg): void {
   const role = m.role ?? "agent";
+  const tsMs = m.ts ? Date.parse(m.ts) : undefined;
   if (role === "user") {
-    const div = bubble("user", "text");
+    const div = bubble("user", "text", tsMs);
     div.textContent = m.body ?? "";
     (m.attachments ?? []).forEach(() => div.appendChild(chip("📎 photo")));
     lastAgentText = "";
@@ -177,18 +230,19 @@ function render(m: ServerMsg): void {
   }
   if (kind === "log" || kind === "done") lastAgentText = value.trim();
   if (role === "system") {
-    bubble("system", "line").textContent = value || "✓";
+    bubble("system", "line", tsMs).textContent = value || "✓";
     return;
   }
   if (kind === "screenshot" && value) {
-    const div = bubble("agent", "shot");
+    const div = bubble("agent", "shot", tsMs);
     const img = document.createElement("img");
     img.src = value;
     img.alt = "board preview";
+    img.onload = () => scrollToBottom(); // height lands after decode
     div.appendChild(img);
   } else if (kind === "pr") {
     const url = prUrl(m.payload, m.body);
-    const div = bubble("agent", "pr");
+    const div = bubble("agent", "pr", tsMs);
     div.innerHTML = url ? `Opened a PR: <a href="${url}" target="_blank" rel="noopener">${url}</a>` : "Opened a PR.";
     const publishBtn = document.createElement("button");
     publishBtn.textContent = "Publish";
@@ -196,10 +250,10 @@ function render(m: ServerMsg): void {
     publishBtn.addEventListener("click", () => void publish(url ?? "", publishBtn));
     div.appendChild(publishBtn);
   } else if (kind === "error") {
-    bubble("agent", "error").textContent = `⚠ ${value}`;
+    bubble("agent", "error", tsMs).textContent = `⚠ ${value}`;
   } else {
     // the agent's words — a real received bubble (log and done alike)
-    bubble("agent", "text").textContent = value;
+    bubble("agent", "text", tsMs).textContent = value;
   }
 }
 
@@ -224,7 +278,7 @@ function setReceipt(state: "Delivered" | "Read"): void {
   const typing = document.getElementById("typing");
   if (typing) t.insertBefore(el, typing);
   else t.appendChild(el);
-  t.scrollTop = t.scrollHeight;
+  if (nearBottom()) scrollToBottom();
 }
 
 // --- typing indicator (dots = the agent is COMPOSING text, like iMessage) ------
@@ -244,7 +298,7 @@ function showTyping(): void {
   const t = document.getElementById("thread");
   if (t) {
     t.appendChild(el);
-    t.scrollTop = t.scrollHeight;
+    if (nearBottom()) scrollToBottom();
   }
 }
 
@@ -260,7 +314,9 @@ function connect(): void {
   closingOnPurpose = false;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/ws?token=${encodeURIComponent(token)}&thread=${THREAD_ID}&since=${lastSeq}`;
+  suppressAnim = true; // the catch-up replay must not animate or glide
   ws = new WebSocket(url);
+  ws.onopen = () => setTimeout(() => (suppressAnim = false), 600);
   ws.onmessage = (e) => {
     if (!document.getElementById("thread")) return; // gate is showing; don't consume
     const m = JSON.parse(e.data) as ServerMsg;
@@ -290,6 +346,7 @@ async function send(): Promise<void> {
   }
   if (text) render({ role: "user", body: text, attachments: [] });
   textEl.value = "";
+  textEl.style.height = "auto"; // collapse the auto-grown compose bar
   pendingFiles = [];
   renderPending();
 

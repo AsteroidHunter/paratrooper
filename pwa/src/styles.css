@@ -93,11 +93,24 @@ html, body {
   top: 0;
   z-index: 5;
 }
-.bar .title {
+/* contact card: logo avatar over a small name, like iMessage's header */
+.contact {
   grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px; /* rounded-corner square on the icon's own cream field */
+  display: block;
+}
+.bar .title {
   text-align: center;
   font-weight: 600;
-  font-size: 1.0rem;
+  font-size: 0.8rem;
 }
 .ghost {
   grid-column: 3;
@@ -125,7 +138,7 @@ html, body {
   font-size: 17px;
   word-wrap: break-word;
   white-space: pre-wrap;
-  margin-top: 6px;
+  margin-top: 10px; /* between senders; runs tighten via .cont */
 }
 .msg.user {
   align-self: flex-end;
@@ -138,6 +151,23 @@ html, body {
   background: var(--received);
   color: var(--received-text);
   border-radius: 18px 18px 18px 4px;
+}
+
+/* clustering: continuations sit tight and square off the sender-side top corner,
+   so only the run's last bubble reads as having the tail */
+.msg.cont { margin-top: 2px; }
+.msg.user.cont { border-radius: 18px 4px 4px 18px; }
+.msg.agent.cont { border-radius: 4px 18px 18px 4px; }
+
+/* live bubbles pop from their sender corner; replay renders static */
+.msg.anim { animation: pop-in 0.2s ease-out; }
+.msg.user.anim { transform-origin: bottom right; }
+.msg.agent.anim { transform-origin: bottom left; }
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.88) translateY(8px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg.anim { animation: none; }
 }
 .msg.agent a { color: var(--sent); }
 .msg.user a { color: #fff; text-decoration: underline; }
@@ -209,7 +239,8 @@ html, body {
 .compose textarea {
   flex: 1;
   resize: none;
-  max-height: 8rem;
+  overflow-y: auto;
+  max-height: 120px; /* ~5 lines; the input handler grows height up to this */
   padding: 8px 14px;
   border: 1px solid var(--hairline);
   border-radius: 18px;
@@ -245,6 +276,30 @@ html, body {
 }
 
 .buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }
+
+/* jump-to-latest chevron: floats above the compose bar while reading history */
+.jump {
+  position: absolute;
+  right: 12px;
+  bottom: calc(68px + env(safe-area-inset-bottom));
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: var(--bar);
+  color: var(--sent);
+  font-size: 1.1rem;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  z-index: 4;
+}
+.jump.show {
+  opacity: 1;
+  pointer-events: auto;
+}
 
 /* pending attachment thumbnails (picked, not yet sent) */
 .pending {
