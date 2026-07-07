@@ -639,6 +639,16 @@ async function setupPush(reg: ServiceWorkerRegistration): Promise<void> {
 
 window.visualViewport?.addEventListener("resize", () => window.scrollTo(0, 0));
 
+// opening (or returning to) the app clears the home-screen unread badge
+function clearBadge(): void {
+  if ("clearAppBadge" in navigator) void navigator.clearAppBadge().catch(() => {});
+  navigator.serviceWorker?.controller?.postMessage("badge-clear");
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") clearBadge();
+});
+clearBadge();
+
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {
     try {
