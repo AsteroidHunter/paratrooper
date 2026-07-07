@@ -97,18 +97,21 @@ function renderPending(): void {
   if (!box) return;
   box.innerHTML = "";
   pendingFiles.forEach((f, i) => {
-    const chipEl = document.createElement("span");
-    chipEl.className = "pchip";
-    chipEl.textContent = `📎 ${f.name} `;
+    const wrap = document.createElement("div");
+    wrap.className = "pthumb";
+    const img = document.createElement("img");
+    img.src = URL.createObjectURL(f);
+    img.onload = () => URL.revokeObjectURL(img.src);
     const x = document.createElement("button");
     x.type = "button";
+    x.className = "pthumb-x";
     x.textContent = "✕";
     x.addEventListener("click", () => {
       pendingFiles.splice(i, 1);
       renderPending();
     });
-    chipEl.appendChild(x);
-    box.appendChild(chipEl);
+    wrap.append(img, x);
+    box.appendChild(wrap);
   });
   box.style.display = pendingFiles.length ? "flex" : "none";
 }
@@ -268,7 +271,14 @@ async function send(): Promise<void> {
     }
     const { seq } = await resp.json();
     if (seq && seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
-    render({ role: "user", body: text, attachments: keys }); // optimistic
+    // optimistic render: photos as sent image bubbles (iMessage style), then text
+    for (const file of files) {
+      const div = bubble("user", "shot");
+      const img = document.createElement("img");
+      img.src = URL.createObjectURL(file);
+      div.appendChild(img);
+    }
+    if (text) render({ role: "user", body: text, attachments: [] });
     showTyping();
     textEl.value = "";
     pendingFiles = [];

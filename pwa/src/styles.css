@@ -133,7 +133,8 @@ html, body, #app {
 
 .msg.error { background: var(--error-bg); color: var(--error-text); }
 
-.msg.shot { padding: 4px; }
+.msg.shot { padding: 0; background: none; }
+.msg.user.shot { align-self: flex-end; }
 .msg.shot img { max-width: 100%; border-radius: 14px; display: block; }
 
 /* system lines (e.g. "published") — centered, small, gray, like iMessage's
@@ -234,7 +235,7 @@ html, body, #app {
 
 .buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }
 
-/* pending attachment chips (picked, not yet sent) */
+/* pending attachment thumbnails (picked, not yet sent) */
 .pending {
   display: none;
   gap: 0.4rem;
@@ -242,21 +243,25 @@ html, body, #app {
   padding: 0.4rem 0.75rem 0;
   background: var(--bar);
 }
-.pchip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: var(--received);
-  color: var(--received-text);
+.pthumb { position: relative; }
+.pthumb img {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
   border-radius: 12px;
-  padding: 4px 10px;
-  font-size: 13px;
+  display: block;
 }
-.pchip button {
+.pthumb-x {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
   border: none;
-  background: none;
-  color: var(--muted);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
   cursor: pointer;
-  font-size: 13px;
-  padding: 0 2px;
 }
