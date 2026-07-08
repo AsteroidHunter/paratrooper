@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 import numpy as np
 import pytest
@@ -15,7 +16,13 @@ from PIL import Image
 
 from paratrooper.agent import images, memory, pins, spotify
 from paratrooper.agent.auth import configure_auth
-from paratrooper.agent.config import ConfigError, load_config, require_env
+from paratrooper.agent.config import (
+    DEFAULT_GIT_EMAIL,
+    DEFAULT_GIT_NAME,
+    ConfigError,
+    load_config,
+    require_env,
+)
 from paratrooper.agent.hooks import git_violation, make_main_guard_hook
 from paratrooper.agent.siterepo import GitError, SiteRepo
 from paratrooper.agent.tools import ToolContext, build_tool_server
@@ -333,6 +340,21 @@ def test_push_refuses_default_branch(tmp_path):
     repo = SiteRepo(tmp_path, default_branch="main")
     with pytest.raises(GitError, match="default branch"):
         repo.push_branch("main")
+
+
+def test_commit_all_uses_bot_identity(tmp_path):
+    subprocess.run(["git", "init", "-b", "main", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / "pin.txt").write_text("hello")
+    repo = SiteRepo(tmp_path)
+    sha = repo.commit_all("add pin")
+    author = repo._git("show", "-s", "--format=%an <%ae>", sha)
+    assert author == f"{DEFAULT_GIT_NAME} <{DEFAULT_GIT_EMAIL}>"
+
+    # self-hosters can point commits at their own app/account
+    (tmp_path / "pin.txt").write_text("bye")
+    custom = SiteRepo(tmp_path, git_name="other[bot]", git_email="1+other[bot]@users.noreply.github.com")
+    sha = custom.commit_all("edit pin")
+    assert custom._git("show", "-s", "--format=%an", sha) == "other[bot]"
 
 
 def test_move_pin_between_stages(tmp_path):

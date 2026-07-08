@@ -112,6 +112,8 @@ async def run_job(
         branch_prefix=config.branch_prefix,
         github_token=github_token(),
         remote=config.remote,
+        git_name=config.git_name,
+        git_email=config.git_email,
     )
     changelog = Changelog(config.changelog)
 
