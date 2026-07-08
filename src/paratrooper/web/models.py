@@ -14,6 +14,39 @@ from pydantic import BaseModel, Field
 
 ResultKind = Literal["working", "typing", "log", "screenshot", "pr", "update", "done", "error"]
 
+# kinds the web service persists on its own authority (no ResultMessage behind them)
+SYSTEM_KINDS = ("job", "published")
+
+
+class EventPolicy(BaseModel):
+    """Per-kind event behavior — the one row that used to be five scattered
+    conditionals (relay ephemerality/terminality, push text, job context)."""
+
+    ephemeral: bool = False  # sockets only: never persisted, never replayed
+    persist: bool = True
+    push_text: str | None = None  # notification body; None -> kind never pushes
+    terminal: bool = False  # ends the job: relay releases the thread's batch
+    context: Literal["text", "pr_ref", "skip"] = "text"  # job-context projection
+
+
+EVENT_POLICY: dict[str, EventPolicy] = {
+    "working": EventPolicy(ephemeral=True, persist=False, context="skip"),
+    "typing": EventPolicy(ephemeral=True, persist=False, context="skip"),
+    "log": EventPolicy(),
+    "update": EventPolicy(),
+    # a screenshot body is a multi-MB base64 data URI — it must never be pasted
+    # into the agent prompt as "context"
+    "screenshot": EventPolicy(context="skip"),
+    "pr": EventPolicy(
+        push_text="Your pin is ready — tap to review and publish 🪂", context="pr_ref"
+    ),
+    "done": EventPolicy(push_text="Paratrooper finished your update.", terminal=True),
+    "error": EventPolicy(push_text="Paratrooper hit a problem with your update.", terminal=True),
+    # system rows: the enqueue marker is bookkeeping, not chat content
+    "job": EventPolicy(context="skip"),
+    "published": EventPolicy(),
+}
+
 
 class JobMessage(BaseModel):
     """web -> worker (Key Value queue). Attachments are inbox keys, not blobs."""

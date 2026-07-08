@@ -918,3 +918,78 @@ def test_publish_empty_ref_with_no_open_pr_is_409(client, monkeypatch):
     r = client.post("/api/publish", headers=auth, json={"thread_id": "d", "pr": ""})
     assert r.status_code == 409
     assert "no open PR" in r.json()["detail"]
+
+
+# --- event policy + job-context projection (chat-event-refactor phase 1) -------
+
+def test_event_policy_covers_every_kind():
+    """Every ResultKind and system kind must have a policy row — a new kind
+    added without one should fail here, not misbehave in the relay."""
+    from typing import get_args
+
+    from paratrooper.web.models import EVENT_POLICY, SYSTEM_KINDS, ResultKind
+
+    for kind in [*get_args(ResultKind), *SYSTEM_KINDS]:
+        assert kind in EVENT_POLICY, f"kind {kind!r} has no policy row"
+    for kind, p in EVENT_POLICY.items():
+        assert not (p.ephemeral and p.persist), f"{kind}: ephemeral rows must not persist"
+    assert EVENT_POLICY["done"].terminal and EVENT_POLICY["error"].terminal
+    assert not EVENT_POLICY["update"].terminal
+
+
+def test_job_context_projection_skips_blobs_and_markers(tmp_path):
+    """The prompt-blob defect: raw bodies pasted a multi-MB screenshot data URI
+    and job-marker hex into the agent prompt as 'context'. The projection must
+    keep text, compress pr rows to a short ref, and drop the rest."""
+    from paratrooper.web.app import _enqueue_job
+
+    store = ThreadStore(tmp_path / "t.sqlite")
+
+    def add(role, body, kind=None):
+        store.add_message(ThreadMessage(
+            thread_id="d", role=role, body=body, ts="2026-07-07T00:00:00Z", kind=kind,
+        ))
+
+    add("user", "put my desert photo up")
+    add("system", "a1b2c3d4e5", kind="job")
+    add("agent", "on it — resizing now", kind="update")
+    add("agent", "data:image/png;base64," + "A" * 4096, kind="screenshot")
+    add("agent", json.dumps({"branch": "paratrooper/desert",
+                             "url": "https://github.com/o/r/pull/9"}), kind="pr")
+    add("agent", "done — PR is up", kind="done")
+
+    class _RecordingQueue:
+        def __init__(self):
+            self.jobs = []
+
+        async def enqueue(self, job):
+            self.jobs.append(job)
+
+    queue = _RecordingQueue()
+    state = AppState(config=None, store=store, queue=queue,
+                     coordinator=_FakeCoordinator(), inbox=DiskInbox(tmp_path / "ib"))
+    _run(_enqueue_job(state, "d", "job-xyz", "next request", []))
+
+    [job] = queue.jobs
+    assert job.context == [
+        "user: put my desert photo up",
+        "agent: on it — resizing now",
+        "agent: opened PR #9",
+        "agent: done — PR is up",
+    ]
+    joined = "\n".join(job.context)
+    assert "data:" not in joined and "a1b2c3d4e5" not in joined
+
+
+def test_pr_context_ref_survives_bad_bodies():
+    """Old pr rows persisted body="" (pre-6da5b3c) or a bare url — the ref line
+    must degrade gracefully, never crash the enqueue path."""
+    from paratrooper.web.app import context_line
+
+    def pr_row(body):
+        return ThreadMessage(thread_id="d", role="agent", body=body,
+                             ts="2026-07-07T00:00:00Z", kind="pr")
+
+    assert context_line(pr_row("https://github.com/o/r/pull/12")) == "agent: opened PR #12"
+    assert context_line(pr_row("")) == "agent: opened a PR"
+    assert context_line(pr_row('{"branch": "x"}')) == "agent: opened a PR"

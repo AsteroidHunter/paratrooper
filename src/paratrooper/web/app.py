@@ -42,6 +42,7 @@ from .batching import ThreadCoordinator
 from .db import ThreadStore
 from .inbox import InboxStore, RedisInbox, new_key
 from .models import (
+    EVENT_POLICY,
     JobMessage,
     PublishRequest,
     ResultMessage,
@@ -102,6 +103,28 @@ def result_body(result: ResultMessage) -> str:
     return json.dumps(result.payload)
 
 
+def _pr_ref(body: str) -> str:
+    """Short PR reference from a persisted pr row (payload JSON or a bare url)."""
+    url = body
+    with contextlib.suppress(json.JSONDecodeError, TypeError, AttributeError):
+        url = json.loads(body).get("url", "") or ""
+    m = re.search(r"/pull/(\d+)", url)
+    return f"opened PR #{m.group(1)}" if m else "opened a PR"
+
+
+def context_line(msg: ThreadMessage) -> str | None:
+    """Project one persisted row into a job-context line per its kind's policy;
+    None drops the row. The prompt is a projection of the thread, not the thread
+    itself: a screenshot row's data-URI body and job markers must never reach it."""
+    policy = EVENT_POLICY.get(msg.kind or "")
+    rule = policy.context if policy else "text"  # user rows carry no kind
+    if rule == "skip":
+        return None
+    if rule == "pr_ref":
+        return f"{msg.role}: {_pr_ref(msg.body)}"
+    return f"{msg.role}: {msg.body}" if msg.body else None
+
+
 @dataclass
 class AppState:
     config: Config
@@ -117,7 +140,10 @@ class AppState:
 async def _enqueue_job(
     state: AppState, thread_id: str, job_id: str, text: str, attachments: list[str]
 ) -> None:
-    context = [f"{m.role}: {m.body}" for m in state.store.recent(thread_id, n=10) if m.body]
+    context = [
+        line for m in state.store.recent(thread_id, n=10)
+        if (line := context_line(m)) is not None
+    ]
     job = JobMessage(
         job_id=job_id, thread_id=thread_id, text=text, attachments=attachments, context=context
     )
@@ -197,7 +223,8 @@ async def _result_relay(state: AppState) -> None:
                     # kill the relay task — skip it, keep relaying
                     logger.warning("relay: skipped unparseable result on %s", channel)
                     continue
-                if result.kind in ("working", "typing"):  # ephemeral: sockets only
+                policy = EVENT_POLICY[result.kind]
+                if policy.ephemeral:  # sockets only: never persisted, never replayed
                     await _send_to_sockets(state, thread_id, result.model_dump())
                     continue
                 seq = state.store.add_message(ThreadMessage(
@@ -208,7 +235,7 @@ async def _result_relay(state: AppState) -> None:
                 # pushes too (otherwise reconnect replays from a stale point)
                 await _send_to_sockets(state, thread_id, {"seq": seq, **result.model_dump()})
                 await _maybe_push(state, result)
-                if result.kind in ("done", "error"):
+                if policy.terminal:
                     # job_finished first: it re-arms the timer for any buffered
                     # batch, so has_pending() correctly blocks the suspend then
                     await state.coordinator.job_finished(thread_id)
