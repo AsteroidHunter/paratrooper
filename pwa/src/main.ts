@@ -5,16 +5,22 @@ import "./styles.css";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.8";
+const APP_VERSION = "0.1.9";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
 let token = localStorage.getItem(TOKEN_KEY) ?? "";
 let lastSeq = 0;
-let oldestSeq = 0; // lowest seq rendered; the ?before= cursor for older pages
+let oldestSeq = 0; // lowest seq applied; the ?before= cursor for older pages
 let loadingOlder = false;
 let ws: WebSocket | null = null;
 let closingOnPurpose = false; // logout: suppress the auto-reconnect
+
+// The client-side event store: seq → ThreadEvent, THE display truth. Apply is
+// idempotent (duplicate seqs no-op — reconnect replays and zombie-socket
+// re-deliveries vanish here) and ordered (older pages and out-of-order frames
+// insert in position). The DOM is a projection of this map, never the state.
+const store = new Map<number, ServerMsg>();
 
 // The canonical ThreadEvent frame — one shape for live pushes, socket replay,
 // and history pages alike. Ephemeral kinds (working/typing) ride without a seq.
@@ -152,17 +158,15 @@ function renderChat(): void {
   };
   thread.addEventListener("touchend", endPeek);
   thread.addEventListener("touchcancel", endPeek);
-  // fresh thread DOM: reset run/stamp/pagination tracking
-  lastBubbleSide = null;
-  lastBubbleAt = 0;
-  lastStampAt = 0;
+  // fresh thread DOM: the store must match (login/logout re-renders the shell)
+  store.clear();
   oldestSeq = 0;
 }
 
 // --- older history (recent-first: the socket sends a window, we page back) ----
 
 async function loadOlder(): Promise<void> {
-  if (loadingOlder || oldestSeq <= 1) return; // 0 = nothing rendered yet, 1 = at the top
+  if (loadingOlder || oldestSeq <= 1) return; // 0 = nothing applied yet, 1 = at the top
   loadingOlder = true;
   try {
     const r = await fetch(`/api/history/${THREAD_ID}?before=${oldestSeq}&limit=50`, {
@@ -174,31 +178,16 @@ async function loadOlder(): Promise<void> {
       oldestSeq = 1; // top of thread reached; stop asking
       return;
     }
+    // older events feed the same apply path as live frames — they insert in
+    // position by seq; only the viewport needs pinning around the height change
     const t = threadEl();
-    // rebuild: render the older page into the emptied thread, then re-attach
-    // the existing bubbles and put the viewport back where it was
-    const keep = document.createDocumentFragment();
-    while (t.firstChild) keep.appendChild(t.firstChild);
     const prevScroll = t.scrollTop;
-    const prevSide = lastBubbleSide;
-    const prevAt = lastBubbleAt;
-    const prevStamp = lastStampAt;
+    const prevHeight = t.scrollHeight;
     const prevSuppress = suppressAnim;
-    lastBubbleSide = null;
-    lastBubbleAt = 0;
-    lastStampAt = 0;
-    suppressAnim = true;
-    for (const m of messages) {
-      if (m.seq && (oldestSeq === 0 || m.seq < oldestSeq)) oldestSeq = m.seq;
-      render(m);
-    }
-    lastBubbleSide = prevSide;
-    lastBubbleAt = prevAt;
-    lastStampAt = prevStamp;
+    suppressAnim = true; // a page of history must not pop bubble-by-bubble
+    for (const m of messages) applyEvent(m);
     suppressAnim = prevSuppress;
-    const olderHeight = t.scrollHeight;
-    t.appendChild(keep);
-    t.scrollTop = olderHeight + prevScroll; // previously-visible row stays put
+    t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
   } finally {
     loadingOlder = false;
   }
@@ -251,13 +240,10 @@ function scrollToBottom(force = false): void {
 
 // iMessage clustering: consecutive same-sender bubbles inside RUN_GAP_MS form a
 // run — continuations tighten spacing and the sender-side top corner. System
-// lines break runs.
-let lastBubbleSide: string | null = null;
-let lastBubbleAt = 0;
+// lines break runs. Runs and gap stamps are DERIVED from the ordered store by
+// decorate() — no mutable tracking, so pagination and out-of-order inserts
+// need no save/restore dance.
 const RUN_GAP_MS = 60_000;
-
-// centered "Today 2:31 PM" stamps at conversation gaps, like iMessage
-let lastStampAt = 0;
 const STAMP_GAP_MS = 60 * 60_000;
 
 function fmtTime(ms: number): string {
@@ -279,44 +265,120 @@ function fmtStampDay(ms: number): string {
   });
 }
 
-function maybeStamp(at: number): void {
-  if (at - lastStampAt <= STAMP_GAP_MS) return;
-  lastStampAt = at;
-  const s = document.createElement("div");
-  s.className = "stamp";
-  const day = document.createElement("b");
-  day.textContent = fmtStampDay(at);
-  s.append(day, ` ${fmtTime(at)}`);
-  threadEl().appendChild(s);
-}
-
 // entrance animation + smooth scroll are for LIVE messages only; a reconnect
 // replaying fifty bubbles must not pop each one
 let suppressAnim = true;
 
-function bubble(role: string, cls: string, tsMs?: number): HTMLDivElement {
-  threadEl().querySelector(".empty")?.remove(); // clear the empty-state hint
-  const wasNear = nearBottom();
-  const at = tsMs ?? Date.now();
-  maybeStamp(at);
-  const cont =
-    (role === "user" || role === "agent") &&
-    role === lastBubbleSide &&
-    at - lastBubbleAt < RUN_GAP_MS;
-  lastBubbleSide = role === "system" ? null : role;
-  lastBubbleAt = at;
+// Each event renders into one .evt wrapper (display: contents — invisible to
+// the thread's flex layout, so rows/stamps stay direct flex items visually).
+// The wrapper is the unit of ordering (data-seq), idempotent re-render, and
+// removal; optimistic send bubbles are unkeyed wrappers at the tail until ACK.
+
+function eventWrappers(): HTMLElement[] {
+  return Array.from(threadEl().querySelectorAll<HTMLElement>(".evt"));
+}
+
+function wrapperFor(seq: number): HTMLElement | null {
+  return threadEl().querySelector<HTMLElement>(`.evt[data-seq="${seq}"]`);
+}
+
+function rowEl(wrapper: HTMLElement, role: string, cls: string, at: number): HTMLDivElement {
   // each bubble sits in a full-width .row so the peek-time label can pin to
   // the screen's right edge (clipped by the thread until the pull reveals it)
   const row = document.createElement("div");
-  row.className = `row ${role}${cont ? " cont" : ""}`;
+  row.className = `row ${role}`;
   if (role !== "system") row.dataset.time = fmtTime(at);
   const div = document.createElement("div");
   div.className = `msg ${role} ${cls}${suppressAnim ? "" : " anim"}`;
   row.appendChild(div);
-  threadEl().appendChild(row);
-  if (wasNear || role === "user") scrollToBottom();
-  else document.getElementById("jump")?.classList.add("show");
+  wrapper.appendChild(row);
   return div;
+}
+
+// decorate(): one pure fold over the rendered wrappers in DOM order — sets
+// run-continuation classes and owns the gap stamps. Same result no matter what
+// order events arrived in.
+function decorate(): void {
+  let prevSide: string | null = null;
+  let prevAt = 0;
+  let lastStampAt = 0;
+  for (const w of eventWrappers()) {
+    const rows = Array.from(w.querySelectorAll<HTMLElement>(":scope > .row"));
+    if (!rows.length) {
+      w.querySelector(":scope > .stamp")?.remove(); // event renders nothing
+      continue;
+    }
+    const at = Number(w.dataset.ts || 0);
+    const role = w.dataset.role ?? "agent";
+    // gap stamp: shown when >1h since the previous stamp, owned by the wrapper
+    let stamp = w.querySelector<HTMLElement>(":scope > .stamp");
+    if (at - lastStampAt > STAMP_GAP_MS) {
+      if (!stamp) {
+        stamp = document.createElement("div");
+        stamp.className = "stamp";
+      }
+      const day = document.createElement("b");
+      day.textContent = fmtStampDay(at);
+      stamp.replaceChildren(day, ` ${fmtTime(at)}`);
+      w.prepend(stamp);
+      lastStampAt = at;
+    } else {
+      stamp?.remove();
+    }
+    for (const row of rows) {
+      const cont =
+        (role === "user" || role === "agent") && role === prevSide && at - prevAt < RUN_GAP_MS;
+      row.classList.toggle("cont", cont);
+      prevSide = role === "system" ? null : role;
+      prevAt = at;
+    }
+  }
+}
+
+// applyEvent(): THE one path every keyed frame takes — live push, reconnect
+// replay, and older history pages alike. Idempotent by seq, ordered by seq.
+function applyEvent(m: ServerMsg): void {
+  const seq = m.seq;
+  if (!seq || store.has(seq)) return; // duplicate delivery no-ops
+  const prevMax = lastSeq;
+  store.set(seq, m);
+  if (seq > lastSeq) lastSeq = seq;
+  if (oldestSeq === 0 || seq < oldestSeq) oldestSeq = seq;
+  const isTail = prevMax === 0 || seq > prevMax;
+
+  const wasNear = nearBottom();
+  if (isTail && m.role !== "user" && m.kind !== "job") hideTyping(); // a bubble replaces the dots
+  const wrapper = document.createElement("div");
+  wrapper.className = "evt";
+  wrapper.dataset.seq = String(seq);
+  renderInto(wrapper, m);
+  // insert in seq order among keyed wrappers; a tail seq lands at the absolute
+  // end so in-flight optimistic (unkeyed) bubbles keep their place above it
+  const next = eventWrappers().find((w) => w.dataset.seq && Number(w.dataset.seq) > seq);
+  if (next) threadEl().insertBefore(wrapper, next);
+  else threadEl().appendChild(wrapper);
+  if (wrapper.childElementCount > 0) threadEl().querySelector(".empty")?.remove();
+  decorate();
+  // pinned-viewport handling for older pages lives in loadOlder; only tail
+  // applies drive the scroll/chevron rules
+  if (isTail && wrapper.childElementCount > 0) {
+    if (wasNear || m.role === "user") scrollToBottom();
+    else document.getElementById("jump")?.classList.add("show");
+  }
+  if (m.kind === "published") flipCorrelatedPr(m);
+}
+
+// re-render one event's wrapper in place (e.g. its pr button state changed)
+function rerender(seq: number): void {
+  const w = wrapperFor(seq);
+  const m = store.get(seq);
+  if (!w || !m) return;
+  const prevSuppress = suppressAnim;
+  suppressAnim = true; // a state flip must not replay the entrance pop
+  w.replaceChildren();
+  renderInto(w, m);
+  suppressAnim = prevSuppress;
+  decorate();
 }
 
 function prUrl(payload: unknown): string | null {
@@ -328,8 +390,6 @@ function prUrl(payload: unknown): string | null {
   if (typeof payload === "string" && payload.startsWith("http")) return payload;
   return null;
 }
-
-let lastAgentText = "";
 
 function thumbUrl(key: string): string {
   return `/api/thumb/${encodeURIComponent(key)}?token=${encodeURIComponent(token)}`;
@@ -345,83 +405,150 @@ function openLightbox(src: string): void {
   document.body.appendChild(overlay);
 }
 
-function render(m: ServerMsg): void {
-  const role = m.role ?? "agent";
-  const tsMs = m.ts ? Date.parse(m.ts) : undefined;
-  const value = typeof m.payload === "string" ? m.payload : "";
-  if (role === "user") {
-    // photos render as their own frameless bubbles (same shape as the send
-    // echo); pre-thumbnail history 404s and falls back to the old chip
-    (m.attachments ?? []).forEach((key) => {
-      const div = bubble("user", "shot", tsMs);
-      const img = document.createElement("img");
-      img.src = thumbUrl(key);
-      img.alt = "photo";
-      img.onload = () => {
-        if (nearBottom()) scrollToBottom();
-      };
-      img.onerror = () => {
-        div.classList.replace("shot", "text");
-        div.appendChild(chip("📎 photo"));
-        img.remove();
-      };
-      img.addEventListener("click", () => openLightbox(img.src));
-      div.appendChild(img);
-    });
-    if (value) {
-      const div = bubble("user", "text", tsMs);
-      div.textContent = value;
+// --- pr ↔ published correlation (Publish button state survives replay) --------
+
+function prNumber(payload: unknown): number | null {
+  const url = prUrl(payload);
+  const m = url?.match(/\/pull\/(\d+)/);
+  return m ? Number(m[1]) : null;
+}
+
+function publishedNumber(m: ServerMsg): number | null {
+  if (m.kind !== "published" || typeof m.payload !== "string") return null;
+  const hit = m.payload.match(/#(\d+)/);
+  return hit ? Number(hit[1]) : null;
+}
+
+function isPublished(num: number | null): boolean {
+  if (num === null) return false;
+  for (const m of store.values()) if (publishedNumber(m) === num) return true;
+  return false;
+}
+
+// a published event resolving an already-rendered pr bubble flips its button
+function flipCorrelatedPr(published: ServerMsg): void {
+  const num = publishedNumber(published);
+  if (num === null) return;
+  for (const [seq, m] of store) {
+    if (m.kind === "pr" && prNumber(m.payload) === num) rerender(seq);
+  }
+}
+
+// consecutive-duplicate agent text (log/done) is display noise — derived from
+// the store predecessor, superseding the old lastAgentText mutable global.
+// Also hides the deploy-overlap double-persist case (same text, two seqs).
+function isDuplicateAgentText(seq: number, text: string): boolean {
+  const seqs = Array.from(store.keys()).sort((a, b) => a - b);
+  for (let i = seqs.indexOf(seq) - 1; i >= 0; i--) {
+    const prev = store.get(seqs[i])!;
+    if (prev.role === "user") return false; // a user turn resets the run
+    const prevText = typeof prev.payload === "string" ? prev.payload.trim() : "";
+    if (prev.role === "agent" && (prev.kind === "log" || prev.kind === "done") && prevText) {
+      return prevText === text;
     }
-    lastAgentText = "";
-    return;
   }
-  const kind = m.kind ?? "log";
-  if (kind === "job") return; // internal enqueue marker, not a message
-  if (kind === "working") {
-    setReceipt("Read"); // the agent has picked it up; otherwise silence
-    return;
-  }
-  if (kind === "typing") {
-    showTyping(); // the agent is writing (dots self-expire if it wasn't for you)
-    return;
-  }
-  if (kind === "done" || kind === "error") {
-    hideTyping();
+  return false;
+}
+
+// --- per-kind renderers: DOM = pure projection of one stored event -------------
+
+type Renderer = (m: ServerMsg, wrapper: HTMLElement, at: number, value: string) => void;
+
+function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
+  // photos render as their own frameless bubbles (same shape as the send
+  // echo); pre-thumbnail history 404s and falls back to the old chip
+  (m.attachments ?? []).forEach((key) => {
+    const div = rowEl(wrapper, "user", "shot", at);
+    const img = document.createElement("img");
+    img.src = thumbUrl(key);
+    img.alt = "photo";
+    img.onload = () => {
+      if (nearBottom()) scrollToBottom();
+    };
+    img.onerror = () => {
+      div.classList.replace("shot", "text");
+      div.appendChild(chip("📎 photo"));
+      img.remove();
+    };
+    img.addEventListener("click", () => openLightbox(img.src));
+    div.appendChild(img);
+  });
+  if (value) rowEl(wrapper, "user", "text", at).textContent = value;
+}
+
+function renderSystemLine(_m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
+  rowEl(wrapper, "system", "line", at).textContent = value || "✓";
+}
+
+function renderScreenshot(_m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
+  if (!value) return;
+  const div = rowEl(wrapper, "agent", "shot", at);
+  const img = document.createElement("img");
+  img.src = value;
+  img.alt = "board preview";
+  img.onload = () => {
+    if (nearBottom()) scrollToBottom(); // height lands after decode
+  };
+  img.addEventListener("click", () => openLightbox(value));
+  div.appendChild(img);
+}
+
+function renderPr(m: ServerMsg, wrapper: HTMLElement, at: number): void {
+  const url = prUrl(m.payload);
+  const div = rowEl(wrapper, "agent", "pr", at);
+  if (url) {
+    div.append("Opened a PR: ");
+    const a = document.createElement("a");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = url;
+    div.appendChild(a);
   } else {
-    hideTyping(); // a bubble replaces the dots
+    div.textContent = "Opened a PR.";
   }
+  const btn = document.createElement("button");
+  btn.className = "publish";
+  if (isPublished(prNumber(m.payload))) {
+    btn.textContent = "Published ✓"; // resolved by a correlated published event
+    btn.disabled = true;
+  } else {
+    btn.textContent = "Publish";
+    btn.addEventListener("click", () => void publish(url ?? "", btn));
+  }
+  div.appendChild(btn);
+}
+
+function renderError(_m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
+  rowEl(wrapper, "agent", "error", at).textContent = `⚠ ${value}`;
+}
+
+function renderAgentText(m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
+  const kind = m.kind ?? "log";
   if (kind === "done" && !value.trim()) return; // job-complete signal, text already shown
-  if ((kind === "log" || kind === "done") && value.trim() && value.trim() === lastAgentText) {
+  if ((kind === "log" || kind === "done") && m.seq && value.trim()
+      && isDuplicateAgentText(m.seq, value.trim())) {
     return; // consecutive duplicate of the same reply
   }
-  if (kind === "log" || kind === "done") lastAgentText = value.trim();
-  if (role === "system") {
-    bubble("system", "line", tsMs).textContent = value || "✓";
-    return;
-  }
-  if (kind === "screenshot" && value) {
-    const div = bubble("agent", "shot", tsMs);
-    const img = document.createElement("img");
-    img.src = value;
-    img.alt = "board preview";
-    img.onload = () => scrollToBottom(); // height lands after decode
-    img.addEventListener("click", () => openLightbox(value));
-    div.appendChild(img);
-  } else if (kind === "pr") {
-    const url = prUrl(m.payload);
-    const div = bubble("agent", "pr", tsMs);
-    div.innerHTML = url ? `Opened a PR: <a href="${url}" target="_blank" rel="noopener">${url}</a>` : "Opened a PR.";
-    const publishBtn = document.createElement("button");
-    publishBtn.textContent = "Publish";
-    publishBtn.className = "publish";
-    publishBtn.addEventListener("click", () => void publish(url ?? "", publishBtn));
-    div.appendChild(publishBtn);
-  } else if (kind === "error") {
-    bubble("agent", "error", tsMs).textContent = `⚠ ${value}`;
-  } else {
-    // the agent's words — a real received bubble (log and done alike)
-    bubble("agent", "text", tsMs).textContent = value;
-  }
+  rowEl(wrapper, "agent", "text", at).textContent = value;
+}
+
+const agentRenderers: Record<string, Renderer> = {
+  screenshot: renderScreenshot,
+  pr: renderPr,
+  error: renderError,
+};
+
+function renderInto(wrapper: HTMLElement, m: ServerMsg): void {
+  const role = m.role ?? "agent";
+  const at = m.ts ? Date.parse(m.ts) : Date.now();
+  const value = typeof m.payload === "string" ? m.payload : "";
+  wrapper.dataset.ts = String(at);
+  wrapper.dataset.role = role;
+  if (role === "user") return renderUser(m, wrapper, at, value);
+  if (m.kind === "job") return; // internal enqueue marker, not a message
+  if (role === "system") return renderSystemLine(m, wrapper, at, value);
+  return (agentRenderers[m.kind ?? "log"] ?? renderAgentText)(m, wrapper, at, value);
 }
 
 function chip(label: string): HTMLSpanElement {
@@ -521,14 +648,39 @@ function connect(): void {
   ws.onmessage = (e) => {
     if (!document.getElementById("thread")) return; // gate is showing; don't consume
     const m = JSON.parse(e.data) as ServerMsg;
-    if (m.seq && m.seq > lastSeq) lastSeq = m.seq;
-    if (m.seq && (oldestSeq === 0 || m.seq < oldestSeq)) oldestSeq = m.seq;
-    render(m);
+    if (!m.seq) {
+      // ephemeral kinds bypass the store: they are presence, not history
+      if (m.kind === "working") setReceipt("Read"); // picked up; otherwise silence
+      if (m.kind === "typing") showTyping(); // dots self-expire if it wasn't for you
+      return;
+    }
+    applyEvent(m); // live, replayed, and paged frames all take the same path
   };
   ws.onclose = () => {
     if (closingOnPurpose || !token) return; // logout: stay closed
     setTimeout(connect, 2000); // dropped: reconnect; catch-up via ?since=
   };
+}
+
+// client-local bubbles (optimistic sends, network-failure notices) live in
+// unkeyed .evt wrappers at the tail — outside the store unless ACKed into it
+function localWrapper(role: string): HTMLElement {
+  const wrapper = document.createElement("div");
+  wrapper.className = "evt";
+  wrapper.dataset.ts = String(Date.now());
+  wrapper.dataset.role = role;
+  threadEl().appendChild(wrapper);
+  threadEl().querySelector(".empty")?.remove();
+  return wrapper;
+}
+
+function localBubble(role: string, cls: string, text: string): void {
+  const wasNear = nearBottom();
+  const w = localWrapper(role);
+  rowEl(w, role, cls, Date.now()).textContent = text;
+  decorate();
+  if (wasNear || role === "user") scrollToBottom();
+  else document.getElementById("jump")?.classList.add("show");
 }
 
 async function send(): Promise<void> {
@@ -538,16 +690,20 @@ async function send(): Promise<void> {
   const files = [...pendingFiles];
   if (!text && files.length === 0) return;
 
-  // INSTANT feedback on tap: bubbles + typing dots appear immediately; the
-  // uploads/POST happen behind them. A failure is reported as an error bubble.
+  // INSTANT feedback on tap: one optimistic wrapper appears immediately; the
+  // uploads/POST happen behind it. On ACK the wrapper adopts the server seq,
+  // so a later replay of the same event no-ops instead of duplicating.
+  const w = localWrapper("user");
   for (const file of files) {
-    const div = bubble("user", "shot");
+    const div = rowEl(w, "user", "shot", Date.now());
     const img = document.createElement("img");
     img.src = URL.createObjectURL(file);
     img.addEventListener("click", () => openLightbox(img.src));
     div.appendChild(img);
   }
-  if (text) render({ role: "user", payload: text, attachments: [] });
+  if (text) rowEl(w, "user", "text", Date.now()).textContent = text;
+  decorate();
+  scrollToBottom();
   textEl.value = "";
   textEl.style.height = "auto"; // collapse the auto-grown compose bar
   pendingFiles = [];
@@ -564,13 +720,13 @@ async function send(): Promise<void> {
         r = await fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd });
       } catch (e) {
         hideTyping();
-        bubble("agent", "error").textContent = `⚠ not sent — upload of ${file.name} failed: ${e}`;
+        localBubble("agent", "error", `⚠ not sent — upload of ${file.name} failed: ${e}`);
         return;
       }
       if (!r.ok) {
         hideTyping();
-        bubble("agent", "error").textContent =
-          `⚠ not sent — upload of ${file.name} failed (${r.status} ${r.statusText})`;
+        localBubble("agent", "error",
+          `⚠ not sent — upload of ${file.name} failed (${r.status} ${r.statusText})`);
         return;
       }
       keys.push((await r.json()).inbox_key);
@@ -584,16 +740,30 @@ async function send(): Promise<void> {
       });
     } catch (e) {
       hideTyping();
-      bubble("agent", "error").textContent = `⚠ not sent, server unreachable: ${e}`;
+      localBubble("agent", "error", `⚠ not sent, server unreachable: ${e}`);
       return;
     }
     if (!resp.ok) {
       hideTyping();
-      bubble("agent", "error").textContent = `⚠ not sent (${resp.status})`;
+      localBubble("agent", "error", `⚠ not sent (${resp.status})`);
       return;
     }
-    const { seq } = await resp.json();
-    if (seq && seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
+    const { seq } = (await resp.json()) as { seq?: number };
+    if (seq) {
+      if (store.has(seq)) {
+        w.remove(); // a reconnect replay beat the ACK; the keyed wrapper won
+        decorate();
+      } else {
+        // upgrade in place: the optimistic wrapper becomes the event's wrapper
+        w.dataset.seq = String(seq);
+        store.set(seq, {
+          seq, role: "user", payload: text, attachments: keys,
+          ts: new Date().toISOString(),
+        });
+        if (seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
+        if (oldestSeq === 0 || seq < oldestSeq) oldestSeq = seq;
+      }
+    }
     setReceipt("Delivered"); // the server has it
   } finally {
     sendBtn.disabled = false;
@@ -616,7 +786,7 @@ async function publish(pr: string, btn: HTMLButtonElement): Promise<void> {
         body: JSON.stringify({ thread_id: THREAD_ID, pr }),
       });
     } catch (e) {
-      bubble("agent", "error").textContent = `⚠ publish failed, server unreachable: ${e}`;
+      localBubble("agent", "error", `⚠ publish failed, server unreachable: ${e}`);
       btn.disabled = false;
       btn.textContent = "Publish";
       return;
@@ -628,7 +798,7 @@ async function publish(pr: string, btn: HTMLButtonElement): Promise<void> {
       } catch {
         /* keep the status text */
       }
-      bubble("agent", "error").textContent = `⚠ publish failed: ${detail}`;
+      localBubble("agent", "error", `⚠ publish failed: ${detail}`);
       btn.disabled = false;
       btn.textContent = "Publish";
       return;
