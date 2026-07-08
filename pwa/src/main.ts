@@ -3,8 +3,9 @@
 import "./styles.css";
 
 declare const __BUILT_AT__: string;
+declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.7";
+const APP_VERSION = "0.1.8";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -15,14 +16,16 @@ let loadingOlder = false;
 let ws: WebSocket | null = null;
 let closingOnPurpose = false; // logout: suppress the auto-reconnect
 
+// The canonical ThreadEvent frame — one shape for live pushes, socket replay,
+// and history pages alike. Ephemeral kinds (working/typing) ride without a seq.
 interface ServerMsg {
   seq?: number;
+  thread_id?: string;
   role?: "user" | "agent" | "system";
-  body?: string;
+  kind?: string | null; // ResultKind or system kind; absent/null on user messages
+  payload?: unknown; // any JSON value; message text is a plain string
   attachments?: string[];
-  kind?: string | null;
-  payload?: unknown;
-  ts?: string; // ISO-8601 on replayed history; live results carry none (client clock is fine)
+  ts?: string; // ISO-8601, server clock (live and replay alike)
 }
 
 const app = document.getElementById("app")!;
@@ -316,17 +319,14 @@ function bubble(role: string, cls: string, tsMs?: number): HTMLDivElement {
   return div;
 }
 
-function prUrl(payload: unknown, body?: string): string | null {
+function prUrl(payload: unknown): string | null {
+  // live pr events carry {branch, url}; the migration parsed legacy JSON-in-body
+  // rows into the same shape, so a bare-url string is the only other real case
   if (payload && typeof payload === "object" && "url" in payload) {
     return String((payload as { url: unknown }).url);
   }
-  const raw = typeof payload === "string" ? payload : body ?? "";
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed.url ?? null;
-  } catch {
-    return raw.startsWith("http") ? raw : null;
-  }
+  if (typeof payload === "string" && payload.startsWith("http")) return payload;
+  return null;
 }
 
 let lastAgentText = "";
@@ -348,6 +348,7 @@ function openLightbox(src: string): void {
 function render(m: ServerMsg): void {
   const role = m.role ?? "agent";
   const tsMs = m.ts ? Date.parse(m.ts) : undefined;
+  const value = typeof m.payload === "string" ? m.payload : "";
   if (role === "user") {
     // photos render as their own frameless bubbles (same shape as the send
     // echo); pre-thumbnail history 404s and falls back to the old chip
@@ -367,15 +368,14 @@ function render(m: ServerMsg): void {
       img.addEventListener("click", () => openLightbox(img.src));
       div.appendChild(img);
     });
-    if (m.body) {
+    if (value) {
       const div = bubble("user", "text", tsMs);
-      div.textContent = m.body;
+      div.textContent = value;
     }
     lastAgentText = "";
     return;
   }
   const kind = m.kind ?? "log";
-  const value = (typeof m.payload === "string" ? m.payload : undefined) ?? m.body ?? "";
   if (kind === "job") return; // internal enqueue marker, not a message
   if (kind === "working") {
     setReceipt("Read"); // the agent has picked it up; otherwise silence
@@ -408,7 +408,7 @@ function render(m: ServerMsg): void {
     img.addEventListener("click", () => openLightbox(value));
     div.appendChild(img);
   } else if (kind === "pr") {
-    const url = prUrl(m.payload, m.body);
+    const url = prUrl(m.payload);
     const div = bubble("agent", "pr", tsMs);
     div.innerHTML = url ? `Opened a PR: <a href="${url}" target="_blank" rel="noopener">${url}</a>` : "Opened a PR.";
     const publishBtn = document.createElement("button");
@@ -477,13 +477,47 @@ function hideTyping(): void {
 
 // --- networking --------------------------------------------------------------
 
+// Version-skew guard: a service-worker-cached bundle can outlive the server it
+// was built against (wire/schema changes ride deploys). On mismatch, drop the
+// SW caches and reload ONCE per server version — navigations are network-first,
+// so the reload fetches the freshly deployed bundle.
+const REFRESHED_KEY = "paratrooper_refreshed_for";
+
+function maybeSelfRefresh(server: string): void {
+  if (__SERVER_VERSION__ === "dev" || server === "dev") return; // local dev
+  if (server === __SERVER_VERSION__) return; // bundle matches the server
+  if (sessionStorage.getItem(REFRESHED_KEY) === server) return; // already tried
+  sessionStorage.setItem(REFRESHED_KEY, server);
+  const cleared =
+    "caches" in window
+      ? caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+      : Promise.resolve([]);
+  void cleared.catch(() => {}).then(() => location.reload());
+}
+
+async function checkServerVersion(): Promise<void> {
+  try {
+    const r = await fetch("/api/health");
+    const v = String((await r.json()).version ?? "");
+    console.log(`paratrooper ui ${__BUILT_AT__} built@${__SERVER_VERSION__} / server ${v}`);
+    if (v) maybeSelfRefresh(v);
+  } catch {
+    /* offline: the cached shell is all there is anyway */
+  }
+}
+
 function connect(): void {
   closingOnPurpose = false;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/ws?token=${encodeURIComponent(token)}&thread=${THREAD_ID}&since=${lastSeq}`;
   suppressAnim = true; // the catch-up replay must not animate or glide
   ws = new WebSocket(url);
-  ws.onopen = () => setTimeout(() => (suppressAnim = false), 600);
+  ws.onopen = () => {
+    setTimeout(() => (suppressAnim = false), 600);
+    // every (re)connect re-checks version: a deploy drops the socket, so the
+    // reconnect is exactly when a live page may have gone stale
+    void checkServerVersion();
+  };
   ws.onmessage = (e) => {
     if (!document.getElementById("thread")) return; // gate is showing; don't consume
     const m = JSON.parse(e.data) as ServerMsg;
@@ -513,7 +547,7 @@ async function send(): Promise<void> {
     img.addEventListener("click", () => openLightbox(img.src));
     div.appendChild(img);
   }
-  if (text) render({ role: "user", body: text, attachments: [] });
+  if (text) render({ role: "user", payload: text, attachments: [] });
   textEl.value = "";
   textEl.style.height = "auto"; // collapse the auto-grown compose bar
   pendingFiles = [];
@@ -670,11 +704,7 @@ if ("serviceWorker" in navigator) {
 
 if (token) {
   renderChat();
-  connect();
-  void fetch("/api/health").then(async (r) => {
-    const v = (await r.json()).version;
-    console.log(`paratrooper ui ${__BUILT_AT__} / server ${v}`);
-  });
+  connect(); // ws.onopen runs the version check; see checkServerVersion
 } else {
   renderTokenGate();
 }

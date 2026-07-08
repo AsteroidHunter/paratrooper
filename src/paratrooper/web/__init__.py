@@ -12,7 +12,7 @@ image at boot.
 from .batching import ThreadCoordinator, is_stop_word
 from .db import ThreadStore
 from .inbox import DiskInbox, RedisInbox
-from .models import JobMessage, ResultMessage, ThreadMessage
+from .models import JobMessage, ResultMessage, ThreadEvent
 
 __all__ = [
     "ThreadStore",
@@ -22,5 +22,5 @@ __all__ = [
     "RedisInbox",
     "JobMessage",
     "ResultMessage",
-    "ThreadMessage",
+    "ThreadEvent",
 ]

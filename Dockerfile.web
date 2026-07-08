@@ -4,6 +4,11 @@
 
 # --- stage 1: build the PWA -> /pwa/dist ---
 FROM node:22-slim AS pwa
+# Render passes the service's env vars (incl. its default RENDER_GIT_COMMIT) to
+# docker build as build args; the bundle bakes it in as __SERVER_VERSION__ so a
+# stale cached client can detect a redeployed server and self-refresh.
+ARG RENDER_GIT_COMMIT=dev
+ENV RENDER_GIT_COMMIT=$RENDER_GIT_COMMIT
 WORKDIR /pwa
 COPY pwa/package.json pwa/package-lock.json ./
 RUN npm ci

@@ -70,15 +70,19 @@ class ResultMessage(BaseModel):
     payload: Any = None
 
 
-class ThreadMessage(BaseModel):
-    """One persisted chat message (the PWA's history unit)."""
+class ThreadEvent(BaseModel):
+    """THE canonical chat event: what gets persisted, what rides the socket
+    (live and replay, identical frames), what the client stores. A worker
+    ``ResultMessage`` maps into this exactly once, in the web relay — nothing
+    downstream sees worker wire types. ``payload`` is any JSON value; user
+    message text is a plain string payload."""
 
     thread_id: str
     role: Literal["user", "agent", "system"]
-    body: str = ""
+    kind: str | None = None  # ResultKind or system kind; None for user messages
+    payload: Any = None
     attachments: list[str] = Field(default_factory=list)
-    ts: str  # ISO-8601
-    kind: str | None = None  # for agent messages: log|screenshot|pr|update|done|error
+    ts: str  # ISO-8601, server clock
 
 
 class UploadResponse(BaseModel):
