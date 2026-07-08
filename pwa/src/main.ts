@@ -4,7 +4,7 @@ import "./styles.css";
 
 declare const __BUILT_AT__: string;
 
-const APP_VERSION = "0.1.6";
+const APP_VERSION = "0.1.7";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -110,17 +110,18 @@ function renderChat(): void {
     document.getElementById("jump")!.classList.remove("show");
     scrollToBottom(true);
   });
-  // swipe-left to peek per-message times (iMessage): drag pulls the thread
-  // left via --peek, labels fade in, everything springs back on release
+  // swipe-left to peek per-message times (iMessage): a decisively LEFTWARD
+  // hold-and-drag pulls the thread with tanh resistance, revealing the time
+  // rail the thread normally clips; anything else stays native scrolling
   let startX = 0;
   let startY = 0;
-  let axis: "h" | "v" | null = null;
+  let peeking: boolean | null = null; // null = gesture direction undecided
   thread.addEventListener(
     "touchstart",
     (e) => {
       startX = e.touches[0].clientX;
       startY = e.touches[0].clientY;
-      axis = null;
+      peeking = null;
     },
     { passive: true },
   );
@@ -129,14 +130,16 @@ function renderChat(): void {
     (e) => {
       const dx = e.touches[0].clientX - startX;
       const dy = e.touches[0].clientY - startY;
-      if (!axis) {
-        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
-        axis = Math.abs(dx) > Math.abs(dy) ? "h" : "v";
-        if (axis === "h") thread.classList.add("dragging");
+      if (peeking === null) {
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+        peeking = dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.5;
+        if (peeking) thread.classList.add("dragging");
       }
-      if (axis !== "h") return;
-      e.preventDefault(); // we own the horizontal gesture; vertical stays native
-      thread.style.setProperty("--peek", `${Math.max(Math.min(dx, 0), -72)}px`);
+      if (!peeking) return;
+      e.preventDefault(); // we own this gesture; vertical scroll stays native
+      // resistance: tracks the finger at first, then fights back toward 64px
+      const pull = 64 * Math.tanh(Math.max(-dx, 0) / 110);
+      thread.style.setProperty("--peek", `-${pull.toFixed(1)}px`);
     },
     { passive: false },
   );
@@ -299,10 +302,15 @@ function bubble(role: string, cls: string, tsMs?: number): HTMLDivElement {
     at - lastBubbleAt < RUN_GAP_MS;
   lastBubbleSide = role === "system" ? null : role;
   lastBubbleAt = at;
+  // each bubble sits in a full-width .row so the peek-time label can pin to
+  // the screen's right edge (clipped by the thread until the pull reveals it)
+  const row = document.createElement("div");
+  row.className = `row ${role}${cont ? " cont" : ""}`;
+  if (role !== "system") row.dataset.time = fmtTime(at);
   const div = document.createElement("div");
-  div.className = `msg ${role} ${cls}${cont ? " cont" : ""}${suppressAnim ? "" : " anim"}`;
-  if (role !== "system") div.dataset.time = fmtTime(at); // swipe-to-reveal label
-  threadEl().appendChild(div);
+  div.className = `msg ${role} ${cls}${suppressAnim ? "" : " anim"}`;
+  row.appendChild(div);
+  threadEl().appendChild(row);
   if (wasNear || role === "user") scrollToBottom();
   else document.getElementById("jump")?.classList.add("show");
   return div;
