@@ -1,0 +1,38 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / PWA
+node_modules/
+pwa/dist/
+*.tsbuildinfo
+
+# Secrets & local state (NEVER commit — secrets are env vars only)
+.env
+.env.*
+!.env.example
+*.local
+
+# Runtime data (persistent disk on Render; local dev only)
+data/
+inbox/
+*.sqlite
+*.sqlite3
+*.db
+
+# Site checkout the worker operates on (cloned at runtime)
+site_checkout/
+
+# OS
+.DS_Store

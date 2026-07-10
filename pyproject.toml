@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "paratrooper"
+version = "0.1.0"
+description = "Phone -> agent -> PR system that edits the theonetrueakash.com pinboard."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Akash Satpathy" }]
+
+# Base deps shared by every entry point. The placement engine is the only
+# truly universal piece (the web service validates proposals too), so it lives
+# in the base set. Service-specific deps go in the extras below so the web and
+# worker images can install only what they need.
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "pillow>=10.3",
+]
+
+[project.optional-dependencies]
+# Worker service: Agent SDK + git/Spotify/screenshot tooling.
+agent = [
+    "claude-agent-sdk>=0.1.0",
+    "httpx>=0.27",
+    "playwright>=1.44",
+    "redis>=5.0",
+]
+# Web service: FastAPI socket/PWA host + queue + push.
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+    "websockets>=12.0",
+    "redis>=5.0",
+    "pywebpush>=2.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/paratrooper"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
