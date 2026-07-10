@@ -74,6 +74,9 @@ async def screenshot_board(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if build:
+        # fresh clones have no node_modules; install once per container life
+        if not (site_root / "node_modules").is_dir():
+            await _run(("npm", "ci", "--no-audit", "--no-fund"), site_root)
         await _run(build_cmd, site_root)
 
     dist = site_root / dist_subdir

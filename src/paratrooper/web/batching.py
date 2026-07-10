@@ -14,11 +14,15 @@ callbacks, so it's driven directly in tests with a tiny window.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 DEFAULT_WINDOW = 10.0
+# if no done/error ever arrives (missed event, worker died), stop blocking the
+# thread forever: consider the job abandoned after this long
+JOB_DEADLINE = 30 * 60.0
 _STOP_WORDS = {"STOP", "CANCEL"}
 
 # (thread_id, job_id, text, attachments) -> awaitable
@@ -40,6 +44,7 @@ class _ThreadState:
     buffer: list[tuple[str, list[str]]] = field(default_factory=list)  # (text, attachments)
     timer: asyncio.Task | None = None
     running_job: str | None = None
+    started_at: float = 0.0  # monotonic; for the stuck-job watchdog
 
 
 class ThreadCoordinator:
@@ -49,14 +54,21 @@ class ThreadCoordinator:
         interrupt: InterruptCb,
         *,
         window: float = DEFAULT_WINDOW,
+        job_deadline: float = JOB_DEADLINE,
     ) -> None:
         self._enqueue = enqueue
         self._interrupt = interrupt
         self._window = window
+        self._deadline = job_deadline
         self._threads: dict[str, _ThreadState] = {}
 
     def _state(self, thread_id: str) -> _ThreadState:
-        return self._threads.setdefault(thread_id, _ThreadState())
+        st = self._threads.setdefault(thread_id, _ThreadState())
+        # watchdog: a job whose completion event never arrived must not block
+        # the thread forever
+        if st.running_job and (time.monotonic() - st.started_at) > self._deadline:
+            st.running_job = None
+        return st
 
     async def handle_message(self, thread_id: str, text: str, attachments: list[str]) -> str:
         """Ingest one PWA message. Returns a short status: 'buffered',
@@ -105,6 +117,7 @@ class ThreadCoordinator:
         st.buffer.clear()
         job_id = uuid.uuid4().hex[:12]
         st.running_job = job_id
+        st.started_at = time.monotonic()
         st.timer = None
         await self._enqueue(thread_id, job_id, "\n".join(t for t in texts if t), attachments)
 
