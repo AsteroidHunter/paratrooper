@@ -40,15 +40,32 @@ self.addEventListener("fetch", (event) => {
 });
 
 // --- web push (Phase 6) ---
+// Unread count for the home-screen badge. SW state is ephemeral (the worker
+// can be killed between pushes), so the count is best-effort — it resets to 1
+// after an eviction rather than persisting through IndexedDB. The page clears
+// it on focus.
+let unread = 0;
+
 self.addEventListener("push", (event) => {
   const body = event.data ? event.data.text() : "Paratrooper update";
+  unread += 1;
   event.waitUntil(
-    self.registration.showNotification("Paratrooper", {
-      body,
-      icon: "/icon-192.png",
-      badge: "/icon-192.png",
-    })
+    Promise.all([
+      self.registration.showNotification("Paratrooper", {
+        body,
+        icon: "/icon-192.png",
+        badge: "/icon-192.png",
+      }),
+      "setAppBadge" in navigator ? navigator.setAppBadge(unread).catch(() => {}) : Promise.resolve(),
+    ])
   );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data === "badge-clear") {
+    unread = 0;
+    if ("clearAppBadge" in navigator) navigator.clearAppBadge().catch(() => {});
+  }
 });
 
 self.addEventListener("notificationclick", (event) => {

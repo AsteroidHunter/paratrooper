@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     endpoint     TEXT PRIMARY KEY,
     subscription TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS attachments (
+    key          TEXT PRIMARY KEY,   -- inbox key already stored in messages.attachments
+    thumb        BLOB NOT NULL,      -- small webp; the only pixels that outlive the inbox TTL
+    content_type TEXT NOT NULL DEFAULT 'image/webp',
+    ts           TEXT NOT NULL
+);
 """
 
 
@@ -90,6 +97,33 @@ class ThreadStore:
             for r in rows
         ]
 
+    def messages_page(
+        self, thread_id: str, *, before_seq: int | None = None, limit: int = 50
+    ) -> list[tuple[int, ThreadMessage]]:
+        """The ``limit`` messages immediately before ``before_seq`` (or the
+        newest when None), oldest-first with seqs — the recent-first initial
+        window and each pull-down-for-older page."""
+        if before_seq is None:
+            sql = ("SELECT * FROM (SELECT * FROM messages WHERE thread_id=? "
+                   "ORDER BY seq DESC LIMIT ?) ORDER BY seq")
+            params: tuple = (thread_id, limit)
+        else:
+            sql = ("SELECT * FROM (SELECT * FROM messages WHERE thread_id=? AND seq<? "
+                   "ORDER BY seq DESC LIMIT ?) ORDER BY seq")
+            params = (thread_id, before_seq, limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            (
+                r["seq"],
+                ThreadMessage(
+                    thread_id=r["thread_id"], role=r["role"], body=r["body"],
+                    attachments=json.loads(r["attachments"]), ts=r["ts"], kind=r["kind"],
+                ),
+            )
+            for r in rows
+        ]
+
     def recent(self, thread_id: str, *, n: int = 10) -> list[ThreadMessage]:
         """The last ``n`` messages (oldest-first) — used as job context."""
         msgs = self._rows(
@@ -127,6 +161,24 @@ class ThreadStore:
             )
             for r in rows
         ]
+
+    # --- attachment thumbnails (photo history survives the inbox TTL) ---
+
+    def add_thumbnail(self, key: str, thumb: bytes, *, ts: str,
+                      content_type: str = "image/webp") -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO attachments(key, thumb, content_type, ts) VALUES (?,?,?,?)",
+                (key, thumb, content_type, ts),
+            )
+            self._conn.commit()
+
+    def thumbnail(self, key: str) -> tuple[bytes, str] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT thumb, content_type FROM attachments WHERE key=?", (key,)
+            ).fetchone()
+        return (row["thumb"], row["content_type"]) if row else None
 
     # --- web push subscriptions (Phase 6) ---
 

@@ -23,6 +23,13 @@ from pathlib import Path
 DEFAULT_CONFIG_PATH = "config/paths.toml"
 DEFAULT_BRANCH = "main"
 DEFAULT_BRANCH_PREFIX = "paratrooper"
+# Commit identity: the paratrooper-98cc GitHub App's bot user. GitHub links a
+# contributor (avatar + hyperlink) only when the commit email resolves to a
+# real identity, and this <bot-user-id>+<slug>@users.noreply address is that
+# bot's. Self-hosters swap in their own app via [site] git_name/git_email or
+# the PARATROOPER_GIT_* env vars.
+DEFAULT_GIT_NAME = "paratrooper-98cc[bot]"
+DEFAULT_GIT_EMAIL = "301089772+paratrooper-98cc[bot]@users.noreply.github.com"
 # Standardized asset filenames inside a pin folder (post-refactor contract).
 PREVIEW_ASSET = "preview.webp"  # the pinned/board preview image
 OPENED_ASSET = "opened.webp"  # the larger "opened" artwork (dual-asset pins, e.g. substack)
@@ -51,6 +58,8 @@ class Config:
     remote: str | None  # site repo git remote URL (None => use the checkout's origin)
     default_branch: str  # the branch the agent must never push to (merge target)
     branch_prefix: str  # feature-branch prefix, e.g. "paratrooper" -> paratrooper/<pin>-<slug>
+    git_name: str = DEFAULT_GIT_NAME  # commit author/committer name
+    git_email: str = DEFAULT_GIT_EMAIL  # commit email — must resolve to a GitHub identity to render linked
 
 
 def _resolve(base: Path, value: str) -> Path:
@@ -120,6 +129,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         remote=site.get("remote") or os.environ.get("PARATROOPER_REMOTE"),
         default_branch=site.get("default_branch", DEFAULT_BRANCH),
         branch_prefix=site.get("branch_prefix", DEFAULT_BRANCH_PREFIX),
+        git_name=os.environ.get("PARATROOPER_GIT_NAME") or site.get("git_name", DEFAULT_GIT_NAME),
+        git_email=os.environ.get("PARATROOPER_GIT_EMAIL") or site.get("git_email", DEFAULT_GIT_EMAIL),
     )
 
 

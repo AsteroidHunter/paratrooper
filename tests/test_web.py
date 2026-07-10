@@ -313,6 +313,119 @@ def test_upload_and_send_flow(client):
     assert rows[-1]["role"] == "user" and rows[-1]["body"] == "add it"
 
 
+def _seed(store, thread_id, n, prefix="m"):
+    return [
+        store.add_message(ThreadMessage(
+            thread_id=thread_id, role="user", body=f"{prefix}{i}",
+            ts="2026-07-07T00:00:00+00:00",
+        ))
+        for i in range(n)
+    ]
+
+
+def test_messages_page_paginates_backwards(tmp_path):
+    store = ThreadStore(tmp_path / "t.sqlite")
+    _seed(store, "other", 3)  # global AUTOINCREMENT: other threads shift seqs
+    seqs = _seed(store, "d", 10)
+
+    newest = store.messages_page("d", limit=4)
+    assert [m.body for _, m in newest] == ["m6", "m7", "m8", "m9"]  # oldest-first
+    older = store.messages_page("d", before_seq=newest[0][0], limit=4)
+    assert [m.body for _, m in older] == ["m2", "m3", "m4", "m5"]
+    first = store.messages_page("d", before_seq=older[0][0], limit=4)
+    assert [m.body for _, m in first] == ["m0", "m1"]
+    assert store.messages_page("d", before_seq=seqs[0]) == []  # top reached
+
+
+def test_history_route_and_cursor_stability(client):
+    auth = {"Authorization": "Bearer tok"}
+    store = client.app.state.app_state.store
+    seqs = _seed(store, "d", 6)
+
+    assert client.get("/api/history/d", params={"before": seqs[3]}).status_code == 401
+    page = client.get(
+        "/api/history/d", headers=auth, params={"before": seqs[3], "limit": 2}
+    ).json()["messages"]
+    assert [m["body"] for m in page] == ["m1", "m2"]
+
+    # live rows arriving after a page is cut don't disturb either cursor:
+    # the same ?before page is identical, and ?since still yields only the new row
+    new_seq = store.add_message(ThreadMessage(
+        thread_id="d", role="agent", body="fresh", ts="2026-07-07T00:00:01+00:00", kind="done",
+    ))
+    again = client.get(
+        "/api/history/d", headers=auth, params={"before": seqs[3], "limit": 2}
+    ).json()["messages"]
+    assert again == page
+    since = client.get(f"/api/thread/d?since={seqs[-1]}", headers=auth).json()["messages"]
+    assert [m["seq"] for m in since] == [new_seq]
+
+
+def test_ws_fresh_login_gets_bounded_window(client):
+    store = client.app.state.app_state.store
+    _seed(store, "d", 60)
+    with client.websocket_connect("/ws?token=tok&thread=d&since=0") as sock:
+        first = sock.receive_json()
+        assert first["body"] == "m10"  # 60 rows, window of 50 -> starts at m10
+        for i in range(11, 60):
+            assert sock.receive_json()["body"] == f"m{i}"
+
+
+def _png_bytes(size=(640, 480), color=(200, 60, 60)) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_make_thumbnail_downscales_and_rejects_non_images():
+    from PIL import Image
+
+    from paratrooper.web.thumbs import THUMB_EDGE, make_thumbnail
+
+    thumb = make_thumbnail(_png_bytes())
+    assert thumb is not None
+    from io import BytesIO
+
+    im = Image.open(BytesIO(thumb))
+    assert im.format == "WEBP" and max(im.size) <= THUMB_EDGE
+    assert make_thumbnail(b"not an image") is None
+
+
+def test_thumbnail_store_roundtrip(tmp_path):
+    store = ThreadStore(tmp_path / "t.sqlite")
+    store.add_thumbnail("inbox/abc.png", b"webpbytes", ts="2026-07-07T00:00:00+00:00")
+    data, ctype = store.thumbnail("inbox/abc.png")
+    assert data == b"webpbytes" and ctype == "image/webp"
+    assert store.thumbnail("inbox/missing.png") is None
+
+
+def test_thumb_route_serves_persisted_previews(client):
+    auth = {"Authorization": "Bearer tok"}
+    up = client.post(
+        "/api/upload", headers=auth, files={"file": ("p.png", _png_bytes(), "image/png")}
+    )
+    key = up.json()["inbox_key"]
+
+    # <img src> can't set headers, so the token rides the query string like /ws
+    ok = client.get(f"/api/thumb/{key}", params={"token": "tok"})
+    assert ok.status_code == 200 and ok.headers["content-type"] == "image/webp"
+
+    assert client.get(f"/api/thumb/{key}").status_code == 401
+    assert client.get(f"/api/thumb/{key}", params={"token": "wrong"}).status_code == 401
+    assert client.get("/api/thumb/nope.png", params={"token": "tok"}).status_code == 404
+
+    # a non-image upload stores no thumbnail: history keeps its chip via 404
+    up2 = client.post(
+        "/api/upload", headers=auth, files={"file": ("f.txt", b"plain text", "text/plain")}
+    )
+    key2 = up2.json()["inbox_key"]
+    assert client.get(f"/api/thumb/{key2}", params={"token": "tok"}).status_code == 404
+
+
 # --- image contracts: each Docker image must import without the other's deps ---
 
 def _import_in_subprocess(blocked_module: str, import_target: str) -> None:
