@@ -27,11 +27,23 @@ INTERRUPT_CHANNEL = "paratrooper:interrupt"
 
 
 def connect(url: str | None = None) -> redis.Redis:
-    """Connect to Key Value. URL from ``url`` or ``$REDIS_URL`` (Render sets this)."""
+    """Connect to Key Value. URL from ``url`` or ``$REDIS_URL`` (Render sets this).
+
+    ``socket_timeout=None`` is load-bearing: redis-py 8 changed the default
+    read timeout from "block forever" to 5s, which kills every blocking read we
+    rely on — the worker's ``BRPOP`` (races its own 5s server-side timeout) and
+    both pub/sub ``listen()`` loops (idle far longer than 5s). Explicit None
+    restores indefinite blocking reads regardless of installed redis-py major.
+    """
     url = url or os.environ.get("REDIS_URL") or os.environ.get("PARATROOPER_REDIS_URL")
     if not url:
         raise RuntimeError("no Redis URL (set REDIS_URL)")
-    return redis.from_url(url, decode_responses=True)
+    return redis.from_url(
+        url,
+        decode_responses=True,
+        socket_timeout=None,  # blocking reads (BRPOP, pub/sub) must not be cut off
+        socket_connect_timeout=5.0,  # but a dead host should fail fast
+    )
 
 
 class JobQueue:

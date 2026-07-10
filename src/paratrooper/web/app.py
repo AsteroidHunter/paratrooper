@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -28,6 +29,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from redis import exceptions as redis_exc
 
 from ..agent.config import Config, load_config
 from . import push
@@ -46,6 +48,8 @@ from .models import (
 from .publish import merge_pull_request, merge_token, owner_repo_from_remote, parse_pr_number
 from .queue import JobQueue, connect
 from .render_control import RenderControl
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -111,29 +115,35 @@ async def _maybe_push(state: AppState, result: ResultMessage) -> None:
 
 async def _result_relay(state: AppState) -> None:
     """Subscribe to all worker result channels: persist each to the thread and
-    fan out to connected sockets; on 'done'/'error' release the thread's batch."""
-    pubsub = state.queue.r.pubsub()
-    await pubsub.psubscribe("paratrooper:results:*")
-    try:
-        async for message in pubsub.listen():
-            if message.get("type") != "pmessage":
-                continue
-            channel = message["channel"]
-            thread_id = channel.rsplit(":", 1)[-1]
-            result = ResultMessage.model_validate_json(message["data"])
-            body = result.payload if isinstance(result.payload, str) else ""
-            state.store.add_message(ThreadMessage(
-                thread_id=thread_id, role="agent", body=body, ts=_now(), kind=result.kind,
-            ))
-            await _send_to_sockets(state, thread_id, result.model_dump())
-            await _maybe_push(state, result)
-            if result.kind in ("done", "error"):
-                # job_finished first: it re-arms the timer for any buffered batch,
-                # so has_pending() correctly blocks the suspend in that case
-                await state.coordinator.job_finished(thread_id)
-                await _maybe_suspend_worker(state)
-    finally:
-        await pubsub.aclose()
+    fan out to connected sockets; on 'done'/'error' release the thread's batch.
+    Transient redis errors re-subscribe rather than silently killing the task —
+    a dead relay means results stop reaching the phone with no visible crash."""
+    while True:
+        pubsub = state.queue.r.pubsub()
+        try:
+            await pubsub.psubscribe("paratrooper:results:*")
+            async for message in pubsub.listen():
+                if message.get("type") != "pmessage":
+                    continue
+                channel = message["channel"]
+                thread_id = channel.rsplit(":", 1)[-1]
+                result = ResultMessage.model_validate_json(message["data"])
+                body = result.payload if isinstance(result.payload, str) else ""
+                state.store.add_message(ThreadMessage(
+                    thread_id=thread_id, role="agent", body=body, ts=_now(), kind=result.kind,
+                ))
+                await _send_to_sockets(state, thread_id, result.model_dump())
+                await _maybe_push(state, result)
+                if result.kind in ("done", "error"):
+                    # job_finished first: it re-arms the timer for any buffered
+                    # batch, so has_pending() correctly blocks the suspend then
+                    await state.coordinator.job_finished(thread_id)
+                    await _maybe_suspend_worker(state)
+        except (redis_exc.ConnectionError, redis_exc.TimeoutError) as exc:
+            logger.warning("result relay redis error, resubscribing: %s", exc)
+            await asyncio.sleep(2)
+        finally:
+            await pubsub.aclose()
 
 
 def _lifespan(injected: AppState | None):
