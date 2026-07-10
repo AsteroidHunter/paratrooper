@@ -45,6 +45,9 @@ class ToolContext:
     # thread (screenshot, PR url) without parsing SDK message internals
     last_pr: str | None = None
     last_screenshot: str | None = None
+    # live channel to the phone: async callable(text) publishing an 'update'
+    # result mid-job. None on offline/CLI runs — post_update degrades to a no-op.
+    emit_update: Any = None
 
 
 def _ok(payload: dict) -> dict:
@@ -259,6 +262,23 @@ def build_tool_server(ctx: ToolContext):
         except Exception as exc:
             return _err(f"screenshot_board failed: {exc}")
 
+    @tool("post_update", "Text Akash ONE short interim message right now, while the job "
+          "is still running (your final reply is separate and stays the single closing "
+          "message). Only for: a brief ack before starting a multi-step board change, or "
+          "a heads-up when something failed or is taking longer. Args: text.",
+          {"text": str})
+    async def post_update_tool(args: dict) -> dict:
+        text = str(args.get("text", "")).strip()
+        if not text:
+            return _err("post_update needs non-empty text")
+        if ctx.emit_update is None:
+            return _ok({"sent": False, "note": "no live channel on this run"})
+        try:
+            await ctx.emit_update(text)
+            return _ok({"sent": True})
+        except Exception as exc:
+            return _err(f"post_update failed: {exc}")
+
     @tool("fetch_history", "Read older changelog entries. Args: optional n, optional "
           "start, optional end.", {"n": int, "start": int, "end": int})
     async def fetch_history_tool(args: dict) -> dict:
@@ -294,6 +314,7 @@ def build_tool_server(ctx: ToolContext):
         git_push_tool,
         open_pr_tool,
         screenshot_board_tool,
+        post_update_tool,
         fetch_history_tool,
         append_changelog_tool,
     ]
