@@ -4,7 +4,7 @@ import "./styles.css";
 
 declare const __BUILT_AT__: string;
 
-const APP_VERSION = "0.1.1";
+const APP_VERSION = "0.1.4";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -145,7 +145,6 @@ function prUrl(payload: unknown, body?: string): string | null {
 }
 
 let lastAgentText = "";
-let jobActive = false;
 
 function render(m: ServerMsg): void {
   const role = m.role ?? "agent";
@@ -160,16 +159,17 @@ function render(m: ServerMsg): void {
   const value = (typeof m.payload === "string" ? m.payload : undefined) ?? m.body ?? "";
   if (kind === "job") return; // internal enqueue marker, not a message
   if (kind === "working") {
-    jobActive = true;
-    setReceipt("Read"); // the agent has picked it up
-    showTyping(); // and is on it now
+    setReceipt("Read"); // the agent has picked it up; otherwise silence
+    return;
+  }
+  if (kind === "typing") {
+    showTyping(); // the agent is writing (dots self-expire if it wasn't for you)
     return;
   }
   if (kind === "done" || kind === "error") {
-    jobActive = false;
     hideTyping();
   } else {
-    hideTyping(); // a bubble replaces the dots...
+    hideTyping(); // a bubble replaces the dots
   }
   if (kind === "done" && !value.trim()) return; // job-complete signal, text already shown
   if ((kind === "log" || kind === "done") && value.trim() && value.trim() === lastAgentText) {
@@ -193,7 +193,7 @@ function render(m: ServerMsg): void {
     const publishBtn = document.createElement("button");
     publishBtn.textContent = "Publish";
     publishBtn.className = "publish";
-    publishBtn.addEventListener("click", () => void publish(url ?? ""));
+    publishBtn.addEventListener("click", () => void publish(url ?? "", publishBtn));
     div.appendChild(publishBtn);
   } else if (kind === "error") {
     bubble("agent", "error").textContent = `⚠ ${value}`;
@@ -201,7 +201,6 @@ function render(m: ServerMsg): void {
     // the agent's words — a real received bubble (log and done alike)
     bubble("agent", "text").textContent = value;
   }
-  if (jobActive) showTyping(); // still working: dots return below the bubble
 }
 
 function chip(label: string): HTMLSpanElement {
@@ -228,9 +227,15 @@ function setReceipt(state: "Delivered" | "Read"): void {
   t.scrollTop = t.scrollHeight;
 }
 
-// --- typing indicator ---------------------------------------------------------
+// --- typing indicator (dots = the agent is COMPOSING text, like iMessage) ------
+// Dots self-expire: the agent's internal notes also count as "composing" but
+// never become messages, so dots that lead nowhere fade out on their own.
+
+let typingExpiry: ReturnType<typeof setTimeout> | null = null;
 
 function showTyping(): void {
+  if (typingExpiry) clearTimeout(typingExpiry);
+  typingExpiry = setTimeout(hideTyping, 15000);
   if (document.getElementById("typing")) return;
   const el = document.createElement("div");
   el.id = "typing";
@@ -244,6 +249,8 @@ function showTyping(): void {
 }
 
 function hideTyping(): void {
+  if (typingExpiry) clearTimeout(typingExpiry);
+  typingExpiry = null;
   document.getElementById("typing")?.remove();
 }
 
@@ -308,11 +315,18 @@ async function send(): Promise<void> {
       }
       keys.push((await r.json()).inbox_key);
     }
-    const resp = await fetch("/api/send", {
-      method: "POST",
-      headers: { ...authHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch("/api/send", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
+      });
+    } catch (e) {
+      hideTyping();
+      bubble("agent", "error").textContent = `⚠ not sent, server unreachable: ${e}`;
+      return;
+    }
     if (!resp.ok) {
       hideTyping();
       bubble("agent", "error").textContent = `⚠ not sent (${resp.status})`;
@@ -326,12 +340,43 @@ async function send(): Promise<void> {
   }
 }
 
-async function publish(pr: string): Promise<void> {
-  await fetch("/api/publish", {
-    method: "POST",
-    headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ thread_id: THREAD_ID, pr }),
-  });
+let publishing = false;
+
+async function publish(pr: string, btn: HTMLButtonElement): Promise<void> {
+  if (publishing) return; // one merge at a time; repeat taps do nothing
+  publishing = true;
+  btn.disabled = true;
+  btn.textContent = "Publishing…";
+  try {
+    let resp: Response;
+    try {
+      resp = await fetch("/api/publish", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ thread_id: THREAD_ID, pr }),
+      });
+    } catch (e) {
+      bubble("agent", "error").textContent = `⚠ publish failed, server unreachable: ${e}`;
+      btn.disabled = false;
+      btn.textContent = "Publish";
+      return;
+    }
+    if (!resp.ok) {
+      let detail = `${resp.status} ${resp.statusText}`;
+      try {
+        detail = (await resp.json()).detail ?? detail;
+      } catch {
+        /* keep the status text */
+      }
+      bubble("agent", "error").textContent = `⚠ publish failed: ${detail}`;
+      btn.disabled = false;
+      btn.textContent = "Publish";
+      return;
+    }
+    btn.textContent = "Published ✓"; // stays disabled; server also pushes a stamp
+  } finally {
+    publishing = false;
+  }
 }
 
 // --- web push (Phase 6): subscribe, re-register on every reopen -------------
@@ -373,6 +418,8 @@ async function setupPush(reg: ServiceWorkerRegistration): Promise<void> {
 }
 
 // --- boot --------------------------------------------------------------------
+
+window.visualViewport?.addEventListener("resize", () => window.scrollTo(0, 0));
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {

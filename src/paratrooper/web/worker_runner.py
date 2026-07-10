@@ -13,6 +13,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import signal
 from pathlib import Path
 
 from redis import exceptions as redis_exc
@@ -47,6 +48,7 @@ class Worker:
         self._current_thread: str | None = None
         self._current_job: str | None = None
         self._task: asyncio.Task | None = None
+        self._shutting_down = False  # SIGTERM: requeue the in-flight job, exit clean
 
     def _cfg(self) -> Config:
         if self._config is None:
@@ -106,7 +108,9 @@ class Worker:
             await self._materialize(msg.attachments)
             await run_job(job, config=self._cfg(), auth_mode=self.auth_mode, on_event=on_event)
         except asyncio.CancelledError:
-            # interrupted: tell the web so it releases the next batch
+            if self._shutting_down:
+                raise  # deploy shutdown: job gets requeued whole; say nothing
+            # user interrupt: tell the web so it releases the next batch
             await self.queue.publish_result(
                 msg.thread_id,
                 ResultMessage(job_id=msg.job_id, kind="error", payload="interrupted"),
@@ -122,7 +126,10 @@ class Worker:
                 ResultMessage(job_id=msg.job_id, kind="error", payload=str(exc)),
             )
         finally:
-            await self._cleanup(msg.attachments)
+            # on deploy shutdown keep the staged attachments: the requeued job
+            # needs to materialize them again on the next instance
+            if not self._shutting_down:
+                await self._cleanup(msg.attachments)
 
     async def _interrupt_listener(self) -> None:
         while True:  # re-subscribe after transient redis drops
@@ -146,11 +153,27 @@ class Worker:
             remote=cfg.remote,
         ).ensure_checkout()
 
+    def _install_shutdown_handler(self) -> None:
+        """Render deploys SIGTERM the old instance while it may be mid-job (this
+        killed a job mid-screenshot and blocked its thread for 11 hours). On
+        SIGTERM: flag shutdown and cancel the in-flight task; run() requeues it."""
+        loop = asyncio.get_running_loop()
+
+        def _on_term() -> None:
+            self._shutting_down = True
+            if self._task and not self._task.done():
+                self._task.cancel()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, _on_term)
+
     async def run(self, *, idle_timeout: int = 5) -> None:
         await asyncio.to_thread(self._bootstrap_checkout)
+        self._install_shutdown_handler()
         listener = asyncio.ensure_future(self._interrupt_listener())
         try:
-            while True:
+            while not self._shutting_down:
                 try:
                     msg = await self.queue.dequeue(timeout=idle_timeout)
                 except _REDIS_TRANSIENT as exc:
@@ -161,10 +184,13 @@ class Worker:
                     continue
                 self._current_thread, self._current_job = msg.thread_id, msg.job_id
                 self._task = asyncio.ensure_future(self._run_one(msg))
-                # CancelledError = interrupt; anything else was already reported
-                # by _run_one — either way the loop must survive
+                # CancelledError = interrupt/shutdown; anything else was already
+                # reported by _run_one — either way the loop must survive
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._task
+                if self._shutting_down:
+                    await self.queue.requeue_front(msg)
+                    logger.info("shutdown: requeued in-flight job %s", msg.job_id)
                 self._current_thread = self._current_job = self._task = None
         finally:
             listener.cancel()

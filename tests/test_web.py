@@ -4,6 +4,7 @@ publish parsing, and the FastAPI routes (with injected state, no Redis)."""
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -562,3 +563,225 @@ def test_failed_job_reports_error_and_spares_the_loop(tmp_path):
     assert "error" in kinds
     err = next(r for r in published if r.kind == "error")
     assert "expired" in str(err.payload)
+
+
+def test_shutdown_requeues_job_without_user_facing_noise(tmp_path, monkeypatch):
+    """A deploy SIGTERM killed a job mid-screenshot and blocked its thread for
+    11 hours. On shutdown-cancel the job must be requeued whole: no 'interrupted'
+    error published, staged attachments kept for the re-run."""
+    from paratrooper.web.models import JobMessage
+    from paratrooper.web.worker_runner import Worker
+
+    published, requeued = [], []
+
+    class _FakeQueue:
+        def __init__(self):
+            self.r = _FakeRedis()
+
+        async def publish_result(self, thread_id, result):
+            published.append(result)
+
+        async def requeue_front(self, job):
+            requeued.append(job.job_id)
+
+    from paratrooper.agent.config import Config
+
+    cfg = Config(
+        inbox=tmp_path / "inbox", site_root=tmp_path / "site",
+        pins_dir=tmp_path / "pins", archive_dir=tmp_path / "arch",
+        later_dir=tmp_path / "later", changelog=tmp_path / "cl.jsonl",
+        remote=None, default_branch="main", branch_prefix="paratrooper",
+    )
+    q = _FakeQueue()
+    w = Worker(q)
+    w._config = cfg
+    # stage an attachment so we can assert it survives a shutdown-cancel
+    _run(w.inbox.put("k.jpeg", b"img"))
+    msg = JobMessage(job_id="j1", thread_id="d", text="add", attachments=["k.jpeg"])
+
+    # pin the job in-flight so the cancel deterministically lands mid-run
+    import paratrooper.web.worker_runner as wr
+
+    async def slow_run_job(*a, **kw):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(wr, "run_job", slow_run_job)
+
+    async def scenario():
+        w._shutting_down = True  # simulate SIGTERM arriving
+        task = asyncio.ensure_future(w._run_one(msg))
+        await asyncio.sleep(0.05)  # let it reach run_job and park there
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(scenario())
+    kinds = [r.kind for r in published]
+    assert "error" not in kinds  # no fake 'interrupted' bubble on deploys
+    assert _run(w.inbox.get("k.jpeg")) == b"img"  # attachment kept for the re-run
+
+
+def test_requeue_front_puts_job_next_in_line():
+    from paratrooper.web.models import JobMessage
+    from paratrooper.web.queue import JobQueue
+
+    calls = []
+
+    class _R:
+        async def rpush(self, key, val):
+            calls.append(("rpush", key))
+
+    q = JobQueue(_R())
+    _run(q.requeue_front(JobMessage(job_id="j", thread_id="d", text="x")))
+    assert calls == [("rpush", "paratrooper:jobs")]  # consumption end of the list
+
+
+def test_open_pr_returns_existing_pr(monkeypatch, tmp_path):
+    """Pushing more commits to a branch that already has a PR must yield that
+    PR's URL (the phone's Publish button depends on it), not a 422 error."""
+    import httpx as _httpx
+
+    from paratrooper.agent import siterepo as sr
+
+    def fake_post(url, **kw):
+        return _httpx.Response(
+            422, text='{"message": "A pull request already exists for x."}',
+            request=_httpx.Request("POST", url),
+        )
+
+    def fake_get(url, **kw):
+        return _httpx.Response(
+            200, json=[{"html_url": "https://github.com/o/r/pull/7"}],
+            request=_httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(sr.httpx, "post", fake_post)
+    monkeypatch.setattr(sr.httpx, "get", fake_get)
+    repo = sr.SiteRepo(tmp_path, github_token="tok", remote="https://github.com/o/r.git")
+    assert repo.open_pr("paratrooper/x", "t") == "https://github.com/o/r/pull/7"
+
+
+def test_publish_maps_error_to_409_with_detail(client, monkeypatch):
+    """A failed merge must tell the phone WHY (409 + detail), not 500."""
+    import paratrooper.web.app as app_mod
+    from paratrooper.web.publish import PublishError
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
+
+    def boom(*a, **kw):
+        raise PublishError("merge failed (405): Pull Request is not mergeable")
+
+    monkeypatch.setattr(app_mod, "merge_pull_request", boom)
+    auth = {"Authorization": "Bearer tok"}
+    r = client.post("/api/publish", headers=auth,
+                    json={"thread_id": "d", "pr": "https://github.com/o/r/pull/3"})
+    assert r.status_code == 409
+    assert "not mergeable" in r.json()["detail"]
+
+
+def test_publish_success_persists_confirmation(client, monkeypatch):
+    import paratrooper.web.app as app_mod
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
+    monkeypatch.setattr(app_mod, "merge_pull_request", lambda *a, **kw: {"sha": "abc123"})
+    auth = {"Authorization": "Bearer tok"}
+    r = client.post("/api/publish", headers=auth,
+                    json={"thread_id": "d", "pr": "7"})
+    assert r.json() == {"merged": True, "sha": "abc123"}
+    rows = client.get("/api/thread/d", headers=auth).json()["messages"]
+    assert rows[-1]["kind"] == "published" and "PR #7" in rows[-1]["body"]
+
+
+# --- pr ref must survive persistence + empty-ref publish (the replay bug) ------
+
+def test_result_body_serializes_structured_payloads():
+    from paratrooper.web.app import result_body
+    from paratrooper.web.models import ResultMessage
+
+    assert result_body(ResultMessage(job_id="j", kind="done", payload="all set")) == "all set"
+    assert result_body(ResultMessage(job_id="j", kind="done")) == ""
+    pr = ResultMessage(
+        job_id="j", kind="pr",
+        payload={"branch": "paratrooper/x", "url": "https://github.com/o/r/pull/9"},
+    )
+    assert json.loads(result_body(pr))["url"] == "https://github.com/o/r/pull/9"
+
+
+def test_find_open_pr_resolves_single_prefixed_pr(monkeypatch):
+    import httpx as _httpx
+
+    from paratrooper.web import publish as pub
+
+    prs = [
+        {"number": 3, "head": {"ref": "dependabot/npm"}},
+        {"number": 2, "head": {"ref": "paratrooper/desert-new-photo"}},
+    ]
+
+    def fake_get(url, **kw):
+        return _httpx.Response(200, json=prs, request=_httpx.Request("GET", url))
+
+    monkeypatch.setattr(pub.httpx, "get", fake_get)
+    found = pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper")
+    assert found["number"] == 2
+
+
+def test_find_open_pr_zero_or_many_is_an_error(monkeypatch):
+    import httpx as _httpx
+
+    from paratrooper.web import publish as pub
+
+    def fake_empty(url, **kw):
+        return _httpx.Response(200, json=[], request=_httpx.Request("GET", url))
+
+    monkeypatch.setattr(pub.httpx, "get", fake_empty)
+    with pytest.raises(PublishError, match="no open PR"):
+        pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper")
+
+    two = [
+        {"number": 1, "head": {"ref": "paratrooper/a"}},
+        {"number": 2, "head": {"ref": "paratrooper/b"}},
+    ]
+
+    def fake_two(url, **kw):
+        return _httpx.Response(200, json=two, request=_httpx.Request("GET", url))
+
+    monkeypatch.setattr(pub.httpx, "get", fake_two)
+    with pytest.raises(PublishError, match="2 open PRs"):
+        pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper")
+
+
+def test_publish_empty_ref_resolves_open_pr(client, monkeypatch):
+    """A replayed pr bubble (body persisted as "" pre-fix) still publishes: the
+    server resolves the one open agent PR instead of 409ing on the empty ref."""
+    import paratrooper.web.app as app_mod
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
+    seen = {}
+
+    def fake_find(owner, repo, *, token, branch_prefix=""):
+        seen["prefix"] = branch_prefix
+        return {"number": 2, "head": {"ref": "paratrooper/desert-new-photo"}}
+
+    monkeypatch.setattr(app_mod, "find_open_pr", fake_find)
+    monkeypatch.setattr(app_mod, "merge_pull_request", lambda *a, **kw: {"sha": "d34d"})
+    auth = {"Authorization": "Bearer tok"}
+    r = client.post("/api/publish", headers=auth, json={"thread_id": "d", "pr": ""})
+    assert r.status_code == 200 and r.json()["merged"] is True
+    assert seen["prefix"] == "paratrooper"
+    rows = client.get("/api/thread/d", headers=auth).json()["messages"]
+    assert "PR #2" in rows[-1]["body"]
+
+
+def test_publish_empty_ref_with_no_open_pr_is_409(client, monkeypatch):
+    import paratrooper.web.app as app_mod
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
+
+    def none_found(*a, **kw):
+        raise PublishError("no open PR to publish")
+
+    monkeypatch.setattr(app_mod, "find_open_pr", none_found)
+    auth = {"Authorization": "Bearer tok"}
+    r = client.post("/api/publish", headers=auth, json={"thread_id": "d", "pr": ""})
+    assert r.status_code == 409
+    assert "no open PR" in r.json()["detail"]
