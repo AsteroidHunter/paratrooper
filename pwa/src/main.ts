@@ -4,12 +4,14 @@ import "./styles.css";
 
 declare const __BUILT_AT__: string;
 
-const APP_VERSION = "0.1.5";
+const APP_VERSION = "0.1.7";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
 let token = localStorage.getItem(TOKEN_KEY) ?? "";
 let lastSeq = 0;
+let oldestSeq = 0; // lowest seq rendered; the ?before= cursor for older pages
+let loadingOlder = false;
 let ws: WebSocket | null = null;
 let closingOnPurpose = false; // logout: suppress the auto-reconnect
 
@@ -20,6 +22,7 @@ interface ServerMsg {
   attachments?: string[];
   kind?: string | null;
   payload?: unknown;
+  ts?: string; // ISO-8601 on replayed history; live results carry none (client clock is fine)
 }
 
 const app = document.getElementById("app")!;
@@ -55,12 +58,16 @@ function renderTokenGate(): void {
 function renderChat(): void {
   app.innerHTML = `
     <header class="bar">
-      <span class="title">Paratrooper <span class="ver">v${APP_VERSION}</span></span>
+      <div class="contact">
+        <img class="avatar" src="/icon-192.png" alt="" />
+        <span class="title">Paratrooper <span class="ver">v${APP_VERSION}</span></span>
+      </div>
       <button id="reset" class="ghost" title="Forget token">⎋</button>
     </header>
     <main id="thread" class="thread">
       <div class="empty">Send a photo, link, or song to update the board. 🪂</div>
     </main>
+    <button type="button" id="jump" class="jump" title="Jump to latest">↓</button>
     <div id="pending" class="pending"></div>
     <form id="compose" class="compose">
       <button type="button" id="attach" class="attach" title="Add photo">＋</button>
@@ -88,6 +95,110 @@ function renderChat(): void {
     e.preventDefault();
     void send();
   });
+  // compose grows with content like iMessage (1 -> ~5 lines, then inner scroll)
+  const textEl = document.getElementById("text") as HTMLTextAreaElement;
+  textEl.addEventListener("input", () => {
+    textEl.style.height = "auto";
+    textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
+  });
+  const thread = document.getElementById("thread")!;
+  thread.addEventListener("scroll", () => {
+    if (nearBottom()) document.getElementById("jump")?.classList.remove("show");
+    if (thread.scrollTop < 40) void loadOlder(); // pull at top -> older page
+  });
+  document.getElementById("jump")!.addEventListener("click", () => {
+    document.getElementById("jump")!.classList.remove("show");
+    scrollToBottom(true);
+  });
+  // swipe-left to peek per-message times (iMessage): a decisively LEFTWARD
+  // hold-and-drag pulls the thread with tanh resistance, revealing the time
+  // rail the thread normally clips; anything else stays native scrolling
+  let startX = 0;
+  let startY = 0;
+  let peeking: boolean | null = null; // null = gesture direction undecided
+  thread.addEventListener(
+    "touchstart",
+    (e) => {
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      peeking = null;
+    },
+    { passive: true },
+  );
+  thread.addEventListener(
+    "touchmove",
+    (e) => {
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (peeking === null) {
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+        peeking = dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.5;
+        if (peeking) thread.classList.add("dragging");
+      }
+      if (!peeking) return;
+      e.preventDefault(); // we own this gesture; vertical scroll stays native
+      // resistance: tracks the finger at first, then fights back toward 64px
+      const pull = 64 * Math.tanh(Math.max(-dx, 0) / 110);
+      thread.style.setProperty("--peek", `-${pull.toFixed(1)}px`);
+    },
+    { passive: false },
+  );
+  const endPeek = () => {
+    thread.classList.remove("dragging");
+    thread.style.setProperty("--peek", "0px");
+  };
+  thread.addEventListener("touchend", endPeek);
+  thread.addEventListener("touchcancel", endPeek);
+  // fresh thread DOM: reset run/stamp/pagination tracking
+  lastBubbleSide = null;
+  lastBubbleAt = 0;
+  lastStampAt = 0;
+  oldestSeq = 0;
+}
+
+// --- older history (recent-first: the socket sends a window, we page back) ----
+
+async function loadOlder(): Promise<void> {
+  if (loadingOlder || oldestSeq <= 1) return; // 0 = nothing rendered yet, 1 = at the top
+  loadingOlder = true;
+  try {
+    const r = await fetch(`/api/history/${THREAD_ID}?before=${oldestSeq}&limit=50`, {
+      headers: authHeaders(),
+    });
+    if (!r.ok) return;
+    const { messages } = (await r.json()) as { messages: ServerMsg[] };
+    if (!messages.length) {
+      oldestSeq = 1; // top of thread reached; stop asking
+      return;
+    }
+    const t = threadEl();
+    // rebuild: render the older page into the emptied thread, then re-attach
+    // the existing bubbles and put the viewport back where it was
+    const keep = document.createDocumentFragment();
+    while (t.firstChild) keep.appendChild(t.firstChild);
+    const prevScroll = t.scrollTop;
+    const prevSide = lastBubbleSide;
+    const prevAt = lastBubbleAt;
+    const prevStamp = lastStampAt;
+    const prevSuppress = suppressAnim;
+    lastBubbleSide = null;
+    lastBubbleAt = 0;
+    lastStampAt = 0;
+    suppressAnim = true;
+    for (const m of messages) {
+      if (m.seq && (oldestSeq === 0 || m.seq < oldestSeq)) oldestSeq = m.seq;
+      render(m);
+    }
+    lastBubbleSide = prevSide;
+    lastBubbleAt = prevAt;
+    lastStampAt = prevStamp;
+    suppressAnim = prevSuppress;
+    const olderHeight = t.scrollHeight;
+    t.appendChild(keep);
+    t.scrollTop = olderHeight + prevScroll; // previously-visible row stays put
+  } finally {
+    loadingOlder = false;
+  }
 }
 
 // --- pending attachments (picked but not yet sent) -----------------------------
@@ -120,14 +231,88 @@ function renderPending(): void {
 
 const threadEl = () => document.getElementById("thread")!;
 
+// --- scrolling: glide when following the tail, chevron when reading history ----
+
+function nearBottom(): boolean {
+  const t = threadEl();
+  return t.scrollHeight - t.scrollTop - t.clientHeight < 150;
+}
+
+function scrollToBottom(force = false): void {
+  const t = threadEl();
+  // replay bursts (suppressAnim) jump instantly; live messages glide
+  t.scrollTo({ top: t.scrollHeight, behavior: suppressAnim || force ? "auto" : "smooth" });
+}
+
 // --- rendering ---------------------------------------------------------------
 
-function bubble(role: string, cls: string): HTMLDivElement {
+// iMessage clustering: consecutive same-sender bubbles inside RUN_GAP_MS form a
+// run — continuations tighten spacing and the sender-side top corner. System
+// lines break runs.
+let lastBubbleSide: string | null = null;
+let lastBubbleAt = 0;
+const RUN_GAP_MS = 60_000;
+
+// centered "Today 2:31 PM" stamps at conversation gaps, like iMessage
+let lastStampAt = 0;
+const STAMP_GAP_MS = 60 * 60_000;
+
+function fmtTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function fmtStampDay(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOf(now) - startOf(d)) / 86_400_000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return d.toLocaleDateString([], { weekday: "long" });
+  return d.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    year: d.getFullYear() === now.getFullYear() ? undefined : "numeric",
+  });
+}
+
+function maybeStamp(at: number): void {
+  if (at - lastStampAt <= STAMP_GAP_MS) return;
+  lastStampAt = at;
+  const s = document.createElement("div");
+  s.className = "stamp";
+  const day = document.createElement("b");
+  day.textContent = fmtStampDay(at);
+  s.append(day, ` ${fmtTime(at)}`);
+  threadEl().appendChild(s);
+}
+
+// entrance animation + smooth scroll are for LIVE messages only; a reconnect
+// replaying fifty bubbles must not pop each one
+let suppressAnim = true;
+
+function bubble(role: string, cls: string, tsMs?: number): HTMLDivElement {
   threadEl().querySelector(".empty")?.remove(); // clear the empty-state hint
+  const wasNear = nearBottom();
+  const at = tsMs ?? Date.now();
+  maybeStamp(at);
+  const cont =
+    (role === "user" || role === "agent") &&
+    role === lastBubbleSide &&
+    at - lastBubbleAt < RUN_GAP_MS;
+  lastBubbleSide = role === "system" ? null : role;
+  lastBubbleAt = at;
+  // each bubble sits in a full-width .row so the peek-time label can pin to
+  // the screen's right edge (clipped by the thread until the pull reveals it)
+  const row = document.createElement("div");
+  row.className = `row ${role}${cont ? " cont" : ""}`;
+  if (role !== "system") row.dataset.time = fmtTime(at);
   const div = document.createElement("div");
-  div.className = `msg ${role} ${cls}`;
-  threadEl().appendChild(div);
-  threadEl().scrollTop = threadEl().scrollHeight;
+  div.className = `msg ${role} ${cls}${suppressAnim ? "" : " anim"}`;
+  row.appendChild(div);
+  threadEl().appendChild(row);
+  if (wasNear || role === "user") scrollToBottom();
+  else document.getElementById("jump")?.classList.add("show");
   return div;
 }
 
@@ -146,12 +331,46 @@ function prUrl(payload: unknown, body?: string): string | null {
 
 let lastAgentText = "";
 
+function thumbUrl(key: string): string {
+  return `/api/thumb/${encodeURIComponent(key)}?token=${encodeURIComponent(token)}`;
+}
+
+function openLightbox(src: string): void {
+  const overlay = document.createElement("div");
+  overlay.className = "lightbox";
+  const img = document.createElement("img");
+  img.src = src;
+  overlay.appendChild(img);
+  overlay.addEventListener("click", () => overlay.remove());
+  document.body.appendChild(overlay);
+}
+
 function render(m: ServerMsg): void {
   const role = m.role ?? "agent";
+  const tsMs = m.ts ? Date.parse(m.ts) : undefined;
   if (role === "user") {
-    const div = bubble("user", "text");
-    div.textContent = m.body ?? "";
-    (m.attachments ?? []).forEach(() => div.appendChild(chip("📎 photo")));
+    // photos render as their own frameless bubbles (same shape as the send
+    // echo); pre-thumbnail history 404s and falls back to the old chip
+    (m.attachments ?? []).forEach((key) => {
+      const div = bubble("user", "shot", tsMs);
+      const img = document.createElement("img");
+      img.src = thumbUrl(key);
+      img.alt = "photo";
+      img.onload = () => {
+        if (nearBottom()) scrollToBottom();
+      };
+      img.onerror = () => {
+        div.classList.replace("shot", "text");
+        div.appendChild(chip("📎 photo"));
+        img.remove();
+      };
+      img.addEventListener("click", () => openLightbox(img.src));
+      div.appendChild(img);
+    });
+    if (m.body) {
+      const div = bubble("user", "text", tsMs);
+      div.textContent = m.body;
+    }
     lastAgentText = "";
     return;
   }
@@ -177,18 +396,20 @@ function render(m: ServerMsg): void {
   }
   if (kind === "log" || kind === "done") lastAgentText = value.trim();
   if (role === "system") {
-    bubble("system", "line").textContent = value || "✓";
+    bubble("system", "line", tsMs).textContent = value || "✓";
     return;
   }
   if (kind === "screenshot" && value) {
-    const div = bubble("agent", "shot");
+    const div = bubble("agent", "shot", tsMs);
     const img = document.createElement("img");
     img.src = value;
     img.alt = "board preview";
+    img.onload = () => scrollToBottom(); // height lands after decode
+    img.addEventListener("click", () => openLightbox(value));
     div.appendChild(img);
   } else if (kind === "pr") {
     const url = prUrl(m.payload, m.body);
-    const div = bubble("agent", "pr");
+    const div = bubble("agent", "pr", tsMs);
     div.innerHTML = url ? `Opened a PR: <a href="${url}" target="_blank" rel="noopener">${url}</a>` : "Opened a PR.";
     const publishBtn = document.createElement("button");
     publishBtn.textContent = "Publish";
@@ -196,10 +417,10 @@ function render(m: ServerMsg): void {
     publishBtn.addEventListener("click", () => void publish(url ?? "", publishBtn));
     div.appendChild(publishBtn);
   } else if (kind === "error") {
-    bubble("agent", "error").textContent = `⚠ ${value}`;
+    bubble("agent", "error", tsMs).textContent = `⚠ ${value}`;
   } else {
     // the agent's words — a real received bubble (log and done alike)
-    bubble("agent", "text").textContent = value;
+    bubble("agent", "text", tsMs).textContent = value;
   }
 }
 
@@ -224,7 +445,7 @@ function setReceipt(state: "Delivered" | "Read"): void {
   const typing = document.getElementById("typing");
   if (typing) t.insertBefore(el, typing);
   else t.appendChild(el);
-  t.scrollTop = t.scrollHeight;
+  if (nearBottom()) scrollToBottom();
 }
 
 // --- typing indicator (dots = the agent is COMPOSING text, like iMessage) ------
@@ -244,7 +465,7 @@ function showTyping(): void {
   const t = document.getElementById("thread");
   if (t) {
     t.appendChild(el);
-    t.scrollTop = t.scrollHeight;
+    if (nearBottom()) scrollToBottom();
   }
 }
 
@@ -260,11 +481,14 @@ function connect(): void {
   closingOnPurpose = false;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/ws?token=${encodeURIComponent(token)}&thread=${THREAD_ID}&since=${lastSeq}`;
+  suppressAnim = true; // the catch-up replay must not animate or glide
   ws = new WebSocket(url);
+  ws.onopen = () => setTimeout(() => (suppressAnim = false), 600);
   ws.onmessage = (e) => {
     if (!document.getElementById("thread")) return; // gate is showing; don't consume
     const m = JSON.parse(e.data) as ServerMsg;
     if (m.seq && m.seq > lastSeq) lastSeq = m.seq;
+    if (m.seq && (oldestSeq === 0 || m.seq < oldestSeq)) oldestSeq = m.seq;
     render(m);
   };
   ws.onclose = () => {
@@ -286,10 +510,12 @@ async function send(): Promise<void> {
     const div = bubble("user", "shot");
     const img = document.createElement("img");
     img.src = URL.createObjectURL(file);
+    img.addEventListener("click", () => openLightbox(img.src));
     div.appendChild(img);
   }
   if (text) render({ role: "user", body: text, attachments: [] });
   textEl.value = "";
+  textEl.style.height = "auto"; // collapse the auto-grown compose bar
   pendingFiles = [];
   renderPending();
 
@@ -420,6 +646,16 @@ async function setupPush(reg: ServiceWorkerRegistration): Promise<void> {
 // --- boot --------------------------------------------------------------------
 
 window.visualViewport?.addEventListener("resize", () => window.scrollTo(0, 0));
+
+// opening (or returning to) the app clears the home-screen unread badge
+function clearBadge(): void {
+  if ("clearAppBadge" in navigator) void navigator.clearAppBadge().catch(() => {});
+  navigator.serviceWorker?.controller?.postMessage("badge-clear");
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") clearBadge();
+});
+clearBadge();
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {

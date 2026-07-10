@@ -20,11 +20,14 @@ in ``hooks.py`` — this is the typed, auditable path; that is the backstop.)
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
 
 import httpx
+
+from .config import DEFAULT_GIT_EMAIL, DEFAULT_GIT_NAME
 
 _GITHUB_API = "https://api.github.com"
 _REMOTE_RE = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$")
@@ -44,21 +47,26 @@ class SiteRepo:
         branch_prefix: str = "paratrooper",
         github_token: str | None = None,
         remote: str | None = None,
+        git_name: str = DEFAULT_GIT_NAME,
+        git_email: str = DEFAULT_GIT_EMAIL,
     ) -> None:
         self.root = Path(site_root)
         self.default_branch = default_branch
         self.branch_prefix = branch_prefix
         self._token = github_token
         self._remote = remote
+        self.git_name = git_name
+        self.git_email = git_email
 
     # --- git plumbing --------------------------------------------------------
 
-    def _git(self, *args: str, check: bool = True) -> str:
+    def _git(self, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
         proc = subprocess.run(
             ["git", *args],
             cwd=self.root,
             capture_output=True,
             text=True,
+            env=env,
         )
         if check and proc.returncode != 0:
             raise GitError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
@@ -114,6 +122,10 @@ class SiteRepo:
         """Fetch, hard-reset the local default branch to ``origin/<default>``,
         and create+check out the fresh feature branch from it. Returns the
         branch name. Run once per request, before the agent edits anything."""
+        # repo-local identity, so even commits the agent makes via Bash (fenced
+        # but allowed) carry the linked bot attribution, not the host's config
+        self._git("config", "user.name", self.git_name)
+        self._git("config", "user.email", self.git_email)
         self._git("fetch", "origin", self.default_branch)
         # reset local default branch to the just-fetched origin tip (don't miss a merge)
         self._git("checkout", "-B", self.default_branch, f"origin/{self.default_branch}")
@@ -124,10 +136,19 @@ class SiteRepo:
     # --- commit / push (branches only) --------------------------------------
 
     def commit_all(self, message: str) -> str:
-        """Stage the whole worktree and commit. Returns the new commit sha. No-op
-        commits raise (nothing to commit is a caller bug worth surfacing)."""
+        """Stage the whole worktree and commit as ``git_name <git_email>``.
+        Returns the new commit sha. No-op commits raise (nothing to commit is a
+        caller bug worth surfacing)."""
         self._git("add", "-A")
-        self._git("commit", "-m", message)
+        # identity via env: GIT_* env vars outrank every config level, so this
+        # wins even over stale GIT_AUTHOR_*/GIT_COMMITTER_* set on the host
+        identity = {
+            "GIT_AUTHOR_NAME": self.git_name,
+            "GIT_AUTHOR_EMAIL": self.git_email,
+            "GIT_COMMITTER_NAME": self.git_name,
+            "GIT_COMMITTER_EMAIL": self.git_email,
+        }
+        self._git("commit", "-m", message, env={**os.environ, **identity})
         return self._git("rev-parse", "HEAD")
 
     def push_branch(self, branch: str) -> None:

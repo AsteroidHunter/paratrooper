@@ -25,6 +25,7 @@ from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
+    Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -58,6 +59,7 @@ from .publish import (
 )
 from .queue import JobQueue, connect
 from .render_control import RenderControl
+from .thumbs import make_thumbnail
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +274,24 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         content = await file.read()
         key = new_key(file.filename)
         await st().inbox.put(key, content)  # cross-service store (Key Value on Render)
+        # persist a small preview NOW — the inbox blob expires in ~24h and this
+        # is the only pixel record history replay will have
+        thumb = await asyncio.to_thread(make_thumbnail, content)
+        if thumb is not None:
+            await asyncio.to_thread(st().store.add_thumbnail, key, thumb, ts=_now())
         return UploadResponse(inbox_key=key, content_type=file.content_type, size=len(content))
+
+    @app.get("/api/thumb/{key}")
+    async def thumb(key: str, token: str = "") -> Response:
+        # token rides the query string like /ws does: <img src> can't set headers
+        if not verify_token(token):
+            raise HTTPException(status_code=401, detail="bad token")
+        row = await asyncio.to_thread(st().store.thumbnail, key)
+        if row is None:
+            raise HTTPException(status_code=404, detail="no thumbnail")
+        data, content_type = row
+        return Response(content=data, media_type=content_type,
+                        headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
     @app.post("/api/send", dependencies=[Depends(require_token)])
     async def send(req: SendRequest) -> dict:
@@ -288,6 +307,14 @@ def create_app(injected: AppState | None = None) -> FastAPI:
     @app.get("/api/thread/{thread_id}", dependencies=[Depends(require_token)])
     async def thread(thread_id: str, since: int = 0) -> dict:
         rows = await asyncio.to_thread(st().store.messages, thread_id, since_seq=since)
+        return {"messages": [{"seq": seq, **m.model_dump()} for seq, m in rows]}
+
+    @app.get("/api/history/{thread_id}", dependencies=[Depends(require_token)])
+    async def history(thread_id: str, before: int, limit: int = 50) -> dict:
+        """One older page for pull-down-at-top (oldest-first, like the socket)."""
+        rows = await asyncio.to_thread(
+            st().store.messages_page, thread_id, before_seq=before, limit=min(limit, 200)
+        )
         return {"messages": [{"seq": seq, **m.model_dump()} for seq, m in rows]}
 
     @app.post("/api/publish", dependencies=[Depends(require_token)])
@@ -347,7 +374,14 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         state = st()
         state.sockets.setdefault(thread_id, set()).add(websocket)
         # catch-up: replay everything the client missed
-        for seq, m in await asyncio.to_thread(state.store.messages, thread_id, since_seq=since):
+        if since == 0:
+            # fresh login: only the recent window — older pages come via
+            # /api/history as the user pulls down (a year of thread should
+            # not replay on every reinstall)
+            rows = await asyncio.to_thread(state.store.messages_page, thread_id, limit=50)
+        else:
+            rows = await asyncio.to_thread(state.store.messages, thread_id, since_seq=since)
+        for seq, m in rows:
             await websocket.send_json({"seq": seq, **m.model_dump()})
         try:
             while True:
