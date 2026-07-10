@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-ResultKind = Literal["working", "log", "screenshot", "pr", "done", "error"]
+ResultKind = Literal["working", "typing", "log", "screenshot", "pr", "done", "error"]
 
 
 class JobMessage(BaseModel):

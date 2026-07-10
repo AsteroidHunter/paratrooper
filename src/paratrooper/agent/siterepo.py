@@ -139,22 +139,36 @@ class SiteRepo:
 
     # --- pull request (open, not merge) -------------------------------------
 
+    def _gh_headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
     def open_pr(self, branch: str, title: str, body: str = "") -> str:
-        """Open a PR from ``branch`` into the default branch via the GitHub API.
-        Returns the PR's html_url. Requires the PAT. Opening ≠ merging."""
+        """Open a PR from ``branch`` into the default branch via the GitHub API,
+        or return the EXISTING open PR for that branch (pushing more commits to
+        a branch with a PR is normal — the caller still needs the URL so the
+        phone gets its Publish button). Returns html_url. Opening ≠ merging."""
         if not self._token:
             raise GitError("no GitHub token configured; cannot open a PR")
         owner, repo = self._owner_repo()
         resp = httpx.post(
             f"{_GITHUB_API}/repos/{owner}/{repo}/pulls",
-            headers={
-                "Authorization": f"Bearer {self._token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=self._gh_headers(),
             json={"title": title, "head": branch, "base": self.default_branch, "body": body},
             timeout=30.0,
         )
-        if resp.status_code not in (200, 201):
-            raise GitError(f"PR open failed ({resp.status_code}): {resp.text}")
-        return resp.json()["html_url"]
+        if resp.status_code in (200, 201):
+            return resp.json()["html_url"]
+        if resp.status_code == 422 and "already exists" in resp.text:
+            existing = httpx.get(
+                f"{_GITHUB_API}/repos/{owner}/{repo}/pulls",
+                headers=self._gh_headers(),
+                params={"head": f"{owner}:{branch}", "state": "open"},
+                timeout=30.0,
+            )
+            if existing.status_code == 200 and existing.json():
+                return existing.json()[0]["html_url"]
+        raise GitError(f"PR open failed ({resp.status_code}): {resp.text}")

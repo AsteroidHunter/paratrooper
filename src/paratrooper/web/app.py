@@ -46,7 +46,14 @@ from .models import (
     ThreadMessage,
     UploadResponse,
 )
-from .publish import merge_pull_request, merge_token, owner_repo_from_remote, parse_pr_number
+from .publish import (
+    PublishError,
+    find_open_pr,
+    merge_pull_request,
+    merge_token,
+    owner_repo_from_remote,
+    parse_pr_number,
+)
 from .queue import JobQueue, connect
 from .render_control import RenderControl
 
@@ -55,6 +62,17 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def result_body(result: ResultMessage) -> str:
+    """Serialize a result payload for thread persistence. Structured payloads
+    (pr's ``{branch, url}``) are stored as JSON — dropping them to ``""`` once
+    cost every replayed Publish button its PR ref."""
+    if isinstance(result.payload, str):
+        return result.payload
+    if result.payload is None:
+        return ""
+    return json.dumps(result.payload)
 
 
 @dataclass
@@ -145,12 +163,12 @@ async def _result_relay(state: AppState) -> None:
                 channel = message["channel"]
                 thread_id = channel.rsplit(":", 1)[-1]
                 result = ResultMessage.model_validate_json(message["data"])
-                if result.kind == "working":  # ephemeral status: sockets only
+                if result.kind in ("working", "typing"):  # ephemeral: sockets only
                     await _send_to_sockets(state, thread_id, result.model_dump())
                     continue
-                body = result.payload if isinstance(result.payload, str) else ""
                 seq = state.store.add_message(ThreadMessage(
-                    thread_id=thread_id, role="agent", body=body, ts=_now(), kind=result.kind,
+                    thread_id=thread_id, role="agent", body=result_body(result),
+                    ts=_now(), kind=result.kind,
                 ))
                 # carry seq so clients advance their catch-up cursor on live
                 # pushes too (otherwise reconnect replays from a stale point)
@@ -245,16 +263,31 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         remote = state.config.remote
         if not remote:
             raise HTTPException(status_code=400, detail="site remote not configured")
-        owner, repo = owner_repo_from_remote(remote)
-        number = parse_pr_number(req.pr)
-        result = await asyncio.to_thread(
-            merge_pull_request, owner, repo, number, token=merge_token()
-        )
+        try:
+            owner, repo = owner_repo_from_remote(remote)
+            if req.pr.strip():
+                number = parse_pr_number(req.pr)
+            else:
+                # pr rows persisted before result_body serialized payloads
+                # replay with body="" — resolve the one open agent PR instead
+                found = await asyncio.to_thread(
+                    find_open_pr, owner, repo,
+                    token=merge_token(), branch_prefix=state.config.branch_prefix,
+                )
+                number = int(found["number"])
+            result = await asyncio.to_thread(
+                merge_pull_request, owner, repo, number, token=merge_token()
+            )
+        except PublishError as exc:
+            # surface WHY (already merged, conflicts, bad PR ref) instead of a 500
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         published = ThreadMessage(
             thread_id=req.thread_id, role="system",
             body=f"published PR #{number}", ts=_now(), kind="published",
         )
-        await asyncio.to_thread(state.store.add_message, published)
+        seq = await asyncio.to_thread(state.store.add_message, published)
+        # live confirmation on the phone, not just a row in history
+        await _send_to_sockets(state, req.thread_id, {"seq": seq, **published.model_dump()})
         return JSONResponse({"merged": True, "sha": result.get("sha")})
 
     @app.get("/api/push/key", dependencies=[Depends(require_token)])
