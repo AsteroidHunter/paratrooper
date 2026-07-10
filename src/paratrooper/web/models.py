@@ -14,6 +14,39 @@ from pydantic import BaseModel, Field
 
 ResultKind = Literal["working", "typing", "log", "screenshot", "pr", "update", "done", "error"]
 
+# kinds the web service persists on its own authority (no ResultMessage behind them)
+SYSTEM_KINDS = ("job", "published")
+
+
+class EventPolicy(BaseModel):
+    """Per-kind event behavior — the one row that used to be five scattered
+    conditionals (relay ephemerality/terminality, push text, job context)."""
+
+    ephemeral: bool = False  # sockets only: never persisted, never replayed
+    persist: bool = True
+    push_text: str | None = None  # notification body; None -> kind never pushes
+    terminal: bool = False  # ends the job: relay releases the thread's batch
+    context: Literal["text", "pr_ref", "skip"] = "text"  # job-context projection
+
+
+EVENT_POLICY: dict[str, EventPolicy] = {
+    "working": EventPolicy(ephemeral=True, persist=False, context="skip"),
+    "typing": EventPolicy(ephemeral=True, persist=False, context="skip"),
+    "log": EventPolicy(),
+    "update": EventPolicy(),
+    # a screenshot body is a multi-MB base64 data URI — it must never be pasted
+    # into the agent prompt as "context"
+    "screenshot": EventPolicy(context="skip"),
+    "pr": EventPolicy(
+        push_text="Your pin is ready — tap to review and publish 🪂", context="pr_ref"
+    ),
+    "done": EventPolicy(push_text="Paratrooper finished your update.", terminal=True),
+    "error": EventPolicy(push_text="Paratrooper hit a problem with your update.", terminal=True),
+    # system rows: the enqueue marker is bookkeeping, not chat content
+    "job": EventPolicy(context="skip"),
+    "published": EventPolicy(),
+}
+
 
 class JobMessage(BaseModel):
     """web -> worker (Key Value queue). Attachments are inbox keys, not blobs."""
@@ -37,15 +70,19 @@ class ResultMessage(BaseModel):
     payload: Any = None
 
 
-class ThreadMessage(BaseModel):
-    """One persisted chat message (the PWA's history unit)."""
+class ThreadEvent(BaseModel):
+    """THE canonical chat event: what gets persisted, what rides the socket
+    (live and replay, identical frames), what the client stores. A worker
+    ``ResultMessage`` maps into this exactly once, in the web relay — nothing
+    downstream sees worker wire types. ``payload`` is any JSON value; user
+    message text is a plain string payload."""
 
     thread_id: str
     role: Literal["user", "agent", "system"]
-    body: str = ""
+    kind: str | None = None  # ResultKind or system kind; None for user messages
+    payload: Any = None
     attachments: list[str] = Field(default_factory=list)
-    ts: str  # ISO-8601
-    kind: str | None = None  # for agent messages: log|screenshot|pr|update|done|error
+    ts: str  # ISO-8601, server clock
 
 
 class UploadResponse(BaseModel):

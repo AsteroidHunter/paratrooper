@@ -12,6 +12,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+from .models import EVENT_POLICY
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,9 +59,6 @@ def send_push(subscription: dict, payload: str, cfg: VapidConfig) -> bool:
 
 
 def notification_text(kind: str) -> str | None:
-    """Short body for a terminal result; None for non-notifying kinds."""
-    return {
-        "pr": "Your pin is ready — tap to review and publish 🪂",
-        "done": "Paratrooper finished your update.",
-        "error": "Paratrooper hit a problem with your update.",
-    }.get(kind)
+    """Short push body per the kind's policy; None for non-notifying kinds."""
+    policy = EVENT_POLICY.get(kind)
+    return policy.push_text if policy else None

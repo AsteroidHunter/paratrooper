@@ -4,7 +4,6 @@ publish parsing, and the FastAPI routes (with injected state, no Redis)."""
 from __future__ import annotations
 
 import asyncio
-import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +14,7 @@ from paratrooper.web.app import AppState, create_app
 from paratrooper.web.auth import verify_token
 from paratrooper.web.batching import DEFAULT_WINDOW
 from paratrooper.web.inbox import DiskInbox, RedisInbox, new_key
-from paratrooper.web.models import ThreadMessage
+from paratrooper.web.models import ThreadEvent
 from paratrooper.web.publish import (
     PublishError,
     owner_repo_from_remote,
@@ -38,9 +37,9 @@ def test_verify_token(monkeypatch):
 def test_thread_store_roundtrip(tmp_path):
     store = ThreadStore(tmp_path / "t.sqlite")
 
-    def msg(thread, role, body, kind=None):
-        return ThreadMessage(
-            thread_id=thread, role=role, body=body, ts="2026-06-30T00:00:00Z", kind=kind
+    def msg(thread, role, payload, kind=None):
+        return ThreadEvent(
+            thread_id=thread, role=role, payload=payload, ts="2026-06-30T00:00:00Z", kind=kind
         )
 
     s1 = store.add_message(msg("d", "user", "hi"))
@@ -48,11 +47,11 @@ def test_thread_store_roundtrip(tmp_path):
     store.add_message(msg("other", "user", "x"))
     # catch-up since seq
     rows = store.messages("d", since_seq=s1)
-    assert [m.body for _, m in rows] == ["hello"]
+    assert [m.payload for _, m in rows] == ["hello"]
     # full thread
     assert len(store.messages("d")) == 2
     # recent for job context
-    assert [m.body for m in store.recent("d", n=10)] == ["hi", "hello"]
+    assert [m.payload for m in store.recent("d", n=10)] == ["hi", "hello"]
 
 
 # --- batching (4.3b) ----------------------------------------------------------
@@ -310,13 +309,13 @@ def test_upload_and_send_flow(client):
 
     # the user message was persisted and is fetchable
     rows = client.get("/api/thread/d", headers=auth).json()["messages"]
-    assert rows[-1]["role"] == "user" and rows[-1]["body"] == "add it"
+    assert rows[-1]["role"] == "user" and rows[-1]["payload"] == "add it"
 
 
 def _seed(store, thread_id, n, prefix="m"):
     return [
-        store.add_message(ThreadMessage(
-            thread_id=thread_id, role="user", body=f"{prefix}{i}",
+        store.add_message(ThreadEvent(
+            thread_id=thread_id, role="user", payload=f"{prefix}{i}",
             ts="2026-07-07T00:00:00+00:00",
         ))
         for i in range(n)
@@ -329,11 +328,11 @@ def test_messages_page_paginates_backwards(tmp_path):
     seqs = _seed(store, "d", 10)
 
     newest = store.messages_page("d", limit=4)
-    assert [m.body for _, m in newest] == ["m6", "m7", "m8", "m9"]  # oldest-first
+    assert [m.payload for _, m in newest] == ["m6", "m7", "m8", "m9"]  # oldest-first
     older = store.messages_page("d", before_seq=newest[0][0], limit=4)
-    assert [m.body for _, m in older] == ["m2", "m3", "m4", "m5"]
+    assert [m.payload for _, m in older] == ["m2", "m3", "m4", "m5"]
     first = store.messages_page("d", before_seq=older[0][0], limit=4)
-    assert [m.body for _, m in first] == ["m0", "m1"]
+    assert [m.payload for _, m in first] == ["m0", "m1"]
     assert store.messages_page("d", before_seq=seqs[0]) == []  # top reached
 
 
@@ -346,12 +345,12 @@ def test_history_route_and_cursor_stability(client):
     page = client.get(
         "/api/history/d", headers=auth, params={"before": seqs[3], "limit": 2}
     ).json()["messages"]
-    assert [m["body"] for m in page] == ["m1", "m2"]
+    assert [m["payload"] for m in page] == ["m1", "m2"]
 
     # live rows arriving after a page is cut don't disturb either cursor:
     # the same ?before page is identical, and ?since still yields only the new row
-    new_seq = store.add_message(ThreadMessage(
-        thread_id="d", role="agent", body="fresh", ts="2026-07-07T00:00:01+00:00", kind="done",
+    new_seq = store.add_message(ThreadEvent(
+        thread_id="d", role="agent", payload="fresh", ts="2026-07-07T00:00:01+00:00", kind="done",
     ))
     again = client.get(
         "/api/history/d", headers=auth, params={"before": seqs[3], "limit": 2}
@@ -366,9 +365,9 @@ def test_ws_fresh_login_gets_bounded_window(client):
     _seed(store, "d", 60)
     with client.websocket_connect("/ws?token=tok&thread=d&since=0") as sock:
         first = sock.receive_json()
-        assert first["body"] == "m10"  # 60 rows, window of 50 -> starts at m10
+        assert first["payload"] == "m10"  # 60 rows, window of 50 -> starts at m10
         for i in range(11, 60):
-            assert sock.receive_json()["body"] == f"m{i}"
+            assert sock.receive_json()["payload"] == f"m{i}"
 
 
 def _png_bytes(size=(640, 480), color=(200, 60, 60)) -> bytes:
@@ -602,9 +601,9 @@ def test_unprocessed_user_messages(tmp_path):
     """Messages after the last job marker are the ones a restart swallowed."""
     store = ThreadStore(tmp_path / "t.sqlite")
 
-    def add(role, body, kind=None, thread="d"):
-        return store.add_message(ThreadMessage(
-            thread_id=thread, role=role, body=body, ts="2026-07-06T00:00:00Z", kind=kind,
+    def add(role, payload, kind=None, thread="d"):
+        return store.add_message(ThreadEvent(
+            thread_id=thread, role=role, payload=payload, ts="2026-07-06T00:00:00Z", kind=kind,
         ))
 
     add("user", "covered msg")
@@ -614,7 +613,7 @@ def test_unprocessed_user_messages(tmp_path):
     add("user", "swallowed two")
     add("user", "other thread msg", thread="e")  # no marker in e at all
     got = store.unprocessed_user_messages()
-    assert [(t, m.body) for t, m in got] == [
+    assert [(t, m.payload) for t, m in got] == [
         ("d", "swallowed one"), ("d", "swallowed two"), ("e", "other thread msg"),
     ]
 
@@ -623,8 +622,8 @@ def test_recover_unprocessed_feeds_coordinator(tmp_path):
     from paratrooper.web.app import recover_unprocessed
 
     store = ThreadStore(tmp_path / "t.sqlite")
-    store.add_message(ThreadMessage(
-        thread_id="d", role="user", body="lost msg", ts="2026-07-06T00:00:00Z",
+    store.add_message(ThreadEvent(
+        thread_id="d", role="user", payload="lost msg", ts="2026-07-06T00:00:00Z",
     ))
     coord = _FakeCoordinator()
     state = AppState(
@@ -802,22 +801,89 @@ def test_publish_success_persists_confirmation(client, monkeypatch):
                     json={"thread_id": "d", "pr": "7"})
     assert r.json() == {"merged": True, "sha": "abc123"}
     rows = client.get("/api/thread/d", headers=auth).json()["messages"]
-    assert rows[-1]["kind"] == "published" and "PR #7" in rows[-1]["body"]
+    assert rows[-1]["kind"] == "published" and "PR #7" in rows[-1]["payload"]
+
+
+# --- canonical ThreadEvent: replay must equal the live frame (phase 2) ---------
+
+def test_thread_event_roundtrip_replay_equals_live(tmp_path):
+    """The 'works live, breaks on replay' bug class: persist the broadcast
+    event, replay it, and the frame must be identical — for every payload
+    shape the worker emits plus user text."""
+    from paratrooper.web.app import _to_event
+    from paratrooper.web.models import ResultMessage
+
+    store = ThreadStore(tmp_path / "t.sqlite")
+    results = [
+        ResultMessage(job_id="j", kind="done", payload="all set"),
+        ResultMessage(job_id="j", kind="update", payload="on it"),
+        ResultMessage(job_id="j", kind="screenshot", payload="data:image/png;base64,AAAA"),
+        ResultMessage(job_id="j", kind="pr",
+                      payload={"branch": "paratrooper/x", "url": "https://github.com/o/r/pull/9"}),
+        ResultMessage(job_id="j", kind="done", payload=None),
+    ]
+    events = [_to_event("d", r) for r in results]
+    events.append(ThreadEvent(  # user text is a plain string payload
+        thread_id="d", role="user", payload="hi there", ts="2026-07-07T00:00:00+00:00",
+    ))
+    for event in events:
+        seq = store.add_message(event)
+        live = {"seq": seq, **event.model_dump()}
+        [(rseq, replayed)] = store.messages("d", since_seq=seq - 1)
+        assert {"seq": rseq, **replayed.model_dump()} == live
+
+
+def test_migration_backfills_payload_and_drops_body(tmp_path):
+    """An old-schema DB (body column, no payload) must come out of ThreadStore
+    boot migrated: payload backfilled for every row, JSON-in-body pr rows
+    parsed, plain text kept verbatim, body column gone."""
+    import sqlite3
+
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE messages (
+            seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id   TEXT NOT NULL,
+            role        TEXT NOT NULL,
+            body        TEXT NOT NULL DEFAULT '',
+            attachments TEXT NOT NULL DEFAULT '[]',
+            ts          TEXT NOT NULL,
+            kind        TEXT
+        );
+        CREATE INDEX idx_messages_thread ON messages(thread_id, seq);
+    """)
+    rows = [
+        ("d", "user", "hi", "[]", "2026-07-01T00:00:00Z", None),
+        ("d", "user", "123", "[]", "2026-07-01T00:00:01Z", None),  # numeric text stays text
+        ("d", "agent", '{"branch": "paratrooper/x", "url": "https://github.com/o/r/pull/9"}',
+         "[]", "2026-07-01T00:00:02Z", "pr"),
+        ("d", "agent", "", "[]", "2026-07-01T00:00:03Z", "pr"),  # pre-6da5b3c empty pr row
+        ("d", "system", "job-abc", "[]", "2026-07-01T00:00:04Z", "job"),
+    ]
+    conn.executemany(
+        "INSERT INTO messages(thread_id, role, body, attachments, ts, kind) VALUES (?,?,?,?,?,?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+    store = ThreadStore(path)  # boot runs the migration
+    cols = {r[1] for r in store._conn.execute("PRAGMA table_info(messages)")}
+    assert "payload" in cols and "body" not in cols
+    got = [m.payload for _, m in store.messages("d")]
+    assert got[0] == "hi"
+    assert got[1] == "123"  # NOT the number 123: non-pr rows are never JSON-parsed
+    assert got[2] == {"branch": "paratrooper/x", "url": "https://github.com/o/r/pull/9"}
+    assert got[3] == ""
+    assert got[4] == "job-abc"
+    # idempotent: reopening a migrated DB is a no-op
+    store.close()
+    again = ThreadStore(path)
+    assert [m.payload for _, m in again.messages("d")] == got
 
 
 # --- pr ref must survive persistence + empty-ref publish (the replay bug) ------
-
-def test_result_body_serializes_structured_payloads():
-    from paratrooper.web.app import result_body
-    from paratrooper.web.models import ResultMessage
-
-    assert result_body(ResultMessage(job_id="j", kind="done", payload="all set")) == "all set"
-    assert result_body(ResultMessage(job_id="j", kind="done")) == ""
-    pr = ResultMessage(
-        job_id="j", kind="pr",
-        payload={"branch": "paratrooper/x", "url": "https://github.com/o/r/pull/9"},
-    )
-    assert json.loads(result_body(pr))["url"] == "https://github.com/o/r/pull/9"
 
 
 def test_find_open_pr_resolves_single_prefixed_pr(monkeypatch):
@@ -882,7 +948,7 @@ def test_publish_empty_ref_resolves_open_pr(client, monkeypatch):
     assert r.status_code == 200 and r.json()["merged"] is True
     assert seen["prefix"] == "paratrooper"
     rows = client.get("/api/thread/d", headers=auth).json()["messages"]
-    assert "PR #2" in rows[-1]["body"]
+    assert "PR #2" in rows[-1]["payload"]
 
 
 def test_ws_token_redacted_from_uvicorn_logs(client):
@@ -918,3 +984,80 @@ def test_publish_empty_ref_with_no_open_pr_is_409(client, monkeypatch):
     r = client.post("/api/publish", headers=auth, json={"thread_id": "d", "pr": ""})
     assert r.status_code == 409
     assert "no open PR" in r.json()["detail"]
+
+
+# --- event policy + job-context projection (chat-event-refactor phase 1) -------
+
+def test_event_policy_covers_every_kind():
+    """Every ResultKind and system kind must have a policy row — a new kind
+    added without one should fail here, not misbehave in the relay."""
+    from typing import get_args
+
+    from paratrooper.web.models import EVENT_POLICY, SYSTEM_KINDS, ResultKind
+
+    for kind in [*get_args(ResultKind), *SYSTEM_KINDS]:
+        assert kind in EVENT_POLICY, f"kind {kind!r} has no policy row"
+    for kind, p in EVENT_POLICY.items():
+        assert not (p.ephemeral and p.persist), f"{kind}: ephemeral rows must not persist"
+    assert EVENT_POLICY["done"].terminal and EVENT_POLICY["error"].terminal
+    assert not EVENT_POLICY["update"].terminal
+
+
+def test_job_context_projection_skips_blobs_and_markers(tmp_path):
+    """The prompt-blob defect: raw bodies pasted a multi-MB screenshot data URI
+    and job-marker hex into the agent prompt as 'context'. The projection must
+    keep text, compress pr rows to a short ref, and drop the rest."""
+    from paratrooper.web.app import _enqueue_job
+
+    store = ThreadStore(tmp_path / "t.sqlite")
+
+    def add(role, payload, kind=None):
+        store.add_message(ThreadEvent(
+            thread_id="d", role=role, payload=payload, ts="2026-07-07T00:00:00Z", kind=kind,
+        ))
+
+    add("user", "put my desert photo up")
+    add("system", "a1b2c3d4e5", kind="job")
+    add("agent", "on it — resizing now", kind="update")
+    add("agent", "data:image/png;base64," + "A" * 4096, kind="screenshot")
+    add("agent", {"branch": "paratrooper/desert",
+                  "url": "https://github.com/o/r/pull/9"}, kind="pr")
+    add("agent", "done — PR is up", kind="done")
+
+    class _RecordingQueue:
+        def __init__(self):
+            self.jobs = []
+
+        async def enqueue(self, job):
+            self.jobs.append(job)
+
+    queue = _RecordingQueue()
+    state = AppState(config=None, store=store, queue=queue,
+                     coordinator=_FakeCoordinator(), inbox=DiskInbox(tmp_path / "ib"))
+    _run(_enqueue_job(state, "d", "job-xyz", "next request", []))
+
+    [job] = queue.jobs
+    assert job.context == [
+        "user: put my desert photo up",
+        "agent: on it — resizing now",
+        "agent: opened PR #9",
+        "agent: done — PR is up",
+    ]
+    joined = "\n".join(job.context)
+    assert "data:" not in joined and "a1b2c3d4e5" not in joined
+
+
+def test_pr_context_ref_survives_bad_payloads():
+    """Backfilled pr rows can hold "" (pre-6da5b3c) or url-less dicts — the ref
+    line must degrade gracefully, never crash the enqueue path."""
+    from paratrooper.web.app import context_line
+
+    def pr_row(payload):
+        return ThreadEvent(thread_id="d", role="agent", payload=payload,
+                           ts="2026-07-07T00:00:00Z", kind="pr")
+
+    assert context_line(pr_row({"url": "https://github.com/o/r/pull/12"})) == "agent: opened PR #12"
+    assert context_line(pr_row("https://github.com/o/r/pull/12")) == "agent: opened PR #12"
+    assert context_line(pr_row("")) == "agent: opened a PR"
+    assert context_line(pr_row({"branch": "x"})) == "agent: opened a PR"
+    assert context_line(pr_row(None)) == "agent: opened a PR"
