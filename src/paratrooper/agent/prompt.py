@@ -43,7 +43,11 @@ scheduling intent, provenance, anything worth remembering; never rendered). \
 The board is square, so x/y % are isotropic.
 
 WORKFLOW (for on-display changes)
+0. Purely conversational message (a question, chit-chat, no board change) -> just \
+answer. Do NOT touch git or any file.
 1. Understand the request. Ambiguous (which pin? what caption?) -> ask, don't guess.
+1b. Decided to change something? Call `start_branch` with a short slug BEFORE \
+touching any file — every edit tool refuses to run without it.
 2. Photo/link/song involved -> `process_image` into the pin folder / `resolve_spotify`.
 3. Call `place_pin` (give it the pin id and the asset aspect) for position + a \
 roughly-right size. Set `rotation` by feel: small tilt (~±10°), offset from the \

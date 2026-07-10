@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -129,10 +130,12 @@ async def _result_relay(state: AppState) -> None:
                 thread_id = channel.rsplit(":", 1)[-1]
                 result = ResultMessage.model_validate_json(message["data"])
                 body = result.payload if isinstance(result.payload, str) else ""
-                state.store.add_message(ThreadMessage(
+                seq = state.store.add_message(ThreadMessage(
                     thread_id=thread_id, role="agent", body=body, ts=_now(), kind=result.kind,
                 ))
-                await _send_to_sockets(state, thread_id, result.model_dump())
+                # carry seq so clients advance their catch-up cursor on live
+                # pushes too (otherwise reconnect replays from a stale point)
+                await _send_to_sockets(state, thread_id, {"seq": seq, **result.model_dump()})
                 await _maybe_push(state, result)
                 if result.kind in ("done", "error"):
                     # job_finished first: it re-arms the timer for any buffered
@@ -189,7 +192,9 @@ def create_app(injected: AppState | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health() -> dict:
-        return {"ok": True}
+        # Render injects RENDER_GIT_COMMIT; 'dev' locally. Ground truth for
+        # "which code is actually serving" — no more guessing.
+        return {"ok": True, "version": os.environ.get("RENDER_GIT_COMMIT", "dev")[:7]}
 
     @app.post("/api/upload", response_model=UploadResponse, dependencies=[Depends(require_token)])
     async def upload(file: UploadFile) -> UploadResponse:
@@ -205,9 +210,9 @@ def create_app(injected: AppState | None = None) -> FastAPI:
             thread_id=req.thread_id, role="user", body=req.text,
             attachments=req.attachments, ts=_now(),
         )
-        await asyncio.to_thread(state.store.add_message, msg)
+        seq = await asyncio.to_thread(state.store.add_message, msg)
         status = await state.coordinator.handle_message(req.thread_id, req.text, req.attachments)
-        return {"status": status}
+        return {"status": status, "seq": seq}  # seq: client advances its catch-up cursor
 
     @app.get("/api/thread/{thread_id}", dependencies=[Depends(require_token)])
     async def thread(thread_id: str, since: int = 0) -> dict:

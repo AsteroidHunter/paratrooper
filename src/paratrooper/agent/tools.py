@@ -35,7 +35,10 @@ class ToolContext:
     config: Config
     repo: SiteRepo
     changelog: Changelog
-    branch: str  # the feature branch this request works on (set by the worker)
+    # The feature branch, created lazily by the start_branch tool ONLY when the
+    # agent decides to change the board — a purely conversational message never
+    # touches git. Mutating tools require it.
+    branch: str | None = None
     spotify_creds: tuple[str, str] | None = None
     now: Any = None  # callable -> ISO timestamp; injectable for tests
     # artifacts captured as the tools run, so the worker can relay them to the
@@ -54,6 +57,30 @@ def _err(message: str) -> dict:
 
 def build_tool_server(ctx: ToolContext):
     """Construct the in-process MCP server + the ``allowed_tools`` names."""
+
+    def _require_branch() -> str | None:
+        """Denial message for mutating tools used before start_branch (guards
+        against edits landing on — and being reset with — the local default
+        branch)."""
+        if ctx.branch is None:
+            return "no feature branch yet — call start_branch first (never edit before it)"
+        return None
+
+    @tool("start_branch", "Create the fresh feature branch for this change (fetches and "
+          "forks from the latest default branch). Call BEFORE editing any file/pin. "
+          "Args: slug (short kebab-case description, e.g. 'twen-new-photo').",
+          {"slug": str})
+    async def start_branch_tool(args: dict) -> dict:
+        if ctx.branch is not None:
+            return _ok({"branch": ctx.branch, "note": "already started"})
+        try:
+            branch = await anyio.to_thread.run_sync(
+                ctx.repo.prepare_branch, pins.slugify(args["slug"])
+            )
+            ctx.branch = branch
+            return _ok({"branch": branch})
+        except Exception as exc:
+            return _err(f"start_branch failed: {exc}")
 
     @tool("place_pin", "Compute non-overlapping {position,size} for a pin. Args: pin_id, "
           "aspect (asset width/height), optional rotation, optional sample(bool).",
@@ -116,6 +143,9 @@ def build_tool_server(ctx: ToolContext):
           "stage ('on-display' default | 'for-later').",
           {"inbox_key": str, "pin_id": str, "opened": bool, "stage": str})
     async def process_image_tool(args: dict) -> dict:
+        if (deny := _require_branch()) is not None:
+            return _err(deny)
+
         def _run() -> dict:
             src = ctx.config.inbox / args["inbox_key"]
             asset = OPENED_ASSET if args.get("opened") else PREVIEW_ASSET
@@ -160,6 +190,9 @@ def build_tool_server(ctx: ToolContext):
           "Args: pin_id, to ('on-display'|'off-display'|'for-later'). Source is "
           "auto-detected.", {"pin_id": str, "to": str})
     async def move_pin_tool(args: dict) -> dict:
+        if (deny := _require_branch()) is not None:
+            return _err(deny)
+
         def _run() -> dict:
             pin_id, to = args["pin_id"], args["to"]
             dst_dir = _stage_dir(to)
@@ -183,6 +216,8 @@ def build_tool_server(ctx: ToolContext):
 
     @tool("git_commit", "Stage the worktree and commit. Args: message.", {"message": str})
     async def git_commit_tool(args: dict) -> dict:
+        if (deny := _require_branch()) is not None:
+            return _err(deny)
         try:
             sha = await anyio.to_thread.run_sync(ctx.repo.commit_all, args["message"])
             return _ok({"sha": sha})
@@ -191,6 +226,8 @@ def build_tool_server(ctx: ToolContext):
 
     @tool("git_push", "Push the current feature branch to origin (never main). No args.", {})
     async def git_push_tool(args: dict) -> dict:
+        if (deny := _require_branch()) is not None:
+            return _err(deny)
         try:
             await anyio.to_thread.run_sync(ctx.repo.push_branch, ctx.branch)
             return _ok({"pushed": ctx.branch})
@@ -200,6 +237,8 @@ def build_tool_server(ctx: ToolContext):
     @tool("open_pr", "Open a PR from the feature branch into the default branch. "
           "Args: title, optional body.", {"title": str, "body": str})
     async def open_pr_tool(args: dict) -> dict:
+        if (deny := _require_branch()) is not None:
+            return _err(deny)
         try:
             url = await anyio.to_thread.run_sync(
                 ctx.repo.open_pr, ctx.branch, args["title"], args.get("body", "")
@@ -245,6 +284,7 @@ def build_tool_server(ctx: ToolContext):
         return _ok({"recorded": written})
 
     handlers = [
+        start_branch_tool,
         place_pin_tool,
         check_overlaps_tool,
         process_image_tool,
