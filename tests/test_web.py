@@ -309,6 +309,49 @@ def test_upload_and_send_flow(client):
     assert rows[-1]["role"] == "user" and rows[-1]["body"] == "add it"
 
 
+# --- image contracts: each Docker image must import without the other's deps ---
+
+def _import_in_subprocess(blocked_module: str, import_target: str) -> None:
+    """Import ``import_target`` in a fresh interpreter with ``blocked_module``
+    made unimportable (sys.modules[name] = None), simulating the Docker image
+    where that dependency isn't installed."""
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        f"import sys; sys.modules[{blocked_module!r}] = None; "
+        f"import {import_target}; print('ok')"
+    )
+    src = str((__import__('pathlib').Path(__file__).parent.parent / "src").resolve())
+    env = {**os.environ, "PYTHONPATH": src}
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, f"{import_target} needs {blocked_module}:\n{proc.stderr[-1500:]}"
+
+
+def test_web_app_imports_without_agent_sdk():
+    """The web image installs .[web] only — importing the app must not pull the
+    Agent SDK (this exact failure crash-looped the deployed web service)."""
+    _import_in_subprocess("claude_agent_sdk", "paratrooper.web.app")
+
+
+def test_worker_imports_without_fastapi():
+    """The worker image installs .[agent] only — its entrypoint must not pull
+    FastAPI (the mirror contract)."""
+    _import_in_subprocess("fastapi", "paratrooper.web.worker_runner")
+
+
+def test_connect_keeps_blocking_reads(monkeypatch):
+    """redis-py 8 defaults socket_timeout to 5s, which kills BRPOP/pub-sub —
+    connect() must pin it back to None (block forever)."""
+    from paratrooper.web.queue import connect
+
+    client = connect("redis://localhost:6399/0")  # lazy: no actual connection made
+    kwargs = client.connection_pool.connection_kwargs
+    assert kwargs["socket_timeout"] is None
+    assert kwargs["socket_connect_timeout"] == 5.0
+
+
 # --- render worker wake/sleep --------------------------------------------------
 
 def test_render_control_from_env(monkeypatch):
