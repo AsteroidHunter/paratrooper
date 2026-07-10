@@ -20,6 +20,7 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import (
     Depends,
@@ -42,11 +43,12 @@ from .batching import ThreadCoordinator
 from .db import ThreadStore
 from .inbox import InboxStore, RedisInbox, new_key
 from .models import (
+    EVENT_POLICY,
     JobMessage,
     PublishRequest,
     ResultMessage,
     SendRequest,
-    ThreadMessage,
+    ThreadEvent,
     UploadResponse,
 )
 from .publish import (
@@ -91,15 +93,40 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def result_body(result: ResultMessage) -> str:
-    """Serialize a result payload for thread persistence. Structured payloads
-    (pr's ``{branch, url}``) are stored as JSON — dropping them to ``""`` once
-    cost every replayed Publish button its PR ref."""
-    if isinstance(result.payload, str):
-        return result.payload
-    if result.payload is None:
-        return ""
-    return json.dumps(result.payload)
+def _to_event(thread_id: str, result: ResultMessage) -> ThreadEvent:
+    """THE one seam where the worker wire type becomes a chat event. The event
+    is persisted verbatim and broadcast identically live and on replay; nothing
+    downstream of here sees a ResultMessage."""
+    return ThreadEvent(
+        thread_id=thread_id, role="agent", kind=result.kind,
+        payload=result.payload, ts=_now(),
+    )
+
+
+def _pr_ref(payload: Any) -> str:
+    """Short PR reference from a pr event payload ({branch, url} dict; rows
+    backfilled from odd legacy bodies may hold a bare url string or nothing)."""
+    url = ""
+    if isinstance(payload, dict):
+        url = str(payload.get("url") or "")
+    elif isinstance(payload, str):
+        url = payload
+    m = re.search(r"/pull/(\d+)", url)
+    return f"opened PR #{m.group(1)}" if m else "opened a PR"
+
+
+def context_line(event: ThreadEvent) -> str | None:
+    """Project one persisted event into a job-context line per its kind's policy;
+    None drops the row. The prompt is a projection of the thread, not the thread
+    itself: a screenshot's data-URI payload and job markers must never reach it."""
+    policy = EVENT_POLICY.get(event.kind or "")
+    rule = policy.context if policy else "text"  # user rows carry no kind
+    if rule == "skip":
+        return None
+    if rule == "pr_ref":
+        return f"{event.role}: {_pr_ref(event.payload)}"
+    text = event.payload if isinstance(event.payload, str) else ""
+    return f"{event.role}: {text}" if text else None
 
 
 @dataclass
@@ -117,15 +144,18 @@ class AppState:
 async def _enqueue_job(
     state: AppState, thread_id: str, job_id: str, text: str, attachments: list[str]
 ) -> None:
-    context = [f"{m.role}: {m.body}" for m in state.store.recent(thread_id, n=10) if m.body]
+    context = [
+        line for m in state.store.recent(thread_id, n=10)
+        if (line := context_line(m)) is not None
+    ]
     job = JobMessage(
         job_id=job_id, thread_id=thread_id, text=text, attachments=attachments, context=context
     )
     await state.queue.enqueue(job)
     # durable marker: every user message at/below this seq is covered by a job,
     # so boot-recovery knows exactly what a restart swallowed
-    await asyncio.to_thread(state.store.add_message, ThreadMessage(
-        thread_id=thread_id, role="system", body=job_id, ts=_now(), kind="job",
+    await asyncio.to_thread(state.store.add_message, ThreadEvent(
+        thread_id=thread_id, role="system", payload=job_id, ts=_now(), kind="job",
     ))
     if state.render:  # wake the worker; the job waits durably in the list meanwhile
         await state.render.resume_worker()
@@ -136,7 +166,7 @@ async def recover_unprocessed(state: AppState) -> int:
     enqueued) back into the coordinator. Returns how many were recovered."""
     rows = await asyncio.to_thread(state.store.unprocessed_user_messages)
     for thread_id, m in rows:
-        await state.coordinator.handle_message(thread_id, m.body, m.attachments)
+        await state.coordinator.handle_message(thread_id, str(m.payload or ""), m.attachments)
     if rows:
         logger.info("recovered %d unprocessed message(s) after restart", len(rows))
     return len(rows)
@@ -160,10 +190,10 @@ async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
             state.sockets.get(thread_id, set()).discard(ws)
 
 
-async def _maybe_push(state: AppState, result: ResultMessage) -> None:
-    """Wake a closed PWA on a terminal result (no-op if VAPID isn't configured)."""
+async def _maybe_push(state: AppState, kind: str) -> None:
+    """Wake a closed PWA on a notifying result (no-op if VAPID isn't configured)."""
     cfg = push.config()
-    text = push.notification_text(result.kind)
+    text = push.notification_text(kind)
     if cfg is None or text is None:
         return
 
@@ -197,18 +227,17 @@ async def _result_relay(state: AppState) -> None:
                     # kill the relay task — skip it, keep relaying
                     logger.warning("relay: skipped unparseable result on %s", channel)
                     continue
-                if result.kind in ("working", "typing"):  # ephemeral: sockets only
-                    await _send_to_sockets(state, thread_id, result.model_dump())
+                policy = EVENT_POLICY[result.kind]
+                event = _to_event(thread_id, result)
+                if policy.ephemeral:  # sockets only: never persisted, never replayed
+                    await _send_to_sockets(state, thread_id, event.model_dump())
                     continue
-                seq = state.store.add_message(ThreadMessage(
-                    thread_id=thread_id, role="agent", body=result_body(result),
-                    ts=_now(), kind=result.kind,
-                ))
-                # carry seq so clients advance their catch-up cursor on live
-                # pushes too (otherwise reconnect replays from a stale point)
-                await _send_to_sockets(state, thread_id, {"seq": seq, **result.model_dump()})
-                await _maybe_push(state, result)
-                if result.kind in ("done", "error"):
+                seq = state.store.add_message(event)  # persisted verbatim
+                # broadcast the STORED event (+seq so clients advance their
+                # catch-up cursor on live pushes) — replay re-sends this frame
+                await _send_to_sockets(state, thread_id, {"seq": seq, **event.model_dump()})
+                await _maybe_push(state, result.kind)
+                if policy.terminal:
                     # job_finished first: it re-arms the timer for any buffered
                     # batch, so has_pending() correctly blocks the suspend then
                     await state.coordinator.job_finished(thread_id)
@@ -296,8 +325,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
     @app.post("/api/send", dependencies=[Depends(require_token)])
     async def send(req: SendRequest) -> dict:
         state = st()
-        msg = ThreadMessage(
-            thread_id=req.thread_id, role="user", body=req.text,
+        msg = ThreadEvent(
+            thread_id=req.thread_id, role="user", payload=req.text,
             attachments=req.attachments, ts=_now(),
         )
         seq = await asyncio.to_thread(state.store.add_message, msg)
@@ -328,8 +357,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
             if req.pr.strip():
                 number = parse_pr_number(req.pr)
             else:
-                # pr rows persisted before result_body serialized payloads
-                # replay with body="" — resolve the one open agent PR instead
+                # pr rows persisted before 6da5b3c carry an empty payload —
+                # resolve the one open agent PR instead of 409ing on it
                 found = await asyncio.to_thread(
                     find_open_pr, owner, repo,
                     token=merge_token(), branch_prefix=state.config.branch_prefix,
@@ -341,9 +370,9 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         except PublishError as exc:
             # surface WHY (already merged, conflicts, bad PR ref) instead of a 500
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        published = ThreadMessage(
+        published = ThreadEvent(
             thread_id=req.thread_id, role="system",
-            body=f"published PR #{number}", ts=_now(), kind="published",
+            payload=f"published PR #{number}", ts=_now(), kind="published",
         )
         seq = await asyncio.to_thread(state.store.add_message, published)
         # live confirmation on the phone, not just a row in history

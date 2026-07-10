@@ -133,13 +133,18 @@ html, body {
   touch-action: pan-y; /* leftward drags belong to the time-peek gesture */
 }
 
-/* swipe-to-peek: children track --peek (set by JS during the drag) and spring
-   back through the transition */
-.thread > * {
+/* each chat event renders inside one .evt wrapper; display:contents keeps its
+   rows/stamps direct flex items of the thread (layout-invisible grouping) */
+.evt { display: contents; }
+
+/* swipe-to-peek: visible thread pieces track --peek (set by JS during the
+   drag) and spring back through the transition. Targeted by class because .evt
+   wrappers generate no boxes for a `>` selector to catch. */
+.thread :where(.row, .stamp, .receipt, .typing, .empty) {
   transform: translateX(var(--peek, 0px));
   transition: transform 0.25s ease;
 }
-.thread.dragging > * { transition: none; }
+.thread.dragging :where(.row, .stamp, .receipt, .typing, .empty) { transition: none; }
 
 /* one full-width row per bubble; the timestamp sits just past the row's right
    edge, clipped by the thread until the pull slides it into view */

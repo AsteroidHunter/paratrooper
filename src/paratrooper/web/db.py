@@ -1,7 +1,8 @@
-"""Thread/message persistence (SQLite on the web service's persistent disk).
+"""Thread/event persistence (SQLite on the web service's persistent disk).
 
-One row per message — the PWA's history source, distinct from the agent's
-git-based memory. On reconnect the PWA fetches messages ``since`` its last-seen
+One row per ThreadEvent — the PWA's history source, distinct from the agent's
+git-based memory. The stored event is canonical: replay re-sends exactly what
+was broadcast live. On reconnect the PWA fetches events ``since`` its last-seen
 sequence number. Synchronous (stdlib sqlite3) behind a lock; async handlers call
 it via ``asyncio.to_thread``.
 """
@@ -13,17 +14,17 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from .models import ThreadMessage
+from .models import ThreadEvent
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     seq         INTEGER PRIMARY KEY AUTOINCREMENT,
     thread_id   TEXT NOT NULL,
     role        TEXT NOT NULL,
-    body        TEXT NOT NULL DEFAULT '',
+    kind        TEXT,
+    payload     TEXT NOT NULL DEFAULT 'null', -- JSON-encoded event payload
     attachments TEXT NOT NULL DEFAULT '[]',
-    ts          TEXT NOT NULL,
-    kind        TEXT
+    ts          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, seq);
 
@@ -41,6 +42,17 @@ CREATE TABLE IF NOT EXISTS attachments (
 """
 
 
+def _event(r: sqlite3.Row) -> ThreadEvent:
+    return ThreadEvent(
+        thread_id=r["thread_id"],
+        role=r["role"],
+        kind=r["kind"],
+        payload=json.loads(r["payload"]) if r["payload"] is not None else None,
+        attachments=json.loads(r["attachments"]),
+        ts=r["ts"],
+    )
+
+
 class ThreadStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -51,56 +63,78 @@ class ThreadStore:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+            self._migrate_body_to_payload()
 
-    def add_message(self, msg: ThreadMessage) -> int:
-        """Persist a message; returns its sequence number."""
+    def _migrate_body_to_payload(self) -> None:
+        """One-time cut from the legacy ``body`` TEXT column to JSON ``payload``:
+        add payload, backfill every row, drop body. Idempotent (column-presence
+        gated) and atomic (one explicit transaction), so a crash mid-way leaves
+        the old schema intact and the next boot retries."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(messages)")}
+        if "body" not in cols:
+            return  # fresh DB or already migrated
+        if sqlite3.sqlite_version_info < (3, 35, 0):  # DROP COLUMN needs 3.35
+            raise RuntimeError(
+                f"sqlite {sqlite3.sqlite_version} < 3.35 cannot drop the legacy "
+                "body column; refusing to run half-migrated"
+            )
+        self._conn.execute("BEGIN")
+        try:
+            if "payload" not in cols:
+                self._conn.execute("ALTER TABLE messages ADD COLUMN payload TEXT")
+            # pr rows persisted their {branch, url} payload as JSON text in body
+            # (6da5b3c); every other row is plain text and stays a string payload
+            rows = self._conn.execute(
+                "SELECT seq, kind, body FROM messages WHERE payload IS NULL"
+            ).fetchall()
+            for r in rows:
+                value = r["body"]
+                if r["kind"] == "pr" and value:
+                    try:
+                        value = json.loads(value)
+                    except json.JSONDecodeError:
+                        pass  # a bare url stays a string payload
+                self._conn.execute(
+                    "UPDATE messages SET payload=? WHERE seq=?",
+                    (json.dumps(value), r["seq"]),
+                )
+            self._conn.execute("ALTER TABLE messages DROP COLUMN body")
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    def add_message(self, event: ThreadEvent) -> int:
+        """Persist an event verbatim; returns its sequence number."""
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO messages(thread_id, role, body, attachments, ts, kind) "
+                "INSERT INTO messages(thread_id, role, kind, payload, attachments, ts) "
                 "VALUES (?,?,?,?,?,?)",
-                (msg.thread_id, msg.role, msg.body, json.dumps(msg.attachments), msg.ts, msg.kind),
+                (event.thread_id, event.role, event.kind, json.dumps(event.payload),
+                 json.dumps(event.attachments), event.ts),
             )
             self._conn.commit()
             return int(cur.lastrowid)
 
-    def _rows(self, sql: str, params: tuple) -> list[ThreadMessage]:
+    def _rows(self, sql: str, params: tuple) -> list[ThreadEvent]:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
-        return [
-            ThreadMessage(
-                thread_id=r["thread_id"],
-                role=r["role"],
-                body=r["body"],
-                attachments=json.loads(r["attachments"]),
-                ts=r["ts"],
-                kind=r["kind"],
-            )
-            for r in rows
-        ]
+        return [_event(r) for r in rows]
 
-    def messages(self, thread_id: str, *, since_seq: int = 0) -> list[tuple[int, ThreadMessage]]:
-        """All messages in a thread after ``since_seq`` (for reconnect catch-up),
+    def messages(self, thread_id: str, *, since_seq: int = 0) -> list[tuple[int, ThreadEvent]]:
+        """All events in a thread after ``since_seq`` (for reconnect catch-up),
         oldest-first, paired with their sequence numbers."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM messages WHERE thread_id=? AND seq>? ORDER BY seq",
                 (thread_id, since_seq),
             ).fetchall()
-        return [
-            (
-                r["seq"],
-                ThreadMessage(
-                    thread_id=r["thread_id"], role=r["role"], body=r["body"],
-                    attachments=json.loads(r["attachments"]), ts=r["ts"], kind=r["kind"],
-                ),
-            )
-            for r in rows
-        ]
+        return [(r["seq"], _event(r)) for r in rows]
 
     def messages_page(
         self, thread_id: str, *, before_seq: int | None = None, limit: int = 50
-    ) -> list[tuple[int, ThreadMessage]]:
-        """The ``limit`` messages immediately before ``before_seq`` (or the
+    ) -> list[tuple[int, ThreadEvent]]:
+        """The ``limit`` events immediately before ``before_seq`` (or the
         newest when None), oldest-first with seqs — the recent-first initial
         window and each pull-down-for-older page."""
         if before_seq is None:
@@ -113,27 +147,17 @@ class ThreadStore:
             params = (thread_id, before_seq, limit)
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
-        return [
-            (
-                r["seq"],
-                ThreadMessage(
-                    thread_id=r["thread_id"], role=r["role"], body=r["body"],
-                    attachments=json.loads(r["attachments"]), ts=r["ts"], kind=r["kind"],
-                ),
-            )
-            for r in rows
-        ]
+        return [(r["seq"], _event(r)) for r in rows]
 
-    def recent(self, thread_id: str, *, n: int = 10) -> list[ThreadMessage]:
-        """The last ``n`` messages (oldest-first) — used as job context."""
-        msgs = self._rows(
+    def recent(self, thread_id: str, *, n: int = 10) -> list[ThreadEvent]:
+        """The last ``n`` events (oldest-first) — used as job context."""
+        return self._rows(
             "SELECT * FROM (SELECT * FROM messages WHERE thread_id=? ORDER BY seq DESC LIMIT ?) "
             "ORDER BY seq",
             (thread_id, n),
         )
-        return msgs
 
-    def unprocessed_user_messages(self) -> list[tuple[str, ThreadMessage]]:
+    def unprocessed_user_messages(self) -> list[tuple[str, ThreadEvent]]:
         """User messages sent after the last enqueued job marker of their thread
         (role='system', kind='job' rows written at enqueue time). These are
         messages a web-service restart swallowed before they became a job —
@@ -151,16 +175,7 @@ class ThreadStore:
                 ORDER BY m.seq
                 """
             ).fetchall()
-        return [
-            (
-                r["thread_id"],
-                ThreadMessage(
-                    thread_id=r["thread_id"], role=r["role"], body=r["body"],
-                    attachments=json.loads(r["attachments"]), ts=r["ts"], kind=r["kind"],
-                ),
-            )
-            for r in rows
-        ]
+        return [(r["thread_id"], _event(r)) for r in rows]
 
     # --- attachment thumbnails (photo history survives the inbox TTL) ---
 
