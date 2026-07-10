@@ -101,14 +101,26 @@ def build_tool_server(ctx: ToolContext):
 
         return _ok(await anyio.to_thread.run_sync(_run))
 
+    def _stage_dir(stage: str):
+        dirs = {
+            "on-display": ctx.config.pins_dir,
+            "off-display": ctx.config.archive_dir,
+            "for-later": ctx.config.later_dir,
+        }
+        if stage not in dirs:
+            raise ValueError(f"unknown stage {stage!r} (use on-display|off-display|for-later)")
+        return dirs[stage]
+
     @tool("process_image", "Optimize a staged upload into a pin's preview.webp (or "
-          "opened.webp). Args: inbox_key, pin_id, optional opened(bool).",
-          {"inbox_key": str, "pin_id": str, "opened": bool})
+          "opened.webp). Args: inbox_key, pin_id, optional opened(bool), optional "
+          "stage ('on-display' default | 'for-later').",
+          {"inbox_key": str, "pin_id": str, "opened": bool, "stage": str})
     async def process_image_tool(args: dict) -> dict:
         def _run() -> dict:
             src = ctx.config.inbox / args["inbox_key"]
             asset = OPENED_ASSET if args.get("opened") else PREVIEW_ASSET
-            dest = pins.pin_folder(ctx.config.pins_dir, args["pin_id"]) / asset
+            stage_dir = _stage_dir(args.get("stage", "on-display"))
+            dest = pins.pin_folder(stage_dir, args["pin_id"]) / asset
             res = images.process_image(src, dest)
             return {
                 "asset": asset,
@@ -143,17 +155,31 @@ def build_tool_server(ctx: ToolContext):
         except Exception as exc:
             return _err(f"resolve_spotify failed: {exc}")
 
-    @tool("archive_pin", "Archive a pin (move its folder out of the board). Args: pin_id.",
-          {"pin_id": str})
-    async def archive_pin_tool(args: dict) -> dict:
+    @tool("move_pin", "Move a pin folder between stages. Archive = to='off-display'; "
+          "publish a staged pin = to='on-display' (then place_pin + update its JSON). "
+          "Args: pin_id, to ('on-display'|'off-display'|'for-later'). Source is "
+          "auto-detected.", {"pin_id": str, "to": str})
+    async def move_pin_tool(args: dict) -> dict:
         def _run() -> dict:
-            dst = pins.archive_pin(ctx.config.pins_dir, ctx.config.archive_dir, args["pin_id"])
-            return {"archived": args["pin_id"], "to": str(dst)}
+            pin_id, to = args["pin_id"], args["to"]
+            dst_dir = _stage_dir(to)
+            src_dir = next(
+                (d for s, d in (
+                    ("on-display", ctx.config.pins_dir),
+                    ("off-display", ctx.config.archive_dir),
+                    ("for-later", ctx.config.later_dir),
+                ) if d != dst_dir and pins.pin_folder(d, pin_id).is_dir()),
+                None,
+            )
+            if src_dir is None:
+                raise pins.PinError(f"pin '{pin_id}' not found in any other stage")
+            dst = pins.move_pin(src_dir, dst_dir, pin_id)
+            return {"moved": pin_id, "to": to, "path": str(dst)}
 
         try:
             return _ok(await anyio.to_thread.run_sync(_run))
         except Exception as exc:
-            return _err(f"archive_pin failed: {exc}")
+            return _err(f"move_pin failed: {exc}")
 
     @tool("git_commit", "Stage the worktree and commit. Args: message.", {"message": str})
     async def git_commit_tool(args: dict) -> dict:
@@ -223,7 +249,7 @@ def build_tool_server(ctx: ToolContext):
         check_overlaps_tool,
         process_image_tool,
         resolve_spotify_tool,
-        archive_pin_tool,
+        move_pin_tool,
         git_commit_tool,
         git_push_tool,
         open_pr_tool,
