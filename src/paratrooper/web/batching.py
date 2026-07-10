@@ -115,3 +115,8 @@ class ThreadCoordinator:
         st.running_job = None
         if st.buffer:
             self._arm_timer(thread_id)
+
+    def has_pending(self) -> bool:
+        """True while any thread has a running job or a buffered batch — i.e.
+        the worker is still needed (used to decide when to suspend it)."""
+        return any(st.running_job or st.buffer for st in self._threads.values())
