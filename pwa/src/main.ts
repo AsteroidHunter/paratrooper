@@ -2,11 +2,14 @@
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
 
+declare const __BUILT_AT__: string;
+
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
 let token = localStorage.getItem(TOKEN_KEY) ?? "";
 let lastSeq = 0;
 let ws: WebSocket | null = null;
+let closingOnPurpose = false; // logout: suppress the auto-reconnect
 
 interface ServerMsg {
   seq?: number;
@@ -32,6 +35,7 @@ function renderTokenGate(): void {
       <p>Enter your access token to connect.</p>
       <input id="token-input" type="password" placeholder="access token" autocomplete="off" />
       <button id="token-save">Connect</button>
+      <p class="buildstamp">ui build ${__BUILT_AT__}</p>
     </div>`;
   const input = document.getElementById("token-input") as HTMLInputElement;
   document.getElementById("token-save")!.addEventListener("click", () => {
@@ -55,23 +59,61 @@ function renderChat(): void {
     <main id="thread" class="thread">
       <div class="empty">Send a photo, link, or song to update the board. 🪂</div>
     </main>
+    <div id="pending" class="pending"></div>
     <form id="compose" class="compose">
-      <label class="attach" title="Add photo">＋
-        <input id="files" type="file" accept="image/*" multiple hidden />
-      </label>
+      <button type="button" id="attach" class="attach" title="Add photo">＋</button>
+      <input id="files" type="file" accept="image/*" multiple hidden />
       <textarea id="text" rows="1" placeholder="Message Paratrooper…"></textarea>
-      <button type="submit" class="send">↑</button>
+      <button type="submit" id="sendbtn" class="send">↑</button>
     </form>`;
   document.getElementById("reset")!.addEventListener("click", () => {
     localStorage.removeItem(TOKEN_KEY);
     token = "";
+    lastSeq = 0; // full replay on next login
+    closingOnPurpose = true;
     ws?.close();
+    ws = null;
     renderTokenGate();
+  });
+  const filesEl = document.getElementById("files") as HTMLInputElement;
+  document.getElementById("attach")!.addEventListener("click", () => filesEl.click());
+  filesEl.addEventListener("change", () => {
+    pendingFiles.push(...Array.from(filesEl.files ?? []));
+    filesEl.value = ""; // allow re-picking the same file
+    renderPending();
   });
   document.getElementById("compose")!.addEventListener("submit", (e) => {
     e.preventDefault();
     void send();
   });
+}
+
+// --- pending attachments (picked but not yet sent) -----------------------------
+
+let pendingFiles: File[] = [];
+
+function renderPending(): void {
+  const box = document.getElementById("pending");
+  if (!box) return;
+  box.innerHTML = "";
+  pendingFiles.forEach((f, i) => {
+    const wrap = document.createElement("div");
+    wrap.className = "pthumb";
+    const img = document.createElement("img");
+    img.src = URL.createObjectURL(f);
+    img.onload = () => URL.revokeObjectURL(img.src);
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "pthumb-x";
+    x.textContent = "✕";
+    x.addEventListener("click", () => {
+      pendingFiles.splice(i, 1);
+      renderPending();
+    });
+    wrap.append(img, x);
+    box.appendChild(wrap);
+  });
+  box.style.display = pendingFiles.length ? "flex" : "none";
 }
 
 const threadEl = () => document.getElementById("thread")!;
@@ -100,16 +142,29 @@ function prUrl(payload: unknown, body?: string): string | null {
   }
 }
 
+let lastAgentText = "";
+
 function render(m: ServerMsg): void {
   const role = m.role ?? "agent";
   if (role === "user") {
     const div = bubble("user", "text");
     div.textContent = m.body ?? "";
     (m.attachments ?? []).forEach(() => div.appendChild(chip("📎 photo")));
+    lastAgentText = "";
     return;
   }
   const kind = m.kind ?? "log";
   const value = (typeof m.payload === "string" ? m.payload : undefined) ?? m.body ?? "";
+  if (kind === "done" || kind === "error") hideTyping();
+  if (kind === "done" && !value.trim()) return; // job-complete signal, text already shown
+  if ((kind === "log" || kind === "done") && value.trim() && value.trim() === lastAgentText) {
+    return; // consecutive duplicate of the same reply
+  }
+  if (kind === "log" || kind === "done") lastAgentText = value.trim();
+  if (role === "system") {
+    bubble("system", "line").textContent = value || "✓";
+    return;
+  }
   if (kind === "screenshot" && value) {
     const div = bubble("agent", "shot");
     const img = document.createElement("img");
@@ -127,10 +182,9 @@ function render(m: ServerMsg): void {
     div.appendChild(publishBtn);
   } else if (kind === "error") {
     bubble("agent", "error").textContent = `⚠ ${value}`;
-  } else if (kind === "done") {
-    bubble("agent", "text done").textContent = value;
   } else {
-    bubble("agent", "log").textContent = value;
+    // the agent's words — a real received bubble (log and done alike)
+    bubble("agent", "text").textContent = value;
   }
 }
 
@@ -141,42 +195,97 @@ function chip(label: string): HTMLSpanElement {
   return s;
 }
 
+// --- typing indicator ---------------------------------------------------------
+
+function showTyping(): void {
+  if (document.getElementById("typing")) return;
+  const el = document.createElement("div");
+  el.id = "typing";
+  el.className = "msg agent typing";
+  el.innerHTML = "<span></span><span></span><span></span>";
+  const t = document.getElementById("thread");
+  if (t) {
+    t.appendChild(el);
+    t.scrollTop = t.scrollHeight;
+  }
+}
+
+function hideTyping(): void {
+  document.getElementById("typing")?.remove();
+}
+
 // --- networking --------------------------------------------------------------
 
 function connect(): void {
+  closingOnPurpose = false;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/ws?token=${encodeURIComponent(token)}&thread=${THREAD_ID}&since=${lastSeq}`;
   ws = new WebSocket(url);
   ws.onmessage = (e) => {
+    if (!document.getElementById("thread")) return; // gate is showing; don't consume
     const m = JSON.parse(e.data) as ServerMsg;
     if (m.seq && m.seq > lastSeq) lastSeq = m.seq;
     render(m);
   };
-  ws.onclose = () => setTimeout(connect, 2000); // reconnect; catch-up via ?since=
+  ws.onclose = () => {
+    if (closingOnPurpose || !token) return; // logout: stay closed
+    setTimeout(connect, 2000); // dropped: reconnect; catch-up via ?since=
+  };
 }
 
 async function send(): Promise<void> {
   const textEl = document.getElementById("text") as HTMLTextAreaElement;
-  const filesEl = document.getElementById("files") as HTMLInputElement;
+  const sendBtn = document.getElementById("sendbtn") as HTMLButtonElement;
   const text = textEl.value.trim();
-  const files = Array.from(filesEl.files ?? []);
+  const files = [...pendingFiles];
   if (!text && files.length === 0) return;
 
-  const keys: string[] = [];
-  for (const file of files) {
-    const fd = new FormData();
-    fd.append("file", file);
-    const r = await fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd });
-    if (r.ok) keys.push((await r.json()).inbox_key);
+  sendBtn.disabled = true; // photo uploads can take seconds
+  try {
+    const keys: string[] = [];
+    for (const file of files) {
+      const fd = new FormData();
+      fd.append("file", file);
+      let r: Response;
+      try {
+        r = await fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd });
+      } catch (e) {
+        bubble("agent", "error").textContent = `⚠ upload of ${file.name} failed: ${e}`;
+        return; // nothing sent; pending chips stay so you can retry
+      }
+      if (!r.ok) {
+        bubble("agent", "error").textContent =
+          `⚠ upload of ${file.name} failed (${r.status} ${r.statusText})`;
+        return;
+      }
+      keys.push((await r.json()).inbox_key);
+    }
+    const resp = await fetch("/api/send", {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
+    });
+    if (!resp.ok) {
+      bubble("agent", "error").textContent = `⚠ send failed (${resp.status})`;
+      return;
+    }
+    const { seq } = await resp.json();
+    if (seq && seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
+    // optimistic render: photos as sent image bubbles (iMessage style), then text
+    for (const file of files) {
+      const div = bubble("user", "shot");
+      const img = document.createElement("img");
+      img.src = URL.createObjectURL(file);
+      div.appendChild(img);
+    }
+    if (text) render({ role: "user", body: text, attachments: [] });
+    showTyping();
+    textEl.value = "";
+    pendingFiles = [];
+    renderPending();
+  } finally {
+    sendBtn.disabled = false;
   }
-  await fetch("/api/send", {
-    method: "POST",
-    headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
-  });
-  render({ role: "user", body: text, attachments: keys }); // optimistic
-  textEl.value = "";
-  filesEl.value = "";
 }
 
 async function publish(pr: string): Promise<void> {
@@ -241,6 +350,10 @@ if ("serviceWorker" in navigator) {
 if (token) {
   renderChat();
   connect();
+  void fetch("/api/health").then(async (r) => {
+    const v = (await r.json()).version;
+    console.log(`paratrooper ui ${__BUILT_AT__} / server ${v}`);
+  });
 } else {
   renderTokenGate();
 }

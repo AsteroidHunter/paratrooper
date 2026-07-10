@@ -314,7 +314,8 @@ def test_build_tool_server(tmp_path):
     assert "mcp__paratrooper__place_pin" in names
     assert "mcp__paratrooper__open_pr" in names
     assert "mcp__paratrooper__move_pin" in names
-    assert len(names) == 11
+    assert "mcp__paratrooper__start_branch" in names
+    assert len(names) == 12
 
 
 # --- siterepo (pure parts) ---------------------------------------------------
@@ -350,3 +351,55 @@ def test_move_pin_between_stages(tmp_path):
                                   "position": {"x": 50, "y": 50}, "size": {"w": 10, "h": 10}})
     with pytest.raises(pins.PinError, match="refusing to overwrite"):
         pins.move_pin(on, off, "future")
+
+
+def test_mutating_tools_require_branch(tmp_path):
+    """Before start_branch, every checkout-mutating tool must refuse — an edit
+    landing on the local default branch would be wiped by the next branch prep."""
+    from paratrooper.agent.config import Config
+    from paratrooper.agent.tools import build_tool_server
+
+    cfg = Config(
+        inbox=tmp_path / "inbox",
+        site_root=tmp_path / "site",
+        pins_dir=tmp_path / "pins",
+        archive_dir=tmp_path / "arch",
+        later_dir=tmp_path / "later",
+        changelog=tmp_path / "cl.jsonl",
+        remote=None,
+        default_branch="main",
+        branch_prefix="paratrooper",
+    )
+    ctx = ToolContext(
+        config=cfg,
+        repo=SiteRepo(cfg.site_root),
+        changelog=memory.Changelog(cfg.changelog),
+    )
+    assert ctx.branch is None
+    # rebuild to capture handlers; call the mutating ones directly
+    import paratrooper.agent.tools as tools_mod
+
+    handlers = {}
+    orig = tools_mod.create_sdk_mcp_server
+
+    def capture(name, version, tools):
+        for t in tools:
+            handlers[t.name] = t.handler
+        return orig(name=name, version=version, tools=tools)
+
+    tools_mod.create_sdk_mcp_server = lambda name, version, tools: capture(name, version, tools)
+    try:
+        build_tool_server(ctx)
+    finally:
+        tools_mod.create_sdk_mcp_server = orig
+
+    for name, args in [
+        ("git_commit", {"message": "x"}),
+        ("git_push", {}),
+        ("open_pr", {"title": "x"}),
+        ("move_pin", {"pin_id": "p", "to": "off-display"}),
+        ("process_image", {"inbox_key": "k", "pin_id": "p"}),
+    ]:
+        out = asyncio.run(handlers[name](args))
+        assert out.get("is_error"), f"{name} ran without a branch"
+        assert "start_branch" in out["content"][0]["text"]

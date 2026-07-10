@@ -146,6 +146,10 @@ class Worker:
 
 
 def main() -> None:
+    import os
+
+    print(f"paratrooper worker starting, version "
+          f"{os.environ.get('RENDER_GIT_COMMIT', 'dev')[:7]}", flush=True)
     asyncio.run(Worker(JobQueue(connect())).run())
 
 
