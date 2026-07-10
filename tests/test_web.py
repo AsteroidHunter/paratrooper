@@ -229,6 +229,9 @@ def test_push_config_off_when_unset(monkeypatch):
     cfg = push.config()
     assert cfg and cfg.subject == "mailto:a@b.c"
     assert push.notification_text("pr") and push.notification_text("log") is None
+    # screenshots buzz too (user decision 20260708, overturning the plan-era
+    # behavior-preservation): a board preview is worth a notification on its own
+    assert push.notification_text("screenshot")
 
 
 def test_subscription_store(tmp_path):

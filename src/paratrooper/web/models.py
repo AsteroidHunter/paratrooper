@@ -34,9 +34,9 @@ EVENT_POLICY: dict[str, EventPolicy] = {
     "typing": EventPolicy(ephemeral=True, persist=False, context="skip"),
     "log": EventPolicy(),
     "update": EventPolicy(),
-    # a screenshot body is a multi-MB base64 data URI — it must never be pasted
-    # into the agent prompt as "context"
-    "screenshot": EventPolicy(context="skip"),
+    # a screenshot payload is a multi-MB base64 data URI — it must never be
+    # pasted into the agent prompt as "context"
+    "screenshot": EventPolicy(push_text="Paratrooper sent a board preview 📸", context="skip"),
     "pr": EventPolicy(
         push_text="Your pin is ready — tap to review and publish 🪂", context="pr_ref"
     ),
