@@ -1,0 +1,26 @@
+# Web service image: build the TypeScript PWA, then run the FastAPI app that
+# serves it and holds the socket. Multi-stage so the Render build env needs no
+# Node toolchain of its own.
+
+# --- stage 1: build the PWA -> /pwa/dist ---
+FROM node:22-slim AS pwa
+WORKDIR /pwa
+COPY pwa/package.json pwa/package-lock.json ./
+RUN npm ci
+COPY pwa/ ./
+RUN npm run build
+
+# --- stage 2: python web service ---
+FROM python:3.12-slim
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY config ./config
+RUN pip install --no-cache-dir -e ".[web]"
+# the built PWA, served at / by app.py (_pwa_dist resolves /app/pwa/dist)
+COPY --from=pwa /pwa/dist ./pwa/dist
+# uvicorn factory; Render injects $PORT
+CMD ["sh", "-c", "uvicorn 'paratrooper.web.app:create_app' --factory --host 0.0.0.0 --port ${PORT:-8000}"]

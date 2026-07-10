@@ -1,0 +1,22 @@
+# Worker service image (checklist 5.2): Agent SDK + git + Playwright/Chromium.
+# Sized for Chromium (~1-2GB RAM at runtime). The Claude Agent SDK bundles its
+# own native CLI, so no Node is needed here.
+
+FROM python:3.12-slim
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+
+# git: site-repo clone + branch/commit/push. ca-certificates: HTTPS to GitHub.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY config ./config
+RUN pip install --no-cache-dir -e ".[agent]"
+
+# Chromium + its OS dependencies for screenshot_board (run with --no-sandbox).
+RUN python -m playwright install --with-deps chromium
+
+# clones the site repo on first boot, then consumes jobs from the queue
+CMD ["python", "-m", "paratrooper.web.worker_runner"]

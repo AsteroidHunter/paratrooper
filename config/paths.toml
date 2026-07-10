@@ -1,0 +1,19 @@
+# Paratrooper paths/site config (folders + repo settings only — NO secrets).
+# Secrets are environment variables; see .env.example.
+# Relative paths resolve against this file's directory.
+
+[paths]
+# The website repo checkout the worker edits (cloned here at deploy/setup time).
+site_root = "../site_checkout"
+# pins_dir / archive_dir default under site_root if omitted:
+#   pins_dir    = "<site_root>/src/content/pins"
+#   archive_dir = "<site_root>/src/content/pins/_archive"
+# changelog defaults to "<site_root>/paratrooper-changelog.jsonl" if omitted.
+
+# Staged uploads (raw photos). On Render this is a persistent disk mount.
+inbox = "../data/inbox"
+
+[site]
+# remote auto-detected from the checkout's `origin` if omitted (or set PARATROOPER_REMOTE).
+default_branch = "main"
+branch_prefix = "paratrooper"
