@@ -309,6 +309,109 @@ def test_upload_and_send_flow(client):
     assert rows[-1]["role"] == "user" and rows[-1]["body"] == "add it"
 
 
+# --- render worker wake/sleep --------------------------------------------------
+
+def test_render_control_from_env(monkeypatch):
+    from paratrooper.web.render_control import RenderControl
+
+    monkeypatch.delenv("RENDER_API_KEY", raising=False)
+    monkeypatch.delenv("RENDER_WORKER_SERVICE_ID", raising=False)
+    assert RenderControl.from_env() is None  # unset -> feature off
+    monkeypatch.setenv("RENDER_API_KEY", "rnd_key")
+    assert RenderControl.from_env() is None  # one of two -> still off
+    monkeypatch.setenv("RENDER_WORKER_SERVICE_ID", "srv-abc123")
+    rc = RenderControl.from_env()
+    assert rc is not None and rc.worker_id == "srv-abc123"
+
+
+def test_render_control_calls_api(monkeypatch):
+    import httpx
+
+    from paratrooper.web import render_control
+
+    calls = []
+
+    class _FakeClient:
+        def __init__(self, timeout=None):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None):
+            calls.append((url, headers["Authorization"]))
+            return httpx.Response(202, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(render_control.httpx, "AsyncClient", _FakeClient)
+    rc = render_control.RenderControl("rnd_key", "srv-abc123")
+    assert _run(rc.resume_worker()) is True
+    assert _run(rc.suspend_worker()) is True
+    assert calls == [
+        ("https://api.render.com/v1/services/srv-abc123/resume", "Bearer rnd_key"),
+        ("https://api.render.com/v1/services/srv-abc123/suspend", "Bearer rnd_key"),
+    ]
+
+
+def test_coordinator_has_pending():
+    async def scenario():
+        enq, intr, enqueued, _ = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.02)
+        assert not coord.has_pending()
+        await coord.handle_message("d", "add this", [])
+        assert coord.has_pending()  # buffered
+        await asyncio.sleep(0.05)
+        assert coord.has_pending()  # running
+        await coord.job_finished("d")
+        assert not coord.has_pending()  # drained
+
+    _run(scenario())
+
+
+def test_maybe_suspend_only_when_drained(tmp_path):
+    from paratrooper.web.app import _maybe_suspend_worker
+
+    class _FakeRender:
+        def __init__(self):
+            self.suspended = 0
+
+        async def suspend_worker(self):
+            self.suspended += 1
+            return True
+
+    class _FakeQueue:
+        def __init__(self, pending):
+            self._pending = pending
+
+        async def pending_jobs(self):
+            return self._pending
+
+    class _State:
+        def __init__(self, render, coordinator, queue):
+            self.render, self.coordinator, self.queue = render, coordinator, queue
+
+    async def scenario():
+        enq, intr, *_ = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.02)
+        render = _FakeRender()
+        # nothing pending anywhere -> suspends
+        await _maybe_suspend_worker(_State(render, coord, _FakeQueue(0)))
+        assert render.suspended == 1
+        # a job still queued -> no suspend
+        await _maybe_suspend_worker(_State(render, coord, _FakeQueue(1)))
+        assert render.suspended == 1
+        # a buffered batch -> no suspend
+        await coord.handle_message("d", "more", [])
+        await _maybe_suspend_worker(_State(render, coord, _FakeQueue(0)))
+        assert render.suspended == 1
+        # render off -> no-op
+        await _maybe_suspend_worker(_State(None, coord, _FakeQueue(0)))
+
+    _run(scenario())
+
+
 def test_push_routes(client, monkeypatch):
     monkeypatch.delenv("VAPID_PUBLIC_KEY", raising=False)
     auth = {"Authorization": "Bearer tok"}

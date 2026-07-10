@@ -36,6 +36,14 @@ services:
         sync: false
       - key: PARATROOPER_APP_TOKEN
         sync: false
+      # Optional cost saver: set both and the web service suspends the worker
+      # between jobs (resume on enqueue, suspend when the queue drains).
+      # RENDER_API_KEY: Account Settings -> API Keys.
+      # RENDER_WORKER_SERVICE_ID: the worker's srv-... id (its dashboard URL).
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_WORKER_SERVICE_ID
+        sync: false
       - key: PARATROOPER_GITHUB_TOKEN
         sync: false
       - key: PARATROOPER_MERGE_TOKEN
