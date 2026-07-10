@@ -33,7 +33,7 @@
 
 * { box-sizing: border-box; }
 
-html, body, #app {
+html, body {
   margin: 0;
   height: 100%;
   background: var(--bg);
@@ -41,9 +41,20 @@ html, body, #app {
   font: 17px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
     system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none; /* no rubber-band revealing the page background */
 }
 
-#app { display: flex; flex-direction: column; }
+/* Fixed app shell pinned to the REAL screen edges — in iOS standalone mode
+   height:100% under-measures the viewport and leaves a white strip below the
+   compose bar. Only .thread scrolls. */
+#app {
+  position: fixed;
+  inset: 0;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
 
 /* --- token gate --- */
 .gate { margin: auto; max-width: 22rem; padding: 2rem 1.5rem; text-align: center; }
@@ -264,4 +275,16 @@ html, body, #app {
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
+}
+
+/* header version tag */
+.ver { opacity: 0.55; font-weight: 400; font-size: 0.85em; }
+
+/* delivery receipt under the last sent bubble (iMessage "Delivered"/"Read") */
+.receipt {
+  align-self: flex-end;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 4px 0;
 }

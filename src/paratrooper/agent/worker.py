@@ -132,6 +132,9 @@ async def run_job(
         # prompting; the main-guard hook denies dangerous Bash (deny beats this mode)
         permission_mode="dontAsk",
         hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[guard])]},
+        # a single oversized CLI message (e.g. an image read) overflows the
+        # default 1MB json buffer and kills the whole job — give it headroom
+        max_buffer_size=10 * 1024 * 1024,
     )
 
     result_text = ""

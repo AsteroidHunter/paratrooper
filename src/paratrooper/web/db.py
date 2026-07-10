@@ -99,6 +99,35 @@ class ThreadStore:
         )
         return msgs
 
+    def unprocessed_user_messages(self) -> list[tuple[str, ThreadMessage]]:
+        """User messages sent after the last enqueued job marker of their thread
+        (role='system', kind='job' rows written at enqueue time). These are
+        messages a web-service restart swallowed before they became a job —
+        the boot-recovery feeds them back into the coordinator."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM messages m
+                WHERE m.role = 'user'
+                  AND m.seq > COALESCE((
+                    SELECT MAX(j.seq) FROM messages j
+                    WHERE j.thread_id = m.thread_id
+                      AND j.role = 'system' AND j.kind = 'job'
+                  ), 0)
+                ORDER BY m.seq
+                """
+            ).fetchall()
+        return [
+            (
+                r["thread_id"],
+                ThreadMessage(
+                    thread_id=r["thread_id"], role=r["role"], body=r["body"],
+                    attachments=json.loads(r["attachments"]), ts=r["ts"], kind=r["kind"],
+                ),
+            )
+            for r in rows
+        ]
+
     # --- web push subscriptions (Phase 6) ---
 
     def add_subscription(self, endpoint: str, subscription_json: str) -> None:

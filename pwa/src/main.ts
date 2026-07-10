@@ -4,6 +4,8 @@ import "./styles.css";
 
 declare const __BUILT_AT__: string;
 
+const APP_VERSION = "0.1.1";
+
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
 let token = localStorage.getItem(TOKEN_KEY) ?? "";
@@ -53,7 +55,7 @@ function renderTokenGate(): void {
 function renderChat(): void {
   app.innerHTML = `
     <header class="bar">
-      <span class="title">Paratrooper</span>
+      <span class="title">Paratrooper <span class="ver">v${APP_VERSION}</span></span>
       <button id="reset" class="ghost" title="Forget token">⎋</button>
     </header>
     <main id="thread" class="thread">
@@ -143,6 +145,7 @@ function prUrl(payload: unknown, body?: string): string | null {
 }
 
 let lastAgentText = "";
+let jobActive = false;
 
 function render(m: ServerMsg): void {
   const role = m.role ?? "agent";
@@ -155,7 +158,19 @@ function render(m: ServerMsg): void {
   }
   const kind = m.kind ?? "log";
   const value = (typeof m.payload === "string" ? m.payload : undefined) ?? m.body ?? "";
-  if (kind === "done" || kind === "error") hideTyping();
+  if (kind === "job") return; // internal enqueue marker, not a message
+  if (kind === "working") {
+    jobActive = true;
+    setReceipt("Read"); // the agent has picked it up
+    showTyping(); // and is on it now
+    return;
+  }
+  if (kind === "done" || kind === "error") {
+    jobActive = false;
+    hideTyping();
+  } else {
+    hideTyping(); // a bubble replaces the dots...
+  }
   if (kind === "done" && !value.trim()) return; // job-complete signal, text already shown
   if ((kind === "log" || kind === "done") && value.trim() && value.trim() === lastAgentText) {
     return; // consecutive duplicate of the same reply
@@ -186,6 +201,7 @@ function render(m: ServerMsg): void {
     // the agent's words — a real received bubble (log and done alike)
     bubble("agent", "text").textContent = value;
   }
+  if (jobActive) showTyping(); // still working: dots return below the bubble
 }
 
 function chip(label: string): HTMLSpanElement {
@@ -193,6 +209,23 @@ function chip(label: string): HTMLSpanElement {
   s.className = "filechip";
   s.textContent = label;
   return s;
+}
+
+// --- delivery receipt (single stamp under the most recent sent message) --------
+
+function setReceipt(state: "Delivered" | "Read"): void {
+  const t = document.getElementById("thread");
+  if (!t) return;
+  document.getElementById("receipt")?.remove();
+  const el = document.createElement("div");
+  el.id = "receipt";
+  el.className = "receipt";
+  el.textContent = state;
+  // sits under the last user bubble; if the dots are up, keep them below it
+  const typing = document.getElementById("typing");
+  if (typing) t.insertBefore(el, typing);
+  else t.appendChild(el);
+  t.scrollTop = t.scrollHeight;
 }
 
 // --- typing indicator ---------------------------------------------------------
@@ -240,7 +273,20 @@ async function send(): Promise<void> {
   const files = [...pendingFiles];
   if (!text && files.length === 0) return;
 
-  sendBtn.disabled = true; // photo uploads can take seconds
+  // INSTANT feedback on tap: bubbles + typing dots appear immediately; the
+  // uploads/POST happen behind them. A failure is reported as an error bubble.
+  for (const file of files) {
+    const div = bubble("user", "shot");
+    const img = document.createElement("img");
+    img.src = URL.createObjectURL(file);
+    div.appendChild(img);
+  }
+  if (text) render({ role: "user", body: text, attachments: [] });
+  textEl.value = "";
+  pendingFiles = [];
+  renderPending();
+
+  sendBtn.disabled = true; // no double-fire while the network work runs
   try {
     const keys: string[] = [];
     for (const file of files) {
@@ -250,12 +296,14 @@ async function send(): Promise<void> {
       try {
         r = await fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd });
       } catch (e) {
-        bubble("agent", "error").textContent = `⚠ upload of ${file.name} failed: ${e}`;
-        return; // nothing sent; pending chips stay so you can retry
+        hideTyping();
+        bubble("agent", "error").textContent = `⚠ not sent — upload of ${file.name} failed: ${e}`;
+        return;
       }
       if (!r.ok) {
+        hideTyping();
         bubble("agent", "error").textContent =
-          `⚠ upload of ${file.name} failed (${r.status} ${r.statusText})`;
+          `⚠ not sent — upload of ${file.name} failed (${r.status} ${r.statusText})`;
         return;
       }
       keys.push((await r.json()).inbox_key);
@@ -266,23 +314,13 @@ async function send(): Promise<void> {
       body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
     });
     if (!resp.ok) {
-      bubble("agent", "error").textContent = `⚠ send failed (${resp.status})`;
+      hideTyping();
+      bubble("agent", "error").textContent = `⚠ not sent (${resp.status})`;
       return;
     }
     const { seq } = await resp.json();
     if (seq && seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
-    // optimistic render: photos as sent image bubbles (iMessage style), then text
-    for (const file of files) {
-      const div = bubble("user", "shot");
-      const img = document.createElement("img");
-      img.src = URL.createObjectURL(file);
-      div.appendChild(img);
-    }
-    if (text) render({ role: "user", body: text, attachments: [] });
-    showTyping();
-    textEl.value = "";
-    pendingFiles = [];
-    renderPending();
+    setReceipt("Delivered"); // the server has it
   } finally {
     sendBtn.disabled = false;
   }
