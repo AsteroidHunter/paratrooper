@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -59,6 +60,29 @@ from .queue import JobQueue, connect
 from .render_control import RenderControl
 
 logger = logging.getLogger(__name__)
+
+# the /ws handshake carries the bearer token as a query param (browsers can't
+# set WS headers), and uvicorn logs the full path on every accept — verified
+# leaking the real token into Render logs. Scrub it before any record is emitted.
+_TOKEN_PARAM_RE = re.compile(r"(token=)[^&\s\"']+")
+
+
+class _RedactTokenFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "token=" in msg:
+            record.msg = _TOKEN_PARAM_RE.sub(r"\1REDACTED", msg)
+            record.args = None
+        return True
+
+
+def install_log_redaction() -> None:
+    """Attach the token scrubber to uvicorn's loggers (idempotent). uvicorn.error
+    emits the WebSocket accept lines; uvicorn.access the HTTP request lines."""
+    for name in ("uvicorn.error", "uvicorn.access"):
+        lg = logging.getLogger(name)
+        if not any(isinstance(f, _RedactTokenFilter) for f in lg.filters):
+            lg.addFilter(_RedactTokenFilter())
 
 
 def _now() -> str:
@@ -231,6 +255,7 @@ def _lifespan(injected: AppState | None):
 
 
 def create_app(injected: AppState | None = None) -> FastAPI:
+    install_log_redaction()
     app = FastAPI(title="Paratrooper", lifespan=_lifespan(injected))
 
     def st() -> AppState:

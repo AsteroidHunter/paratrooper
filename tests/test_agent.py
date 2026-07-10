@@ -409,8 +409,8 @@ def test_mutating_tools_require_branch(tmp_path):
 def test_post_update_tool(tmp_path):
     """post_update pushes an interim 'update' through the live channel; empty
     text is refused; without a channel (CLI/offline runs) it no-ops quietly."""
-    from paratrooper.agent.config import Config
     import paratrooper.agent.tools as tools_mod
+    from paratrooper.agent.config import Config
 
     cfg = Config(
         inbox=tmp_path / "inbox",
