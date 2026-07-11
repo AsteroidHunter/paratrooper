@@ -6,7 +6,6 @@ build-backend = "hatchling.build"
 name = "paratrooper"
 version = "0.1.0"
 description = "Phone -> agent -> PR system that edits the theonetrueakash.com pinboard."
-readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Akash Satpathy" }]
