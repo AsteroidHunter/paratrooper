@@ -5,7 +5,7 @@ import "./styles.css";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.9";
+const APP_VERSION = "0.1.10";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -80,7 +80,8 @@ function renderChat(): void {
     <div id="pending" class="pending"></div>
     <form id="compose" class="compose">
       <button type="button" id="attach" class="attach" title="Add photo">＋</button>
-      <input id="files" type="file" accept="image/*" multiple hidden />
+      <input id="files" type="file" accept="image/*" multiple
+        class="filepick" tabindex="-1" aria-hidden="true" />
       <textarea id="text" rows="1" placeholder="Message Paratrooper…"></textarea>
       <button type="submit" id="sendbtn" class="send">↑</button>
     </form>`;
@@ -94,7 +95,12 @@ function renderChat(): void {
     renderTokenGate();
   });
   const filesEl = document.getElementById("files") as HTMLInputElement;
-  document.getElementById("attach")!.addEventListener("click", () => filesEl.click());
+  const attachEl = document.getElementById("attach")!;
+  // keep the textarea focused (keyboard up) while the native picker presents:
+  // letting the tap steal focus collapses the keyboard mid-presentation and
+  // iOS anchors the picker menu to the button's stale, panned-viewport rect
+  attachEl.addEventListener("pointerdown", (e) => e.preventDefault());
+  attachEl.addEventListener("click", () => filesEl.click());
   filesEl.addEventListener("change", () => {
     pendingFiles.push(...Array.from(filesEl.files ?? []));
     filesEl.value = ""; // allow re-picking the same file
@@ -112,11 +118,15 @@ function renderChat(): void {
   });
   const thread = document.getElementById("thread")!;
   thread.addEventListener("scroll", () => {
-    if (nearBottom()) document.getElementById("jump")?.classList.remove("show");
+    // the ONE place following flips: away from the bottom = reading history,
+    // back at the bottom = following again (programmatic pins land here too)
+    followTail = nearBottom();
+    if (followTail) document.getElementById("jump")?.classList.remove("show");
     if (thread.scrollTop < 40) void loadOlder(); // pull at top -> older page
   });
   document.getElementById("jump")!.addEventListener("click", () => {
     document.getElementById("jump")!.classList.remove("show");
+    followTail = true;
     scrollToBottom(true);
   });
   // swipe-left to peek per-message times (iMessage): a decisively LEFTWARD
@@ -161,6 +171,9 @@ function renderChat(): void {
   // fresh thread DOM: the store must match (login/logout re-renders the shell)
   store.clear();
   oldestSeq = 0;
+  followTail = true;
+  threadObserver?.disconnect(); // the old shell's thread element is gone
+  threadObserver?.observe(thread);
 }
 
 // --- older history (recent-first: the socket sends a window, we page back) ----
@@ -224,6 +237,23 @@ function renderPending(): void {
 const threadEl = () => document.getElementById("thread")!;
 
 // --- scrolling: glide when following the tail, chevron when reading history ----
+
+// stick-to-bottom (the WICG chat pattern): while following the tail, EVERY
+// late height change — an image decoding, the keyboard shrinking the shell,
+// the compose bar growing — re-pins the bottom. Following ends only when the
+// user scrolls away (the scroll handler derives it) and resumes at the bottom;
+// a moment-of-apply nearBottom() check can't do this, because a tall image
+// above the fold pushes the bottom out of its threshold and pinning dies.
+let followTail = true;
+
+// re-pin when the THREAD BOX resizes (keyboard up/down, compose growth);
+// content growth inside it re-pins via applyEvent and image onload hooks
+const threadObserver =
+  "ResizeObserver" in window
+    ? new ResizeObserver(() => {
+        if (followTail) scrollToBottom(true);
+      })
+    : null;
 
 function nearBottom(): boolean {
   const t = threadEl();
@@ -346,7 +376,6 @@ function applyEvent(m: ServerMsg): void {
   if (oldestSeq === 0 || seq < oldestSeq) oldestSeq = seq;
   const isTail = prevMax === 0 || seq > prevMax;
 
-  const wasNear = nearBottom();
   if (isTail && m.role !== "user" && m.kind !== "job") hideTyping(); // a bubble replaces the dots
   const wrapper = document.createElement("div");
   wrapper.className = "evt";
@@ -362,7 +391,8 @@ function applyEvent(m: ServerMsg): void {
   // pinned-viewport handling for older pages lives in loadOlder; only tail
   // applies drive the scroll/chevron rules
   if (isTail && wrapper.childElementCount > 0) {
-    if (wasNear || m.role === "user") scrollToBottom();
+    if (m.role === "user") followTail = true; // your own message snaps you back
+    if (followTail) scrollToBottom();
     else document.getElementById("jump")?.classList.add("show");
   }
   if (m.kind === "published") flipCorrelatedPr(m);
@@ -463,7 +493,7 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
     img.src = thumbUrl(key);
     img.alt = "photo";
     img.onload = () => {
-      if (nearBottom()) scrollToBottom();
+      if (followTail) scrollToBottom(); // decoded height lands late
     };
     img.onerror = () => {
       div.classList.replace("shot", "text");
@@ -487,7 +517,7 @@ function renderScreenshot(_m: ServerMsg, wrapper: HTMLElement, at: number, value
   img.src = value;
   img.alt = "board preview";
   img.onload = () => {
-    if (nearBottom()) scrollToBottom(); // height lands after decode
+    if (followTail) scrollToBottom(); // height lands after decode
   };
   img.addEventListener("click", () => openLightbox(value));
   div.appendChild(img);
@@ -572,7 +602,7 @@ function setReceipt(state: "Delivered" | "Read"): void {
   const typing = document.getElementById("typing");
   if (typing) t.insertBefore(el, typing);
   else t.appendChild(el);
-  if (nearBottom()) scrollToBottom();
+  if (followTail) scrollToBottom();
 }
 
 // --- typing indicator (dots = the agent is COMPOSING text, like iMessage) ------
@@ -592,7 +622,7 @@ function showTyping(): void {
   const t = document.getElementById("thread");
   if (t) {
     t.appendChild(el);
-    if (nearBottom()) scrollToBottom();
+    if (followTail) scrollToBottom();
   }
 }
 
@@ -675,11 +705,11 @@ function localWrapper(role: string): HTMLElement {
 }
 
 function localBubble(role: string, cls: string, text: string): void {
-  const wasNear = nearBottom();
   const w = localWrapper(role);
   rowEl(w, role, cls, Date.now()).textContent = text;
   decorate();
-  if (wasNear || role === "user") scrollToBottom();
+  if (role === "user") followTail = true;
+  if (followTail) scrollToBottom();
   else document.getElementById("jump")?.classList.add("show");
 }
 
@@ -703,6 +733,7 @@ async function send(): Promise<void> {
   }
   if (text) rowEl(w, "user", "text", Date.now()).textContent = text;
   decorate();
+  followTail = true; // sending snaps you to the tail
   scrollToBottom();
   textEl.value = "";
   textEl.style.height = "auto"; // collapse the auto-grown compose bar
@@ -847,9 +878,57 @@ async function setupPush(reg: ServiceWorkerRegistration): Promise<void> {
   });
 }
 
-// --- boot --------------------------------------------------------------------
+// --- keyboard / viewport sync --------------------------------------------------
+// iOS never resizes the layout viewport for the keyboard (WebKit has no
+// interactive-widget support), so a fixed inset:0 shell keeps the compose bar
+// UNDER the keyboard. While an editable is focused, the shell tracks the
+// visual viewport instead (top = offsetTop, height = height), which puts the
+// compose bar on the keyboard's top edge and lets the thread re-pin via the
+// ResizeObserver. On blur the inline styles are cleared back to inset:0 CSS —
+// visualViewport is only trusted while the keyboard is provably up, because
+// iOS 26 leaves stale height/offsetTop values after dismissal.
 
-window.visualViewport?.addEventListener("resize", () => window.scrollTo(0, 0));
+const vv = window.visualViewport;
+
+function isEditable(t: EventTarget | null): boolean {
+  return t instanceof HTMLElement && t.matches("textarea, input:not([type='file'])");
+}
+
+function keyboardUp(): boolean {
+  return isEditable(document.activeElement);
+}
+
+function syncShell(): void {
+  if (!vv) return;
+  app.style.top = `${vv.offsetTop}px`;
+  app.style.height = `${vv.height}px`;
+}
+
+function releaseShell(): void {
+  app.style.top = "";
+  app.style.height = "";
+  window.scrollTo(0, 0); // clear any residual focus pan of the layout viewport
+}
+
+if (vv) {
+  document.addEventListener("focusin", (e) => {
+    if (isEditable(e.target)) syncShell();
+  });
+  document.addEventListener("focusout", (e) => {
+    if (!isEditable(e.target)) return;
+    // one frame's grace: focus may be hopping to another editable
+    requestAnimationFrame(() => {
+      if (!keyboardUp()) releaseShell();
+    });
+  });
+  // keyboard show/hide and focus pans land here; no timers, no guessed delays
+  vv.addEventListener("resize", () => (keyboardUp() ? syncShell() : releaseShell()));
+  vv.addEventListener("scroll", () => {
+    if (keyboardUp()) syncShell();
+  });
+}
+
+// --- boot --------------------------------------------------------------------
 
 // opening (or returning to) the app clears the home-screen unread badge
 function clearBadge(): void {

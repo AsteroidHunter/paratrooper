@@ -44,13 +44,14 @@ html, body {
   overscroll-behavior: none; /* no rubber-band revealing the page background */
 }
 
-/* Fixed app shell pinned to the REAL screen edges — in iOS standalone mode
-   height:100% under-measures the viewport and leaves a white strip below the
-   compose bar. Only .thread scrolls. */
+/* Fixed app shell pinned by inset alone — pinning both edges needs no viewport
+   measurement, so iOS standalone's dvh/innerHeight misreports can't leave a
+   strip below the compose bar (a height would override bottom:0 and reintroduce
+   it). While the keyboard is up, JS drives top/height from visualViewport.
+   Only .thread scrolls. */
 #app {
   position: fixed;
   inset: 0;
-  height: 100dvh;
   display: flex;
   flex-direction: column;
   background: var(--bg);
@@ -283,10 +284,11 @@ html, body {
 
 /* --- compose bar (pill input, blue circular send) --- */
 .compose {
+  position: relative; /* anchor box for the invisible file input */
   display: flex;
   gap: 0.5rem;
   align-items: flex-end;
-  padding: 0.5rem 0.75rem calc(0.5rem + env(safe-area-inset-bottom));
+  padding: 0.5rem 0.75rem; /* flush bottom by request — no safe-area band */
   background: var(--bar);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -317,6 +319,19 @@ html, body {
   cursor: pointer;
   flex: none;
 }
+
+/* the real file input, invisibly overlaying the ＋ button: iOS anchors its
+   picker menu to the input's rendered rect, and a display:none input has none
+   (the menu then floats mid-screen). Taps still land on the button. */
+.filepick {
+  position: absolute;
+  left: 0.75rem;
+  bottom: 0.5rem;
+  width: 34px;
+  height: 34px;
+  opacity: 0;
+  pointer-events: none;
+}
 .compose .send {
   width: 34px;
   height: 34px;
@@ -337,7 +352,7 @@ html, body {
 .jump {
   position: absolute;
   right: 12px;
-  bottom: calc(68px + env(safe-area-inset-bottom));
+  bottom: 60px;
   width: 36px;
   height: 36px;
   border: none;
