@@ -5,7 +5,7 @@ import "./styles.css";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.10";
+const APP_VERSION = "0.1.11";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -98,10 +98,18 @@ function renderChat(): void {
   const attachEl = document.getElementById("attach")!;
   // keep the textarea focused (keyboard up) while the native picker presents:
   // letting the tap steal focus collapses the keyboard mid-presentation and
-  // iOS anchors the picker menu to the button's stale, panned-viewport rect
-  attachEl.addEventListener("pointerdown", (e) => e.preventDefault());
+  // iOS anchors the picker menu to the button's stale, panned-viewport rect.
+  // ONLY when the keyboard is actually up — preventing a from-idle tap leaves
+  // iOS in a state where the next textarea tap won't raise the keyboard.
+  attachEl.addEventListener("pointerdown", (e) => {
+    if (isEditable(document.activeElement)) e.preventDefault();
+  });
   attachEl.addEventListener("click", () => filesEl.click());
+  // the picker can leave system focus on the (invisible) input; parked focus
+  // there makes iOS swallow the next tap-to-focus on the textarea
+  filesEl.addEventListener("cancel", () => filesEl.blur());
   filesEl.addEventListener("change", () => {
+    filesEl.blur();
     pendingFiles.push(...Array.from(filesEl.files ?? []));
     filesEl.value = ""; // allow re-picking the same file
     renderPending();
@@ -900,13 +908,25 @@ function keyboardUp(): boolean {
 
 function syncShell(): void {
   if (!vv) return;
+  // iOS 26 can report vv ~24px short with NO keyboard up (webkit bug 297779),
+  // and focusin fires before the keyboard moves; a real keyboard costs
+  // hundreds of px. On sub-keyboard deltas keep the pure-CSS shell rather
+  // than nudging it by a stale offset (the "chat dips but no keyboard" jump).
+  if (window.innerHeight - vv.height < 100) {
+    clearShellStyles();
+    return;
+  }
   app.style.top = `${vv.offsetTop}px`;
   app.style.height = `${vv.height}px`;
 }
 
-function releaseShell(): void {
+function clearShellStyles(): void {
   app.style.top = "";
   app.style.height = "";
+}
+
+function releaseShell(): void {
+  clearShellStyles();
   window.scrollTo(0, 0); // clear any residual focus pan of the layout viewport
 }
 
