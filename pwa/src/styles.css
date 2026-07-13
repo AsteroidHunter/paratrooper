@@ -60,7 +60,12 @@ html, body {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  /* bottom clearance for the home indicator — collapses while the keyboard is
+     up (.kb, set by the shell sync) so the compose bar hugs the keyboard like
+     iMessage instead of floating a dead band above it */
+  --pad-b: max(0.5rem, env(safe-area-inset-bottom));
 }
+#app.kb { --pad-b: 0.5rem; }
 
 /* --- token gate --- */
 .gate { margin: auto; max-width: 22rem; padding: 2rem 1.5rem; text-align: center; }
@@ -293,7 +298,7 @@ html, body {
   display: flex;
   gap: 0.5rem;
   align-items: flex-end;
-  padding: 0.5rem 0.75rem; /* flush bottom by request — no safe-area band */
+  padding: 0.5rem 0.75rem var(--pad-b);
   background: var(--bar);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -331,7 +336,7 @@ html, body {
 .filepick {
   position: absolute;
   left: 0.75rem;
-  bottom: 0.5rem;
+  bottom: var(--pad-b); /* tracks the ＋ button through the padding toggle */
   width: 34px;
   height: 34px;
   opacity: 0;
@@ -357,7 +362,7 @@ html, body {
 .jump {
   position: absolute;
   right: 12px;
-  bottom: 60px;
+  bottom: calc(52px + var(--pad-b));
   width: 36px;
   height: 36px;
   border: none;

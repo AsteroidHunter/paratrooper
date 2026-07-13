@@ -5,7 +5,7 @@ import "./styles.css";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.11";
+const APP_VERSION = "0.1.12";
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -918,11 +918,13 @@ function syncShell(): void {
   }
   app.style.top = `${vv.offsetTop}px`;
   app.style.height = `${vv.height}px`;
+  app.classList.add("kb"); // keyboard up: drop the home-indicator clearance
 }
 
 function clearShellStyles(): void {
   app.style.top = "";
   app.style.height = "";
+  app.classList.remove("kb");
 }
 
 function releaseShell(): void {
