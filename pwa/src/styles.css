@@ -52,8 +52,7 @@ html, body {
 /* Fixed app shell pinned by inset alone — pinning both edges needs no viewport
    measurement, so iOS standalone's dvh/innerHeight misreports can't leave a
    strip below the compose bar (a height would override bottom:0 and reintroduce
-   it). While the keyboard is up, JS drives top/height from visualViewport.
-   Only .thread scrolls. */
+   it). Only .thread scrolls. */
 #app {
   position: fixed;
   inset: 0;
@@ -61,11 +60,19 @@ html, body {
   flex-direction: column;
   background: var(--bg);
   /* bottom clearance for the home indicator — collapses while the keyboard is
-     up (.kb, set by the shell sync) so the compose bar hugs the keyboard like
+     up (.kb, set by shell.ts) so the compose bar hugs the keyboard like
      iMessage instead of floating a dead band above it */
   --pad-b: max(0.5rem, env(safe-area-inset-bottom));
 }
-#app.kb { --pad-b: 0.5rem; }
+/* Keyboard provably up: track the visual viewport. shell.ts publishes the mode
+   class and the two measurements; this rule decides what they mean. top+height
+   override the inset's bottom pin (over-constrained absolute positioning drops
+   `bottom`), putting the compose bar on the keyboard's top edge. */
+#app.kb {
+  top: var(--vv-top, 0px);
+  height: var(--vv-height, 100vh);
+  --pad-b: 0.5rem;
+}
 
 /* --- token gate --- */
 .gate { margin: auto; max-width: 22rem; padding: 2rem 1.5rem; text-align: center; }
