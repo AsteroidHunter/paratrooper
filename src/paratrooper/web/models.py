@@ -104,3 +104,10 @@ class PublishRequest(BaseModel):
 
     thread_id: str
     pr: str  # PR url or number
+
+
+class TapLogRequest(BaseModel):
+    """PWA -> web /taplog: TEMPORARY (bug/plustap) — a batch of on-device
+    instrumentation lines, echoed to stdout so Render logs carry them."""
+
+    lines: list[str] = Field(default_factory=list)

@@ -48,6 +48,7 @@ from .models import (
     PublishRequest,
     ResultMessage,
     SendRequest,
+    TapLogRequest,
     ThreadEvent,
     UploadResponse,
 )
@@ -321,6 +322,15 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         data, content_type = row
         return Response(content=data, media_type=content_type,
                         headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
+    @app.post("/api/taplog", dependencies=[Depends(require_token)])
+    async def taplog(req: TapLogRequest) -> dict:
+        # TEMPORARY (bug/plustap): the phone's tap instrumentation ships its
+        # lines here; stdout is the sink because Render captures it — reading
+        # the evidence needs no device, no copy/paste, just the service logs.
+        for line in req.lines[:500]:
+            print(f"TAPLOG {line}", flush=True)
+        return {"ok": True}
 
     @app.post("/api/send", dependencies=[Depends(require_token)])
     async def send(req: SendRequest) -> dict:

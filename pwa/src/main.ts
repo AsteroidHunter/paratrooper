@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.14-dbg"; // taplog instrumentation build (bug/plustap)
+const APP_VERSION = "0.1.15-dbg"; // taplog now auto-ships to the server (bug/plustap)
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1

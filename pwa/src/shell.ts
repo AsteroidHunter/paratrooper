@@ -121,6 +121,7 @@ function readWorld(): World {
 function applyShell(t: ShellTarget): void {
   if (!appEl) return;
   const was = appEl.classList.contains("kb");
+  if (t.kb !== was) slog("shell.kb", t.kb ? `on top=${t.vvTop} h=${t.vvHeight}` : "off");
   if (t.kb) {
     appEl.style.setProperty("--vv-top", `${t.vvTop}px`);
     appEl.style.setProperty("--vv-height", `${t.vvHeight}px`);
