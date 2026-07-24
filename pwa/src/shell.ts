@@ -88,6 +88,15 @@ export function createPickerLifecycle(effects: { present: () => void; dismiss: (
 // No DOM access at import time — window/document are only touched inside
 // functions, so the pure core above imports cleanly in any environment.
 
+// TEMPORARY (bug/plustap): decision-point logging into taplog.ts's panel.
+// Raw events are taplog's job; these lines record what the shell DECIDED
+// (preventDefault or not, click forwarded, settle executed). No-op unless
+// wired, so tests and the pure core stay inert.
+let slog: (ev: string, detail?: string) => void = () => {};
+export function setShellLogger(fn: (ev: string, detail?: string) => void): void {
+  slog = fn;
+}
+
 function isEditable(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && t.matches("textarea, input:not([type='file'])");
 }
@@ -129,8 +138,12 @@ export function reconcile(): void {
 }
 
 const picker = createPickerLifecycle({
-  present: () => fileEl?.click(),
+  present: () => {
+    slog("shell.present", "files.click()");
+    fileEl?.click();
+  },
   dismiss: () => {
+    slog("shell.settle", "blur files"); // logged BEFORE blur: act= shows parked state
     fileEl?.blur(); // parked focus is the tap-swallower; clear it on every path
     reconcile();
   },
@@ -171,9 +184,19 @@ export function initShell(el: HTMLElement): void {
 export function bindPicker(input: HTMLInputElement, button: HTMLElement): void {
   fileEl = input;
   button.addEventListener("pointerdown", (e) => {
-    if (preservesFocus(readWorld())) e.preventDefault();
+    const w = readWorld();
+    const preserve = preservesFocus(w);
+    slog(
+      "shell.＋pd",
+      `editor=${w.editorFocused ? 1 : 0} file=${w.fileFocused ? 1 : 0}` +
+        ` open=${picker.isOpen() ? 1 : 0} preventDefault=${preserve ? 1 : 0}`,
+    );
+    if (preserve) e.preventDefault();
   });
-  button.addEventListener("click", () => picker.open());
+  button.addEventListener("click", () => {
+    slog("shell.＋click", picker.isOpen() ? "stale session still open" : "");
+    picker.open();
+  });
   input.addEventListener("cancel", picker.settle);
   input.addEventListener("change", picker.settle);
 }

@@ -1,12 +1,13 @@
 // Paratrooper PWA — message the pinboard agent. Vanilla TS + DOM (lightest build).
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
-import { bindPicker, initShell } from "./shell";
+import { bindPicker, initShell, setShellLogger } from "./shell";
+import { initTapLog } from "./taplog";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.13";
+const APP_VERSION = "0.1.14-dbg"; // taplog instrumentation build (bug/plustap)
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -36,6 +37,9 @@ interface ServerMsg {
 }
 
 const app = document.getElementById("app")!;
+// taplog BEFORE initShell: its raw-event listeners must register first so
+// each raw line renders above the shell decision it triggered
+setShellLogger(initTapLog());
 initShell(app); // keyboard/focus/picker state converges through shell.ts
 
 function authHeaders(): Record<string, string> {
