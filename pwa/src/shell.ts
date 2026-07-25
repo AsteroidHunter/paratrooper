@@ -11,13 +11,16 @@
 //   measurement, and only while an editor is provably focused — iOS 26
 //   reports stale height/offsetTop after dismissal (webkit bug 297779), so
 //   sub-keyboard deltas read as "no keyboard" (a real one costs hundreds of px).
-// - The picker flow can park system focus on the invisible file input, and
-//   `cancel` is NOT guaranteed on dismissal (iOS 26 drops it when the
-//   three-option menu is swiped away; cf. the WebKit 26.2 "upload button
-//   stops working" fix). Parked focus makes iOS consume the next tap as a
-//   blur — the every-second-＋-tap-dead bug. So picker cleanup is a race —
-//   cancel / change / window-refocus / visibility / next page tap, first
-//   signal wins, settle runs exactly once — never a bet on one event.
+// - Dismissing the picker menu only LOOKS instant: WKFileUploadPanel keeps
+//   tearing down natively for another ~0.5–2s (swipe dismissals are slowest),
+//   and a files.click() forwarded inside that window is silently DROPPED by
+//   WebKit — the dead-＋-tap bug. Device-proven via taplog (2026-07-24): every
+//   dead tap forwarded its click before the previous teardown's window-refocus
+//   signal; every working tap came after. The old parked-focus theory was
+//   falsified the same day — focus never parks on the file input. `cancel`
+//   fires late or not at all (when it comes, it is always the LAST signal),
+//   so teardown completion rides whichever signal lands first (window
+//   refocus / cancel / change), and a too-early ＋ tap queues until then.
 // - While an editable is focused, a ＋ tap must preventDefault on pointerdown
 //   (or the keyboard collapses mid-presentation and the menu anchors to a
 //   stale rect); from idle it must NOT (or iOS swallows the next focus tap).
@@ -63,23 +66,71 @@ export function preservesFocus(w: World): boolean {
   return w.editorFocused || w.fileFocused;
 }
 
-// Picker lifecycle: open() presents, settle() cleans up EXACTLY once no matter
-// how many completion signals arrive or which one comes first. Effects are
-// injected so the once-semantics are testable.
-export function createPickerLifecycle(effects: { present: () => void; dismiss: () => void }) {
-  let open = false;
-  const settle = (): void => {
-    if (!open) return;
-    open = false;
-    effects.dismiss();
+// Picker lifecycle, device-proven model (taplog sessions, 2026-07-24):
+//   presented --settle()--> tearing --teardownComplete()--> idle
+// settle() = "the native UI is gone from the screen" (page tap, refocus, …);
+// teardownComplete() = "WebKit finished tearing the panel down" (window
+// refocus / cancel / change). A ＋ tap during "tearing" would have its click
+// dropped inside WebKit, so it queues and presents on the completion signal.
+// TEARDOWN_MAX_MS never delays a tap — it only classifies a stale "tearing"
+// (no signal ever came because the present was dropped and nothing is
+// actually tearing down) so the next tap presents immediately instead of
+// queueing forever. Effects are injected so all of this is testable.
+export const TEARDOWN_MAX_MS = 2500;
+
+export function createPickerLifecycle(
+  effects: { present: () => void; dismiss: () => void },
+  now: () => number = () => performance.now(),
+) {
+  let phase: "idle" | "presented" | "tearing" = "idle";
+  let queued = false;
+  let tearStart = 0;
+  const present = (): void => {
+    phase = "presented";
+    effects.present();
   };
   return {
-    isOpen: () => open,
-    settle,
-    open(): void {
-      settle(); // reaching ＋ again means any stale session's UI is gone
-      open = true;
-      effects.present();
+    isOpen: () => phase === "presented",
+    isTearing: () => phase === "tearing",
+    open(): "presented" | "queued" | "represented" {
+      if (phase === "tearing") {
+        if (now() - tearStart < TEARDOWN_MAX_MS) {
+          queued = true; // WebKit would drop the click; present on the signal
+          return "queued";
+        }
+        phase = "idle"; // signal never came: nothing was tearing down
+      }
+      if (phase === "presented") {
+        // a ＋ click while a sheet is supposedly showing is impossible (a
+        // real sheet swallows page clicks) — that present was dropped.
+        // Clean up and re-present inside THIS tap's user gesture.
+        effects.dismiss();
+        present();
+        return "represented";
+      }
+      present();
+      return "presented";
+    },
+    settle(): void {
+      if (phase !== "presented") return;
+      phase = "tearing";
+      tearStart = now();
+      effects.dismiss();
+    },
+    // flush=false drops a queued tap instead of presenting it — the
+    // return-to-app paths use it, where any queued intent is stale and a
+    // deferred click would lack user activation anyway.
+    teardownComplete(flush: boolean): "flushed" | "completed" | "noop" {
+      if (phase !== "tearing") return "noop";
+      phase = "idle";
+      if (queued) {
+        queued = false;
+        if (flush) {
+          present();
+          return "flushed";
+        }
+      }
+      return "completed";
     },
   };
 }
@@ -157,27 +208,32 @@ export function initShell(el: HTMLElement): void {
   document.addEventListener("focusout", () => requestAnimationFrame(reconcile));
   window.visualViewport?.addEventListener("resize", reconcile);
   window.visualViewport?.addEventListener("scroll", reconcile);
-  // picker-completion racers. Page-level and permanent (they survive renderChat
-  // re-renders); each means "any native picker UI is gone". settle() no-ops
-  // unless a session is actually open.
+  // Picker signals, page-level and permanent (they survive renderChat
+  // re-renders). Window refocus is the one teardown-complete marker present
+  // in every observed trace, so it both settles a still-open session (swipe
+  // dismissals produce no page tap) and flushes a queued ＋ tap.
   window.addEventListener("focus", () => {
     picker.settle();
+    if (picker.teardownComplete(true) === "flushed") slog("shell.flush", "queued ＋ presented");
     reconcile();
   });
+  // return-to-app paths: whatever was queued is stale — drop it, never ghost-present
   window.addEventListener("pageshow", () => {
     picker.settle();
+    picker.teardownComplete(false);
     reconcile();
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
       picker.settle();
+      picker.teardownComplete(false);
       reconcile();
     }
   });
-  // a tap landing in OUR page also means native UI is gone; settling in the
-  // capture phase un-parks focus before the tap's default handling can be
-  // consumed by the blur
-  document.addEventListener("pointerdown", picker.settle, true);
+  // a tap landing in OUR page means the native UI is gone from the screen —
+  // but NOT that teardown finished (the dismissing tap itself leaks through
+  // ~0.5s before the refocus signal), so this one only settles
+  document.addEventListener("pointerdown", () => picker.settle(), true);
 }
 
 // wire the compose ＋ button and file input; called per renderChat because the
@@ -195,9 +251,13 @@ export function bindPicker(input: HTMLInputElement, button: HTMLElement): void {
     if (preserve) e.preventDefault();
   });
   button.addEventListener("click", () => {
-    slog("shell.＋click", picker.isOpen() ? "stale session still open" : "");
-    picker.open();
+    slog("shell.＋click", picker.open());
   });
-  input.addEventListener("cancel", picker.settle);
-  input.addEventListener("change", picker.settle);
+  // the input's own signals end the session AND mark teardown finished
+  const sessionDone = (): void => {
+    picker.settle();
+    if (picker.teardownComplete(true) === "flushed") slog("shell.flush", "queued ＋ presented");
+  };
+  input.addEventListener("cancel", sessionDone);
+  input.addEventListener("change", sessionDone);
 }

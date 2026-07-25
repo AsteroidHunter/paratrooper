@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   MIN_KEYBOARD_PX,
+  TEARDOWN_MAX_MS,
   computeShell,
   createPickerLifecycle,
   keyboardInset,
@@ -71,52 +72,87 @@ describe("preservesFocus — the ＋ pointerdown preventDefault rule", () => {
   });
 });
 
-describe("picker lifecycle — settle races, runs once, never trusts one event", () => {
+describe("picker lifecycle — the WebKit teardown window (taplog-proven 2026-07-24)", () => {
   function lifecycle() {
     const present = vi.fn();
     const dismiss = vi.fn();
-    return { p: createPickerLifecycle({ present, dismiss }), present, dismiss };
+    const clock = { t: 0 };
+    const p = createPickerLifecycle({ present, dismiss }, () => clock.t);
+    return { p, present, dismiss, clock };
   }
 
-  it("iOS 26 drops `cancel` on menu dismissal: any other signal settles instead (the alternating-＋ bug)", () => {
-    const { p, dismiss } = lifecycle();
+  it("a ＋ tap during teardown QUEUES instead of forwarding a click WebKit would drop (the dead-＋-tap bug)", () => {
+    const { p, present } = lifecycle();
     p.open();
-    // no cancel ever arrives; the window-refocus racer fires
-    p.settle();
-    expect(dismiss).toHaveBeenCalledTimes(1);
-    expect(p.isOpen()).toBe(false);
+    p.settle(); // menu dismissed from the screen; native teardown still running
+    expect(p.open()).toBe("queued");
+    expect(present).toHaveBeenCalledTimes(1); // no click into the void
+    expect(p.isTearing()).toBe(true);
   });
 
-  it("settle runs exactly once under duplicate signals (cancel AND refocus AND next tap)", () => {
-    const { p, dismiss } = lifecycle();
-    p.open();
-    p.settle();
-    p.settle();
-    p.settle();
-    expect(dismiss).toHaveBeenCalledTimes(1);
-  });
-
-  it("settle before any open is a no-op (page taps while no session)", () => {
-    const { p, dismiss } = lifecycle();
-    p.settle();
-    expect(dismiss).not.toHaveBeenCalled();
-  });
-
-  it("reopening after settle presents again — tap 3 must work", () => {
+  it("the queued tap presents the moment the teardown signal lands (window refocus / cancel)", () => {
     const { p, present } = lifecycle();
     p.open();
     p.settle();
-    p.open();
+    p.open(); // queued
+    expect(p.teardownComplete(true)).toBe("flushed");
     expect(present).toHaveBeenCalledTimes(2);
     expect(p.isOpen()).toBe(true);
   });
 
-  it("open over a stale un-settled session settles it first, then presents", () => {
+  it("tap AFTER the teardown signal presents normally — the working-tap population in the device log", () => {
+    const { p, present } = lifecycle();
+    p.open();
+    p.settle();
+    expect(p.teardownComplete(true)).toBe("completed");
+    expect(p.open()).toBe("presented");
+    expect(present).toHaveBeenCalledTimes(2);
+  });
+
+  it("dismiss effects run exactly once under duplicate settle signals", () => {
+    const { p, dismiss } = lifecycle();
+    p.open();
+    p.settle();
+    p.settle();
+    p.settle();
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("settle/teardownComplete with no session are no-ops (every page tap fires them)", () => {
+    const { p, dismiss } = lifecycle();
+    p.settle();
+    expect(p.teardownComplete(true)).toBe("noop");
+    expect(dismiss).not.toHaveBeenCalled();
+  });
+
+  it("stale tearing (present was dropped, signal never comes): tap presents immediately past TEARDOWN_MAX_MS — never a bricked ＋", () => {
+    const { p, present, clock } = lifecycle();
+    p.open();
+    p.settle();
+    clock.t = TEARDOWN_MAX_MS - 1;
+    expect(p.open()).toBe("queued"); // still inside the window
+    clock.t = TEARDOWN_MAX_MS;
+    expect(p.open()).toBe("presented"); // window over: this tap goes through NOW
+    expect(present).toHaveBeenCalledTimes(2);
+  });
+
+  it("＋ click while a sheet is supposedly up = that present was dropped; re-present within the same gesture", () => {
     const { p, present, dismiss } = lifecycle();
     p.open();
-    p.open(); // no completion signal ever arrived for the first
+    expect(p.open()).toBe("represented"); // a real sheet swallows page clicks
     expect(dismiss).toHaveBeenCalledTimes(1);
     expect(present).toHaveBeenCalledTimes(2);
     expect(p.isOpen()).toBe(true);
+  });
+
+  it("return-to-app drops a stale queued tap (flush=false) — no ghost menu on reopen", () => {
+    const { p, present } = lifecycle();
+    p.open();
+    p.settle();
+    p.open(); // queued
+    expect(p.teardownComplete(false)).toBe("completed");
+    expect(present).toHaveBeenCalledTimes(1);
+    p.open(); // the user's NEXT real tap works normally
+    expect(present).toHaveBeenCalledTimes(2);
   });
 });
