@@ -64,14 +64,21 @@ html, body {
      iMessage instead of floating a dead band above it */
   --pad-b: max(0.5rem, env(safe-area-inset-bottom));
 }
-/* Keyboard provably up: track the visual viewport. shell.ts publishes the mode
-   class and the two measurements; this rule decides what they mean. top+height
-   override the inset's bottom pin (over-constrained absolute positioning drops
-   `bottom`), putting the compose bar on the keyboard's top edge. */
+/* Keyboard provably up: no home indicator to clear, so the compose bar hugs
+   the keyboard like iMessage instead of floating a dead band above it. This
+   applies in BOTH of iOS 26's keyboard modes. */
 #app.kb {
+  --pad-b: 0.5rem;
+}
+/* Overlay mode ONLY: the layout viewport stayed full height, so the four-edge
+   pin now reaches under the keyboard and must be corrected. top+height
+   override the inset's bottom pin (over-constrained absolute positioning drops
+   `bottom`), putting the compose bar on the keyboard's top edge. In the other
+   mode iOS shrinks the window itself and the pin is already exact — writing
+   these would move the shell off-screen, so shell.ts withholds this class. */
+#app.kb-vv {
   top: var(--vv-top, 0px);
   height: var(--vv-height, 100vh);
-  --pad-b: 0.5rem;
 }
 
 /* --- token gate --- */

@@ -1,13 +1,13 @@
 // Paratrooper PWA — message the pinboard agent. Vanilla TS + DOM (lightest build).
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
-import { bindPicker, initShell, setShellLogger } from "./shell";
+import { bindPicker, currentFileInput, initShell, setShellLogger } from "./shell";
 import { initTapLog } from "./taplog";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.16-dbg"; // ＋ queue-on-teardown-signal fix (bug/plustap)
+const APP_VERSION = "0.1.17-dbg"; // ＋ fresh-input present + baseline kb detection
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -101,12 +101,14 @@ function renderChat(): void {
     renderTokenGate();
   });
   const filesEl = document.getElementById("files") as HTMLInputElement;
-  // ＋/picker focus choreography (preventDefault rules, parked-focus cleanup)
-  // lives in shell.ts; here only the app concern: collect picks into the tray
-  bindPicker(filesEl, document.getElementById("attach")!);
-  filesEl.addEventListener("change", () => {
-    pendingFiles.push(...Array.from(filesEl.files ?? []));
-    filesEl.value = ""; // allow re-picking the same file
+  // ＋/picker focus choreography (preventDefault rules, parked-focus cleanup,
+  // swapping in a virgin input per present) lives in shell.ts; here only the
+  // app concern: collect picks into the tray. Read the CURRENT input rather
+  // than the one bound above — shell.ts replaces the element between presents.
+  bindPicker(filesEl, document.getElementById("attach")!, () => {
+    const el = currentFileInput();
+    pendingFiles.push(...Array.from(el?.files ?? []));
+    if (el) el.value = ""; // allow re-picking the same file
     renderPending();
   });
   document.getElementById("compose")!.addEventListener("submit", (e) => {

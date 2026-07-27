@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   MIN_KEYBOARD_PX,
+  SETTLE_GUARD_MS,
   TEARDOWN_MAX_MS,
   computeShell,
   createPickerLifecycle,
@@ -17,6 +18,7 @@ function world(over: Partial<World> = {}): World {
   return {
     editorFocused: false,
     fileFocused: false,
+    baseline: 844, // full-screen visual viewport, learned with no keyboard
     innerHeight: 844, // iPhone-ish logical viewport
     vvHeight: 844,
     vvTop: 0,
@@ -39,14 +41,30 @@ describe("keyboardInset — the iOS 26 lie filter (webkit bug 297779)", () => {
   });
 });
 
-describe("computeShell — when the shell may trust the visual viewport", () => {
-  it("focusin before the keyboard moves (delta 0) stays in pure-CSS mode", () => {
-    expect(computeShell(world({ editorFocused: true })).kb).toBe(false);
+describe("computeShell — iOS 26's two keyboard modes (taplog-proven 2026-07-25)", () => {
+  it("overlay mode: layout viewport stayed tall, so track the visual viewport", () => {
+    const t = computeShell(world({ editorFocused: true, vvHeight: 508, vvTop: 40 }));
+    expect(t).toEqual({ kb: true, trackViewport: true, vvTop: 40, vvHeight: 508 });
   });
 
-  it("editor focused + real keyboard tracks the visual viewport (v0.1.10 bug 2)", () => {
-    const t = computeShell(world({ editorFocused: true, vvHeight: 508, vvTop: 40 }));
-    expect(t).toEqual({ kb: true, vvTop: 40, vvHeight: 508 });
+  it("window-shrink mode: innerHeight shrank too — STILL a keyboard (v0.1.16 bug: read as none)", () => {
+    const t = computeShell(world({ editorFocused: true, innerHeight: 508, vvHeight: 508 }));
+    expect(t.kb).toBe(true);
+  });
+
+  it("window-shrink mode does NOT override the four-edge pin — writing top/height moved the shell off-screen", () => {
+    const t = computeShell(world({ editorFocused: true, innerHeight: 508, vvHeight: 508, vvTop: 336 }));
+    expect(t.trackViewport).toBe(false);
+  });
+
+  it("baseline, not innerHeight, decides there is a keyboard — innerHeight lies mid-animation", () => {
+    // the transient frame that used to flip the shell off inside 16ms
+    const t = computeShell(world({ editorFocused: true, innerHeight: 508, vvHeight: 508, baseline: 844 }));
+    expect(t.kb).toBe(true);
+  });
+
+  it("focusin before the keyboard moves (delta 0) stays in pure-CSS mode", () => {
+    expect(computeShell(world({ editorFocused: true })).kb).toBe(false);
   });
 
   it("no editor focused: a shrunken viewport is never trusted (stale after blur)", () => {
@@ -72,46 +90,68 @@ describe("preservesFocus — the ＋ pointerdown preventDefault rule", () => {
   });
 });
 
-describe("picker lifecycle — the WebKit teardown window (taplog-proven 2026-07-24)", () => {
+describe("picker lifecycle — the WebKit teardown window", () => {
   function lifecycle() {
     const present = vi.fn();
     const dismiss = vi.fn();
     const clock = { t: 0 };
     const p = createPickerLifecycle({ present, dismiss }, () => clock.t);
-    return { p, present, dismiss, clock };
+    const past = (ms = SETTLE_GUARD_MS) => (clock.t += ms);
+    return { p, present, dismiss, clock, past };
   }
 
-  it("a ＋ tap during teardown QUEUES instead of forwarding a click WebKit would drop (the dead-＋-tap bug)", () => {
+  it("a tap from idle presents on the EXISTING input — the 16/16 working population", () => {
     const { p, present } = lifecycle();
-    p.open();
-    p.settle(); // menu dismissed from the screen; native teardown still running
-    expect(p.open()).toBe("queued");
-    expect(present).toHaveBeenCalledTimes(1); // no click into the void
-    expect(p.isTearing()).toBe(true);
+    expect(p.open()).toBe("presented");
+    expect(present).toHaveBeenCalledWith(false);
   });
 
-  it("the queued tap presents the moment the teardown signal lands (window refocus / cancel)", () => {
-    const { p, present } = lifecycle();
+  it("a ＋ tap during teardown presents on a FRESH input, inside its own gesture (v0.1.16 queued 0/7)", () => {
+    const { p, present, past } = lifecycle();
     p.open();
-    p.settle();
-    p.open(); // queued
-    expect(p.teardownComplete(true)).toBe("flushed");
-    expect(present).toHaveBeenCalledTimes(2);
+    past();
+    p.settle(); // menu dismissed from the screen; native teardown still running
+    expect(p.open()).toBe("refreshed");
+    expect(present).toHaveBeenLastCalledWith(true);
     expect(p.isOpen()).toBe(true);
   });
 
-  it("tap AFTER the teardown signal presents normally — the working-tap population in the device log", () => {
-    const { p, present } = lifecycle();
+  it("the previous session's trailing refocus does NOT tear down the fresh present (the v0.1.16 killer)", () => {
+    const { p, dismiss, past, clock } = lifecycle();
     p.open();
+    past();
     p.settle();
-    expect(p.teardownComplete(true)).toBe("completed");
+    p.open(); // refreshed
+    dismiss.mockClear();
+    clock.t += 3; // the old teardown's window-refocus, 3ms later
+    expect(p.settle()).toBe("guarded");
+    expect(dismiss).not.toHaveBeenCalled();
+    expect(p.isOpen()).toBe(true);
+  });
+
+  it("a real dismissal (past the guard) settles normally", () => {
+    const { p, dismiss, past } = lifecycle();
+    p.open();
+    past();
+    expect(p.settle()).toBe("settled");
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(p.isTearing()).toBe(true);
+  });
+
+  it("tap AFTER teardown completes presents normally on the existing input", () => {
+    const { p, present, past } = lifecycle();
+    p.open();
+    past();
+    p.settle();
+    expect(p.teardownComplete()).toBe("completed");
     expect(p.open()).toBe("presented");
-    expect(present).toHaveBeenCalledTimes(2);
+    expect(present).toHaveBeenLastCalledWith(false);
   });
 
   it("dismiss effects run exactly once under duplicate settle signals", () => {
-    const { p, dismiss } = lifecycle();
+    const { p, dismiss, past } = lifecycle();
     p.open();
+    past();
     p.settle();
     p.settle();
     p.settle();
@@ -120,20 +160,23 @@ describe("picker lifecycle — the WebKit teardown window (taplog-proven 2026-07
 
   it("settle/teardownComplete with no session are no-ops (every page tap fires them)", () => {
     const { p, dismiss } = lifecycle();
-    p.settle();
-    expect(p.teardownComplete(true)).toBe("noop");
+    expect(p.settle()).toBe("noop");
+    expect(p.teardownComplete()).toBe("noop");
     expect(dismiss).not.toHaveBeenCalled();
   });
 
-  it("stale tearing (present was dropped, signal never comes): tap presents immediately past TEARDOWN_MAX_MS — never a bricked ＋", () => {
-    const { p, present, clock } = lifecycle();
+  it("stale tearing (present was dropped, signal never comes): past TEARDOWN_MAX_MS a tap presents clean — never a bricked ＋", () => {
+    const { p, present, clock, past } = lifecycle();
     p.open();
+    past();
     p.settle();
-    clock.t = TEARDOWN_MAX_MS - 1;
-    expect(p.open()).toBe("queued"); // still inside the window
-    clock.t = TEARDOWN_MAX_MS;
-    expect(p.open()).toBe("presented"); // window over: this tap goes through NOW
-    expect(present).toHaveBeenCalledTimes(2);
+    clock.t += TEARDOWN_MAX_MS - 1;
+    expect(p.open()).toBe("refreshed"); // still inside the window
+    past();
+    p.settle();
+    clock.t += TEARDOWN_MAX_MS;
+    expect(p.open()).toBe("presented"); // window over: nothing was tearing down
+    expect(present).toHaveBeenLastCalledWith(false);
   });
 
   it("＋ click while a sheet is supposedly up = that present was dropped; re-present within the same gesture", () => {
@@ -141,18 +184,17 @@ describe("picker lifecycle — the WebKit teardown window (taplog-proven 2026-07
     p.open();
     expect(p.open()).toBe("represented"); // a real sheet swallows page clicks
     expect(dismiss).toHaveBeenCalledTimes(1);
-    expect(present).toHaveBeenCalledTimes(2);
+    expect(present).toHaveBeenLastCalledWith(true);
     expect(p.isOpen()).toBe(true);
   });
 
-  it("return-to-app drops a stale queued tap (flush=false) — no ghost menu on reopen", () => {
-    const { p, present } = lifecycle();
+  it("returning to the app with nothing open cannot ghost-present", () => {
+    const { p, present, past } = lifecycle();
     p.open();
+    past();
     p.settle();
-    p.open(); // queued
-    expect(p.teardownComplete(false)).toBe("completed");
+    p.teardownComplete();
+    p.teardownComplete();
     expect(present).toHaveBeenCalledTimes(1);
-    p.open(); // the user's NEXT real tap works normally
-    expect(present).toHaveBeenCalledTimes(2);
   });
 });
