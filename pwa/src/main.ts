@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.19-dbg"; // release parked focus AFTER teardown, not on the dismissing tap
+const APP_VERSION = "0.1.20-dbg"; // ＋ opens an in-page menu; system handoff behind its Photos row
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -85,6 +85,9 @@ function renderChat(): void {
     <button type="button" id="jump" class="jump" title="Jump to latest">↓</button>
     <div id="pending" class="pending"></div>
     <form id="compose" class="compose">
+      <div id="plusmenu" class="plusmenu" hidden>
+        <button type="button" id="menu-photos" class="plusmenu-row">🖼 Photos</button>
+      </div>
       <button type="button" id="attach" class="attach" title="Add photo">＋</button>
       <input id="files" type="file" accept="image/*" multiple
         class="filepick" tabindex="-1" aria-hidden="true" />
@@ -101,11 +104,13 @@ function renderChat(): void {
     renderTokenGate();
   });
   const filesEl = document.getElementById("files") as HTMLInputElement;
-  // ＋/picker focus choreography (preventDefault rules, parked-focus cleanup,
-  // swapping in a virgin input per present) lives in shell.ts; here only the
-  // app concern: collect picks into the tray. Read the CURRENT input rather
-  // than the one bound above — shell.ts replaces the element between presents.
-  bindPicker(filesEl, document.getElementById("attach")!, () => {
+  // ＋/menu/picker focus choreography (preventDefault rules, parked-focus
+  // cleanup, swapping in a virgin input per present, the Photos-row gate)
+  // lives in shell.ts; here only the app concern: collect picks into the
+  // tray. Read the CURRENT input rather than the one bound above — shell.ts
+  // replaces the element between presents.
+  bindPicker(filesEl, document.getElementById("attach")!,
+    document.getElementById("plusmenu")!, document.getElementById("menu-photos")!, () => {
     const el = currentFileInput();
     pendingFiles.push(...Array.from(el?.files ?? []));
     if (el) el.value = ""; // allow re-picking the same file
