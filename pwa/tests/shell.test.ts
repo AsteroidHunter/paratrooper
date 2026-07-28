@@ -188,18 +188,6 @@ describe("picker lifecycle — the WebKit teardown window", () => {
     expect(p.isOpen()).toBe(true);
   });
 
-  it("isTearing gates only the real window: true while tearing, false once TEARDOWN_MAX_MS lapses (the menu row must not stick shut on a lost signal)", () => {
-    const { p, past, clock } = lifecycle();
-    p.open();
-    past();
-    p.settle();
-    expect(p.isTearing()).toBe(true);
-    clock.t += TEARDOWN_MAX_MS - 1;
-    expect(p.isTearing()).toBe(true);
-    clock.t += 1;
-    expect(p.isTearing()).toBe(false);
-  });
-
   it("returning to the app with nothing open cannot ghost-present", () => {
     const { p, present, past } = lifecycle();
     p.open();

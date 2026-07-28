@@ -108,9 +108,7 @@ export function createPickerLifecycle(
   };
   return {
     isOpen: () => phase === "presented",
-    // time-aware: past TEARDOWN_MAX_MS the signal was lost and nothing is
-    // really tearing, so a gate keyed off this must not stick shut
-    isTearing: () => phase === "tearing" && now() - tearStart < TEARDOWN_MAX_MS,
+    isTearing: () => phase === "tearing",
     open(): "presented" | "refreshed" | "represented" {
       if (phase === "tearing") {
         if (now() - tearStart < TEARDOWN_MAX_MS) {
@@ -171,9 +169,6 @@ function isEditable(t: EventTarget | null): boolean {
 let appEl: HTMLElement | null = null;
 let fileEl: HTMLInputElement | null = null; // replaced on every fresh present
 let onPick: (() => void) | null = null; // rebound with each fresh input
-let attachEl: HTMLElement | null = null; // the ＋ button (exempt from outside-close)
-let menuEl: HTMLElement | null = null; // the in-page ＋ menu
-let photosEl: HTMLElement | null = null; // its Photos row, gated while tearing
 
 // The full-screen visual-viewport height, learned while no editor is focused.
 // Everything keyboard-related is measured against THIS, never against a live
@@ -301,47 +296,12 @@ function bindInputSignals(input: HTMLInputElement): void {
   const sessionDone = (): void => {
     picker.settle();
     if (picker.teardownComplete() === "completed") releaseParkedEditor();
-    syncMenuGate();
   };
   input.addEventListener("cancel", sessionDone);
   input.addEventListener("change", () => {
     sessionDone();
     onPick?.();
   });
-}
-
-// --- the in-page ＋ menu --------------------------------------------------------
-// ＋ no longer touches system UI: it toggles OUR menu (plain page DOM), so the
-// tap cannot be swallowed by a teardown and an up keyboard survives it. The
-// system handoff — and the keyboard drop iOS forces when its sheet presents —
-// sits behind a deliberate tap on the Photos row. That row is gated while a
-// dismissed picker is still tearing down (a present inside the window is
-// silently eaten); the gate is a class, NOT `disabled`, so the futile tap
-// still preventDefaults and the keyboard it would have blurred stays up.
-
-function menuIsOpen(): boolean {
-  return menuEl !== null && !menuEl.hidden;
-}
-
-function syncMenuGate(): void {
-  const gated = picker.isTearing();
-  photosEl?.classList.toggle("gated", gated);
-  photosEl?.setAttribute("aria-disabled", String(gated));
-}
-
-function setMenu(open: boolean, why: string): void {
-  if (!menuEl || menuIsOpen() === open) return;
-  menuEl.hidden = !open;
-  if (open) {
-    syncMenuGate();
-    // backstop: teardown signals re-sync the gate, but if none ever arrives
-    // the time-aware isTearing() clears at the cap — re-check then, so the
-    // row cannot stay dimmed on a lost signal
-    if (picker.isTearing()) setTimeout(syncMenuGate, TEARDOWN_MAX_MS);
-    slog("shell.menu", `open gate=${picker.isTearing() ? 1 : 0}`);
-  } else {
-    slog("shell.menu", `close ${why}`);
-  }
 }
 
 export function initShell(el: HTMLElement): void {
@@ -362,60 +322,32 @@ export function initShell(el: HTMLElement): void {
   window.addEventListener("focus", () => {
     picker.settle();
     const done = picker.teardownComplete() === "completed";
-    syncMenuGate();
     reconcile();
     if (done) releaseParkedEditor();
   });
   window.addEventListener("pageshow", () => {
     picker.settle();
     picker.teardownComplete();
-    syncMenuGate();
     reconcile();
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
       picker.settle();
       picker.teardownComplete();
-      syncMenuGate();
       reconcile();
     }
   });
   // a tap landing in OUR page means the native UI is gone from the screen —
   // but NOT that teardown finished (the dismissing tap itself leaks through
-  // ~0.5s before the refocus signal), so this one only settles. It also
-  // closes the menu on outside taps; ＋ and the menu rows manage their own.
-  document.addEventListener(
-    "pointerdown",
-    (e) => {
-      picker.settle();
-      if (
-        menuIsOpen() &&
-        e.target instanceof Node &&
-        !menuEl!.contains(e.target) &&
-        !(attachEl?.contains(e.target) ?? false)
-      ) {
-        setMenu(false, "outside");
-      }
-    },
-    true,
-  );
+  // ~0.5s before the refocus signal), so this one only settles.
+  document.addEventListener("pointerdown", () => picker.settle(), true);
 }
 
-// wire the compose ＋ button, its in-page menu, and the file input; called per
-// renderChat because the re-render recreates all of them. `pick` fires when
-// files are chosen — it is re-attached to each fresh input, so the app's
-// handler survives the swaps.
-export function bindPicker(
-  input: HTMLInputElement,
-  button: HTMLElement,
-  menu: HTMLElement,
-  photos: HTMLElement,
-  pick: () => void,
-): void {
+// wire the compose ＋ button and file input; called per renderChat because the
+// re-render recreates both elements. `pick` fires when files are chosen — it is
+// re-attached to each fresh input, so the app's handler survives the swaps.
+export function bindPicker(input: HTMLInputElement, button: HTMLElement, pick: () => void): void {
   fileEl = input;
-  attachEl = button;
-  menuEl = menu;
-  photosEl = photos;
   onPick = pick;
   bindInputSignals(input);
   button.addEventListener("pointerdown", (e) => {
@@ -425,19 +357,11 @@ export function bindPicker(
       "shell.＋pd",
       `editor=${w.editorFocused ? 1 : 0} file=${w.fileFocused ? 1 : 0}` +
         ` open=${picker.isOpen() ? 1 : 0} tear=${picker.isTearing() ? 1 : 0}` +
-        ` menu=${menuIsOpen() ? 1 : 0} preventDefault=${preserve ? 1 : 0}`,
+        ` preventDefault=${preserve ? 1 : 0}`,
     );
     if (preserve) e.preventDefault();
   });
-  button.addEventListener("click", () => setMenu(!menuIsOpen(), "plus"));
-  // the row preserves an up keyboard exactly like ＋ (device-proven rule);
-  // iOS will still take it when the sheet presents — that part is structural
-  photos.addEventListener("pointerdown", (e) => {
-    if (preservesFocus(readWorld())) e.preventDefault();
-  });
-  photos.addEventListener("click", () => {
-    if (photos.classList.contains("gated")) return; // present would be eaten
-    setMenu(false, "photos");
+  button.addEventListener("click", () => {
     slog("shell.＋click", picker.open());
   });
 }
