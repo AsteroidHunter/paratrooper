@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.18-dbg"; // keyboard survives a picker dismissal; no on-screen log
+const APP_VERSION = "0.1.19-dbg"; // release parked focus AFTER teardown, not on the dismissing tap
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
