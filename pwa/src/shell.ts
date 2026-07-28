@@ -319,8 +319,25 @@ export function initShell(el: HTMLElement): void {
   });
   // a tap landing in OUR page means the native UI is gone from the screen —
   // but NOT that teardown finished (the dismissing tap itself leaks through
-  // ~0.5s before the refocus signal), so this one only settles
-  document.addEventListener("pointerdown", () => picker.settle(), true);
+  // ~0.5s before the refocus signal), so this one only settles.
+  document.addEventListener(
+    "pointerdown",
+    () => {
+      if (picker.settle() !== "settled") return;
+      // iOS drops the keyboard when the picker's sheet takes the screen and
+      // never restores it, but the editor keeps DOM focus the whole time
+      // (device-proven: act= stays on the textarea across the entire picker
+      // session). So the tap that dismisses the picker changes no focus and
+      // iOS has no reason to raise the keyboard again — it stays down until
+      // some LATER tap happens to land a real focus change. Blurring here
+      // turns this tap into that focus change: if it lands on an editable,
+      // the default focus follows and the keyboard comes back on its own; if
+      // it lands anywhere else, dropping focus is what should happen anyway.
+      const active = document.activeElement;
+      if (isEditable(active)) (active as HTMLElement).blur();
+    },
+    true,
+  );
 }
 
 // wire the compose ＋ button and file input; called per renderChat because the
