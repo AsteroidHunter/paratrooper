@@ -80,6 +80,27 @@ export function preservesFocus(w: World): boolean {
   return w.editorFocused || w.fileFocused;
 }
 
+// Experiment (v0.1.21): the dismissing tap is the LAST real touch before
+// WKFileUploadPanel's teardown reclaims first responder (~0.5–1s later) and
+// collapses a keyboard the user never dismissed (device-proven 2026-07-28:
+// the keyboard SURVIVES presentation and dies at teardown-complete, ~25–40ms
+// after the window refocus). iOS grants keyboards only to a focus change made
+// inside a real touch — so this tap is the only moment the page can re-assert
+// ownership. Cycle blur()+focus() synchronously in the dismissing tap's own
+// handler and let the taplog grade whether the teardown still snatches it.
+// Only when: the tap actually dismissed a session ("settled"), an editor is
+// focused, the keyboard is provably up, and the tap is NOT on the editor
+// itself (a tap there is iOS's own natural focus path — injecting a blur
+// mid-tap could drop the very keyboard we're defending).
+export function shouldCycleFocus(
+  settled: boolean,
+  editorFocused: boolean,
+  targetEditable: boolean,
+  kb: boolean,
+): boolean {
+  return settled && editorFocused && !targetEditable && kb;
+}
+
 // Picker lifecycle:
 //   presented --settle()--> tearing --teardownComplete()--> idle
 // settle() = "the native UI is gone from the screen" (page tap, refocus, …);
@@ -339,8 +360,27 @@ export function initShell(el: HTMLElement): void {
   });
   // a tap landing in OUR page means the native UI is gone from the screen —
   // but NOT that teardown finished (the dismissing tap itself leaks through
-  // ~0.5s before the refocus signal), so this one only settles.
-  document.addEventListener("pointerdown", () => picker.settle(), true);
+  // ~0.5s before the refocus signal), so this one only settles — plus, while
+  // it is the one real touch available, the v0.1.21 focus-cycle experiment.
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      const settled = picker.settle() === "settled";
+      const active = document.activeElement;
+      const cycle = shouldCycleFocus(
+        settled,
+        isEditable(active),
+        isEditable(e.target),
+        computeShell(readWorld()).kb,
+      );
+      if (!cycle) return;
+      const tgt = e.target instanceof HTMLElement ? e.target.tagName.toLowerCase() : "?";
+      slog("shell.cycle", `blur+focus tgt=${tgt}`);
+      (active as HTMLElement).blur();
+      (active as HTMLElement).focus();
+    },
+    true,
+  );
 }
 
 // wire the compose ＋ button and file input; called per renderChat because the

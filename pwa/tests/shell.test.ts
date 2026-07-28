@@ -11,6 +11,7 @@ import {
   createPickerLifecycle,
   keyboardInset,
   preservesFocus,
+  shouldCycleFocus,
   type World,
 } from "../src/shell";
 
@@ -196,5 +197,23 @@ describe("picker lifecycle — the WebKit teardown window", () => {
     p.teardownComplete();
     p.teardownComplete();
     expect(present).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("shouldCycleFocus — the v0.1.21 keyboard re-claim experiment", () => {
+  it("cycles on the real repro: dismissing tap, editor focused, keyboard up, tap elsewhere", () => {
+    expect(shouldCycleFocus(true, true, false, true)).toBe(true);
+  });
+  it("never cycles on a tap that did not dismiss a session (ordinary page taps)", () => {
+    expect(shouldCycleFocus(false, true, false, true)).toBe(false);
+  });
+  it("never cycles onto the editor's own tap — iOS's natural focus path owns that one", () => {
+    expect(shouldCycleFocus(true, true, true, true)).toBe(false);
+  });
+  it("never cycles without a provable keyboard — blur+focus with none up is v0.1.18's regression shape", () => {
+    expect(shouldCycleFocus(true, true, false, false)).toBe(false);
+  });
+  it("never cycles when nothing editable holds focus — there is no keyboard owner to defend", () => {
+    expect(shouldCycleFocus(true, false, false, true)).toBe(false);
   });
 });
