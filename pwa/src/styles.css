@@ -342,7 +342,34 @@ html, body {
   font-size: 1.25rem;
   cursor: pointer;
   flex: none;
+  overflow: hidden; /* the glyph must not paint outside a mid-collapse box */
+  /* keyboard-DOWN direction: the editor hands the space back first, then the
+     ＋ fades in — the mirror of the keyboard-up choreography below */
+  transition: width 0.13s ease, margin-right 0.13s ease, opacity 0.1s ease 0.13s;
 }
+
+/* The ＋ and the keyboard never coexist. While the keyboard is provably up
+   (.kb — the shell's baseline-tested signal) the ＋ fades out, THEN yields its
+   flex slot so the editor widens leftward into it, both inside the keyboard's
+   own rise; when the keyboard leaves, the editor shrinks back first and the ＋
+   fades in after. With no ＋ to tap while typing, a picker can never present
+   over a live keyboard — the teardown snatch has nothing left to snatch. */
+#app.kb .compose .attach {
+  opacity: 0;
+  width: 0;
+  margin-right: -0.5rem; /* swallow the flex gap so the slot truly closes */
+  pointer-events: none; /* mid-fade taps belong to the widening editor */
+  /* keyboard-UP direction: fade first, then give up the width */
+  transition: opacity 0.1s ease, width 0.13s ease 0.1s, margin-right 0.13s ease 0.1s;
+}
+
+/* The teardown settling window (.settling, shell.ts): after a picker dismissal
+   the ＋ greys and the editor looks switched off until teardown-complete. A
+   flip, not a fade — filter and the editor's opacity sit outside every
+   transition list here, so both edges land instantly. The shell holds the taps;
+   these rules are only the visible truth of it. */
+#app.settling .compose .attach { filter: opacity(0.35); }
+#app.settling .compose textarea { opacity: 0.5; }
 
 /* the real file input, invisibly overlaying the ＋ button: iOS anchors its
    picker menu to the input's rendered rect, and a display:none input has none

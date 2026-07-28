@@ -9,9 +9,9 @@ import {
   TEARDOWN_MAX_MS,
   computeShell,
   createPickerLifecycle,
+  holdsBarTap,
   keyboardInset,
   preservesFocus,
-  shouldCycleFocus,
   type World,
 } from "../src/shell";
 
@@ -198,22 +198,71 @@ describe("picker lifecycle — the WebKit teardown window", () => {
     p.teardownComplete();
     expect(present).toHaveBeenCalledTimes(1);
   });
+
+  describe("expireTearing — the settling window's timer backstop", () => {
+    it("a settled window past the cap expires — a dropped present sends no signal, ever", () => {
+      const { p, past, clock } = lifecycle();
+      p.open();
+      past();
+      p.settle();
+      clock.t += TEARDOWN_MAX_MS;
+      expect(p.expireTearing()).toBe("expired");
+      expect(p.isTearing()).toBe(false);
+    });
+
+    it("never expires early — real teardowns end by signal, not by clock", () => {
+      const { p, past, clock } = lifecycle();
+      p.open();
+      past();
+      p.settle();
+      clock.t += TEARDOWN_MAX_MS - 1;
+      expect(p.expireTearing()).toBe("noop");
+      expect(p.isTearing()).toBe(true);
+    });
+
+    it("a stale timer after the signals already ended the window is a no-op", () => {
+      const { p, past, clock } = lifecycle();
+      p.open();
+      past();
+      p.settle();
+      p.teardownComplete();
+      clock.t += TEARDOWN_MAX_MS;
+      expect(p.expireTearing()).toBe("noop");
+    });
+
+    it("a timer firing while a sheet is up (armed by the represented-recovery) is a no-op", () => {
+      const { p, clock } = lifecycle();
+      p.open();
+      clock.t += TEARDOWN_MAX_MS + 1;
+      expect(p.expireTearing()).toBe("noop");
+      expect(p.isOpen()).toBe(true);
+    });
+
+    it("after expiry a ＋ tap presents clean on the existing input — never a bricked ＋", () => {
+      const { p, present, past, clock } = lifecycle();
+      p.open();
+      past();
+      p.settle();
+      clock.t += TEARDOWN_MAX_MS;
+      p.expireTearing();
+      expect(p.open()).toBe("presented");
+      expect(present).toHaveBeenLastCalledWith(false);
+    });
+  });
 });
 
-describe("shouldCycleFocus — the v0.1.21 keyboard re-claim experiment", () => {
-  it("cycles on the real repro: dismissing tap, editor focused, keyboard up, tap elsewhere", () => {
-    expect(shouldCycleFocus(true, true, false, true)).toBe(true);
+describe("holdsBarTap — the settling-window tap hold (the eaten ＋ tap and the keyboard flicker)", () => {
+  it("holds an editor tap while tearing — a keyboard raised here dies mid-rise", () => {
+    expect(holdsBarTap(true, true, false)).toBe(true);
   });
-  it("never cycles on a tap that did not dismiss a session (ordinary page taps)", () => {
-    expect(shouldCycleFocus(false, true, false, true)).toBe(false);
+  it("holds a ＋ tap while tearing — its click is the one WebKit silently drops", () => {
+    expect(holdsBarTap(true, false, true)).toBe(true);
   });
-  it("never cycles onto the editor's own tap — iOS's natural focus path owns that one", () => {
-    expect(shouldCycleFocus(true, true, true, true)).toBe(false);
+  it("holds nothing outside the window — idle taps must stay fully native", () => {
+    expect(holdsBarTap(false, true, false)).toBe(false);
+    expect(holdsBarTap(false, false, true)).toBe(false);
   });
-  it("never cycles without a provable keyboard — blur+focus with none up is v0.1.18's regression shape", () => {
-    expect(shouldCycleFocus(true, true, false, false)).toBe(false);
-  });
-  it("never cycles when nothing editable holds focus — there is no keyboard owner to defend", () => {
-    expect(shouldCycleFocus(true, false, false, true)).toBe(false);
+  it("never holds the rest of the page — send and thread taps ride through the window", () => {
+    expect(holdsBarTap(true, false, false)).toBe(false);
   });
 });

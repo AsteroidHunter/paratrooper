@@ -80,25 +80,20 @@ export function preservesFocus(w: World): boolean {
   return w.editorFocused || w.fileFocused;
 }
 
-// Experiment (v0.1.21): the dismissing tap is the LAST real touch before
-// WKFileUploadPanel's teardown reclaims first responder (~0.5–1s later) and
-// collapses a keyboard the user never dismissed (device-proven 2026-07-28:
-// the keyboard SURVIVES presentation and dies at teardown-complete, ~25–40ms
-// after the window refocus). iOS grants keyboards only to a focus change made
-// inside a real touch — so this tap is the only moment the page can re-assert
-// ownership. Cycle blur()+focus() synchronously in the dismissing tap's own
-// handler and let the taplog grade whether the teardown still snatches it.
-// Only when: the tap actually dismissed a session ("settled"), an editor is
-// focused, the keyboard is provably up, and the tap is NOT on the editor
-// itself (a tap there is iOS's own natural focus path — injecting a blur
-// mid-tap could drop the very keyboard we're defending).
-export function shouldCycleFocus(
-  settled: boolean,
-  editorFocused: boolean,
+// The teardown window cannot be shortened, survived, or recovered from (three
+// shipped mechanisms and the v0.1.21 focus-cycle all falsified on device), so
+// the bar now WAITS it out visibly: from the dismissal until teardown-complete
+// the ＋ greys and the editor looks switched off (styles.css `.settling`), and
+// taps on either are HELD — preventDefault on the capture path, so no focus
+// change raises a keyboard the teardown's window-blur would kill mid-rise, and
+// no ＋ click reaches the zone where WebKit silently drops it. Only the two
+// picker-adjacent controls wait; the send button and the thread stay live.
+export function holdsBarTap(
+  tearing: boolean,
   targetEditable: boolean,
-  kb: boolean,
+  targetPlus: boolean,
 ): boolean {
-  return settled && editorFocused && !targetEditable && kb;
+  return tearing && (targetEditable || targetPlus);
 }
 
 // Picker lifecycle:
@@ -167,6 +162,16 @@ export function createPickerLifecycle(
       phase = "idle";
       return "completed";
     },
+    // the timer backstop's check. Signals normally end the window, but after a
+    // DROPPED present (no native session ever existed) none will come, and a
+    // held bar must never wait on luck. Pure and time-aware, so a stale or
+    // duplicate timer firing is a no-op.
+    expireTearing(): "expired" | "noop" {
+      if (phase !== "tearing") return "noop";
+      if (now() - tearStart < TEARDOWN_MAX_MS) return "noop";
+      phase = "idle";
+      return "expired";
+    },
   };
 }
 
@@ -189,6 +194,7 @@ function isEditable(t: EventTarget | null): boolean {
 
 let appEl: HTMLElement | null = null;
 let fileEl: HTMLInputElement | null = null; // replaced on every fresh present
+let plusEl: HTMLElement | null = null; // the ＋ button; held during the settling window
 let onPick: (() => void) | null = null; // rebound with each fresh input
 
 // The full-screen visual-viewport height, learned while no editor is focused.
@@ -224,15 +230,19 @@ function readWorld(): World {
   };
 }
 
-// THE one writer of shell presentation: two mode classes plus two measurements.
-// styles.css owns what they mean (.kb collapses --pad-b, .kb-vv consumes the
-// vars to override the four-edge pin).
-function applyShell(t: ShellTarget): void {
+// THE one writer of shell presentation: three mode classes plus two
+// measurements. styles.css owns what they mean (.kb collapses --pad-b AND
+// vanishes the ＋, .kb-vv consumes the vars to override the four-edge pin,
+// .settling greys the bar for the teardown window).
+function applyShell(t: ShellTarget, settling: boolean): void {
   if (!appEl) return;
   const wasKb = appEl.classList.contains("kb");
   const wasTracking = appEl.classList.contains("kb-vv");
+  const wasSettling = appEl.classList.contains("settling");
   if (t.kb !== wasKb) slog("shell.kb", t.kb ? `on h=${t.vvHeight} base=${baseline}` : "off");
   appEl.classList.toggle("kb", t.kb);
+  if (settling !== wasSettling) slog("shell.settling", settling ? "on" : "off");
+  appEl.classList.toggle("settling", settling);
 
   if (t.trackViewport !== wasTracking) {
     slog("shell.track", t.trackViewport ? `on top=${t.vvTop} h=${t.vvHeight}` : "off");
@@ -279,7 +289,7 @@ export function reconcile(): void {
   // retract the shell mid-animation
   if (!t.kb) tracking = false;
   else if (t.trackViewport) tracking = true;
-  applyShell({ ...t, trackViewport: t.kb && tracking });
+  applyShell({ ...t, trackViewport: t.kb && tracking }, picker.isTearing());
 }
 
 const picker = createPickerLifecycle({
@@ -291,9 +301,23 @@ const picker = createPickerLifecycle({
   dismiss: () => {
     slog("shell.settle", "blur files"); // logged BEFORE blur: act= shows parked state
     fileEl?.blur(); // parked focus is the tap-swallower; clear it on every path
+    armTeardownExpiry();
     reconcile();
   },
 });
+
+// The window's end normally arrives as a signal (refocus/cancel/change), but a
+// dropped present produces none — without a clock the bar would stay held until
+// some unrelated signal happened by. expireTearing() carries the real check, so
+// this timer can fire stale, duplicated, or into a later session, harmlessly.
+function armTeardownExpiry(): void {
+  setTimeout(() => {
+    if (picker.expireTearing() === "expired") {
+      slog("shell.teardown", "expired");
+      reconcile();
+    }
+  }, TEARDOWN_MAX_MS + 50);
+}
 
 // Replace the file input with a virgin clone. The dying WKFileUploadPanel is
 // bound to the old element, and a click on it inside the teardown window is
@@ -316,7 +340,9 @@ function swapFileInput(): void {
 function bindInputSignals(input: HTMLInputElement): void {
   const sessionDone = (): void => {
     picker.settle();
-    if (picker.teardownComplete() === "completed") releaseParkedEditor();
+    const done = picker.teardownComplete() === "completed";
+    reconcile(); // the settling window ends HERE; the bar must un-grey now
+    if (done) releaseParkedEditor();
   };
   input.addEventListener("cancel", sessionDone);
   input.addEventListener("change", () => {
@@ -360,24 +386,19 @@ export function initShell(el: HTMLElement): void {
   });
   // a tap landing in OUR page means the native UI is gone from the screen —
   // but NOT that teardown finished (the dismissing tap itself leaks through
-  // ~0.5s before the refocus signal), so this one only settles — plus, while
-  // it is the one real touch available, the v0.1.21 focus-cycle experiment.
+  // ~0.5s before the refocus signal), so it only settles. And from that tap
+  // until teardown-complete, ＋/editor taps are held (see holdsBarTap): the
+  // settle() runs first, so the dismissing tap itself is already inside the
+  // window and cannot focus an editor whose keyboard the teardown would kill.
   document.addEventListener(
     "pointerdown",
     (e) => {
-      const settled = picker.settle() === "settled";
-      const active = document.activeElement;
-      const cycle = shouldCycleFocus(
-        settled,
-        isEditable(active),
-        isEditable(e.target),
-        computeShell(readWorld()).kb,
-      );
-      if (!cycle) return;
-      const tgt = e.target instanceof HTMLElement ? e.target.tagName.toLowerCase() : "?";
-      slog("shell.cycle", `blur+focus tgt=${tgt}`);
-      (active as HTMLElement).blur();
-      (active as HTMLElement).focus();
+      picker.settle();
+      if (holdsBarTap(picker.isTearing(), isEditable(e.target), e.target === plusEl)) {
+        const tgt = e.target instanceof HTMLElement ? e.target.tagName.toLowerCase() : "?";
+        slog("shell.hold", `tgt=${tgt}`);
+        e.preventDefault();
+      }
     },
     true,
   );
@@ -388,6 +409,7 @@ export function initShell(el: HTMLElement): void {
 // re-attached to each fresh input, so the app's handler survives the swaps.
 export function bindPicker(input: HTMLInputElement, button: HTMLElement, pick: () => void): void {
   fileEl = input;
+  plusEl = button;
   onPick = pick;
   bindInputSignals(input);
   button.addEventListener("pointerdown", (e) => {
@@ -402,6 +424,13 @@ export function bindPicker(input: HTMLInputElement, button: HTMLElement, pick: (
     if (preserve) e.preventDefault();
   });
   button.addEventListener("click", () => {
+    // a held tap still delivers its click (device-proven); during the window it
+    // must not reach open(), which would present straight into the dropped-click
+    // zone — the falsified fresh-input path, 0/6 on device
+    if (picker.isTearing()) {
+      slog("shell.＋click", "held");
+      return;
+    }
     slog("shell.＋click", picker.open());
   });
 }

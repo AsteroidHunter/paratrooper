@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.21-dbg"; // focus-cycle inside the dismissing tap: re-claim the keyboard before teardown snatches it
+const APP_VERSION = "0.1.22-dbg"; // the three bar locks: ＋ vanishes under the keyboard; ＋/editor grey out and hold taps for the teardown window
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -117,10 +117,24 @@ function renderChat(): void {
   });
   // compose grows with content like iMessage (1 -> ~5 lines, then inner scroll)
   const textEl = document.getElementById("text") as HTMLTextAreaElement;
-  textEl.addEventListener("input", () => {
+  const autosize = (): void => {
     textEl.style.height = "auto";
     textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
-  });
+  };
+  textEl.addEventListener("input", autosize);
+  // the editor's width moves when the ＋ yields/reclaims its slot (styles.css
+  // .kb): existing text re-wraps at the new width, so its height must be
+  // re-derived or the box keeps a stale line count (too tall widening, an
+  // inner scrollbar shrinking back). Width-gated so our own height writes
+  // above can't loop the observer.
+  let lastTextWidth = 0;
+  if ("ResizeObserver" in window) {
+    new ResizeObserver(() => {
+      if (textEl.clientWidth === lastTextWidth) return;
+      lastTextWidth = textEl.clientWidth;
+      autosize();
+    }).observe(textEl);
+  }
   const thread = document.getElementById("thread")!;
   thread.addEventListener("scroll", () => {
     // the ONE place following flips: away from the bottom = reading history,
