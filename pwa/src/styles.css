@@ -21,11 +21,9 @@
   --glass-edge: rgba(0, 0, 0, 0.1);
   --glass-shade: rgba(0, 0, 0, 0.1);
   --glass-lift: rgba(0, 0, 0, 0.07);
-  /* header: opaque where the bar meets the phone's top, translucent below;
-     raised = the drop shadow shared by the header's floating elements */
+  /* header: opaque where the bar meets the phone's top, translucent below */
   --bar-grad-top: rgba(249, 249, 249, 1);
   --bar-grad-bottom: rgba(249, 249, 249, 0.45);
-  --raised: 0 2px 8px rgba(0, 0, 0, 0.16);
   color-scheme: light;
 }
 
@@ -47,7 +45,6 @@
     --glass-lift: rgba(0, 0, 0, 0.5);
     --bar-grad-top: rgba(22, 22, 24, 1);
     --bar-grad-bottom: rgba(22, 22, 24, 0.45);
-    --raised: 0 2px 8px rgba(0, 0, 0, 0.55);
     color-scheme: dark;
   }
 }
@@ -153,27 +150,15 @@ html, body {
   gap: 2px;
 }
 .avatar {
-  width: 50px;
-  height: 50px;
+  width: 70px; /* 1.4× the 50px it was */
+  height: 70px;
   border-radius: 50%; /* circular window on the logo, iMessage contact style */
   object-fit: cover;
   display: block;
-  box-shadow: var(--raised);
-}
-/* name + version wrapped in one raised glass capsule under the photo */
-.namepill {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 3px 12px;
-  border-radius: 999px;
-  border: 1px solid var(--glass-edge);
-  background: var(--glass-bg);
-  backdrop-filter: blur(16px) saturate(180%);
-  -webkit-backdrop-filter: blur(16px) saturate(180%);
-  box-shadow:
-    inset 0 1px 0 var(--glass-rim),
-    var(--raised);
+  /* the extra 20px of photo (and the 8px the removed capsule gave back) must
+     not tallen the bar: bleed the difference upward into the safe-area
+     padding, which is dead space above the content */
+  margin-top: -12px;
 }
 .bar .title {
   text-align: center;
@@ -209,8 +194,7 @@ html, body {
   -webkit-backdrop-filter: blur(16px) saturate(180%);
   box-shadow:
     inset 0 1px 0 var(--glass-rim),
-    inset 0 -6px 10px -8px var(--glass-shade),
-    var(--raised);
+    inset 0 -6px 10px -8px var(--glass-shade);
   color: var(--muted);
   cursor: pointer;
 }
@@ -491,8 +475,9 @@ html, body {
     inset 0 1px 0 var(--glass-rim),
     inset 0 -6px 10px -8px var(--glass-shade),
     0 1px 6px var(--glass-lift);
-  color: var(--muted);
+  color: var(--text); /* black in light mode (white in dark), not muted grey */
   font-size: 1.25rem;
+  font-weight: 200; /* thin ＋ strokes */
   cursor: pointer;
   flex: none;
   overflow: hidden; /* the glyph must not paint outside a mid-collapse box */
