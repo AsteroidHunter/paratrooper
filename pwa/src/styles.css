@@ -337,6 +337,19 @@ html, body {
   color: var(--text);
   font: inherit;
   font-size: 17px;
+  /* keyboard-down direction: shrink the inset in step with the ＋ reclaiming
+     its slot (same clock as .attach width/margin), so the text column never
+     moves or re-wraps — the pill slides under motionless text */
+  transition: padding-left 0.13s ease;
+}
+/* While the keyboard is up the pill widens leftward into the ＋'s slot, but
+   the text must not re-wrap: the left inset grows by exactly the vacated
+   space (34px ＋ + 0.5rem flex gap), keeping the text column's width and
+   screen position identical in both states. Timed to the same duration and
+   delay as the ＋'s width collapse so the two cancel frame-by-frame. */
+#app.kb .compose textarea {
+  padding-left: calc(48px + 0.5rem); /* 14px base + 34px ＋ + the gap */
+  transition: padding-left 0.13s ease 0.1s;
 }
 .attach {
   display: grid;
