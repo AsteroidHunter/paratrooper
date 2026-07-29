@@ -13,6 +13,14 @@
   --muted: #8e8e93;
   --error-bg: #ffe5e5;
   --error-text: #d70015;
+  /* liquid-glass material (Safari-grade: tint + rim + shade; no SVG refraction).
+     The rim is the specular top edge, the shade fakes thickness at the bottom,
+     the edge is the silhouette line, the lift is the soft drop under it. */
+  --glass-bg: rgba(120, 120, 128, 0.08);
+  --glass-rim: rgba(255, 255, 255, 0.9);
+  --glass-edge: rgba(0, 0, 0, 0.1);
+  --glass-shade: rgba(0, 0, 0, 0.12);
+  --glass-lift: rgba(0, 0, 0, 0.07);
   color-scheme: light;
 }
 
@@ -27,6 +35,11 @@
     --muted: #98989f;
     --error-bg: #3a1214;
     --error-text: #ff453a;
+    --glass-bg: rgba(255, 255, 255, 0.09);
+    --glass-rim: rgba(255, 255, 255, 0.28);
+    --glass-edge: rgba(255, 255, 255, 0.14);
+    --glass-shade: rgba(0, 0, 0, 0.5);
+    --glass-lift: rgba(0, 0, 0, 0.5);
     color-scheme: dark;
   }
 }
@@ -331,9 +344,18 @@ html, body {
   max-height: 120px; /* ~5 lines; the input handler grows height up to this */
   padding: 8px 40px 8px 14px; /* the right inset is the ↑'s reserved column —
     text must never wrap under or beside-then-behind the button */
-  border: 1px solid var(--hairline);
+  border: 1px solid var(--glass-edge);
   border-radius: 18px;
-  background: var(--bg);
+  /* liquid glass, the parts Safari can do: translucent tint, specular top rim,
+     inner bottom shade for thickness, soft lift. The backdrop blur is inert
+     over the flat canvas today but lights up if content ever scrolls under. */
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    inset 0 -10px 16px -14px var(--glass-shade),
+    0 1px 6px var(--glass-lift);
   color: var(--text);
   font: inherit;
   font-size: 17px;
@@ -356,7 +378,15 @@ html, body {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: var(--received);
+  /* same liquid-glass material as the pill (see the textarea rule) */
+  border: 1px solid var(--glass-edge);
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    inset 0 -6px 10px -8px var(--glass-shade),
+    0 1px 6px var(--glass-lift);
   color: var(--muted);
   font-size: 1.25rem;
   cursor: pointer;
