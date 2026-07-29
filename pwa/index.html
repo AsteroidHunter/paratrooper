@@ -14,11 +14,12 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
     <title>Paratrooper</title>
+    <!-- DISABLED splash (v0.1.24): on a standalone iOS cold open the ~2s of
+         white happens BEFORE this document arrives from the server, so an
+         in-page splash cannot cover it — it only showed for the last blink.
+         Kept commented out in case a non-PWA shell ever exists, where the
+         page is local and the wait really is the app booting.
     <style>
-      /* Pre-bundle splash, inlined so it paints the moment the HTML arrives —
-         the ~2s cold-open used to be a blank white page while the bundle
-         fetched. Self-sufficient on purpose (no styles.css yet at this point);
-         the app's first render replaces #app's children, removing it. */
       html { background: #fff; }
       .splash {
         position: fixed;
@@ -47,14 +48,17 @@
         .splash { color: #fff; }
       }
     </style>
+    -->
   </head>
   <body>
     <div id="app">
+      <!-- splash markup, disabled with the styles above:
       <div class="splash">
         <img src="/icon-192.png" alt="" />
         <div>Paratrooper</div>
         <div class="splash-dots"><span></span><span></span><span></span></div>
       </div>
+      -->
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

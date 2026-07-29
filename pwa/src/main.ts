@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.23-dbg"; // cosmetics: cold-open splash, floating compose field, in-field ↑ only when sendable, no tap flash
+const APP_VERSION = "0.1.24-dbg"; // splash disabled (white is pre-arrival, uncoverable in-page); placeholder just "Paratrooper"
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -89,7 +89,7 @@ function renderChat(): void {
       <input id="files" type="file" accept="image/*" multiple
         class="filepick" tabindex="-1" aria-hidden="true" />
       <div class="field">
-        <textarea id="text" rows="1" placeholder="Message Paratrooper…"></textarea>
+        <textarea id="text" rows="1" placeholder="Paratrooper"></textarea>
         <button type="submit" id="sendbtn" class="send">↑</button>
       </div>
     </form>`;
