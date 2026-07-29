@@ -7,7 +7,22 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.33-dbg"; // capsule and shadows removed, photo 1.4× without a taller bar, ＋ now text-black and thin
+const APP_VERSION = "0.1.34-dbg"; // header row layout, opaque menu + log-out confirm, cream bar/pill, WW1 dispatch placeholders
+
+// compose placeholder: one of these, picked at random each time the chat
+// renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
+const PROMPTS = [
+  "Dispatch for HQ?",
+  "Wire your orders …",
+  "Carrier pigeon inbound …",
+  "Balloon's up …",
+  "Over the top …",
+  "Sortie at dawn …",
+  "From the trenches …",
+  "Telegram for the board?",
+  "Drop from the biplane …",
+  "Signal the aerodrome …",
+];
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -88,11 +103,11 @@ function renderTokenGate(): void {
 function renderChat(): void {
   app.innerHTML = `
     <header class="bar">
-      <div class="contact">
-        <img class="avatar" src="/icon-192.png" alt="" />
+      <div class="ident">
         <span class="title">Paratrooper</span>
         <span class="ver">v${APP_VERSION}</span>
       </div>
+      <img class="avatar" src="/icon-192.png" alt="" />
       <div class="settings">
         <button type="button" id="settings" class="gearbtn" title="Settings" aria-label="Settings"></button>
         <div id="menu" class="menu">
@@ -100,6 +115,15 @@ function renderChat(): void {
         </div>
       </div>
     </header>
+    <div id="confirm" class="confirm">
+      <div class="confirm-card">
+        <p class="confirm-msg">Are you sure you want to log out?</p>
+        <div class="confirm-row">
+          <button type="button" id="confirm-no" class="confirm-no">No</button>
+          <button type="button" id="confirm-yes" class="confirm-yes">Yes</button>
+        </div>
+      </div>
+    </div>
     <main id="thread" class="thread">
       <div class="empty">Send a photo, link, or song to update the board. 🪂</div>
     </main>
@@ -110,14 +134,28 @@ function renderChat(): void {
       <input id="files" type="file" accept="image/*" multiple
         class="filepick" tabindex="-1" aria-hidden="true" />
       <div class="field">
-        <textarea id="text" rows="1" placeholder="Paratrooper"></textarea>
+        <textarea id="text" rows="1"
+          placeholder="${PROMPTS[Math.floor(Math.random() * PROMPTS.length)]}"></textarea>
         <button type="submit" id="sendbtn" class="send">↑</button>
       </div>
     </form>`;
   document.getElementById("settings")!.addEventListener("click", () => {
     document.getElementById("menu")!.classList.toggle("open");
   });
+  // Log Out is gated behind an iOS-style confirm so a stray tap can't log out:
+  // No (safe, bold blue) dismisses; Yes (destructive red) actually logs out.
+  const confirmEl = document.getElementById("confirm")!;
   document.getElementById("logout")!.addEventListener("click", () => {
+    document.getElementById("menu")!.classList.remove("open");
+    confirmEl.classList.add("open");
+  });
+  confirmEl.addEventListener("click", (e) => {
+    if (e.target === confirmEl) confirmEl.classList.remove("open"); // backdrop tap = No
+  });
+  document.getElementById("confirm-no")!.addEventListener("click", () => {
+    confirmEl.classList.remove("open");
+  });
+  document.getElementById("confirm-yes")!.addEventListener("click", () => {
     localStorage.removeItem(TOKEN_KEY);
     token = "";
     lastSeq = 0; // full replay on next login
