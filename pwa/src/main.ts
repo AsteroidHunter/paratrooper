@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.25-dbg"; // pill widens under motionless text: left inset grows with the ＋'s vacated slot, no re-wrap
+const APP_VERSION = "0.1.26-dbg"; // text rides the pill's left edge as one block; spare width absorbed on the right, no left gap
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
