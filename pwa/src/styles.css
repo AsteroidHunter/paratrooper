@@ -25,7 +25,7 @@
      Cream (#FFF9F1) is "the color" — revert here if he says reverse it. */
   --bar-grad-top: rgba(255, 249, 241, 1);
   --bar-grad-bottom: rgba(255, 249, 241, 0.45);
-  --pill-bg: rgba(255, 249, 241, 0.85); /* cream editor pill; ＋ stays --glass-bg white */
+  --pill-bg: rgba(255, 249, 241, 0.6); /* cream-tinted GLASS — same translucency as --glass-bg, only the hue moves */
   --menu-bg: #f2f2f4; /* fully opaque dropdown / alert card */
   color-scheme: light;
 }
@@ -484,7 +484,7 @@ html, body {
   /* liquid glass, the parts Safari can do: translucent tint, specular top rim,
      inner bottom shade for thickness, soft lift. The backdrop blur is inert
      over the flat canvas today but lights up if content ever scrolls under.
-     Near-solid cream in light mode ("the color") so the hue reads on white. */
+     Cream-tinted in light mode ("the color") at unchanged glass translucency. */
   background: var(--pill-bg);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
