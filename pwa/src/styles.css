@@ -28,9 +28,8 @@
   --pill-bg: rgba(255, 255, 255, 0.6); /* white glass, same as --glass-bg */
   --menu-bg: #f2f2f4; /* fully opaque dropdown / alert card */
   --accent: #432bff; /* sent bubbles + compose caret (per spec, ONLY those) */
-  /* hold-glow on the editor pill: brightens while the finger is down */
-  --pill-glow-bg: rgba(255, 255, 255, 0.95);
-  --pill-glow: rgba(255, 255, 255, 0.9);
+  /* hold-glow: interior illumination washed OVER the pill while pressed */
+  --pill-glow: rgba(255, 255, 255, 0.4);
   color-scheme: light;
 }
 
@@ -54,8 +53,7 @@
     --bar-grad-bottom: rgba(22, 22, 24, 0.45);
     --pill-bg: rgba(255, 255, 255, 0.14); /* dark mode keeps the white-lean glass */
     --menu-bg: #2c2c2e;
-    --pill-glow-bg: rgba(255, 255, 255, 0.3); /* full white would blind on dark glass */
-    --pill-glow: rgba(255, 255, 255, 0.25);
+    --pill-glow: rgba(255, 255, 255, 0.2); /* gentler wash on dark glass */
     color-scheme: dark;
   }
 }
@@ -483,6 +481,28 @@ html, body {
   position: relative;
   display: flex;
   flex: 1;
+  transition: transform 0.35s ease; /* the hold-glow's slight press scale */
+}
+/* iMessage hold-glow (per Apple's interactive glass: the surface itself
+   illuminates and scales under the finger — not an edge halo). The light wash
+   is a compositor-only overlay ABOVE the textarea: the layer the text and
+   caret are painted on never animates, which is what made the caret drift in
+   the first attempt. Fades in on hold, out on release. */
+.field::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  background: var(--pill-glow);
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  pointer-events: none;
+}
+.field.glow {
+  transform: scale(1.015);
+}
+.field.glow::after {
+  opacity: 1;
 }
 .compose textarea {
   flex: 1;
@@ -510,21 +530,8 @@ html, body {
   font-size: 17px;
   outline: none; /* no browser focus ring — the keyboard IS the focus signal */
   /* keyboard-down direction: same clock as the ＋ reclaiming its slot; the
-     opacity entry is the settling re-enable fade; background/box-shadow are
-     the hold-glow's fade-out when the finger lifts */
-  transition: padding-right 0.13s ease, opacity 0.3s ease,
-    background-color 0.35s ease, box-shadow 0.35s ease;
-}
-/* iMessage hold-glow: while a finger rests on the pill (.glow, set on
-   pointerdown, cleared on pointerup/cancel) it brightens toward white and the
-   rim blooms; releasing fades it back through the base transition above */
-.compose textarea.glow {
-  background: var(--pill-glow-bg);
-  box-shadow:
-    inset 0 1px 0 var(--glass-rim),
-    inset 0 -10px 16px -14px var(--glass-shade),
-    0 0 12px var(--pill-glow),
-    0 1px 6px var(--glass-lift);
+     opacity entry is the settling re-enable fade */
+  transition: padding-right 0.13s ease, opacity 0.3s ease;
 }
 /* While the keyboard is up the pill widens leftward into the ＋'s slot and the
    text rides WITH its left edge — one uniform slide, never a re-wrap. The
@@ -556,6 +563,10 @@ html, body {
   font-weight: 200; /* thin ＋ strokes */
   cursor: pointer;
   flex: none;
+  /* the bar bottom-aligns its items (so ＋ holds still when the pill grows),
+     but the single-line pill is ~7px taller than the ＋ — half of that lifts
+     the ＋ onto the pill's optical centerline */
+  margin-bottom: 3.5px;
   overflow: hidden; /* the glyph must not paint outside a mid-collapse box */
   /* keyboard-DOWN direction: the editor hands the space back first, then the
      ＋ fades in — the mirror of the keyboard-up choreography below. The filter
@@ -596,7 +607,9 @@ html, body {
 .filepick {
   position: absolute;
   left: 0.75rem;
-  bottom: var(--pad-b); /* tracks the ＋ button through the padding toggle */
+  /* tracks the ＋ through the padding toggle AND its centering lift — iOS
+     anchors the picker sheet to this rect, so it must sit exactly on the ＋ */
+  bottom: calc(var(--pad-b) + 3.5px);
   width: 34px;
   height: 34px;
   opacity: 0;

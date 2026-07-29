@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.39-dbg"; // scroll-bounce fix (+2px border), 432BFF bubbles/caret, iMessage hold-glow on the pill
+const APP_VERSION = "0.1.40-dbg"; // hold-glow rebuilt as interior illumination + press scale on an overlay layer; ＋ lifted to the pill's centerline
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -66,12 +66,12 @@ document.addEventListener(
   (e) => {
     const t = e.target;
     if (t instanceof HTMLElement && t.id === "text" && !app.classList.contains("settling")) {
-      t.classList.add("glow");
+      t.parentElement?.classList.add("glow"); // the .field wrapper carries the glow
     }
   },
   true,
 );
-const unglow = (): void => document.getElementById("text")?.classList.remove("glow");
+const unglow = (): void => document.querySelector(".field.glow")?.classList.remove("glow");
 document.addEventListener("pointerup", unglow, true);
 document.addEventListener("pointercancel", unglow, true);
 
