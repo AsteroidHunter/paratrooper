@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.31-dbg"; // settings glyph → ⋯ (text glyph, no emoji), the circled-ellipsis iOS options affordance
+const APP_VERSION = "0.1.32-dbg"; // header v2: gradient glass bar, name+version capsule, raised photo/pill/settings, geometric ⋯ dots
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -90,11 +90,13 @@ function renderChat(): void {
     <header class="bar">
       <div class="contact">
         <img class="avatar" src="/icon-192.png" alt="" />
-        <span class="title">Paratrooper</span>
-        <span class="ver">v${APP_VERSION}</span>
+        <div class="namepill">
+          <span class="title">Paratrooper</span>
+          <span class="ver">v${APP_VERSION}</span>
+        </div>
       </div>
       <div class="settings">
-        <button type="button" id="settings" class="gearbtn" title="Settings">⋯</button>
+        <button type="button" id="settings" class="gearbtn" title="Settings" aria-label="Settings"></button>
         <div id="menu" class="menu">
           <button type="button" id="logout" class="menu-item">Log Out</button>
         </div>

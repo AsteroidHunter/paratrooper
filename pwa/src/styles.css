@@ -21,6 +21,11 @@
   --glass-edge: rgba(0, 0, 0, 0.1);
   --glass-shade: rgba(0, 0, 0, 0.1);
   --glass-lift: rgba(0, 0, 0, 0.07);
+  /* header: opaque where the bar meets the phone's top, translucent below;
+     raised = the drop shadow shared by the header's floating elements */
+  --bar-grad-top: rgba(249, 249, 249, 1);
+  --bar-grad-bottom: rgba(249, 249, 249, 0.45);
+  --raised: 0 2px 8px rgba(0, 0, 0, 0.16);
   color-scheme: light;
 }
 
@@ -40,6 +45,9 @@
     --glass-edge: rgba(255, 255, 255, 0.14);
     --glass-shade: rgba(0, 0, 0, 0.5);
     --glass-lift: rgba(0, 0, 0, 0.5);
+    --bar-grad-top: rgba(22, 22, 24, 1);
+    --bar-grad-bottom: rgba(22, 22, 24, 0.45);
+    --raised: 0 2px 8px rgba(0, 0, 0, 0.55);
     color-scheme: dark;
   }
 }
@@ -126,10 +134,12 @@ html, body {
   grid-template-columns: 2.5rem 1fr 2.5rem;
   align-items: center;
   padding: max(0.5rem, env(safe-area-inset-top)) 0.75rem 0.5rem;
-  background: var(--bar);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border-bottom: 0.5px solid var(--hairline);
+  /* liquid-glass header: fully opaque where it meets the phone's top edge,
+     dissolving to translucent at the bottom — no hairline, the fade IS the
+     edge. Blur is inert over the flat canvas but keeps the material honest. */
+  background: linear-gradient(to bottom, var(--bar-grad-top), var(--bar-grad-bottom));
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
   position: sticky;
   top: 0;
   z-index: 5;
@@ -148,18 +158,35 @@ html, body {
   border-radius: 50%; /* circular window on the logo, iMessage contact style */
   object-fit: cover;
   display: block;
+  box-shadow: var(--raised);
+}
+/* name + version wrapped in one raised glass capsule under the photo */
+.namepill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 3px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--glass-edge);
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    var(--raised);
 }
 .bar .title {
   text-align: center;
   font-weight: 600;
   font-size: 12px; /* small name under the big photo, like iMessage */
+  line-height: 1.3;
 }
 /* faint version line under the name */
 .bar .ver {
   color: var(--muted);
   font-weight: 400;
   font-size: 9px;
-  line-height: 1;
+  line-height: 1.2;
 }
 
 /* settings: circular glass button, small glass dropdown under it */
@@ -171,7 +198,7 @@ html, body {
 }
 .gearbtn {
   display: grid;
-  place-items: center; /* the glyph sat off-center on the button's baseline */
+  place-items: center;
   width: 34px;
   height: 34px;
   padding: 0;
@@ -183,12 +210,20 @@ html, body {
   box-shadow:
     inset 0 1px 0 var(--glass-rim),
     inset 0 -6px 10px -8px var(--glass-shade),
-    0 1px 6px var(--glass-lift);
+    var(--raised);
   color: var(--muted);
-  font-size: 20px;
-  font-weight: 700; /* the ⋯ needs weight to read at this size */
-  line-height: 1;
   cursor: pointer;
+}
+/* the ⋯ drawn as geometry, not a font glyph: a font character rides its text
+   metrics and never lands dead-center; a 4px dot cloned twice by box-shadow is
+   centered by the grid mathematically */
+.gearbtn::before {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: -7px 0 0 currentColor, 7px 0 0 currentColor;
 }
 .menu {
   position: absolute;
