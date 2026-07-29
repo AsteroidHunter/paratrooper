@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.22-dbg"; // the three bar locks: ＋ vanishes under the keyboard; ＋/editor grey out and hold taps for the teardown window
+const APP_VERSION = "0.1.23-dbg"; // cosmetics: cold-open splash, floating compose field, in-field ↑ only when sendable, no tap flash
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -85,11 +85,13 @@ function renderChat(): void {
     <button type="button" id="jump" class="jump" title="Jump to latest">↓</button>
     <div id="pending" class="pending"></div>
     <form id="compose" class="compose">
-      <button type="button" id="attach" class="attach" title="Add photo">＋</button>
+      <button type="button" id="attach" class="attach" title="Attach">＋</button>
       <input id="files" type="file" accept="image/*" multiple
         class="filepick" tabindex="-1" aria-hidden="true" />
-      <textarea id="text" rows="1" placeholder="Message Paratrooper…"></textarea>
-      <button type="submit" id="sendbtn" class="send">↑</button>
+      <div class="field">
+        <textarea id="text" rows="1" placeholder="Message Paratrooper…"></textarea>
+        <button type="submit" id="sendbtn" class="send">↑</button>
+      </div>
     </form>`;
   document.getElementById("reset")!.addEventListener("click", () => {
     localStorage.removeItem(TOKEN_KEY);
@@ -121,7 +123,10 @@ function renderChat(): void {
     textEl.style.height = "auto";
     textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
   };
-  textEl.addEventListener("input", autosize);
+  textEl.addEventListener("input", () => {
+    autosize();
+    refreshSend();
+  });
   // the editor's width moves when the ＋ yields/reclaims its slot (styles.css
   // .kb): existing text re-wraps at the new width, so its height must be
   // re-derived or the box keeps a stale line count (too tall widening, an
@@ -229,7 +234,18 @@ async function loadOlder(): Promise<void> {
 
 let pendingFiles: File[] = [];
 
+// the ↑ lives inside the field and exists only while there is something to
+// send (text or staged files), like iMessage; every path that changes either
+// one funnels through the input handler or renderPending, which both call this
+function refreshSend(): void {
+  const btn = document.getElementById("sendbtn");
+  const text = document.getElementById("text") as HTMLTextAreaElement | null;
+  if (!btn || !text) return;
+  btn.classList.toggle("show", text.value.trim().length > 0 || pendingFiles.length > 0);
+}
+
 function renderPending(): void {
+  refreshSend(); // staged files count toward "something to send"
   const box = document.getElementById("pending");
   if (!box) return;
   box.innerHTML = "";

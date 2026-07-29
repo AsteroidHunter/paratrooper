@@ -14,9 +14,48 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
     <title>Paratrooper</title>
+    <style>
+      /* Pre-bundle splash, inlined so it paints the moment the HTML arrives —
+         the ~2s cold-open used to be a blank white page while the bundle
+         fetched. Self-sufficient on purpose (no styles.css yet at this point);
+         the app's first render replaces #app's children, removing it. */
+      html { background: #fff; }
+      .splash {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-content: center;
+        justify-items: center;
+        gap: 14px;
+        font: 600 20px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+        color: #000;
+      }
+      .splash img { width: 76px; height: 76px; border-radius: 18px; }
+      .splash-dots { display: flex; gap: 5px; margin-top: 2px; }
+      .splash-dots span {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #8e8e93;
+        animation: splash-blink 1.2s infinite both;
+      }
+      .splash-dots span:nth-child(2) { animation-delay: 0.2s; }
+      .splash-dots span:nth-child(3) { animation-delay: 0.4s; }
+      @keyframes splash-blink { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
+      @media (prefers-color-scheme: dark) {
+        html { background: #000; }
+        .splash { color: #fff; }
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div class="splash">
+        <img src="/icon-192.png" alt="" />
+        <div>Paratrooper</div>
+        <div class="splash-dots"><span></span><span></span><span></span></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

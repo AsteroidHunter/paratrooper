@@ -35,6 +35,9 @@
 
 html, body {
   margin: 0;
+  /* no system tap flash on buttons/links (the whitish blink iOS paints by
+     default); inherited, so this opts the whole app out like native UIs do */
+  -webkit-tap-highlight-color: transparent;
   /* 100vh, NOT 100% or 100dvh: in iOS standalone mode height:100% defeats
      viewport-fit=cover (the webview letterboxes and paints a white bar under
      the app) and 100dvh misreports on cold start; standalone has no toolbar,
@@ -306,24 +309,28 @@ html, body {
 .typing span:nth-child(3) { animation-delay: 0.4s; }
 @keyframes blink { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
 
-/* --- compose bar (pill input, blue circular send) --- */
+/* --- compose bar: no panel behind it — the pill field and the ＋ float on
+   the canvas like iMessage --- */
 .compose {
   position: relative; /* anchor box for the invisible file input */
   display: flex;
   gap: 0.5rem;
   align-items: flex-end;
   padding: 0.5rem 0.75rem var(--pad-b);
-  background: var(--bar);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border-top: 0.5px solid var(--hairline);
+}
+/* the field wrapper: the pill plus the ↑ that lives inside its right edge */
+.field {
+  position: relative;
+  display: flex;
+  flex: 1;
 }
 .compose textarea {
   flex: 1;
   resize: none;
   overflow-y: auto;
   max-height: 120px; /* ~5 lines; the input handler grows height up to this */
-  padding: 8px 14px;
+  padding: 8px 40px 8px 14px; /* the right inset is the ↑'s reserved column —
+    text must never wrap under or beside-then-behind the button */
   border: 1px solid var(--hairline);
   border-radius: 18px;
   background: var(--bg);
@@ -383,18 +390,32 @@ html, body {
   opacity: 0;
   pointer-events: none;
 }
+/* the ↑: pinned bottom-right INSIDE the pill, present only while there is
+   something to send (.show, toggled by refreshSend). It keeps the pill's
+   bottom edge as the field grows, exactly like iMessage's. */
 .compose .send {
-  width: 34px;
-  height: 34px;
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: none;
   border-radius: 50%;
   background: var(--sent);
   color: #fff;
-  font-size: 1.15rem;
+  font-size: 1rem;
   font-weight: 700;
   cursor: pointer;
-  flex: none;
+  opacity: 0;
+  transform: scale(0.5);
+  pointer-events: none;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.compose .send.show {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
 }
 
 .buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }
@@ -423,13 +444,13 @@ html, body {
   pointer-events: auto;
 }
 
-/* pending attachment thumbnails (picked, not yet sent) */
+/* pending attachment thumbnails (picked, not yet sent) — float on the canvas
+   like the bar below them */
 .pending {
   display: none;
   gap: 0.4rem;
   flex-wrap: wrap;
   padding: 0.4rem 0.75rem 0;
-  background: var(--bar);
 }
 .pthumb { position: relative; }
 .pthumb img {
