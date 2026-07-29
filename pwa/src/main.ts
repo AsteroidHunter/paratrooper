@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.28-dbg"; // whiter glass; glass chevron; iMessage header w/ settings menu; bar locks for the whole picker session, fades back in
+const APP_VERSION = "0.1.29-dbg"; // header polish: 50px contact circle, centered 🪂 settings button, no focus ring on the pill
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -94,7 +94,7 @@ function renderChat(): void {
         <span class="ver">v${APP_VERSION}</span>
       </div>
       <div class="settings">
-        <button type="button" id="settings" class="gearbtn" title="Settings">⚙︎</button>
+        <button type="button" id="settings" class="gearbtn" title="Settings">🪂</button>
         <div id="menu" class="menu">
           <button type="button" id="logout" class="menu-item">Log Out</button>
         </div>
