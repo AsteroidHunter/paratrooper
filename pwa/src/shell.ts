@@ -82,11 +82,14 @@ export function preservesFocus(w: World): boolean {
 
 // The teardown window cannot be shortened, survived, or recovered from (three
 // shipped mechanisms and the v0.1.21 focus-cycle all falsified on device), so
-// the bar now WAITS it out visibly: from the dismissal until teardown-complete
-// the ＋ greys and the editor looks switched off (styles.css `.settling`), and
-// taps on either are HELD — preventDefault on the capture path, so no focus
-// change raises a keyboard the teardown's window-blur would kill mid-rise, and
-// no ＋ click reaches the zone where WebKit silently drops it. Only the two
+// the bar WAITS it out visibly. The VISUAL off-state (styles.css `.settling`)
+// runs for the whole picker session — from the ＋ tap that opens it through
+// teardown-complete — so the bar never blinks off/on after a dismissal; it
+// went off with the opening tap and fades back in when the cleanup ends. The
+// TAP HOLD below is narrower: only during teardown, when a page tap is even
+// possible — preventDefault on the capture path, so no focus change raises a
+// keyboard the teardown's window-blur would kill mid-rise, and no ＋ click
+// reaches the zone where WebKit silently drops it. Only the two
 // picker-adjacent controls wait; the send button and the thread stay live.
 export function holdsBarTap(
   tearing: boolean,
@@ -233,7 +236,7 @@ function readWorld(): World {
 // THE one writer of shell presentation: three mode classes plus two
 // measurements. styles.css owns what they mean (.kb collapses --pad-b AND
 // vanishes the ＋, .kb-vv consumes the vars to override the four-edge pin,
-// .settling greys the bar for the teardown window).
+// .settling greys the bar for the whole picker session).
 function applyShell(t: ShellTarget, settling: boolean): void {
   if (!appEl) return;
   const wasKb = appEl.classList.contains("kb");
@@ -289,7 +292,9 @@ export function reconcile(): void {
   // retract the shell mid-animation
   if (!t.kb) tracking = false;
   else if (t.trackViewport) tracking = true;
-  applyShell({ ...t, trackViewport: t.kb && tracking }, picker.isTearing());
+  // the visual off-state covers the whole session; the tap hold stays
+  // teardown-only (see holdsBarTap)
+  applyShell({ ...t, trackViewport: t.kb && tracking }, picker.isOpen() || picker.isTearing());
 }
 
 const picker = createPickerLifecycle({
@@ -297,6 +302,7 @@ const picker = createPickerLifecycle({
     if (fresh) swapFileInput();
     slog("shell.present", fresh ? "files.click() [fresh]" : "files.click()");
     fileEl?.click();
+    reconcile(); // the settling visual starts NOW, inside the opening tap
   },
   dismiss: () => {
     slog("shell.settle", "blur files"); // logged BEFORE blur: act= shows parked state

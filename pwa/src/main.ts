@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.27-dbg"; // liquid glass on the pill and ＋: tint, specular rim, thickness shade, backdrop blur (Safari-grade)
+const APP_VERSION = "0.1.28-dbg"; // whiter glass; glass chevron; iMessage header w/ settings menu; bar locks for the whole picker session, fades back in
 
 const TOKEN_KEY = "paratrooper_token";
 const THREAD_ID = "default"; // single user, single thread in v1
@@ -42,6 +42,21 @@ const app = document.getElementById("app")!;
 setShellLogger(initTapLog());
 initShell(app); // keyboard/focus/picker state converges through shell.ts
 
+// settings dropdown: any tap outside it (or its button) closes it. Bound once
+// at module level with live lookups, so renderChat re-renders can't stack
+// stale listeners.
+document.addEventListener(
+  "pointerdown",
+  (e) => {
+    const menu = document.getElementById("menu");
+    if (!menu?.classList.contains("open")) return;
+    const gear = document.getElementById("settings");
+    if (e.target instanceof Node && (menu.contains(e.target) || gear?.contains(e.target))) return;
+    menu.classList.remove("open");
+  },
+  true,
+);
+
 function authHeaders(): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
@@ -75,9 +90,15 @@ function renderChat(): void {
     <header class="bar">
       <div class="contact">
         <img class="avatar" src="/icon-192.png" alt="" />
-        <span class="title">Paratrooper <span class="ver">v${APP_VERSION}</span></span>
+        <span class="title">Paratrooper</span>
+        <span class="ver">v${APP_VERSION}</span>
       </div>
-      <button id="reset" class="ghost" title="Forget token">⎋</button>
+      <div class="settings">
+        <button type="button" id="settings" class="gearbtn" title="Settings">⚙︎</button>
+        <div id="menu" class="menu">
+          <button type="button" id="logout" class="menu-item">Log Out</button>
+        </div>
+      </div>
     </header>
     <main id="thread" class="thread">
       <div class="empty">Send a photo, link, or song to update the board. 🪂</div>
@@ -93,7 +114,10 @@ function renderChat(): void {
         <button type="submit" id="sendbtn" class="send">↑</button>
       </div>
     </form>`;
-  document.getElementById("reset")!.addEventListener("click", () => {
+  document.getElementById("settings")!.addEventListener("click", () => {
+    document.getElementById("menu")!.classList.toggle("open");
+  });
+  document.getElementById("logout")!.addEventListener("click", () => {
     localStorage.removeItem(TOKEN_KEY);
     token = "";
     lastSeq = 0; // full replay on next login
