@@ -133,9 +133,8 @@ html, body {
 /* --- nav bar (frosted, centered title, hairline) --- */
 .bar {
   display: grid;
-  /* one centered row: ident block left, photo center, settings right — the
-     grid's center-alignment is what puts all three on the photo's midline */
-  grid-template-columns: 1fr auto 1fr;
+  /* contact group centered, settings right, everything on one midline */
+  grid-template-columns: 2.5rem 1fr 2.5rem;
   align-items: center;
   padding: max(0.5rem, env(safe-area-inset-top)) 0.75rem 0.5rem;
   /* liquid-glass header: fully opaque where it meets the phone's top edge,
@@ -148,18 +147,25 @@ html, body {
   top: 0;
   z-index: 5;
 }
-/* app ident: name over version, left-aligned in the bar's top-left corner */
+/* contact group, centered in the bar: the trooper image with the left-aligned
+   name/version block on its right */
+.contact {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
 .ident {
-  justify-self: start;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
 }
+/* the top-bar trooper (public/topbar-logo.png, NOT the PWA icon): a cut-out
+   figure, so natural aspect — no circle crop, no frame */
 .avatar {
-  width: 70px;
-  height: 70px;
-  border-radius: 50%; /* circular window on the logo, iMessage contact style */
-  object-fit: cover;
+  height: 48px;
+  width: auto;
   display: block;
 }
 .bar .title {

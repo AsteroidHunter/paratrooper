@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.36-dbg"; // cream reverted entirely — bar and pill back to the white glass values
+const APP_VERSION = "0.1.37-dbg"; // header re-centered: trooper image (new asset) left of the left-aligned name/version
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -103,11 +103,13 @@ function renderTokenGate(): void {
 function renderChat(): void {
   app.innerHTML = `
     <header class="bar">
-      <div class="ident">
-        <span class="title">Paratrooper</span>
-        <span class="ver">v${APP_VERSION}</span>
+      <div class="contact">
+        <img class="avatar" src="/topbar-logo.png" alt="" />
+        <div class="ident">
+          <span class="title">Paratrooper</span>
+          <span class="ver">v${APP_VERSION}</span>
+        </div>
       </div>
-      <img class="avatar" src="/icon-192.png" alt="" />
       <div class="settings">
         <button type="button" id="settings" class="gearbtn" title="Settings" aria-label="Settings"></button>
         <div id="menu" class="menu">
