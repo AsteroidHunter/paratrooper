@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.38-dbg"; // transparent-bg trooper asset; image-to-text gap halved
+const APP_VERSION = "0.1.39-dbg"; // scroll-bounce fix (+2px border), 432BFF bubbles/caret, iMessage hold-glow on the pill
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -56,6 +56,24 @@ const app = document.getElementById("app")!;
 // each raw line renders above the shell decision it triggered
 setShellLogger(initTapLog());
 initShell(app); // keyboard/focus/picker state converges through shell.ts
+
+// editor hold-glow (iMessage): the pill brightens while a finger rests on it
+// and fades back on release. Skipped during the settling window — a held tap
+// must not glow a switched-off box. Module-level with live lookups, like the
+// menu-close below, so re-renders can't stack listeners.
+document.addEventListener(
+  "pointerdown",
+  (e) => {
+    const t = e.target;
+    if (t instanceof HTMLElement && t.id === "text" && !app.classList.contains("settling")) {
+      t.classList.add("glow");
+    }
+  },
+  true,
+);
+const unglow = (): void => document.getElementById("text")?.classList.remove("glow");
+document.addEventListener("pointerup", unglow, true);
+document.addEventListener("pointercancel", unglow, true);
 
 // settings dropdown: any tap outside it (or its button) closes it. Bound once
 // at module level with live lookups, so renderChat re-renders can't stack
@@ -185,7 +203,10 @@ function renderChat(): void {
   const textEl = document.getElementById("text") as HTMLTextAreaElement;
   const autosize = (): void => {
     textEl.style.height = "auto";
-    textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
+    // +2 = the pill's top/bottom border: scrollHeight excludes borders but the
+    // border-box height must cover them, or the box sits 2px overfull forever
+    // and iOS lets an "empty" textarea scroll-bounce
+    textEl.style.height = `${Math.min(textEl.scrollHeight + 2, 120)}px`;
   };
   textEl.addEventListener("input", () => {
     autosize();
