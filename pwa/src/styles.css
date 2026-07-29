@@ -185,7 +185,8 @@ html, body {
     inset 0 -6px 10px -8px var(--glass-shade),
     0 1px 6px var(--glass-lift);
   color: var(--muted);
-  font-size: 17px;
+  font-size: 20px;
+  font-weight: 700; /* the ⋯ needs weight to read at this size */
   line-height: 1;
   cursor: pointer;
 }
