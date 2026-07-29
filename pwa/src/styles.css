@@ -22,10 +22,10 @@
   --glass-shade: rgba(0, 0, 0, 0.1);
   --glass-lift: rgba(0, 0, 0, 0.07);
   /* header: opaque where the bar meets the phone's top, translucent below.
-     Cream (#FFF9F1) is "the color" — revert here if he says reverse it. */
-  --bar-grad-top: rgba(255, 249, 241, 1);
-  --bar-grad-bottom: rgba(255, 249, 241, 0.45);
-  --pill-bg: rgba(255, 249, 241, 0.6); /* cream-tinted GLASS — same translucency as --glass-bg, only the hue moves */
+     (The cream #FFF9F1 experiment lived here and was reverted on order.) */
+  --bar-grad-top: rgba(249, 249, 249, 1);
+  --bar-grad-bottom: rgba(249, 249, 249, 0.45);
+  --pill-bg: rgba(255, 255, 255, 0.6); /* white glass, same as --glass-bg */
   --menu-bg: #f2f2f4; /* fully opaque dropdown / alert card */
   color-scheme: light;
 }

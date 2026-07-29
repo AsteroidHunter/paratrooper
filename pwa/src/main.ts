@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.35-dbg"; // pill back to true glass, cream tint only (0.6 alpha as before)
+const APP_VERSION = "0.1.36-dbg"; // cream reverted entirely — bar and pill back to the white glass values
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
