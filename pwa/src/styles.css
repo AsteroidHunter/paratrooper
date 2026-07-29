@@ -481,13 +481,12 @@ html, body {
   position: relative;
   display: flex;
   flex: 1;
-  transition: transform 0.35s ease; /* the hold-glow's slight press scale */
 }
-/* iMessage hold-glow (per Apple's interactive glass: the surface itself
-   illuminates and scales under the finger — not an edge halo). The light wash
-   is a compositor-only overlay ABOVE the textarea: the layer the text and
-   caret are painted on never animates, which is what made the caret drift in
-   the first attempt. Fades in on hold, out on release. */
+/* iMessage hold-glow: the surface itself illuminates under the finger — an
+   interior light wash, no edge halo, no size change. The wash is a
+   compositor-only overlay ABOVE the textarea: the layer the text and caret
+   are painted on never animates, which is what made the caret drift in the
+   first attempt. Fades in on hold, out on release. */
 .field::after {
   content: "";
   position: absolute;
@@ -497,9 +496,6 @@ html, body {
   opacity: 0;
   transition: opacity 0.35s ease;
   pointer-events: none;
-}
-.field.glow {
-  transform: scale(1.015);
 }
 .field.glow::after {
   opacity: 1;
