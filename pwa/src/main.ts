@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.37-dbg"; // header re-centered: trooper image (new asset) left of the left-aligned name/version
+const APP_VERSION = "0.1.38-dbg"; // transparent-bg trooper asset; image-to-text gap halved
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
