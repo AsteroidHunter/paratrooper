@@ -530,7 +530,8 @@ html, body {
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.9),
     inset 0 0 10px rgba(255, 255, 255, 0.7),
-    0 5px 16px rgba(0, 0, 0, 0.16);
+    0 2px 6px -2px rgba(0, 0, 0, 0.2); /* dark but hugging: contrast without
+      the outward bloom that reads as "the pill lifted/grew" */
   opacity: 0;
   transition: opacity 0.5s ease; /* release: fades off gently */
   pointer-events: none;
@@ -651,7 +652,7 @@ html, body {
   background: var(--accent); /* matches the sent bubbles, not the legacy blue */
   color: #fff;
   font-size: 1rem;
-  font-weight: 700;
+  font-weight: 200; /* thin ↑ strokes, matching the ＋'s weight */
   cursor: pointer;
   opacity: 0;
   transform: scale(0.5);
@@ -726,6 +727,54 @@ html, body {
 
 /* header version tag */
 .ver { opacity: 0.55; font-weight: 400; font-size: 0.85em; }
+
+/* older-history fallback ring: a 0-height overlay just under the header, so
+   showing/hiding it never moves the scroll math. Appears only when a fetch
+   outlasts 150ms (the prefetch usually lands before the user arrives). */
+.loadolder {
+  height: 0;
+  display: flex;
+  justify-content: center;
+  z-index: 4;
+}
+.loadolder .ring {
+  width: 18px;
+  height: 18px;
+  margin-top: 10px;
+  border: 2.5px solid var(--hairline);
+  border-top-color: var(--muted);
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  animation: oldspin 0.8s linear infinite;
+}
+.loadolder.show .ring { opacity: 1; }
+@keyframes oldspin { to { transform: rotate(360deg); } }
+
+/* version-swap cover: cache-first opens paint the stale UI instantly, so the
+   refresh hides behind this branded beat instead of flipping mid-use */
+.updating {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  background: var(--bg);
+}
+.updating img { height: 76px; width: auto; }
+.updating .up-title { font-weight: 600; font-size: 15px; }
+.updots { display: flex; gap: 5px; }
+.updots span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: blink 1.2s infinite both;
+}
+.updots span:nth-child(2) { animation-delay: 0.2s; }
+.updots span:nth-child(3) { animation-delay: 0.4s; }
 
 /* delivery receipt under the last sent bubble (iMessage "Delivered"/"Read") */
 .receipt {

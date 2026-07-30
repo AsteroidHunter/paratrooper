@@ -1,7 +1,10 @@
-// Minimal service worker — enables installability (Add to Home Screen) and an
-// offline app-shell cache. Network-first for navigations so updates land; the
-// shell is a fallback. (Web push subscription is added in Phase 6.)
-const SHELL = "paratrooper-shell-v1";
+// Service worker — installability, offline app-shell cache, and INSTANT opens:
+// navigations serve the locally cached shell immediately (no network wait, no
+// white screen) while a background fetch refreshes the cache. Version skew is
+// safe because the page compares its build against /api/health and runs the
+// update flow (overlay -> cache clear -> warm refetch -> reload) on mismatch.
+// Assets cache on first fetch; hashed filenames make new bundles cache-miss.
+const SHELL = "paratrooper-shell-v2";
 
 self.addEventListener("install", () => self.skipWaiting());
 
@@ -23,19 +26,33 @@ self.addEventListener("fetch", (event) => {
 
   if (request.mode === "navigate") {
     event.respondWith(
-      fetch(request)
-        .then((resp) => {
-          const copy = resp.clone();
-          caches.open(SHELL).then((c) => c.put("/", copy));
-          return resp;
-        })
-        .catch(() => caches.match("/").then((r) => r ?? Response.error()))
+      caches.match("/").then((cached) => {
+        const fresh = fetch(request)
+          .then((resp) => {
+            const copy = resp.clone();
+            caches.open(SHELL).then((c) => c.put("/", copy));
+            return resp;
+          })
+          .catch(() => cached ?? Response.error());
+        return cached ?? fresh; // stored copy paints NOW; network refreshes behind
+      })
     );
     return;
   }
 
+  // assets: cache-first, populated on first fetch so opens and offline work
   event.respondWith(
-    caches.match(request).then((cached) => cached ?? fetch(request))
+    caches.match(request).then(
+      (cached) =>
+        cached ??
+        fetch(request).then((resp) => {
+          if (resp.ok && url.origin === self.location.origin) {
+            const copy = resp.clone();
+            caches.open(SHELL).then((c) => c.put(request, copy));
+          }
+          return resp;
+        })
+    )
   );
 });
 

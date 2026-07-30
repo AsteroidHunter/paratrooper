@@ -8,7 +8,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.51-dbg"; // white-ish face + hairline (the verified iMessage recipe); glow = touch spot + rim flare + deepened shadow; ↑ matches the bubbles
+const APP_VERSION = "0.1.53-dbg"; // instant cached opens + Updating screen; settle-signal boot (no glides); early history prefetch w/ fallback ring; send flight; tight glow; thin ↑
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -164,6 +164,7 @@ function renderChat(): void {
         </div>
       </div>
     </div>
+    <div id="loadolder" class="loadolder" aria-hidden="true"><span class="ring"></span></div>
     <main id="thread" class="thread">
       <div class="empty">Send a photo, link, or song to update the board. 🪂</div>
     </main>
@@ -251,7 +252,10 @@ function renderChat(): void {
     // back at the bottom = following again (programmatic pins land here too)
     followTail = nearBottom();
     if (followTail) document.getElementById("jump")?.classList.remove("show");
-    if (thread.scrollTop < 40) void loadOlder(); // pull at top -> older page
+    // start fetching older pages while the user is still ~1.5 screens away
+    // (iMessage-style): content usually lands before they arrive, so the
+    // scroll just continues — the spinner only shows if they outrun it
+    if (thread.scrollTop < 1200) void loadOlder();
   });
   document.getElementById("jump")!.addEventListener("click", () => {
     document.getElementById("jump")!.classList.remove("show");
@@ -310,6 +314,10 @@ function renderChat(): void {
 async function loadOlder(): Promise<void> {
   if (loadingOlder || oldestSeq <= 1) return; // 0 = nothing applied yet, 1 = at the top
   loadingOlder = true;
+  // slow-fetch fallback only: the ring appears after 150ms so a fast page
+  // never flashes it (its box is 0-height overlay — no scroll math to keep)
+  const spin = document.getElementById("loadolder");
+  const spinT = setTimeout(() => spin?.classList.add("show"), 150);
   try {
     const r = await fetch(`/api/history/${THREAD_ID}?before=${oldestSeq}&limit=50`, {
       headers: authHeaders(),
@@ -331,6 +339,8 @@ async function loadOlder(): Promise<void> {
     suppressAnim = prevSuppress;
     t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
   } finally {
+    clearTimeout(spinT);
+    spin?.classList.remove("show");
     loadingOlder = false;
   }
 }
@@ -634,7 +644,9 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
     img.src = thumbUrl(key);
     img.alt = "photo";
     img.onload = () => {
-      if (followTail) scrollToBottom(); // decoded height lands late
+      // decoded height lands late; re-pin INSTANTLY — a layout completion must
+      // never glide (the opening-scroll motion he flagged came from these)
+      if (followTail) scrollToBottom(true);
     };
     img.onerror = () => {
       div.classList.replace("shot", "text");
@@ -658,7 +670,7 @@ function renderScreenshot(_m: ServerMsg, wrapper: HTMLElement, at: number, value
   img.src = value;
   img.alt = "board preview";
   img.onload = () => {
-    if (followTail) scrollToBottom(); // height lands after decode
+    if (followTail) scrollToBottom(true); // height lands after decode; never glide
   };
   img.addEventListener("click", () => openLightbox(value));
   div.appendChild(img);
@@ -786,16 +798,38 @@ function hideTyping(): void {
 // so the reload fetches the freshly deployed bundle.
 const REFRESHED_KEY = "paratrooper_refreshed_for";
 
+// full-screen "Updating …" cover for the version swap: with cache-first opens
+// the stale UI paints instantly, so a silent mid-use reload would read as a
+// strange flip — this branded beat explains it instead
+function showUpdating(): void {
+  if (document.getElementById("updating")) return;
+  const el = document.createElement("div");
+  el.id = "updating";
+  el.className = "updating";
+  el.innerHTML = `
+    <img src="/topbar-logo.png" alt="" />
+    <div class="up-title">Updating …</div>
+    <div class="updots"><span></span><span></span><span></span></div>`;
+  document.body.appendChild(el);
+}
+
 function maybeSelfRefresh(server: string): void {
   if (__SERVER_VERSION__ === "dev" || server === "dev") return; // local dev
   if (server === __SERVER_VERSION__) return; // bundle matches the server
   if (sessionStorage.getItem(REFRESHED_KEY) === server) return; // already tried
   sessionStorage.setItem(REFRESHED_KEY, server);
+  showUpdating();
   const cleared =
     "caches" in window
       ? caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
       : Promise.resolve([]);
-  void cleared.catch(() => {}).then(() => location.reload());
+  void cleared
+    .catch(() => {})
+    // warm refetch: repopulate the shell cache with the NEW page before
+    // reloading, so the reload paints instantly from cache under the overlay
+    // instead of showing white while the network round-trips
+    .then(() => fetch("/").catch(() => {}))
+    .then(() => location.reload());
 }
 
 async function checkServerVersion(): Promise<void> {
@@ -809,6 +843,17 @@ async function checkServerVersion(): Promise<void> {
   }
 }
 
+// The socket never announces "replay finished", and the old fixed 600ms guess
+// let slow replays leak animated glides onto the opening screen. Instead:
+// quiet-for-400ms means settled — every replay frame pushes the deadline back,
+// so however long the backlog takes, the thread builds with instant pins and
+// only starts animating once it is genuinely done.
+let settleTimer: ReturnType<typeof setTimeout> | null = null;
+function settleAnim(): void {
+  if (settleTimer) clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => (suppressAnim = false), 400);
+}
+
 function connect(): void {
   closingOnPurpose = false;
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -816,7 +861,7 @@ function connect(): void {
   suppressAnim = true; // the catch-up replay must not animate or glide
   ws = new WebSocket(url);
   ws.onopen = () => {
-    setTimeout(() => (suppressAnim = false), 600);
+    settleAnim(); // covers the empty-thread case where no frames arrive
     // every (re)connect re-checks version: a deploy drops the socket, so the
     // reconnect is exactly when a live page may have gone stale
     void checkServerVersion();
@@ -824,6 +869,7 @@ function connect(): void {
   ws.onmessage = (e) => {
     if (!document.getElementById("thread")) return; // gate is showing; don't consume
     const m = JSON.parse(e.data) as ServerMsg;
+    if (m.seq && suppressAnim) settleAnim(); // replay still pouring: hold the pins instant
     if (!m.seq) {
       // ephemeral kinds bypass the store: they are presence, not history.
       // (working is keyed now — the stored row drives the Read receipt)
@@ -836,6 +882,39 @@ function connect(): void {
     if (closingOnPurpose || !token) return; // logout: stay closed
     setTimeout(connect, 2000); // dropped: reconnect; catch-up via ?since=
   };
+}
+
+// iMessage send flight: the fresh bubble lifts out of the compose field and
+// springs up into its thread seat. FLIP — the bubble is laid out in its final
+// spot, instantly translated back to the field's rect, then released on a
+// spring ease. Right edges are pinned (both are right-aligned); replayed and
+// received bubbles keep their ordinary entrance.
+function flyFromField(wrapper: HTMLElement): void {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const field = document.querySelector(".field");
+  const msgs = wrapper.querySelectorAll<HTMLElement>(".msg");
+  if (!field || !msgs.length) return;
+  const start = field.getBoundingClientRect();
+  msgs.forEach((msg) => {
+    const end = msg.getBoundingClientRect();
+    const dx = start.right - end.right;
+    const dy = start.top - end.top;
+    msg.style.transition = "none";
+    msg.style.transform = `translate(${dx}px, ${dy}px)`;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        msg.style.transition = "transform 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.08)";
+        msg.style.transform = "";
+        msg.addEventListener(
+          "transitionend",
+          () => {
+            msg.style.transition = "";
+          },
+          { once: true },
+        );
+      });
+    });
+  });
 }
 
 // client-local bubbles (optimistic sends, network-failure notices) live in
@@ -869,6 +948,10 @@ async function send(): Promise<void> {
   // INSTANT feedback on tap: one optimistic wrapper appears immediately; the
   // uploads/POST happen behind it. On ACK the wrapper adopts the server seq,
   // so a later replay of the same event no-ops instead of duplicating.
+  // suppressAnim while rendering: the send flight below owns the entrance —
+  // the pop-in animation would fight its transform.
+  const prevSuppress = suppressAnim;
+  suppressAnim = true;
   const w = localWrapper("user");
   for (const file of files) {
     const div = rowEl(w, "user", "shot", Date.now());
@@ -878,9 +961,11 @@ async function send(): Promise<void> {
     div.appendChild(img);
   }
   if (text) rowEl(w, "user", "text", Date.now()).textContent = text;
+  suppressAnim = prevSuppress;
   decorate();
   followTail = true; // sending snaps you to the tail
-  scrollToBottom();
+  scrollToBottom(true); // instant pin: the flight is the only motion
+  flyFromField(w);
   textEl.value = "";
   textEl.style.height = "auto"; // collapse the auto-grown compose bar
   pendingFiles = [];
