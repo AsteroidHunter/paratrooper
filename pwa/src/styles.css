@@ -573,6 +573,10 @@ html, body {
   place-items: center;
   width: 34px;
   height: 34px;
+  /* the UA's default button padding (6px/side) floors a border-box width at
+     12px — the collapsed ＋ was never truly 0 wide, shorting the pill 12px of
+     the compensated space and re-wrapping the text (measured 2026-07-30) */
+  padding: 0;
   border-radius: 50%;
   /* same liquid-glass material as the field, scaled for a circle */
   border: none;
@@ -728,27 +732,25 @@ html, body {
 /* header version tag */
 .ver { opacity: 0.55; font-weight: 400; font-size: 0.85em; }
 
-/* older-history fallback ring: a 0-height overlay just under the header, so
-   showing/hiding it never moves the scroll math. Appears only when a fetch
-   outlasts 150ms (the prefetch usually lands before the user arrives). */
-.loadolder {
-  height: 0;
-  display: flex;
+/* older-history spinner: a real row ABOVE THE OLDEST MESSAGE, like the
+   reference — visible only when you actually reach the content's top, present
+   exactly as long as more history exists (drainOlder removes it, inside the
+   scroll pin, once the server says there is nothing older). Hidden while the
+   thread is empty so it can't hover over the placeholder. */
+.histspin {
+  display: none;
   justify-content: center;
-  z-index: 4;
+  padding: 12px 0 4px;
 }
-.loadolder .ring {
+.thread:has(.evt) .histspin { display: flex; }
+.histspin .ring {
   width: 18px;
   height: 18px;
-  margin-top: 10px;
   border: 2.5px solid var(--hairline);
   border-top-color: var(--muted);
   border-radius: 50%;
-  opacity: 0;
-  transition: opacity 0.15s ease;
   animation: oldspin 0.8s linear infinite;
 }
-.loadolder.show .ring { opacity: 1; }
 @keyframes oldspin { to { transform: rotate(360deg); } }
 
 /* version-swap cover: cache-first opens paint the stale UI instantly, so the
