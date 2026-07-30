@@ -8,7 +8,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.53-dbg"; // instant cached opens + Updating screen; settle-signal boot (no glides); early history prefetch w/ fallback ring; send flight; tight glow; thin ↑
+const APP_VERSION = "0.1.54-dbg"; // history smoothing: pages of 25 fetched early, buffered, inserted only when the scroll is truly at rest
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -31,6 +31,14 @@ let token = localStorage.getItem(TOKEN_KEY) ?? "";
 let lastSeq = 0;
 let oldestSeq = 0; // lowest seq applied; the ?before= cursor for older pages
 let loadingOlder = false;
+// Older-history pipeline (the iMessage feel without a virtual list): pages are
+// FETCHED early, held here, and INSERTED only when the scroll is at rest —
+// writing scrollTop mid-glide is what fought iOS momentum and jerked (v0.1.53).
+// At most one page is in flight or buffered, so the ?before= cursor (which
+// only advances on insert) can never fetch the same page twice.
+let pendingOlder: ServerMsg[] = [];
+let threadTouching = false; // finger on the thread: never insert under it
+let lastScrollAt = 0; // scroll events still arriving = momentum still running
 let ws: WebSocket | null = null;
 let closingOnPurpose = false; // logout: suppress the auto-reconnect
 
@@ -247,15 +255,18 @@ function renderChat(): void {
     }).observe(textEl);
   }
   const thread = document.getElementById("thread")!;
+  let restTimer: ReturnType<typeof setTimeout> | null = null;
   thread.addEventListener("scroll", () => {
     // the ONE place following flips: away from the bottom = reading history,
     // back at the bottom = following again (programmatic pins land here too)
     followTail = nearBottom();
     if (followTail) document.getElementById("jump")?.classList.remove("show");
-    // start fetching older pages while the user is still ~1.5 screens away
-    // (iMessage-style): content usually lands before they arrive, so the
-    // scroll just continues — the spinner only shows if they outrun it
+    // start FETCHING older pages while the user is still ~1.5 screens away —
+    // the insert happens separately, only once the scroll comes to rest
     if (thread.scrollTop < 1200) void loadOlder();
+    lastScrollAt = performance.now();
+    if (restTimer) clearTimeout(restTimer);
+    restTimer = setTimeout(tryApplyOlder, 150); // quiet for 150ms = at rest
   });
   document.getElementById("jump")!.addEventListener("click", () => {
     document.getElementById("jump")!.classList.remove("show");
@@ -274,6 +285,7 @@ function renderChat(): void {
       startX = e.touches[0].clientX;
       startY = e.touches[0].clientY;
       peeking = null;
+      threadTouching = true; // no history inserts under a resting finger
     },
     { passive: true },
   );
@@ -298,12 +310,18 @@ function renderChat(): void {
   const endPeek = () => {
     thread.classList.remove("dragging");
     thread.style.setProperty("--peek", "0px");
+    threadTouching = false;
+    // a release with no glide (a still hold) fires no scroll events, so the
+    // rest-debounce never runs — check shortly after; tryApplyOlder's own
+    // lastScrollAt gate skips this when a real glide is underway
+    setTimeout(tryApplyOlder, 200);
   };
   thread.addEventListener("touchend", endPeek);
   thread.addEventListener("touchcancel", endPeek);
   // fresh thread DOM: the store must match (login/logout re-renders the shell)
   store.clear();
   oldestSeq = 0;
+  pendingOlder = []; // buffered page holds stale seqs from the old session
   followTail = true;
   threadObserver?.disconnect(); // the old shell's thread element is gone
   threadObserver?.observe(thread);
@@ -311,15 +329,15 @@ function renderChat(): void {
 
 // --- older history (recent-first: the socket sends a window, we page back) ----
 
+// FETCH half: grabs the next page (25 — smaller slabs read gradual) into the
+// buffer and never touches the DOM. The ring is a slow-network fallback only.
 async function loadOlder(): Promise<void> {
-  if (loadingOlder || oldestSeq <= 1) return; // 0 = nothing applied yet, 1 = at the top
+  if (loadingOlder || pendingOlder.length || oldestSeq <= 1) return; // 0 = nothing applied yet, 1 = top
   loadingOlder = true;
-  // slow-fetch fallback only: the ring appears after 150ms so a fast page
-  // never flashes it (its box is 0-height overlay — no scroll math to keep)
   const spin = document.getElementById("loadolder");
   const spinT = setTimeout(() => spin?.classList.add("show"), 150);
   try {
-    const r = await fetch(`/api/history/${THREAD_ID}?before=${oldestSeq}&limit=50`, {
+    const r = await fetch(`/api/history/${THREAD_ID}?before=${oldestSeq}&limit=25`, {
       headers: authHeaders(),
     });
     if (!r.ok) return;
@@ -328,21 +346,39 @@ async function loadOlder(): Promise<void> {
       oldestSeq = 1; // top of thread reached; stop asking
       return;
     }
-    // older events feed the same apply path as live frames — they insert in
-    // position by seq; only the viewport needs pinning around the height change
-    const t = threadEl();
-    const prevScroll = t.scrollTop;
-    const prevHeight = t.scrollHeight;
-    const prevSuppress = suppressAnim;
-    suppressAnim = true; // a page of history must not pop bubble-by-bubble
-    for (const m of messages) applyEvent(m);
-    suppressAnim = prevSuppress;
-    t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
+    pendingOlder = messages;
   } finally {
     clearTimeout(spinT);
     spin?.classList.remove("show");
     loadingOlder = false;
   }
+  tryApplyOlder(); // user may already be at rest (e.g. parked at the top)
+}
+
+// INSERT half: runs only at rest. Older events feed the same apply path as
+// live frames — they insert in position by seq; only the viewport needs
+// pinning around the height change, and doing THAT at rest is the whole point.
+function applyOlder(): void {
+  if (!pendingOlder.length) return;
+  const t = threadEl();
+  const prevScroll = t.scrollTop;
+  const prevHeight = t.scrollHeight;
+  const prevSuppress = suppressAnim;
+  suppressAnim = true; // a page of history must not pop bubble-by-bubble
+  for (const m of pendingOlder) applyEvent(m);
+  pendingOlder = [];
+  suppressAnim = prevSuppress;
+  t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
+}
+
+// the rest gate: no finger down, no scroll event for ~a beat (momentum still
+// fires scroll events, so this is quiet only when the glide truly ended).
+// After inserting, top up the buffer if the user is parked near the top.
+function tryApplyOlder(): void {
+  if (!pendingOlder.length || threadTouching) return;
+  if (performance.now() - lastScrollAt < 140) return; // glide still running
+  applyOlder();
+  if (threadEl().scrollTop < 1200) void loadOlder();
 }
 
 // --- pending attachments (picked but not yet sent) -----------------------------
