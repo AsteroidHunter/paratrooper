@@ -17,8 +17,7 @@
      white canvas. Deliberately BELOW pure white: that gap is the headroom the
      hold-glow bulb needs to register (pure white can't out-white white). One
      value for pill, ＋, and settings so the materials read identical. */
-  --glass-bg: rgba(120, 120, 128, 0.12); /* a notch stronger: the pill must not
-    dissolve into the white canvas */
+  --glass-bg: rgba(120, 120, 128, 0.09); /* lightened on review: visible, not grey */
   --glass-edge: rgba(0, 0, 0, 0.1); /* the opaque menu's hairline only */
   /* The glass lighting stacks, v3 — device-review lessons: no gradients or
      texture on the FACE (uniform, like the reference), and the edge is a rim
@@ -28,16 +27,16 @@
      outside keeps the pill defined against the white canvas. */
   --glass-stack:
     inset 0 1px 0 rgba(255, 255, 255, 0.95),
-    inset 0 0 0 1.5px rgba(255, 255, 255, 0.55),
-    inset 0 0 3px 1px rgba(255, 255, 255, 0.35),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    inset 0 0 2px rgba(255, 255, 255, 0.35),
     inset 0 -1px 2px rgba(0, 0, 0, 0.05),
     0 0 0 0.5px rgba(0, 0, 0, 0.07),
     0 1px 3px rgba(0, 0, 0, 0.08),
     0 8px 20px rgba(0, 0, 0, 0.07);
   --glass-stack-sm:
     inset 0 1px 0 rgba(255, 255, 255, 0.95),
-    inset 0 0 0 1.5px rgba(255, 255, 255, 0.55),
-    inset 0 0 2px 1px rgba(255, 255, 255, 0.35),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    inset 0 0 2px rgba(255, 255, 255, 0.35),
     inset 0 -1px 2px rgba(0, 0, 0, 0.05),
     0 0 0 0.5px rgba(0, 0, 0, 0.07),
     0 1px 2px rgba(0, 0, 0, 0.09),
@@ -68,16 +67,16 @@
     --glass-edge: rgba(255, 255, 255, 0.14);
     --glass-stack:
       inset 0 1px 0 rgba(255, 255, 255, 0.4),
-      inset 0 0 0 1.5px rgba(255, 255, 255, 0.18),
-      inset 0 0 3px 1px rgba(255, 255, 255, 0.1),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+      inset 0 0 2px rgba(255, 255, 255, 0.1),
       inset 0 -1px 2px rgba(0, 0, 0, 0.4),
       0 0 0 0.5px rgba(0, 0, 0, 0.5),
       0 1px 3px rgba(0, 0, 0, 0.45),
       0 8px 20px rgba(0, 0, 0, 0.4);
     --glass-stack-sm:
       inset 0 1px 0 rgba(255, 255, 255, 0.4),
-      inset 0 0 0 1.5px rgba(255, 255, 255, 0.18),
-      inset 0 0 2px 1px rgba(255, 255, 255, 0.1),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+      inset 0 0 2px rgba(255, 255, 255, 0.1),
       inset 0 -1px 2px rgba(0, 0, 0, 0.4),
       0 0 0 0.5px rgba(0, 0, 0, 0.5),
       0 1px 2px rgba(0, 0, 0, 0.45),
@@ -533,12 +532,12 @@ html, body {
   border-radius: 18px;
   background: var(--pill-glow);
   opacity: 0;
-  transition: opacity 0.3s ease; /* release: bulb fades off */
+  transition: opacity 0.5s ease; /* release: bulb fades off, gently */
   pointer-events: none;
 }
 .field.glow::before {
   opacity: 1;
-  transition: opacity 0.08s ease-out; /* touch: bulb clicks on */
+  transition: opacity 0.25s ease-out; /* touch: bulb eases on */
 }
 .compose textarea {
   flex: 1;
