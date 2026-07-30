@@ -8,7 +8,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.55-dbg"; // history v3 (scrollend inserts, 3-page bank, at-top landings, content-anchored spinner) + re-wrap fix: ＋ padding floor zeroed
+const APP_VERSION = "0.1.56-dbg"; // history v4: one page lands per glide boundary; the at-top fast path (which wrote into the rubber-band) removed
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -332,16 +332,12 @@ function renderChat(): void {
     thread.classList.remove("dragging");
     thread.style.setProperty("--peek", "0px");
     threadTouching = false;
-    if (thread.scrollTop <= 1) {
-      // released AT the top: there is no glide to fight at the boundary —
-      // land the bank immediately (the frustrated-flicking case)
-      lastScrollAt = 0;
-      tryApplyOlder();
-    } else {
-      // a release with no glide (a still hold) fires no scroll/scrollend —
-      // check shortly after; the lastScrollAt gate skips real glides
-      setTimeout(tryApplyOlder, 200);
-    }
+    // a release with no glide (a still hold) fires no scroll/scrollend —
+    // check shortly after; the lastScrollAt gate skips real glides. NO special
+    // at-top fast path: a release at the top starts the rubber-band snap-back,
+    // which is itself a scroll animation — writing into it was the teleport.
+    // scrollend fires after the bounce settles and lands the page then.
+    setTimeout(tryApplyOlder, 200);
   };
   thread.addEventListener("touchend", endPeek);
   thread.addEventListener("touchcancel", endPeek);
@@ -390,22 +386,24 @@ async function loadOlder(): Promise<void> {
   if (!historyDone && pendingOlder.length < HISTORY_BANK) void loadOlder(); // keep banking
 }
 
-// INSERT half: drains the WHOLE bank in one pinned operation, only ever at a
-// glide boundary. Older events feed the same apply path as live frames — they
-// insert in position by seq; only the viewport needs pinning around the height
-// change, and doing THAT between glides is the whole point. Removing the
-// spinner rides the same pin so the goodbye can't shift the view either.
+// INSERT half: lands ONE page per glide boundary — the bank is for readiness,
+// not for dumping ("users notice jumps way more than slow loading"); 75-message
+// slabs were review-rejected. Older events feed the same apply path as live
+// frames — they insert in position by seq; only the viewport needs pinning
+// around the height change, and doing THAT between glides is the whole point.
+// The spinner leaves only WITH the final page (or an empty-handed done probe),
+// riding the same pin so the goodbye can't shift the view either.
 function drainOlder(): void {
   const spin = document.getElementById("histspin");
-  const dropSpin = historyDone && spin !== null;
-  if (!pendingOlder.length && !dropSpin) return;
+  const page = pendingOlder.shift();
+  const dropSpin = historyDone && pendingOlder.length === 0 && spin !== null;
+  if (!page && !dropSpin) return;
   const t = threadEl();
   const prevScroll = t.scrollTop;
   const prevHeight = t.scrollHeight;
   const prevSuppress = suppressAnim;
   suppressAnim = true; // a page of history must not pop bubble-by-bubble
-  for (const page of pendingOlder) for (const m of page) applyEvent(m);
-  pendingOlder = [];
+  if (page) for (const m of page) applyEvent(m);
   suppressAnim = prevSuppress;
   if (dropSpin) spin.remove(); // nothing older exists anymore
   t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
