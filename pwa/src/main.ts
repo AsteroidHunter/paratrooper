@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.42-dbg"; // hold-glow v3: finger-anchored point light with radial falloff, tracked while held
+const APP_VERSION = "0.1.43-dbg"; // the bulb: off-white resting glass (pill+＋+settings identical), whole-surface glow, fast on / gentle off
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -61,32 +61,13 @@ initShell(app); // keyboard/focus/picker state converges through shell.ts
 // and fades back on release. Skipped during the settling window — a held tap
 // must not glow a switched-off box. Module-level with live lookups, like the
 // menu-close below, so re-renders can't stack listeners.
-// the glow's hot spot rides the finger: --gx/--gy feed the overlay's radial
-// gradient (styles.css .field::after)
-function aimGlow(field: HTMLElement, e: PointerEvent): void {
-  const r = field.getBoundingClientRect();
-  field.style.setProperty("--gx", `${e.clientX - r.left}px`);
-  field.style.setProperty("--gy", `${e.clientY - r.top}px`);
-}
 document.addEventListener(
   "pointerdown",
   (e) => {
     const t = e.target;
     if (t instanceof HTMLElement && t.id === "text" && !app.classList.contains("settling")) {
-      const field = t.parentElement;
-      if (field) {
-        aimGlow(field, e);
-        field.classList.add("glow");
-      }
+      t.parentElement?.classList.add("glow"); // the .field wrapper carries the bulb
     }
-  },
-  true,
-);
-document.addEventListener(
-  "pointermove",
-  (e) => {
-    const field = document.querySelector<HTMLElement>(".field.glow");
-    if (field) aimGlow(field, e);
   },
   true,
 );
