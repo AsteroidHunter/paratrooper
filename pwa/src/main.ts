@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.46-dbg"; // caustics and gradients stripped; uniform face, stronger tint, rim band with 3px melt, hairline silhouette
+const APP_VERSION = "0.1.48-dbg"; // lighter face (0.09), 1px edge band with 2px melt on all three glass elements, gentler bulb (0.25s on / 0.5s off)
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
