@@ -53,9 +53,18 @@ describe("computeShell — iOS 26's two keyboard modes (taplog-proven 2026-07-25
     expect(t.kb).toBe(true);
   });
 
-  it("window-shrink mode does NOT override the four-edge pin — writing top/height moved the shell off-screen", () => {
-    const t = computeShell(world({ editorFocused: true, innerHeight: 508, vvHeight: 508, vvTop: 336 }));
+  it("window-shrink WITHOUT a pan does NOT override the four-edge pin — writing top/height moved the shell off-screen", () => {
+    const t = computeShell(world({ editorFocused: true, innerHeight: 508, vvHeight: 508, vvTop: 0 }));
     expect(t.trackViewport).toBe(false);
+  });
+
+  it("shrink-AND-pan DOES override: iOS shrank innerHeight and slid the page up, hiding the header (taplog 2026-07-30)", () => {
+    // device numbers: baseline 812, keyboard up, inner shrank to 400 AND the
+    // page was panned 362px — the old inner-only test read this as "no
+    // correction needed" and the top bar vanished for the session
+    const t = computeShell(world({ editorFocused: true, innerHeight: 400, vvHeight: 400, vvTop: 362 }));
+    expect(t.kb).toBe(true);
+    expect(t.trackViewport).toBe(true);
   });
 
   it("baseline, not innerHeight, decides there is a keyboard — innerHeight lies mid-animation", () => {

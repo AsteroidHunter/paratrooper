@@ -11,9 +11,14 @@
 //     * overlay      — the layout viewport stays full height, only the visual
 //                      viewport shrinks. The shell must track the visual
 //                      viewport or the compose bar sits under the keyboard.
-//     * window-shrink — `innerHeight` shrinks WITH the visual viewport. The
-//                      four-edge pin is then already exact; writing our own
-//                      top/height moves the shell off-screen.
+//     * window-shrink — `innerHeight` shrinks WITH the visual viewport. With
+//                      no pan the four-edge pin is then already exact; writing
+//                      our own top/height moves the shell off-screen.
+//     * shrink-AND-pan — (taplog 2026-07-30) innerHeight shrinks AND iOS slides
+//                      the page up (vv.offsetTop ~362): the pin anchors to a
+//                      page whose top is above the screen, hiding the header.
+//                      A nonzero pan therefore forces the viewport override
+//                      regardless of innerHeight.
 //   So "is there a keyboard" must NOT be derived from innerHeight - vvHeight
 //   (that reads 0 in window-shrink mode, and 10 of 14 taps landed there).
 //   It is measured against a BASELINE full-screen height captured while no
@@ -65,10 +70,18 @@ export function keyboardInset(baseline: number, vvHeight: number): number {
 
 export function computeShell(w: World): ShellTarget {
   const kb = w.editorFocused && keyboardInset(w.baseline, w.vvHeight) > 0;
-  // innerHeight still shrunk with the keyboard = window-shrink mode = the
-  // four-edge pin already matches the visible area; correcting it would be
-  // the bug, not the fix.
-  const trackViewport = kb && keyboardInset(w.innerHeight, w.vvHeight) > 0;
+  // The layout viewport needs correcting when the visible area is not where
+  // the four-edge pin thinks it is. Two device-proven triggers:
+  //   - overlay mode: innerHeight stayed tall while the viewport shrank
+  //   - shrink-AND-pan (taplog 2026-07-30): innerHeight shrank to match the
+  //     viewport — which used to read as "pin already exact" — but iOS ALSO
+  //     slid the page up (vvTop 362), leaving the app's header above the
+  //     screen for the whole keyboard session. Any nonzero pan means the pin
+  //     is wrong, no matter what innerHeight claims.
+  // True window-shrink with no pan (vvTop 0) still correctly reads false —
+  // writing top/height there was the historical off-screen bug.
+  const trackViewport =
+    kb && (keyboardInset(w.innerHeight, w.vvHeight) > 0 || w.vvTop > 0);
   return { kb, trackViewport, vvTop: w.vvTop, vvHeight: w.vvHeight };
 }
 
