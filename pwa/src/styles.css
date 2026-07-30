@@ -22,29 +22,26 @@
      value for pill, ＋, and settings so the materials read identical. */
   --glass-bg: rgba(120, 120, 128, 0.09);
   --glass-edge: rgba(0, 0, 0, 0.1); /* the opaque menu's hairline only */
-  /* The glass lighting stacks — there is NO stroke anywhere; the edge IS
-     light. Reading top to bottom: top edge catches the light hardest, sides
-     fainter, bottom lip faintest; then an inner top glow and inner bottom
-     shade fake the slab's thickness; then a tight contact shadow plus a wide
-     ambient one float it. -sm is the same stack scaled for the 34px circles. */
+  /* The glass lighting stacks. Lesson from device review: several thin crisp
+     inset lines read as CONCENTRIC RINGS — so exactly ONE fine catch-line at
+     the top, and every other layer is a wide, feathered bloom that melts into
+     the face with no visible boundary (inset shadows follow the rounded shape
+     with smooth falloff). Then soft top light, soft floor shade, and two drops
+     (contact + ambient). -sm is the same scaled for the 34px circles. */
   --glass-stack:
-    inset 0 1.5px 1px rgba(255, 255, 255, 0.95),
-    inset 1px 0 1px rgba(255, 255, 255, 0.45),
-    inset -1px 0 1px rgba(255, 255, 255, 0.45),
-    inset 0 -1px 1px rgba(255, 255, 255, 0.25),
-    inset 0 6px 12px -8px rgba(255, 255, 255, 0.5),
-    inset 0 -8px 14px -10px rgba(0, 0, 0, 0.12),
-    0 2px 6px rgba(0, 0, 0, 0.08),
-    0 10px 24px rgba(0, 0, 0, 0.08);
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 0 0 12px rgba(255, 255, 255, 0.45),
+    inset 0 6px 14px -6px rgba(255, 255, 255, 0.45),
+    inset 0 -8px 16px -8px rgba(0, 0, 0, 0.08),
+    0 2px 6px rgba(0, 0, 0, 0.07),
+    0 10px 24px rgba(0, 0, 0, 0.07);
   --glass-stack-sm:
-    inset 0 1px 1px rgba(255, 255, 255, 0.95),
-    inset 1px 0 1px rgba(255, 255, 255, 0.4),
-    inset -1px 0 1px rgba(255, 255, 255, 0.4),
-    inset 0 -1px 1px rgba(255, 255, 255, 0.2),
-    inset 0 3px 6px -3px rgba(255, 255, 255, 0.5),
-    inset 0 -4px 8px -5px rgba(0, 0, 0, 0.12),
-    0 1px 3px rgba(0, 0, 0, 0.1),
-    0 6px 14px rgba(0, 0, 0, 0.08);
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 0 0 8px rgba(255, 255, 255, 0.45),
+    inset 0 3px 7px -3px rgba(255, 255, 255, 0.45),
+    inset 0 -4px 9px -4px rgba(0, 0, 0, 0.08),
+    0 1px 3px rgba(0, 0, 0, 0.09),
+    0 6px 14px rgba(0, 0, 0, 0.07);
   --glass-sheen: rgba(255, 255, 255, 0.5); /* diagonal catch-light across the face */
   /* header: opaque where the bar meets the phone's top, translucent below.
      (The cream #FFF9F1 experiment lived here and was reverted on order.) */
@@ -71,21 +68,17 @@
     --glass-bg: rgba(255, 255, 255, 0.14); /* lighter lean in dark mode too */
     --glass-edge: rgba(255, 255, 255, 0.14);
     --glass-stack:
-      inset 0 1.5px 1px rgba(255, 255, 255, 0.4),
-      inset 1px 0 1px rgba(255, 255, 255, 0.16),
-      inset -1px 0 1px rgba(255, 255, 255, 0.16),
-      inset 0 -1px 1px rgba(255, 255, 255, 0.1),
-      inset 0 6px 12px -8px rgba(255, 255, 255, 0.18),
-      inset 0 -8px 14px -10px rgba(0, 0, 0, 0.6),
+      inset 0 1px 0 rgba(255, 255, 255, 0.35),
+      inset 0 0 12px rgba(255, 255, 255, 0.14),
+      inset 0 6px 14px -6px rgba(255, 255, 255, 0.14),
+      inset 0 -8px 16px -8px rgba(0, 0, 0, 0.5),
       0 2px 6px rgba(0, 0, 0, 0.45),
       0 10px 24px rgba(0, 0, 0, 0.4);
     --glass-stack-sm:
-      inset 0 1px 1px rgba(255, 255, 255, 0.4),
-      inset 1px 0 1px rgba(255, 255, 255, 0.14),
-      inset -1px 0 1px rgba(255, 255, 255, 0.14),
-      inset 0 -1px 1px rgba(255, 255, 255, 0.08),
-      inset 0 3px 6px -3px rgba(255, 255, 255, 0.16),
-      inset 0 -4px 8px -5px rgba(0, 0, 0, 0.55),
+      inset 0 1px 0 rgba(255, 255, 255, 0.35),
+      inset 0 0 8px rgba(255, 255, 255, 0.13),
+      inset 0 3px 7px -3px rgba(255, 255, 255, 0.13),
+      inset 0 -4px 9px -4px rgba(0, 0, 0, 0.45),
       0 1px 3px rgba(0, 0, 0, 0.5),
       0 6px 14px rgba(0, 0, 0, 0.4);
     --glass-sheen: rgba(255, 255, 255, 0.12);
@@ -523,12 +516,23 @@ html, body {
   display: flex;
   flex: 1;
   border-radius: 18px;
+  overflow: hidden; /* clips the caustic layer's displaced spill to the pill */
   background-color: var(--glass-bg);
-  background-image: linear-gradient(135deg, var(--glass-sheen), transparent 60%);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
   box-shadow: var(--glass-stack);
   transition: opacity 0.3s ease; /* the settling re-enable fade */
+}
+/* the caustic face: the sheen gradient run through real SVG turbulence
+   displacement (index.html #glass-caustics) — organic luminance wisps instead
+   of geometric bands. A real element (not a pseudo — the bulb owns ::before)
+   sitting below the textarea in paint order, so text floats above it. */
+.field .glassface {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, var(--glass-sheen), transparent 60%);
+  filter: url(#glass-caustics);
+  pointer-events: none;
 }
 /* iMessage hold-glow, the bulb: the whole surface lights, snapping on fast
    (~80ms — a tap must catch it) and fading off gently on release. ::before
