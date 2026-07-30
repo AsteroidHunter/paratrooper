@@ -1,13 +1,14 @@
 // Paratrooper PWA — message the pinboard agent. Vanilla TS + DOM (lightest build).
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
+import { receiptFor } from "./receipts";
 import { bindPicker, currentFileInput, initShell, setShellLogger } from "./shell";
 import { initTapLog } from "./taplog";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.49-dbg"; // vanishing-header fix: a panned page forces the viewport override even when innerHeight shrank (iOS's third kb mode)
+const APP_VERSION = "0.1.50-dbg"; // vanishing-header fix (panned page forces the viewport override) + persisted Delivered/Read receipts
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -516,6 +517,7 @@ function applyEvent(m: ServerMsg): void {
     else document.getElementById("jump")?.classList.add("show");
   }
   if (m.kind === "published") flipCorrelatedPr(m);
+  updateReceipt(); // any event can move the watermark (user row, job row, working)
 }
 
 // re-render one event's wrapper in place (e.g. its pr button state changed)
@@ -696,7 +698,9 @@ function renderInto(wrapper: HTMLElement, m: ServerMsg): void {
   wrapper.dataset.ts = String(at);
   wrapper.dataset.role = role;
   if (role === "user") return renderUser(m, wrapper, at, value);
-  if (m.kind === "job") return; // internal enqueue marker, not a message
+  // internal markers, not messages: job = enqueue bookkeeping, working = the
+  // pickup watermark the receipt derives from
+  if (m.kind === "job" || m.kind === "working") return;
   if (role === "system") return renderSystemLine(m, wrapper, at, value);
   return (agentRenderers[m.kind ?? "log"] ?? renderAgentText)(m, wrapper, at, value);
 }
@@ -709,19 +713,22 @@ function chip(label: string): HTMLSpanElement {
 }
 
 // --- delivery receipt (single stamp under the most recent sent message) --------
+// Derived from the STORED thread, never from transient signals, so a reopen
+// replays the same label (message persisted -> Delivered; its job picked up,
+// per the stored working row -> Read). Anchored inside the newest sent
+// message's wrapper, so it stays under that bubble when replies land below.
 
-function setReceipt(state: "Delivered" | "Read"): void {
-  const t = document.getElementById("thread");
-  if (!t) return;
+function updateReceipt(): void {
   document.getElementById("receipt")?.remove();
+  const r = receiptFor(store.values());
+  if (!r) return;
+  const wrapper = wrapperFor(r.seq);
+  if (!wrapper) return; // newest sent message sits above the loaded window
   const el = document.createElement("div");
   el.id = "receipt";
   el.className = "receipt";
-  el.textContent = state;
-  // sits under the last user bubble; if the dots are up, keep them below it
-  const typing = document.getElementById("typing");
-  if (typing) t.insertBefore(el, typing);
-  else t.appendChild(el);
+  el.textContent = r.state;
+  wrapper.appendChild(el);
   if (followTail) scrollToBottom();
 }
 
@@ -799,8 +806,8 @@ function connect(): void {
     if (!document.getElementById("thread")) return; // gate is showing; don't consume
     const m = JSON.parse(e.data) as ServerMsg;
     if (!m.seq) {
-      // ephemeral kinds bypass the store: they are presence, not history
-      if (m.kind === "working") setReceipt("Read"); // picked up; otherwise silence
+      // ephemeral kinds bypass the store: they are presence, not history.
+      // (working is keyed now — the stored row drives the Read receipt)
       if (m.kind === "typing") showTyping(); // dots self-expire if it wasn't for you
       return;
     }
@@ -915,7 +922,7 @@ async function send(): Promise<void> {
         if (oldestSeq === 0 || seq < oldestSeq) oldestSeq = seq;
       }
     }
-    setReceipt("Delivered"); // the server has it
+    updateReceipt(); // the server has it: the stored row now derives Delivered
   } finally {
     sendBtn.disabled = false;
   }
