@@ -1069,3 +1069,81 @@ def test_pr_context_ref_survives_bad_payloads():
     assert context_line(pr_row("")) == "agent: opened a PR"
     assert context_line(pr_row({"branch": "x"})) == "agent: opened a PR"
     assert context_line(pr_row(None)) == "agent: opened a PR"
+
+
+# --- token redaction (roadmap 5) ----------------------------------------------
+
+def test_token_redaction_keeps_access_log_args_intact():
+    """uvicorn's access formatter unpacks record.args positionally; the old
+    filter nulled args after merging, crashing the formatter with a
+    '--- Logging error ---' traceback on every token-bearing URL (all
+    /api/thumb requests). Redact inside the tuple and keep its shape."""
+    import logging as _logging
+
+    from paratrooper.web.app import _RedactTokenFilter
+
+    rec = _logging.LogRecord(
+        "uvicorn.access", _logging.INFO, __file__, 0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("1.2.3.4:5", "GET", "/api/thumb/k.webp?token=hunter2", "1.1", 200),
+        None,
+    )
+    assert _RedactTokenFilter().filter(rec)
+    assert len(rec.args) == 5  # the formatter unpacks exactly five
+    assert "hunter2" not in rec.getMessage()
+    assert "token=REDACTED" in rec.getMessage()
+
+
+def test_token_redaction_scrubs_argless_records():
+    """The WebSocket accept line arrives pre-merged (no args) on uvicorn.error
+    — the original leak the filter was built for. Still scrubbed."""
+    import logging as _logging
+
+    from paratrooper.web.app import _RedactTokenFilter
+
+    rec = _logging.LogRecord(
+        "uvicorn.error", _logging.INFO, __file__, 0,
+        '1.2.3.4:0 - "WebSocket /ws?token=hunter2" [accepted]', None, None,
+    )
+    assert _RedactTokenFilter().filter(rec)
+    assert "hunter2" not in rec.getMessage()
+    assert "token=REDACTED" in rec.getMessage()
+
+
+# --- live job-marker broadcast (roadmap 7) ------------------------------------
+
+def test_enqueue_broadcasts_job_marker_to_connected_sockets(tmp_path):
+    """Read-flip bug (2026-07-30): the job marker was persisted but never
+    pushed to already-connected apps, so the Delivered→Read flip could not
+    happen until a force-quit re-read the thread (reconnect replay starts past
+    the missed seq, so it never healed). Enqueue must broadcast the stored row,
+    seq included, exactly like every other persisted event."""
+    from paratrooper.web.app import _enqueue_job
+
+    store = ThreadStore(tmp_path / "t.sqlite")
+
+    class _RecordingQueue:
+        def __init__(self):
+            self.jobs = []
+
+        async def enqueue(self, job):
+            self.jobs.append(job)
+
+    class _WS:
+        def __init__(self):
+            self.sent = []
+
+        async def send_json(self, data):
+            self.sent.append(data)
+
+    ws = _WS()
+    state = AppState(config=None, store=store, queue=_RecordingQueue(),
+                     coordinator=_FakeCoordinator(), inbox=DiskInbox(tmp_path / "ib"))
+    state.sockets["d"] = {ws}
+    _run(_enqueue_job(state, "d", "job-7", "hi", []))
+
+    [frame] = ws.sent
+    assert frame["kind"] == "job" and frame["role"] == "system"
+    assert frame["payload"] == "job-7"
+    [(stored_seq, stored)] = store.messages("d")
+    assert frame["seq"] == stored_seq  # client store keys by seq; must match

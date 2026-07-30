@@ -8,7 +8,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.55-dbg"; // history v3 (scrollend inserts, 3-page bank, at-top landings, content-anchored spinner) + re-wrap fix: ＋ padding floor zeroed
+const APP_VERSION = "0.1.56-dbg"; // server: 33-msg job context, args-safe token redaction, live job-marker broadcast (Read flips without force-quit)
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
