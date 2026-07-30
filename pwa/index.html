@@ -60,18 +60,6 @@
       </div>
       -->
     </div>
-    <!-- Shared SVG filter: turbulence-displaced caustics for the glass face.
-         Safari won't run SVG filters on BACKDROPS, but runs them fine on an
-         element's own content via CSS filter:url() — so we displace our own
-         internal light layer instead of the page behind it. Lives outside
-         #app so the app's re-renders can't wipe it. Static, so Safari's
-         filter-caching and size-cap quirks don't bite. -->
-    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
-      <filter id="glass-caustics" x="-25%" y="-25%" width="150%" height="150%">
-        <feTurbulence type="fractalNoise" baseFrequency="0.012 0.05" numOctaves="2" seed="7" />
-        <feDisplacementMap in="SourceGraphic" scale="24" xChannelSelector="R" yChannelSelector="G" />
-      </filter>
-    </svg>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

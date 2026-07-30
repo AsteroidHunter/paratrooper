@@ -13,36 +13,35 @@
   --muted: #8e8e93;
   --error-bg: #ffe5e5;
   --error-text: #d70015;
-  /* liquid-glass material (Safari-grade: tint + rim + shade; no SVG refraction).
-     The rim is the specular top edge, the shade fakes thickness at the bottom,
-     the edge is the silhouette line, the lift is the soft drop under it. */
   /* off-white glass ≈ Apple's systemGray6 #F2F2F7 once rendered over the
      white canvas. Deliberately BELOW pure white: that gap is the headroom the
      hold-glow bulb needs to register (pure white can't out-white white). One
      value for pill, ＋, and settings so the materials read identical. */
-  --glass-bg: rgba(120, 120, 128, 0.09);
+  --glass-bg: rgba(120, 120, 128, 0.12); /* a notch stronger: the pill must not
+    dissolve into the white canvas */
   --glass-edge: rgba(0, 0, 0, 0.1); /* the opaque menu's hairline only */
-  /* The glass lighting stacks. Lesson from device review: several thin crisp
-     inset lines read as CONCENTRIC RINGS — so exactly ONE fine catch-line at
-     the top, and every other layer is a wide, feathered bloom that melts into
-     the face with no visible boundary (inset shadows follow the rounded shape
-     with smooth falloff). Then soft top light, soft floor shade, and two drops
-     (contact + ambient). -sm is the same scaled for the 34px circles. */
+  /* The glass lighting stacks, v3 — device-review lessons: no gradients or
+     texture on the FACE (uniform, like the reference), and the edge is a rim
+     BAND with body: 1.5px of bright rim melting out within ~3px, brightest
+     along the top, so it reads as the polished edge of a slab — thick, but
+     decayed too fast to draw a nested inner shape. A hairline silhouette
+     outside keeps the pill defined against the white canvas. */
   --glass-stack:
-    inset 0 1px 0 rgba(255, 255, 255, 0.7),
-    inset 0 0 12px rgba(255, 255, 255, 0.45),
-    inset 0 6px 14px -6px rgba(255, 255, 255, 0.45),
-    inset 0 -8px 16px -8px rgba(0, 0, 0, 0.08),
-    0 2px 6px rgba(0, 0, 0, 0.07),
-    0 10px 24px rgba(0, 0, 0, 0.07);
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.55),
+    inset 0 0 3px 1px rgba(255, 255, 255, 0.35),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.05),
+    0 0 0 0.5px rgba(0, 0, 0, 0.07),
+    0 1px 3px rgba(0, 0, 0, 0.08),
+    0 8px 20px rgba(0, 0, 0, 0.07);
   --glass-stack-sm:
-    inset 0 1px 0 rgba(255, 255, 255, 0.7),
-    inset 0 0 8px rgba(255, 255, 255, 0.45),
-    inset 0 3px 7px -3px rgba(255, 255, 255, 0.45),
-    inset 0 -4px 9px -4px rgba(0, 0, 0, 0.08),
-    0 1px 3px rgba(0, 0, 0, 0.09),
-    0 6px 14px rgba(0, 0, 0, 0.07);
-  --glass-sheen: rgba(255, 255, 255, 0.5); /* diagonal catch-light across the face */
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.55),
+    inset 0 0 2px 1px rgba(255, 255, 255, 0.35),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.05),
+    0 0 0 0.5px rgba(0, 0, 0, 0.07),
+    0 1px 2px rgba(0, 0, 0, 0.09),
+    0 5px 12px rgba(0, 0, 0, 0.07);
   /* header: opaque where the bar meets the phone's top, translucent below.
      (The cream #FFF9F1 experiment lived here and was reverted on order.) */
   --bar-grad-top: rgba(249, 249, 249, 1);
@@ -68,20 +67,21 @@
     --glass-bg: rgba(255, 255, 255, 0.14); /* lighter lean in dark mode too */
     --glass-edge: rgba(255, 255, 255, 0.14);
     --glass-stack:
-      inset 0 1px 0 rgba(255, 255, 255, 0.35),
-      inset 0 0 12px rgba(255, 255, 255, 0.14),
-      inset 0 6px 14px -6px rgba(255, 255, 255, 0.14),
-      inset 0 -8px 16px -8px rgba(0, 0, 0, 0.5),
-      0 2px 6px rgba(0, 0, 0, 0.45),
-      0 10px 24px rgba(0, 0, 0, 0.4);
+      inset 0 1px 0 rgba(255, 255, 255, 0.4),
+      inset 0 0 0 1.5px rgba(255, 255, 255, 0.18),
+      inset 0 0 3px 1px rgba(255, 255, 255, 0.1),
+      inset 0 -1px 2px rgba(0, 0, 0, 0.4),
+      0 0 0 0.5px rgba(0, 0, 0, 0.5),
+      0 1px 3px rgba(0, 0, 0, 0.45),
+      0 8px 20px rgba(0, 0, 0, 0.4);
     --glass-stack-sm:
-      inset 0 1px 0 rgba(255, 255, 255, 0.35),
-      inset 0 0 8px rgba(255, 255, 255, 0.13),
-      inset 0 3px 7px -3px rgba(255, 255, 255, 0.13),
-      inset 0 -4px 9px -4px rgba(0, 0, 0, 0.45),
-      0 1px 3px rgba(0, 0, 0, 0.5),
-      0 6px 14px rgba(0, 0, 0, 0.4);
-    --glass-sheen: rgba(255, 255, 255, 0.12);
+      inset 0 1px 0 rgba(255, 255, 255, 0.4),
+      inset 0 0 0 1.5px rgba(255, 255, 255, 0.18),
+      inset 0 0 2px 1px rgba(255, 255, 255, 0.1),
+      inset 0 -1px 2px rgba(0, 0, 0, 0.4),
+      0 0 0 0.5px rgba(0, 0, 0, 0.5),
+      0 1px 2px rgba(0, 0, 0, 0.45),
+      0 5px 12px rgba(0, 0, 0, 0.4);
     --bar-grad-top: rgba(22, 22, 24, 1);
     --bar-grad-bottom: rgba(22, 22, 24, 0.45);
     --menu-bg: #2c2c2e;
@@ -233,7 +233,6 @@ html, body {
   border-radius: 50%;
   border: none;
   background-color: var(--glass-bg);
-  background-image: linear-gradient(135deg, var(--glass-sheen), transparent 60%);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
   box-shadow: var(--glass-stack-sm);
@@ -516,23 +515,11 @@ html, body {
   display: flex;
   flex: 1;
   border-radius: 18px;
-  overflow: hidden; /* clips the caustic layer's displaced spill to the pill */
-  background-color: var(--glass-bg);
+  background-color: var(--glass-bg); /* uniform face — no gradients, no texture */
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
   box-shadow: var(--glass-stack);
   transition: opacity 0.3s ease; /* the settling re-enable fade */
-}
-/* the caustic face: the sheen gradient run through real SVG turbulence
-   displacement (index.html #glass-caustics) — organic luminance wisps instead
-   of geometric bands. A real element (not a pseudo — the bulb owns ::before)
-   sitting below the textarea in paint order, so text floats above it. */
-.field .glassface {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(135deg, var(--glass-sheen), transparent 60%);
-  filter: url(#glass-caustics);
-  pointer-events: none;
 }
 /* iMessage hold-glow, the bulb: the whole surface lights, snapping on fast
    (~80ms — a tap must catch it) and fading off gently on release. ::before
@@ -590,7 +577,6 @@ html, body {
   /* same liquid-glass material as the field, scaled for a circle */
   border: none;
   background-color: var(--glass-bg);
-  background-image: linear-gradient(135deg, var(--glass-sheen), transparent 60%);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
   box-shadow: var(--glass-stack-sm);
@@ -692,7 +678,6 @@ html, body {
   border: none;
   border-radius: 50%;
   background-color: var(--glass-bg);
-  background-image: linear-gradient(135deg, var(--glass-sheen), transparent 60%);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
   box-shadow: var(--glass-stack-sm);

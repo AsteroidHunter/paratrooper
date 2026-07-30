@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.45-dbg"; // no more rings: single catch-line + feathered blooms; sheen displaced into real caustic wisps (SVG turbulence)
+const APP_VERSION = "0.1.46-dbg"; // caustics and gradients stripped; uniform face, stronger tint, rim band with 3px melt, hairline silhouette
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -154,7 +154,6 @@ function renderChat(): void {
       <input id="files" type="file" accept="image/*" multiple
         class="filepick" tabindex="-1" aria-hidden="true" />
       <div class="field">
-        <div class="glassface" aria-hidden="true"></div>
         <textarea id="text" rows="1"
           placeholder="${PROMPTS[Math.floor(Math.random() * PROMPTS.length)]}"></textarea>
         <button type="submit" id="sendbtn" class="send">↑</button>
