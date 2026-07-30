@@ -383,17 +383,19 @@ def _png_bytes(size=(640, 480), color=(200, 60, 60)) -> bytes:
     return buf.getvalue()
 
 
-def test_make_thumbnail_downscales_and_rejects_non_images():
+def test_make_thumbnail_downscales_reports_dims_and_rejects_non_images():
     from PIL import Image
 
     from paratrooper.web.thumbs import THUMB_EDGE, make_thumbnail
 
-    thumb = make_thumbnail(_png_bytes())
-    assert thumb is not None
+    result = make_thumbnail(_png_bytes())
+    assert result is not None
+    data, w, h = result
     from io import BytesIO
 
-    im = Image.open(BytesIO(thumb))
+    im = Image.open(BytesIO(data))
     assert im.format == "WEBP" and max(im.size) <= THUMB_EDGE
+    assert (w, h) == im.size  # the reported dims ARE the stored preview's dims
     assert make_thumbnail(b"not an image") is None
 
 
@@ -403,6 +405,40 @@ def test_thumbnail_store_roundtrip(tmp_path):
     data, ctype = store.thumbnail("inbox/abc.png")
     assert data == b"webpbytes" and ctype == "image/webp"
     assert store.thumbnail("inbox/missing.png") is None
+
+
+def test_thumb_dims_roundtrip_and_legacy_null(tmp_path):
+    store = ThreadStore(tmp_path / "t.sqlite")
+    store.add_thumbnail("a.png", b"x", ts="t", width=320, height=240)
+    store.add_thumbnail("legacy.png", b"y", ts="t")  # pre-dims row: no sizes
+    dims = store.thumb_dims(["a.png", "legacy.png", "missing.png"])
+    assert dims == {"a.png": (320, 240)}
+    assert store.thumb_dims([]) == {}
+
+
+def test_history_frames_carry_attachment_dims(client):
+    auth = {"Authorization": "Bearer tok"}
+    up = client.post(
+        "/api/upload", headers=auth, files={"file": ("p.png", _png_bytes(), "image/png")}
+    )
+    key = up.json()["inbox_key"]
+    client.post(
+        "/api/send", headers=auth,
+        json={"thread_id": "dimt", "text": "pic", "attachments": [key]},
+    )
+    client.post(
+        "/api/send", headers=auth,
+        json={"thread_id": "dimt", "text": "words only", "attachments": []},
+    )
+    rows = client.get("/api/thread/dimt", headers=auth).json()["messages"]
+    msg = next(m for m in rows if m.get("attachments"))
+    dims = msg["attachment_dims"]
+    assert len(dims) == 1 and dims[0] is not None
+    w, h = dims[0]
+    assert w > 0 and h > 0  # the client reserves the image box from these
+    # text-only events carry no dims field at all
+    textual = next(m for m in rows if not m.get("attachments"))
+    assert "attachment_dims" not in textual
 
 
 def test_thumb_route_serves_persisted_previews(client):

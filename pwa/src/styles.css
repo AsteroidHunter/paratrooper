@@ -421,7 +421,9 @@ html, body {
 .msg.error { background: var(--error-bg); color: var(--error-text); }
 
 .msg.shot { padding: 0; background: none; }
-.msg.shot img { max-width: 100%; border-radius: 14px; display: block; cursor: zoom-in; }
+/* height:auto + the width/height attributes = the box's aspect ratio is
+   reserved before decode, so a landing photo can never shove the scroll */
+.msg.shot img { max-width: 100%; height: auto; border-radius: 14px; display: block; cursor: zoom-in; }
 
 /* tap-to-zoom overlay */
 .lightbox {

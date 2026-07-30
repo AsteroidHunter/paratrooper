@@ -8,7 +8,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.57-dbg"; // history v4 (one page per glide boundary, no at-top rubber-band write) + server job-context/redaction/live-marker batch
+const APP_VERSION = "0.1.58-dbg"; // reserved image boxes: server sends thumb dims, client cuts exact holes before decode — landings can't shove the scroll
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -63,6 +63,7 @@ interface ServerMsg {
   kind?: string | null; // ResultKind or system kind; absent/null on user messages
   payload?: unknown; // any JSON value; message text is a plain string
   attachments?: string[];
+  attachment_dims?: ([number, number] | null)[]; // thumb sizes, index-aligned; null = legacy row
   ts?: string; // ISO-8601, server clock (live and replay alike)
 }
 
@@ -713,9 +714,23 @@ type Renderer = (m: ServerMsg, wrapper: HTMLElement, at: number, value: string) 
 function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
   // photos render as their own frameless bubbles (same shape as the send
   // echo); pre-thumbnail history 404s and falls back to the old chip
-  (m.attachments ?? []).forEach((key) => {
+  (m.attachments ?? []).forEach((key, i) => {
     const div = rowEl(wrapper, "user", "shot", at);
     const img = document.createElement("img");
+    // reserve the box BEFORE any pixels arrive: an unsized image is 0-tall
+    // until decode, and its late growth shoves the scroll position (the
+    // residual history-landing jump). Server sends each thumb's real size;
+    // legacy rows without one get a fixed 4:3 frame, cover-cropped.
+    const dims = m.attachment_dims?.[i];
+    if (dims) {
+      img.width = dims[0];
+      img.height = dims[1];
+    } else {
+      img.width = 240;
+      img.height = 180;
+      img.style.aspectRatio = "4 / 3"; // lock the box even after decode
+      img.style.objectFit = "cover";
+    }
     img.src = thumbUrl(key);
     img.alt = "photo";
     img.onload = () => {

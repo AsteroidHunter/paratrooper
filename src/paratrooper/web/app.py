@@ -109,6 +109,24 @@ def _to_event(thread_id: str, result: ResultMessage) -> ThreadEvent:
     )
 
 
+def _frame(seq: int, event: ThreadEvent, dims: dict[str, tuple[int, int]]) -> dict:
+    """The one wire shape for keyed events. Events with attachments carry
+    ``attachment_dims`` (same order as ``attachments``, null for legacy rows
+    without recorded sizes) so the client can reserve each image's box before
+    any pixels arrive — an unreserved image renders 0-tall then grows on
+    decode, shoving the scroll position under the reader."""
+    data = {"seq": seq, **event.model_dump()}
+    if event.attachments:
+        data["attachment_dims"] = [dims.get(k) for k in event.attachments]
+    return data
+
+
+def _page_dims(store: ThreadStore, rows: list[tuple[int, ThreadEvent]]) -> dict:
+    """One dims lookup for a whole page of events (most events carry none)."""
+    keys = [k for _, m in rows for k in m.attachments]
+    return store.thumb_dims(keys) if keys else {}
+
+
 def _pr_ref(payload: Any) -> str:
     """Short PR reference from a pr event payload ({branch, url} dict; rows
     backfilled from odd legacy bodies may hold a bare url string or nothing)."""
@@ -314,10 +332,14 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         key = new_key(file.filename)
         await st().inbox.put(key, content)  # cross-service store (Key Value on Render)
         # persist a small preview NOW — the inbox blob expires in ~24h and this
-        # is the only pixel record history replay will have
+        # is the only pixel record history replay will have. Its dimensions ride
+        # along so message frames can tell the client how big each box is.
         thumb = await asyncio.to_thread(make_thumbnail, content)
         if thumb is not None:
-            await asyncio.to_thread(st().store.add_thumbnail, key, thumb, ts=_now())
+            data, w, h = thumb
+            await asyncio.to_thread(
+                st().store.add_thumbnail, key, data, ts=_now(), width=w, height=h
+            )
         return UploadResponse(inbox_key=key, content_type=file.content_type, size=len(content))
 
     @app.get("/api/thumb/{key}")
@@ -355,7 +377,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
     @app.get("/api/thread/{thread_id}", dependencies=[Depends(require_token)])
     async def thread(thread_id: str, since: int = 0) -> dict:
         rows = await asyncio.to_thread(st().store.messages, thread_id, since_seq=since)
-        return {"messages": [{"seq": seq, **m.model_dump()} for seq, m in rows]}
+        dims = await asyncio.to_thread(_page_dims, st().store, rows)
+        return {"messages": [_frame(seq, m, dims) for seq, m in rows]}
 
     @app.get("/api/history/{thread_id}", dependencies=[Depends(require_token)])
     async def history(thread_id: str, before: int, limit: int = 50) -> dict:
@@ -363,7 +386,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         rows = await asyncio.to_thread(
             st().store.messages_page, thread_id, before_seq=before, limit=min(limit, 200)
         )
-        return {"messages": [{"seq": seq, **m.model_dump()} for seq, m in rows]}
+        dims = await asyncio.to_thread(_page_dims, st().store, rows)
+        return {"messages": [_frame(seq, m, dims) for seq, m in rows]}
 
     @app.post("/api/publish", dependencies=[Depends(require_token)])
     async def publish(req: PublishRequest) -> JSONResponse:
@@ -429,8 +453,9 @@ def create_app(injected: AppState | None = None) -> FastAPI:
             rows = await asyncio.to_thread(state.store.messages_page, thread_id, limit=50)
         else:
             rows = await asyncio.to_thread(state.store.messages, thread_id, since_seq=since)
+        dims = await asyncio.to_thread(_page_dims, state.store, rows)
         for seq, m in rows:
-            await websocket.send_json({"seq": seq, **m.model_dump()})
+            await websocket.send_json(_frame(seq, m, dims))
         try:
             while True:
                 await websocket.receive_text()  # client keepalive / pings; sends go via POST

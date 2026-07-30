@@ -15,9 +15,12 @@ from PIL import Image, ImageOps
 THUMB_EDGE = 320
 
 
-def make_thumbnail(data: bytes) -> bytes | None:
-    """~320px-long-edge webp preview, or None when the bytes aren't an image
-    (non-image uploads simply keep their 📎 chip in history)."""
+def make_thumbnail(data: bytes) -> tuple[bytes, int, int] | None:
+    """~320px-long-edge webp preview as ``(bytes, width, height)``, or None when
+    the bytes aren't an image (non-image uploads simply keep their 📎 chip in
+    history). The dimensions ride to the client with each message so it can
+    reserve the image's box before any pixels arrive — an unreserved image
+    renders 0-tall, then grows on decode and shoves the scroll position."""
     try:
         im = Image.open(BytesIO(data))
         im = ImageOps.exif_transpose(im)  # phone photos carry orientation in EXIF
@@ -26,6 +29,6 @@ def make_thumbnail(data: bytes) -> bytes | None:
             im = im.convert("RGB")
         out = BytesIO()
         im.save(out, format="WEBP", quality=70)
-        return out.getvalue()
+        return out.getvalue(), im.width, im.height
     except Exception:
         return None

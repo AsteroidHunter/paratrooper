@@ -37,7 +37,9 @@ CREATE TABLE IF NOT EXISTS attachments (
     key          TEXT PRIMARY KEY,   -- inbox key already stored in messages.attachments
     thumb        BLOB NOT NULL,      -- small webp; the only pixels that outlive the inbox TTL
     content_type TEXT NOT NULL DEFAULT 'image/webp',
-    ts           TEXT NOT NULL
+    ts           TEXT NOT NULL,
+    width        INTEGER,            -- thumb pixel size, NULL on pre-dims rows;
+    height       INTEGER             -- the client reserves image boxes from these
 );
 """
 
@@ -64,6 +66,17 @@ class ThreadStore:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
             self._migrate_body_to_payload()
+            self._migrate_attachment_dims()
+
+    def _migrate_attachment_dims(self) -> None:
+        """Additive columns for thumbnail dimensions on DBs created before them.
+        Idempotent (column-presence gated); legacy rows keep NULL and the client
+        falls back to a fixed-ratio box for those."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(attachments)")}
+        for col in ("width", "height"):
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE attachments ADD COLUMN {col} INTEGER")
+        self._conn.commit()
 
     def _migrate_body_to_payload(self) -> None:
         """One-time cut from the legacy ``body`` TEXT column to JSON ``payload``:
@@ -180,11 +193,13 @@ class ThreadStore:
     # --- attachment thumbnails (photo history survives the inbox TTL) ---
 
     def add_thumbnail(self, key: str, thumb: bytes, *, ts: str,
-                      content_type: str = "image/webp") -> None:
+                      content_type: str = "image/webp",
+                      width: int | None = None, height: int | None = None) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO attachments(key, thumb, content_type, ts) VALUES (?,?,?,?)",
-                (key, thumb, content_type, ts),
+                "INSERT OR REPLACE INTO attachments(key, thumb, content_type, ts, width, height) "
+                "VALUES (?,?,?,?,?,?)",
+                (key, thumb, content_type, ts, width, height),
             )
             self._conn.commit()
 
@@ -194,6 +209,20 @@ class ThreadStore:
                 "SELECT thumb, content_type FROM attachments WHERE key=?", (key,)
             ).fetchone()
         return (row["thumb"], row["content_type"]) if row else None
+
+    def thumb_dims(self, keys: list[str]) -> dict[str, tuple[int, int]]:
+        """Thumb pixel sizes for ``keys`` (rows with recorded dims only) — the
+        client reserves each image's box from these before any pixels arrive."""
+        if not keys:
+            return {}
+        marks = ",".join("?" for _ in keys)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT key, width, height FROM attachments WHERE key IN ({marks}) "
+                "AND width IS NOT NULL AND height IS NOT NULL",
+                tuple(keys),
+            ).fetchall()
+        return {r["key"]: (r["width"], r["height"]) for r in rows}
 
     # --- web push subscriptions (Phase 6) ---
 
