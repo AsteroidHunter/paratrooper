@@ -8,7 +8,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.56-dbg"; // history v4: one page lands per glide boundary; the at-top fast path (which wrote into the rubber-band) removed
+const APP_VERSION = "0.1.57-dbg"; // history v4 (one page per glide boundary, no at-top rubber-band write) + server job-context/redaction/live-marker batch
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

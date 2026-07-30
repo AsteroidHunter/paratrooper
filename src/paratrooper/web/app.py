@@ -74,10 +74,15 @@ _TOKEN_PARAM_RE = re.compile(r"(token=)[^&\s\"']+")
 
 class _RedactTokenFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        if "token=" in msg:
-            record.msg = _TOKEN_PARAM_RE.sub(r"\1REDACTED", msg)
-            record.args = None
+        # scrub inside args rather than merging-and-nulling: uvicorn's access
+        # formatter unpacks record.args positionally, so the tuple must survive
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _TOKEN_PARAM_RE.sub(r"\1REDACTED", a) if isinstance(a, str) else a
+                for a in record.args
+            )
+        if isinstance(record.msg, str) and "token=" in record.msg:
+            record.msg = _TOKEN_PARAM_RE.sub(r"\1REDACTED", record.msg)
         return True
 
 
@@ -146,7 +151,7 @@ async def _enqueue_job(
     state: AppState, thread_id: str, job_id: str, text: str, attachments: list[str]
 ) -> None:
     context = [
-        line for m in state.store.recent(thread_id, n=10)
+        line for m in state.store.recent(thread_id, n=33)
         if (line := context_line(m)) is not None
     ]
     job = JobMessage(
@@ -155,9 +160,13 @@ async def _enqueue_job(
     await state.queue.enqueue(job)
     # durable marker: every user message at/below this seq is covered by a job,
     # so boot-recovery knows exactly what a restart swallowed
-    await asyncio.to_thread(state.store.add_message, ThreadEvent(
+    marker = ThreadEvent(
         thread_id=thread_id, role="system", payload=job_id, ts=_now(), kind="job",
-    ))
+    )
+    seq = await asyncio.to_thread(state.store.add_message, marker)
+    # and broadcast it: the Read flip derives from this row, and a client that
+    # misses it live never gets it again (reconnect replay starts past its seq)
+    await _send_to_sockets(state, thread_id, {"seq": seq, **marker.model_dump()})
     if state.render:  # wake the worker; the job waits durably in the list meanwhile
         await state.render.resume_worker()
 
