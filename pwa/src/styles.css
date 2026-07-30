@@ -21,10 +21,31 @@
      hold-glow bulb needs to register (pure white can't out-white white). One
      value for pill, ＋, and settings so the materials read identical. */
   --glass-bg: rgba(120, 120, 128, 0.09);
-  --glass-rim: rgba(255, 255, 255, 0.9);
-  --glass-edge: rgba(0, 0, 0, 0.1);
-  --glass-shade: rgba(0, 0, 0, 0.1);
-  --glass-lift: rgba(0, 0, 0, 0.07);
+  --glass-edge: rgba(0, 0, 0, 0.1); /* the opaque menu's hairline only */
+  /* The glass lighting stacks — there is NO stroke anywhere; the edge IS
+     light. Reading top to bottom: top edge catches the light hardest, sides
+     fainter, bottom lip faintest; then an inner top glow and inner bottom
+     shade fake the slab's thickness; then a tight contact shadow plus a wide
+     ambient one float it. -sm is the same stack scaled for the 34px circles. */
+  --glass-stack:
+    inset 0 1.5px 1px rgba(255, 255, 255, 0.95),
+    inset 1px 0 1px rgba(255, 255, 255, 0.45),
+    inset -1px 0 1px rgba(255, 255, 255, 0.45),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.25),
+    inset 0 6px 12px -8px rgba(255, 255, 255, 0.5),
+    inset 0 -8px 14px -10px rgba(0, 0, 0, 0.12),
+    0 2px 6px rgba(0, 0, 0, 0.08),
+    0 10px 24px rgba(0, 0, 0, 0.08);
+  --glass-stack-sm:
+    inset 0 1px 1px rgba(255, 255, 255, 0.95),
+    inset 1px 0 1px rgba(255, 255, 255, 0.4),
+    inset -1px 0 1px rgba(255, 255, 255, 0.4),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.2),
+    inset 0 3px 6px -3px rgba(255, 255, 255, 0.5),
+    inset 0 -4px 8px -5px rgba(0, 0, 0, 0.12),
+    0 1px 3px rgba(0, 0, 0, 0.1),
+    0 6px 14px rgba(0, 0, 0, 0.08);
+  --glass-sheen: rgba(255, 255, 255, 0.5); /* diagonal catch-light across the face */
   /* header: opaque where the bar meets the phone's top, translucent below.
      (The cream #FFF9F1 experiment lived here and was reverted on order.) */
   --bar-grad-top: rgba(249, 249, 249, 1);
@@ -48,10 +69,26 @@
     --error-bg: #3a1214;
     --error-text: #ff453a;
     --glass-bg: rgba(255, 255, 255, 0.14); /* lighter lean in dark mode too */
-    --glass-rim: rgba(255, 255, 255, 0.28);
     --glass-edge: rgba(255, 255, 255, 0.14);
-    --glass-shade: rgba(0, 0, 0, 0.5);
-    --glass-lift: rgba(0, 0, 0, 0.5);
+    --glass-stack:
+      inset 0 1.5px 1px rgba(255, 255, 255, 0.4),
+      inset 1px 0 1px rgba(255, 255, 255, 0.16),
+      inset -1px 0 1px rgba(255, 255, 255, 0.16),
+      inset 0 -1px 1px rgba(255, 255, 255, 0.1),
+      inset 0 6px 12px -8px rgba(255, 255, 255, 0.18),
+      inset 0 -8px 14px -10px rgba(0, 0, 0, 0.6),
+      0 2px 6px rgba(0, 0, 0, 0.45),
+      0 10px 24px rgba(0, 0, 0, 0.4);
+    --glass-stack-sm:
+      inset 0 1px 1px rgba(255, 255, 255, 0.4),
+      inset 1px 0 1px rgba(255, 255, 255, 0.14),
+      inset -1px 0 1px rgba(255, 255, 255, 0.14),
+      inset 0 -1px 1px rgba(255, 255, 255, 0.08),
+      inset 0 3px 6px -3px rgba(255, 255, 255, 0.16),
+      inset 0 -4px 8px -5px rgba(0, 0, 0, 0.55),
+      0 1px 3px rgba(0, 0, 0, 0.5),
+      0 6px 14px rgba(0, 0, 0, 0.4);
+    --glass-sheen: rgba(255, 255, 255, 0.12);
     --bar-grad-top: rgba(22, 22, 24, 1);
     --bar-grad-bottom: rgba(22, 22, 24, 0.45);
     --menu-bg: #2c2c2e;
@@ -201,13 +238,12 @@ html, body {
   height: 34px;
   padding: 0;
   border-radius: 50%;
-  border: 1px solid var(--glass-edge);
-  background: var(--glass-bg);
+  border: none;
+  background-color: var(--glass-bg);
+  background-image: linear-gradient(135deg, var(--glass-sheen), transparent 60%);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
-  box-shadow:
-    inset 0 1px 0 var(--glass-rim),
-    inset 0 -6px 10px -8px var(--glass-shade);
+  box-shadow: var(--glass-stack-sm);
   color: var(--muted);
   cursor: pointer;
 }
@@ -478,19 +514,28 @@ html, body {
   align-items: flex-end;
   padding: 0.5rem 0.75rem var(--pad-b);
 }
-/* the field wrapper: the pill plus the ↑ that lives inside its right edge */
+/* The field IS the glass now: pill-shaped material (tint + sheen + lighting
+   stack + inert-for-now backdrop blur) with the naked textarea floating above
+   it, so text is drawn ON TOP of the light like the native material draws
+   content above the glass. */
 .field {
   position: relative;
   display: flex;
   flex: 1;
+  border-radius: 18px;
+  background-color: var(--glass-bg);
+  background-image: linear-gradient(135deg, var(--glass-sheen), transparent 60%);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow: var(--glass-stack);
+  transition: opacity 0.3s ease; /* the settling re-enable fade */
 }
-/* iMessage hold-glow, the bulb: the WHOLE surface lights, snapping on fast
-   (~80ms — a tap must catch it) and fading off gently on release. The resting
-   pill is off-white precisely so this near-white veil has headroom to show; a
-   finger-centered spot was invisible because the finger physically covers it.
-   Still an overlay ABOVE the textarea: the layer the text and caret are
-   painted on never animates (the caret-drift lesson). */
-.field::after {
+/* iMessage hold-glow, the bulb: the whole surface lights, snapping on fast
+   (~80ms — a tap must catch it) and fading off gently on release. ::before
+   paints ABOVE the field's material but BELOW its in-flow children — the
+   surface brightens, the letters stay ink, and the layer the text and caret
+   are painted on never animates (the caret-drift lesson). */
+.field::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -500,7 +545,7 @@ html, body {
   transition: opacity 0.3s ease; /* release: bulb fades off */
   pointer-events: none;
 }
-.field.glow::after {
+.field.glow::before {
   opacity: 1;
   transition: opacity 0.08s ease-out; /* touch: bulb clicks on */
 }
@@ -511,27 +556,16 @@ html, body {
   max-height: 120px; /* ~5 lines; the input handler grows height up to this */
   padding: 8px 40px 8px 14px; /* the right inset is the ↑'s reserved column —
     text must never wrap under or beside-then-behind the button */
-  border: 1px solid var(--glass-edge);
+  border: none; /* the .field carries the material; this is bare text */
   border-radius: 18px;
-  /* liquid glass, the parts Safari can do: translucent tint, specular top rim,
-     inner bottom shade for thickness, soft lift. The backdrop blur is inert
-     over the flat canvas today but lights up if content ever scrolls under.
-     Same --glass-bg as the ＋ and settings: the three materials must match. */
-  background: var(--glass-bg);
-  backdrop-filter: blur(16px) saturate(180%);
-  -webkit-backdrop-filter: blur(16px) saturate(180%);
-  box-shadow:
-    inset 0 1px 0 var(--glass-rim),
-    inset 0 -10px 16px -14px var(--glass-shade),
-    0 1px 6px var(--glass-lift);
+  background: none;
   color: var(--text);
   caret-color: var(--accent);
   font: inherit;
   font-size: 17px;
   outline: none; /* no browser focus ring — the keyboard IS the focus signal */
-  /* keyboard-down direction: same clock as the ＋ reclaiming its slot; the
-     opacity entry is the settling re-enable fade */
-  transition: padding-right 0.13s ease, opacity 0.3s ease;
+  /* keyboard-down direction: same clock as the ＋ reclaiming its slot */
+  transition: padding-right 0.13s ease;
 }
 /* While the keyboard is up the pill widens leftward into the ＋'s slot and the
    text rides WITH its left edge — one uniform slide, never a re-wrap. The
@@ -549,24 +583,22 @@ html, body {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  /* same liquid-glass material as the pill (see the textarea rule) */
-  border: 1px solid var(--glass-edge);
-  background: var(--glass-bg);
+  /* same liquid-glass material as the field, scaled for a circle */
+  border: none;
+  background-color: var(--glass-bg);
+  background-image: linear-gradient(135deg, var(--glass-sheen), transparent 60%);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
-  box-shadow:
-    inset 0 1px 0 var(--glass-rim),
-    inset 0 -6px 10px -8px var(--glass-shade),
-    0 1px 6px var(--glass-lift);
+  box-shadow: var(--glass-stack-sm);
   color: var(--text); /* black in light mode (white in dark), not muted grey */
   font-size: 1.25rem;
   font-weight: 200; /* thin ＋ strokes */
   cursor: pointer;
   flex: none;
   /* the bar bottom-aligns its items (so ＋ holds still when the pill grows),
-     but the single-line pill is ~7px taller than the ＋ — half of that lifts
-     the ＋ onto the pill's optical centerline */
-  margin-bottom: 3.5px;
+     but the single-line pill (39px borderless) is 5px taller than the ＋ —
+     half of that lifts the ＋ onto the pill's optical centerline */
+  margin-bottom: 2.5px;
   overflow: hidden; /* the glyph must not paint outside a mid-collapse box */
   /* keyboard-DOWN direction: the editor hands the space back first, then the
      ＋ fades in — the mirror of the keyboard-up choreography below. The filter
@@ -590,16 +622,16 @@ html, body {
   transition: opacity 0.1s ease, width 0.13s ease 0.1s, margin-right 0.13s ease 0.1s;
 }
 
-/* The picker session window (.settling, shell.ts): the ＋ greys and the editor
-   looks switched off from the ＋ tap that OPENS the picker all the way through
-   teardown-complete — so there is no off/on blink after a dismissal; the bar is
-   already off while the sheet is up and simply stays off for the last beat.
-   Going off is instant (it answers the tap); coming back FADES via the
-   filter/opacity entries in the base transition lists above. transition:none
+/* The picker session window (.settling, shell.ts): the ＋ greys and the whole
+   field looks switched off from the ＋ tap that OPENS the picker all the way
+   through teardown-complete — so there is no off/on blink after a dismissal;
+   the bar is already off while the sheet is up and simply stays off for the
+   last beat. Going off is instant (it answers the tap); coming back FADES via
+   the filter/opacity entries in the base transitions above. transition:none
    here is safe: the keyboard choreography can never run during a session (the
    ＋ is unreachable while the keyboard is up). */
 #app.settling .compose .attach { filter: opacity(0.35); transition: none; }
-#app.settling .compose textarea { opacity: 0.5; transition: none; }
+#app.settling .field { opacity: 0.5; transition: none; }
 
 /* the real file input, invisibly overlaying the ＋ button: iOS anchors its
    picker menu to the input's rendered rect, and a display:none input has none
@@ -609,7 +641,7 @@ html, body {
   left: 0.75rem;
   /* tracks the ＋ through the padding toggle AND its centering lift — iOS
      anchors the picker sheet to this rect, so it must sit exactly on the ＋ */
-  bottom: calc(var(--pad-b) + 3.5px);
+  bottom: calc(var(--pad-b) + 2.5px);
   width: 34px;
   height: 34px;
   opacity: 0;
@@ -653,15 +685,13 @@ html, body {
   bottom: calc(64px + var(--pad-b));
   width: 36px;
   height: 36px;
-  border: 1px solid var(--glass-edge);
+  border: none;
   border-radius: 50%;
-  background: var(--glass-bg);
+  background-color: var(--glass-bg);
+  background-image: linear-gradient(135deg, var(--glass-sheen), transparent 60%);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
-  box-shadow:
-    inset 0 1px 0 var(--glass-rim),
-    inset 0 -6px 10px -8px var(--glass-shade),
-    0 1px 6px var(--glass-lift);
+  box-shadow: var(--glass-stack-sm);
   color: var(--sent);
   font-size: 1.1rem;
   cursor: pointer;

@@ -7,7 +7,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.43-dbg"; // the bulb: off-white resting glass (pill+＋+settings identical), whole-surface glow, fast on / gentle off
+const APP_VERSION = "0.1.44-dbg"; // glass polish: edges as directional light (no strokes), thickness + sheen, deeper float, bulb under the text
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -203,10 +203,10 @@ function renderChat(): void {
   const textEl = document.getElementById("text") as HTMLTextAreaElement;
   const autosize = (): void => {
     textEl.style.height = "auto";
-    // +2 = the pill's top/bottom border: scrollHeight excludes borders but the
-    // border-box height must cover them, or the box sits 2px overfull forever
-    // and iOS lets an "empty" textarea scroll-bounce
-    textEl.style.height = `${Math.min(textEl.scrollHeight + 2, 120)}px`;
+    // exact fit = nothing to scroll-bounce. The textarea is borderless now
+    // (the .field wrapper carries the glass), so scrollHeight IS the full
+    // border-box need — the old +2 border compensation would reopen the gap
+    textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
   };
   textEl.addEventListener("input", () => {
     autosize();
