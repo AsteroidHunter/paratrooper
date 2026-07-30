@@ -1004,6 +1004,10 @@ def test_event_policy_covers_every_kind():
         assert not (p.ephemeral and p.persist), f"{kind}: ephemeral rows must not persist"
     assert EVENT_POLICY["done"].terminal and EVENT_POLICY["error"].terminal
     assert not EVENT_POLICY["update"].terminal
+    # working is the pickup watermark: it must persist (the phone derives its
+    # Read receipt from stored rows on replay) and must never reach job context
+    assert EVENT_POLICY["working"].persist and not EVENT_POLICY["working"].ephemeral
+    assert EVENT_POLICY["working"].context == "skip"
 
 
 def test_job_context_projection_skips_blobs_and_markers(tmp_path):
@@ -1021,6 +1025,7 @@ def test_job_context_projection_skips_blobs_and_markers(tmp_path):
 
     add("user", "put my desert photo up")
     add("system", "a1b2c3d4e5", kind="job")
+    add("agent", None, kind="working")  # pickup watermark row: persisted, never context
     add("agent", "on it — resizing now", kind="update")
     add("agent", "data:image/png;base64," + "A" * 4096, kind="screenshot")
     add("agent", {"branch": "paratrooper/desert",

@@ -30,7 +30,10 @@ class EventPolicy(BaseModel):
 
 
 EVENT_POLICY: dict[str, EventPolicy] = {
-    "working": EventPolicy(ephemeral=True, persist=False, context="skip"),
+    # persisted (not ephemeral) so it survives as the thread's pickup watermark:
+    # the phone derives its Read receipt from stored working rows, so the label
+    # must replay after a reopen. Renders nothing; never job context.
+    "working": EventPolicy(context="skip"),
     "typing": EventPolicy(ephemeral=True, persist=False, context="skip"),
     "log": EventPolicy(),
     "update": EventPolicy(),
