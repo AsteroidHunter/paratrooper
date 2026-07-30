@@ -17,29 +17,23 @@
      white canvas. Deliberately BELOW pure white: that gap is the headroom the
      hold-glow bulb needs to register (pure white can't out-white white). One
      value for pill, ＋, and settings so the materials read identical. */
-  --glass-bg: rgba(120, 120, 128, 0.12); /* a notch stronger: the pill must not
-    dissolve into the white canvas */
+  --glass-bg: rgba(120, 120, 128, 0.1); /* visible against the canvas, but a
+    touch lighter than the 0.12 he flagged as too grey */
   --glass-edge: rgba(0, 0, 0, 0.1); /* the opaque menu's hairline only */
-  /* The glass lighting stacks, v3 — device-review lessons: no gradients or
-     texture on the FACE (uniform, like the reference), and the edge is a rim
-     BAND with body: 1.5px of bright rim melting out within ~3px, brightest
-     along the top, so it reads as the polished edge of a slab — thick, but
-     decayed too fast to draw a nested inner shape. A hairline silhouette
-     outside keeps the pill defined against the white canvas. */
+  /* The glass lighting stacks, v5 — THE RULE, learned twice: any layer with
+     near-zero blur draws a visible contour, and contours read as concentric
+     shapes. So: exactly one blurred rim glow (brightest at the perimeter,
+     Gaussian decay inward — its REACH is the thickness) plus one wide soft
+     top-bias light; two smooth fields sum to a smooth field. Silhouette comes
+     from face tint + contact shadow, never from an outline. */
   --glass-stack:
-    inset 0 1px 0 rgba(255, 255, 255, 0.95),
-    inset 0 0 0 1.5px rgba(255, 255, 255, 0.55),
-    inset 0 0 3px 1px rgba(255, 255, 255, 0.35),
-    inset 0 -1px 2px rgba(0, 0, 0, 0.05),
-    0 0 0 0.5px rgba(0, 0, 0, 0.07),
+    inset 0 0 6px rgba(255, 255, 255, 0.8),
+    inset 0 3px 10px -4px rgba(255, 255, 255, 0.5),
     0 1px 3px rgba(0, 0, 0, 0.08),
     0 8px 20px rgba(0, 0, 0, 0.07);
   --glass-stack-sm:
-    inset 0 1px 0 rgba(255, 255, 255, 0.95),
-    inset 0 0 0 1.5px rgba(255, 255, 255, 0.55),
-    inset 0 0 2px 1px rgba(255, 255, 255, 0.35),
-    inset 0 -1px 2px rgba(0, 0, 0, 0.05),
-    0 0 0 0.5px rgba(0, 0, 0, 0.07),
+    inset 0 0 5px rgba(255, 255, 255, 0.8),
+    inset 0 2px 6px -2px rgba(255, 255, 255, 0.5),
     0 1px 2px rgba(0, 0, 0, 0.09),
     0 5px 12px rgba(0, 0, 0, 0.07);
   /* header: opaque where the bar meets the phone's top, translucent below.
@@ -67,19 +61,13 @@
     --glass-bg: rgba(255, 255, 255, 0.14); /* lighter lean in dark mode too */
     --glass-edge: rgba(255, 255, 255, 0.14);
     --glass-stack:
-      inset 0 1px 0 rgba(255, 255, 255, 0.4),
-      inset 0 0 0 1.5px rgba(255, 255, 255, 0.18),
-      inset 0 0 3px 1px rgba(255, 255, 255, 0.1),
-      inset 0 -1px 2px rgba(0, 0, 0, 0.4),
-      0 0 0 0.5px rgba(0, 0, 0, 0.5),
+      inset 0 0 6px rgba(255, 255, 255, 0.22),
+      inset 0 3px 10px -4px rgba(255, 255, 255, 0.14),
       0 1px 3px rgba(0, 0, 0, 0.45),
       0 8px 20px rgba(0, 0, 0, 0.4);
     --glass-stack-sm:
-      inset 0 1px 0 rgba(255, 255, 255, 0.4),
-      inset 0 0 0 1.5px rgba(255, 255, 255, 0.18),
-      inset 0 0 2px 1px rgba(255, 255, 255, 0.1),
-      inset 0 -1px 2px rgba(0, 0, 0, 0.4),
-      0 0 0 0.5px rgba(0, 0, 0, 0.5),
+      inset 0 0 5px rgba(255, 255, 255, 0.2),
+      inset 0 2px 6px -2px rgba(255, 255, 255, 0.13),
       0 1px 2px rgba(0, 0, 0, 0.45),
       0 5px 12px rgba(0, 0, 0, 0.4);
     --bar-grad-top: rgba(22, 22, 24, 1);
