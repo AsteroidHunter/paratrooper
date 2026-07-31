@@ -8,7 +8,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.58-dbg"; // reserved image boxes: server sends thumb dims, client cuts exact holes before decode — landings can't shove the scroll
+const APP_VERSION = "0.1.59-dbg"; // screenshot boxes reserved too (PNG dims parsed from the data-URI header) — the last unsized images
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -753,10 +753,36 @@ function renderSystemLine(_m: ServerMsg, wrapper: HTMLElement, at: number, value
   rowEl(wrapper, "system", "line", at).textContent = value || "✓";
 }
 
+// PNG dimensions read straight from a data-URI's first 24 bytes (signature +
+// IHDR width/height) — no image decode needed, so the box can be reserved for
+// every stored screenshot, legacy included. Null when it isn't a PNG.
+function pngDims(dataUri: string): [number, number] | null {
+  const start = dataUri.indexOf(",") + 1;
+  if (start <= 0) return null;
+  try {
+    const head = atob(dataUri.slice(start, start + 32)); // 32 b64 chars = 24 bytes
+    if (head.length < 24 || head.slice(12, 16) !== "IHDR") return null;
+    const u32 = (o: number) =>
+      ((head.charCodeAt(o) << 24) | (head.charCodeAt(o + 1) << 16) |
+        (head.charCodeAt(o + 2) << 8) | head.charCodeAt(o + 3)) >>> 0;
+    const w = u32(16);
+    const h = u32(20);
+    return w > 0 && h > 0 ? [w, h] : null;
+  } catch {
+    return null;
+  }
+}
+
 function renderScreenshot(_m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
   if (!value) return;
   const div = rowEl(wrapper, "agent", "shot", at);
   const img = document.createElement("img");
+  // reserve the box before decode — the last unsized images shoving the scroll
+  const dims = pngDims(value);
+  if (dims) {
+    img.width = dims[0];
+    img.height = dims[1];
+  }
   img.src = value;
   img.alt = "board preview";
   img.onload = () => {
