@@ -8,7 +8,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.59-dbg"; // screenshot boxes reserved too (PNG dims parsed from the data-URI header) — the last unsized images
+const APP_VERSION = "0.1.60-dbg"; // parked auto-stream stopped (land only at glide ends or while waiting at the spinner); spinner exits by smooth collapse
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -383,7 +383,10 @@ async function loadOlder(): Promise<void> {
   } finally {
     loadingOlder = false;
   }
-  tryApplyOlder(); // user may already be at rest (e.g. parked at the top)
+  // a completed fetch may land ONLY for someone visibly waiting at the
+  // spinner — landing on every fetch while parked streamed the whole thread
+  // in 25s ("too many per turn"); everyone else gets pages at glide ends
+  if (threadEl().scrollTop <= 50) tryApplyOlder();
   if (!historyDone && pendingOlder.length < HISTORY_BANK) void loadOlder(); // keep banking
 }
 
@@ -406,8 +409,14 @@ function drainOlder(): void {
   suppressAnim = true; // a page of history must not pop bubble-by-bubble
   if (page) for (const m of page) applyEvent(m);
   suppressAnim = prevSuppress;
-  if (dropSpin) spin.remove(); // nothing older exists anymore
   t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
+  if (dropSpin) {
+    // the farewell happens at scrollTop~0 where the pin cannot compensate for
+    // height removed above (it can't go negative) — an abrupt remove() shoved
+    // the view every time. Collapse it smoothly outside the pin instead.
+    spin.classList.add("bye");
+    setTimeout(() => spin.remove(), 300);
+  }
 }
 
 // the boundary gate: no finger down and the glide over (scrollend sets

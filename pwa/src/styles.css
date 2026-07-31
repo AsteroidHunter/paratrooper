@@ -743,8 +743,18 @@ html, body {
   display: none;
   justify-content: center;
   padding: 12px 0 4px;
+  max-height: 40px;
+  overflow: hidden;
+  transition: max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease;
 }
 .thread:has(.evt) .histspin { display: flex; }
+/* the farewell at the true top: collapse smoothly instead of vanishing — an
+   abrupt removal deletes height above a scrollTop the pin can't compensate */
+.histspin.bye {
+  max-height: 0;
+  padding: 0;
+  opacity: 0;
+}
 .histspin .ring {
   width: 18px;
   height: 18px;
