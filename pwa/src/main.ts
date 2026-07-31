@@ -8,7 +8,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.60-dbg"; // parked auto-stream stopped (land only at glide ends or while waiting at the spinner); spinner exits by smooth collapse
+const APP_VERSION = "0.1.61-dbg"; // spinner redrawn as a smooth-tail activity ring (the border spinner read as sliced)
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

@@ -755,12 +755,15 @@ html, body {
   padding: 0;
   opacity: 0;
 }
+/* smooth-tail activity ring (the border-top spinner reads as a circle with a
+   hard slice cut out): a conic sweep fading to transparent, masked to a ring */
 .histspin .ring {
   width: 18px;
   height: 18px;
-  border: 2.5px solid var(--hairline);
-  border-top-color: var(--muted);
   border-radius: 50%;
+  background: conic-gradient(rgba(142, 142, 147, 0) 12%, var(--muted));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
   animation: oldspin 0.8s linear infinite;
 }
 @keyframes oldspin { to { transform: rotate(360deg); } }
