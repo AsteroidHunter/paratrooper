@@ -8,7 +8,7 @@ import { initTapLog } from "./taplog";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.62-dbg"; // spinner rebuilt as a plain SVG arc (no masks for iOS to break) with an explicit paint-order guarantee
+const APP_VERSION = "0.1.61-dbg"; // spinner redrawn as a smooth-tail activity ring (the border spinner read as sliced)
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -180,7 +180,7 @@ function renderChat(): void {
       </div>
     </div>
     <main id="thread" class="thread">
-      <div id="histspin" class="histspin" aria-hidden="true"><svg class="ring" viewBox="0 0 20 20" width="18" height="18"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="38 12.3" /></svg></div>
+      <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
       <div class="empty">Send a photo, link, or song to update the board. 🪂</div>
     </main>
     <button type="button" id="jump" class="jump" title="Jump to latest">↓</button>
