@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 import httpx
@@ -55,6 +57,7 @@ class SiteRepo:
         self.branch_prefix = branch_prefix
         self._token = github_token
         self._remote = remote
+        self._askpass: str | None = None
         self.git_name = git_name
         self.git_email = git_email
 
@@ -84,12 +87,35 @@ class SiteRepo:
             raise GitError(f"cannot parse owner/repo from remote {self.remote_url()!r}")
         return m.group("owner"), m.group("repo")
 
-    def _authed_remote(self) -> str:
-        """HTTPS remote with the PAT injected for push (token never logged)."""
-        url = self.remote_url()
-        if self._token and url.startswith("https://"):
-            return url.replace("https://", f"https://x-access-token:{self._token}@", 1)
-        return url
+    # A GIT_ASKPASS helper instead of a token-in-URL remote: a URL with the PAT
+    # embedded gets persisted by clone into .git/config (plaintext at rest) and
+    # shows up in `ps` while the command runs. The helper file itself holds no
+    # secret — it answers git's prompts from the environment.
+    _ASKPASS = (
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  [Uu]sername*) echo "x-access-token" ;;\n'
+        '  *) printf \'%s\' "$PARATROOPER_GIT_ASKPASS_TOKEN" ;;\n'
+        "esac\n"
+    )
+
+    def _auth_env(self) -> dict[str, str] | None:
+        """Env for git commands that must authenticate: askpass helper wired to
+        the token. None (inherit untouched env) without a token/HTTPS remote."""
+        if not (self._token and self.remote_url().startswith("https://")):
+            return None
+        if self._askpass is None:
+            fd, path = tempfile.mkstemp(prefix="paratrooper-askpass-")
+            with os.fdopen(fd, "w") as fh:
+                fh.write(self._ASKPASS)
+            os.chmod(path, stat.S_IRWXU)
+            self._askpass = path
+        return {
+            **os.environ,
+            "GIT_ASKPASS": self._askpass,
+            "PARATROOPER_GIT_ASKPASS_TOKEN": self._token,
+            "GIT_TERMINAL_PROMPT": "0",  # fail fast, never hang on a prompt
+        }
 
     # --- bootstrap -----------------------------------------------------------
 
@@ -104,9 +130,9 @@ class SiteRepo:
         self.root.parent.mkdir(parents=True, exist_ok=True)
         clone = [
             "git", "clone", "--branch", self.default_branch,
-            self._authed_remote(), str(self.root),
+            self.remote_url(), str(self.root),
         ]
-        proc = subprocess.run(clone, capture_output=True, text=True)
+        proc = subprocess.run(clone, capture_output=True, text=True, env=self._auth_env())
         if proc.returncode != 0:
             raise GitError(f"site clone failed: {proc.stderr.strip()}")
 
@@ -126,7 +152,7 @@ class SiteRepo:
         # but allowed) carry the linked bot attribution, not the host's config
         self._git("config", "user.name", self.git_name)
         self._git("config", "user.email", self.git_email)
-        self._git("fetch", "origin", self.default_branch)
+        self._git("fetch", "origin", self.default_branch, env=self._auth_env())
         # reset local default branch to the just-fetched origin tip (don't miss a merge)
         self._git("checkout", "-B", self.default_branch, f"origin/{self.default_branch}")
         branch = self.branch_name(*name_parts)
@@ -156,7 +182,10 @@ class SiteRepo:
         worker may never push main."""
         if branch == self.default_branch:
             raise GitError(f"refusing to push the default branch {branch!r}")
-        self._git("push", "--set-upstream", self._authed_remote(), f"{branch}:{branch}")
+        self._git(
+            "push", "--set-upstream", self.remote_url(), f"{branch}:{branch}",
+            env=self._auth_env(),
+        )
 
     # --- pull request (open, not merge) -------------------------------------
 

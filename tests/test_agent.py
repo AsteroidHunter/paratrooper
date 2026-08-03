@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -340,6 +342,31 @@ def test_push_refuses_default_branch(tmp_path):
     repo = SiteRepo(tmp_path, default_branch="main")
     with pytest.raises(GitError, match="default branch"):
         repo.push_branch("main")
+
+
+def test_git_auth_never_embeds_token(tmp_path, monkeypatch):
+    """The PAT must never ride in git argv (visible in `ps`, persisted by clone
+    into .git/config) — only in the askpass env; the helper file holds no secret."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw.get("env")))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("paratrooper.agent.siterepo.subprocess.run", fake_run)
+    repo = SiteRepo(
+        tmp_path / "co", github_token="sekret",
+        remote="https://github.com/o/r.git",
+    )
+    repo.ensure_checkout()
+    repo.push_branch("paratrooper/x")
+    assert len(calls) == 2
+    for cmd, env in calls:
+        assert all("sekret" not in part for part in cmd)
+        assert env["PARATROOPER_GIT_ASKPASS_TOKEN"] == "sekret"
+        askpass = Path(env["GIT_ASKPASS"])
+        assert askpass.exists() and "sekret" not in askpass.read_text()
+        assert os.access(askpass, os.X_OK)
 
 
 def test_commit_all_uses_bot_identity(tmp_path):
