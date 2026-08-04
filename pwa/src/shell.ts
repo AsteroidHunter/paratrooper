@@ -7,14 +7,14 @@
 //
 // iOS facts this module encodes (each cost a bug round; pinned in tests/):
 // - iOS 26 presents the keyboard in TWO modes, apparently at random per tap
-//   (device-proven, taplog 2026-07-25):
+//   (device-proven, 2026-07-25):
 //     * overlay      — the layout viewport stays full height, only the visual
 //                      viewport shrinks. The shell must track the visual
 //                      viewport or the compose bar sits under the keyboard.
 //     * window-shrink — `innerHeight` shrinks WITH the visual viewport. With
 //                      no pan the four-edge pin is then already exact; writing
 //                      our own top/height moves the shell off-screen.
-//     * shrink-AND-pan — (taplog 2026-07-30) innerHeight shrinks AND iOS slides
+//     * shrink-AND-pan — (2026-07-30) innerHeight shrinks AND iOS slides
 //                      the page up (vv.offsetTop ~362): the pin anchors to a
 //                      page whose top is above the screen, hiding the header.
 //                      A nonzero pan therefore forces the viewport override
@@ -73,7 +73,7 @@ export function computeShell(w: World): ShellTarget {
   // The layout viewport needs correcting when the visible area is not where
   // the four-edge pin thinks it is. Two device-proven triggers:
   //   - overlay mode: innerHeight stayed tall while the viewport shrank
-  //   - shrink-AND-pan (taplog 2026-07-30): innerHeight shrank to match the
+  //   - shrink-AND-pan (2026-07-30): innerHeight shrank to match the
   //     viewport — which used to read as "pin already exact" — but iOS ALSO
   //     slid the page up (vvTop 362), leaving the app's header above the
   //     screen for the whole keyboard session. Any nonzero pan means the pin
@@ -195,15 +195,6 @@ export function createPickerLifecycle(
 // No DOM access at import time — window/document are only touched inside
 // functions, so the pure core above imports cleanly in any environment.
 
-// TEMPORARY (bug/plustap): decision-point logging into taplog.ts's panel.
-// Raw events are taplog's job; these lines record what the shell DECIDED
-// (preventDefault or not, click forwarded, settle executed). No-op unless
-// wired, so tests and the pure core stay inert.
-let slog: (ev: string, detail?: string) => void = () => {};
-export function setShellLogger(fn: (ev: string, detail?: string) => void): void {
-  slog = fn;
-}
-
 function isEditable(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && t.matches("textarea, input:not([type='file'])");
 }
@@ -252,17 +243,10 @@ function readWorld(): World {
 // .settling greys the bar for the whole picker session).
 function applyShell(t: ShellTarget, settling: boolean): void {
   if (!appEl) return;
-  const wasKb = appEl.classList.contains("kb");
   const wasTracking = appEl.classList.contains("kb-vv");
-  const wasSettling = appEl.classList.contains("settling");
-  if (t.kb !== wasKb) slog("shell.kb", t.kb ? `on h=${t.vvHeight} base=${baseline}` : "off");
   appEl.classList.toggle("kb", t.kb);
-  if (settling !== wasSettling) slog("shell.settling", settling ? "on" : "off");
   appEl.classList.toggle("settling", settling);
 
-  if (t.trackViewport !== wasTracking) {
-    slog("shell.track", t.trackViewport ? `on top=${t.vvTop} h=${t.vvHeight}` : "off");
-  }
   if (t.trackViewport) {
     appEl.style.setProperty("--vv-top", `${t.vvTop}px`);
     appEl.style.setProperty("--vv-height", `${t.vvHeight}px`);
@@ -313,12 +297,10 @@ export function reconcile(): void {
 const picker = createPickerLifecycle({
   present: (fresh: boolean) => {
     if (fresh) swapFileInput();
-    slog("shell.present", fresh ? "files.click() [fresh]" : "files.click()");
     fileEl?.click();
     reconcile(); // the settling visual starts NOW, inside the opening tap
   },
   dismiss: () => {
-    slog("shell.settle", "blur files"); // logged BEFORE blur: act= shows parked state
     fileEl?.blur(); // parked focus is the tap-swallower; clear it on every path
     armTeardownExpiry();
     reconcile();
@@ -332,7 +314,6 @@ const picker = createPickerLifecycle({
 function armTeardownExpiry(): void {
   setTimeout(() => {
     if (picker.expireTearing() === "expired") {
-      slog("shell.teardown", "expired");
       reconcile();
     }
   }, TEARDOWN_MAX_MS + 50);
@@ -414,8 +395,6 @@ export function initShell(el: HTMLElement): void {
     (e) => {
       picker.settle();
       if (holdsBarTap(picker.isTearing(), isEditable(e.target), e.target === plusEl)) {
-        const tgt = e.target instanceof HTMLElement ? e.target.tagName.toLowerCase() : "?";
-        slog("shell.hold", `tgt=${tgt}`);
         e.preventDefault();
       }
     },
@@ -432,25 +411,14 @@ export function bindPicker(input: HTMLInputElement, button: HTMLElement, pick: (
   onPick = pick;
   bindInputSignals(input);
   button.addEventListener("pointerdown", (e) => {
-    const w = readWorld();
-    const preserve = preservesFocus(w);
-    slog(
-      "shell.＋pd",
-      `editor=${w.editorFocused ? 1 : 0} file=${w.fileFocused ? 1 : 0}` +
-        ` open=${picker.isOpen() ? 1 : 0} tear=${picker.isTearing() ? 1 : 0}` +
-        ` preventDefault=${preserve ? 1 : 0}`,
-    );
-    if (preserve) e.preventDefault();
+    if (preservesFocus(readWorld())) e.preventDefault();
   });
   button.addEventListener("click", () => {
     // a held tap still delivers its click (device-proven); during the window it
     // must not reach open(), which would present straight into the dropped-click
     // zone — the falsified fresh-input path, 0/6 on device
-    if (picker.isTearing()) {
-      slog("shell.＋click", "held");
-      return;
-    }
-    slog("shell.＋click", picker.open());
+    if (picker.isTearing()) return;
+    picker.open();
   });
 }
 

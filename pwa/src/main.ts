@@ -2,13 +2,12 @@
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
 import { receiptFor } from "./receipts";
-import { bindPicker, currentFileInput, initShell, setShellLogger } from "./shell";
-import { initTapLog } from "./taplog";
+import { bindPicker, currentFileInput, initShell } from "./shell";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.60-dbg"; // parked auto-stream stopped (land only at glide ends or while waiting at the spinner); spinner exits by smooth collapse
+const APP_VERSION = "0.1.63"; // debug tap instrumentation stripped (client module, server echo route); shell logic unchanged
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -68,9 +67,6 @@ interface ServerMsg {
 }
 
 const app = document.getElementById("app")!;
-// taplog BEFORE initShell: its raw-event listeners must register first so
-// each raw line renders above the shell decision it triggered
-setShellLogger(initTapLog());
 initShell(app); // keyboard/focus/picker state converges through shell.ts
 
 // editor hold-glow (iMessage): the pill brightens while a finger rests on it
