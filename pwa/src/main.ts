@@ -7,7 +7,7 @@ import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.64"; // receipt label dips through the Delivered->Read flip; ↑ shielded so the keyboard stays up on send
+const APP_VERSION = "0.1.65"; // empty-thread stub removed: a new chat shows nothing, iMessage-style
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -177,7 +177,6 @@ function renderChat(): void {
     </div>
     <main id="thread" class="thread">
       <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
-      <div class="empty">Send a photo, link, or song to update the board. 🪂</div>
     </main>
     <button type="button" id="jump" class="jump" title="Jump to latest">↓</button>
     <div id="pending" class="pending"></div>
@@ -620,7 +619,6 @@ function applyEvent(m: ServerMsg): void {
   const next = eventWrappers().find((w) => w.dataset.seq && Number(w.dataset.seq) > seq);
   if (next) threadEl().insertBefore(wrapper, next);
   else threadEl().appendChild(wrapper);
-  if (wrapper.childElementCount > 0) threadEl().querySelector(".empty")?.remove();
   decorate();
   // pinned-viewport handling for older pages lives in loadOlder; only tail
   // applies drive the scroll/chevron rules
@@ -1080,7 +1078,6 @@ function localWrapper(role: string): HTMLElement {
   wrapper.dataset.ts = String(Date.now());
   wrapper.dataset.role = role;
   threadEl().appendChild(wrapper);
-  threadEl().querySelector(".empty")?.remove();
   return wrapper;
 }
 
