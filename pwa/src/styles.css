@@ -798,3 +798,13 @@ html, body {
   font-weight: 600;
   padding: 1px 4px 0;
 }
+/* the Delivered -> Read flip: a gentle dip through transparent, opacity only —
+   same box, no motion, no layout part. main.ts swaps the text at the 50%
+   midpoint and owns the matching duration (RECEIPT_FLIP_MS = 250). An
+   animation, not a transition, so the swipe-peek transform transition above
+   is left untouched. */
+.receipt.flip { animation: receipt-flip 0.25s ease; }
+@keyframes receipt-flip {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}

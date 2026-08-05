@@ -422,6 +422,19 @@ export function bindPicker(input: HTMLInputElement, button: HTMLElement, pick: (
   });
 }
 
+// The in-pill ↑ send button gets the same pointerdown shield as the ＋: its
+// default focus grab is what collapsed the keyboard on every send. Prevented
+// only while an editor (or the parked file input) holds focus — never from
+// idle, per preservesFocus — and a prevented tap still delivers its click
+// (device-proven above), so the form submit fires exactly as before. The send
+// button stays OUT of holdsBarTap: it rides through the picker's settling
+// window untouched (pinned).
+export function bindSendShield(button: HTMLElement): void {
+  button.addEventListener("pointerdown", (e) => {
+    if (preservesFocus(readWorld())) e.preventDefault();
+  });
+}
+
 // the current file input — it is replaced on fresh presents, so callers must
 // never cache the element they were handed at bind time
 export function currentFileInput(): HTMLInputElement | null {

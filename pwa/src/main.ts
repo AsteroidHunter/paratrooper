@@ -2,12 +2,12 @@
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
 import { receiptFor } from "./receipts";
-import { bindPicker, currentFileInput, initShell } from "./shell";
+import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.63"; // debug tap instrumentation stripped (client module, server echo route); shell logic unchanged
+const APP_VERSION = "0.1.64"; // receipt label dips through the Delivered->Read flip; ↑ shielded so the keyboard stays up on send
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -231,6 +231,9 @@ function renderChat(): void {
     e.preventDefault();
     void send();
   });
+  // the ↑ must not steal focus from the textarea (that collapsed the keyboard
+  // on every send); the shield mirrors the ＋'s, and shell.ts owns the rule
+  bindSendShield(document.getElementById("sendbtn")!);
   // compose grows with content like iMessage (1 -> ~5 lines, then inner scroll)
   const textEl = document.getElementById("text") as HTMLTextAreaElement;
   const autosize = (): void => {
@@ -870,15 +873,41 @@ function chip(label: string): HTMLSpanElement {
 // per the stored working row -> Read). Anchored inside the newest sent
 // message's wrapper, so it stays under that bubble when replies land below.
 
+// The label flip (Delivered -> Read) dips through transparent instead of
+// snapping. 250ms end to end — styles.css `.receipt.flip` carries the matching
+// duration — with the text swapped at the invisible midpoint.
+const RECEIPT_FLIP_MS = 250;
+
 function updateReceipt(): void {
-  document.getElementById("receipt")?.remove();
   const r = receiptFor(store.values());
-  if (!r) return;
-  const wrapper = wrapperFor(r.seq);
-  if (!wrapper) return; // newest sent message sits above the loaded window
+  const wrapper = r ? wrapperFor(r.seq) : null;
+  const existing = document.getElementById("receipt");
+  if (!r || !wrapper) {
+    existing?.remove(); // nothing to stamp, or the newest sent message sits above the loaded window
+    return;
+  }
+  if (existing && existing.parentElement === wrapper) {
+    // Same bubble, so only the LABEL can have changed: fade it, don't snap it.
+    // dataset.state holds the TARGET label — repeat calls while a dip is
+    // mid-flight compare against it and no-op instead of stacking dips, and
+    // the midpoint timer reads it so the newest state always wins.
+    if (existing.dataset.state !== r.state) {
+      existing.dataset.state = r.state;
+      existing.classList.remove("flip");
+      void existing.offsetWidth; // flush so a re-added .flip restarts the animation
+      existing.classList.add("flip");
+      setTimeout(() => {
+        existing.textContent = existing.dataset.state ?? "";
+      }, RECEIPT_FLIP_MS / 2);
+    }
+    if (followTail) scrollToBottom();
+    return;
+  }
+  existing?.remove(); // the anchor moved to a new bubble: fresh stamp, no dip
   const el = document.createElement("div");
   el.id = "receipt";
   el.className = "receipt";
+  el.dataset.state = r.state;
   el.textContent = r.state;
   wrapper.appendChild(el);
   if (followTail) scrollToBottom();
