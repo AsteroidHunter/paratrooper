@@ -46,6 +46,15 @@ from paratrooper.agent.tools import ToolContext, build_tool_server
         "cd src/content && git push origin main",  # compound
         'bash -c "git push origin main"',  # nested -> regex backstop
         "git branch -D main",
+        "git push origin HEAD:refs/heads/main",  # full-ref refspec destination
+        "git push origin refs/heads/main",  # bare full-ref token
+        'bash -c "git push origin HEAD:refs/heads/main"',  # nested -> regex backstop
+        "gh api --method PUT repos/OWNER/REPO/pulls/5/merge",  # raw API merge
+        "gh api repos/OWNER/REPO/merges",  # any raw API call
+        "git push --all origin",
+        "git push --mirror origin",
+        "git push --branches origin",  # --all's alias
+        "echo hi && git push --all origin",  # compound
     ],
 )
 def test_git_violation_denies(command):
@@ -63,6 +72,11 @@ def test_git_violation_denies(command):
         "ls -la && cat index.json",
         "git status",
         "git log --oneline -5",
+        "git push origin feature/x",
+        "git push --set-upstream origin paratrooper/foo:paratrooper/foo",
+        "git push origin HEAD:refs/heads/paratrooper/foo",  # full ref, feature dest
+        "git fetch origin main",
+        "git checkout main",
     ],
 )
 def test_git_violation_allows(command):

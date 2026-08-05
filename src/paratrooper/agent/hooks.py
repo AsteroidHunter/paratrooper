@@ -11,6 +11,13 @@ Compound commands are **decomposed** (split on ``;`` ``&&`` ``||`` ``|`` and
 newlines, each piece tokenized) so a forbidden op can't be smuggled inside a
 chain like ``git checkout x && git push origin main``. A whole-string regex
 backstop catches nestings the splitter might miss (e.g. command substitution).
+
+Push refspecs are judged by their **destination**: the part after the last
+``:`` (the whole token if there is none) with a leading ``refs/heads/``
+stripped, so ``HEAD:refs/heads/main`` and ``refs/heads/main`` are as forbidden
+as ``main``. ``git push --all``/``--mirror`` and ``gh api`` are denied outright
+— the worker pushes single feature branches and talks to GitHub only through
+the typed in-process tools.
 """
 
 from __future__ import annotations
@@ -31,8 +38,16 @@ def _regex_backstop(command: str, default_branch: str) -> str | None:
     checks = [
         (r"\bgit\s+merge\b", "git merge is forbidden (the agent never merges)"),
         (r"\bgh\s+pr\s+merge\b", "gh pr merge is forbidden"),
+        (r"\bgh\s+api\b", "raw GitHub API calls are forbidden — use the typed tools"),
         (r"\bgit\s+push\b.*--force\b", "force-push is forbidden"),
-        (rf"\bgit\s+push\b.*(?:\s|:){db}\b", f"pushing to '{default_branch}' is forbidden"),
+        (
+            r"\bgit\s+push\b.*--(?:all|mirror|branches)\b",
+            "git push --all/--mirror is forbidden",
+        ),
+        (
+            rf"\bgit\s+push\b.*(?:\s|:|refs/heads/){db}\b",
+            f"pushing to '{default_branch}' is forbidden",
+        ),
     ]
     for pattern, reason in checks:
         if re.search(pattern, command):
@@ -40,11 +55,22 @@ def _regex_backstop(command: str, default_branch: str) -> str | None:
     return None
 
 
+def _push_destination(token: str) -> str:
+    """Resolve a push refspec token to the branch it would write: the part
+    after the last ``:`` (the whole token if there is none), minus a leading
+    ``refs/heads/``. So ``main``, ``HEAD:main``, ``refs/heads/main`` and
+    ``HEAD:refs/heads/main`` all resolve to ``main``."""
+    dest = token.rsplit(":", 1)[-1]
+    return dest.removeprefix("refs/heads/")
+
+
 def _check_subcommand(tokens: list[str], default_branch: str) -> str | None:
     if not tokens:
         return None
     head = tokens[0]
     if head == "gh":
+        if "api" in tokens:
+            return "raw GitHub API calls are forbidden — use the typed tools"
         if "pr" in tokens and "merge" in tokens:
             return "gh pr merge is forbidden — merging is the web service's job"
         return None
@@ -57,8 +83,10 @@ def _check_subcommand(tokens: list[str], default_branch: str) -> str | None:
     if sub == "push":
         if "--force" in rest or "-f" in rest or any(t.startswith("+") for t in rest):
             return "force-push is forbidden"
+        if "--all" in rest or "--mirror" in rest or "--branches" in rest:
+            return "git push --all/--mirror is forbidden — push a single feature branch"
         for t in rest:
-            if t == default_branch or t.endswith(f":{default_branch}"):
+            if _push_destination(t) == default_branch:
                 return f"pushing to '{default_branch}' is forbidden — push a feature branch"
         return None
     if sub == "branch" and default_branch in rest and (
