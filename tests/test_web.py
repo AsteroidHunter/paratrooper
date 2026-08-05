@@ -257,6 +257,9 @@ class _FakeCoordinator:
     async def job_finished(self, thread_id):
         pass
 
+    def has_pending(self):
+        return False  # holds no batches; linger tests inject state.render to reach this
+
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
@@ -568,46 +571,154 @@ def test_coordinator_has_pending():
     _run(scenario())
 
 
-def test_maybe_suspend_only_when_drained(tmp_path):
-    from paratrooper.web.app import _maybe_suspend_worker
+class _FakeRender:
+    def __init__(self):
+        self.suspended = 0
 
-    class _FakeRender:
-        def __init__(self):
-            self.suspended = 0
+    async def suspend_worker(self):
+        self.suspended += 1
+        return True
 
-        async def suspend_worker(self):
-            self.suspended += 1
-            return True
 
-    class _FakeQueue:
-        def __init__(self, pending):
-            self._pending = pending
+class _FakeJobQueue:
+    def __init__(self, pending=0):
+        self.pending = pending
 
-        async def pending_jobs(self):
-            return self._pending
+    async def pending_jobs(self):
+        return self.pending
 
-    class _State:
-        def __init__(self, render, coordinator, queue):
-            self.render, self.coordinator, self.queue = render, coordinator, queue
+
+def _linger_state(render, coord, queue, **kw):
+    """AppState trimmed to what the worker-sleep machinery touches."""
+    return AppState(config=None, store=None, queue=queue, coordinator=coord,
+                    inbox=None, render=render, **kw)
+
+
+def test_maybe_suspend_only_when_drained():
+    """A drain no longer suspends on the spot — it arms the linger countdown;
+    non-drained states and render-off arm nothing (and never suspend)."""
+    from paratrooper.web.app import _cancel_linger, _maybe_suspend_worker
 
     async def scenario():
         enq, intr, *_ = _recorders()
         coord = ThreadCoordinator(enq, intr, window=0.02)
         render = _FakeRender()
-        # nothing pending anywhere -> suspends
-        await _maybe_suspend_worker(_State(render, coord, _FakeQueue(0)))
-        assert render.suspended == 1
-        # a job still queued -> no suspend
-        await _maybe_suspend_worker(_State(render, coord, _FakeQueue(1)))
-        assert render.suspended == 1
-        # a buffered batch -> no suspend
+        # nothing pending anywhere -> arms the countdown, no immediate suspend
+        state = _linger_state(render, coord, _FakeJobQueue(0), linger_s=60)
+        await _maybe_suspend_worker(state)
+        assert state.linger_task is not None and render.suspended == 0
+        _cancel_linger(state)  # don't leak the 60s timer out of the test
+        # a job still queued -> no countdown
+        state = _linger_state(render, coord, _FakeJobQueue(1), linger_s=60)
+        await _maybe_suspend_worker(state)
+        assert state.linger_task is None
+        # a buffered batch -> no countdown
         await coord.handle_message("d", "more", [])
-        await _maybe_suspend_worker(_State(render, coord, _FakeQueue(0)))
-        assert render.suspended == 1
-        # render off -> no-op
-        await _maybe_suspend_worker(_State(None, coord, _FakeQueue(0)))
+        state = _linger_state(render, coord, _FakeJobQueue(0), linger_s=60)
+        await _maybe_suspend_worker(state)
+        assert state.linger_task is None
+        # render off -> no-op, no timers
+        state = _linger_state(None, coord, _FakeJobQueue(0), linger_s=60)
+        await _maybe_suspend_worker(state)
+        assert state.linger_task is None and render.suspended == 0
 
     _run(scenario())
+
+
+def test_linger_arms_on_drain_and_suspends_when_still_drained(monkeypatch):
+    """Drain -> countdown; countdown firing with everything still drained ->
+    suspend. Re-arming replaces the previous countdown (never stacks), and the
+    linger length comes from PARATROOPER_WORKER_LINGER_S."""
+    from paratrooper.web.app import DEFAULT_LINGER_S, _linger_seconds, _maybe_suspend_worker
+
+    assert DEFAULT_LINGER_S == 300.0  # 5 min between turns without a cold boot
+    monkeypatch.setenv("PARATROOPER_WORKER_LINGER_S", "0.02")
+
+    async def scenario():
+        enq, intr, *_ = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.02)
+        render = _FakeRender()
+        state = _linger_state(render, coord, _FakeJobQueue(0))  # linger_s read from env
+        assert state.linger_s == 0.02
+        await _maybe_suspend_worker(state)
+        assert state.linger_task is not None and render.suspended == 0
+        await asyncio.sleep(0.06)
+        assert render.suspended == 1  # fired still-drained -> napped
+        # two drains back to back arm ONE countdown -> one more suspend, not two
+        await _maybe_suspend_worker(state)
+        await _maybe_suspend_worker(state)
+        await asyncio.sleep(0.06)
+        assert render.suspended == 2
+
+    _run(scenario())
+    monkeypatch.setenv("PARATROOPER_WORKER_LINGER_S", "soon")
+    assert _linger_seconds() == DEFAULT_LINGER_S  # junk env value -> default, no crash
+
+
+def test_activity_during_linger_cancels_suspend():
+    """A message arriving mid-linger cancels the countdown (the send path:
+    cancel, ingest, re-evaluate) — an active conversation never naps the
+    worker, and nothing re-arms while its batch is pending."""
+    from paratrooper.web.app import _cancel_linger, _maybe_suspend_worker
+
+    async def scenario():
+        enq, intr, *_ = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.02)
+        render = _FakeRender()
+        state = _linger_state(render, coord, _FakeJobQueue(0), linger_s=0.05)
+        await _maybe_suspend_worker(state)  # drained -> countdown armed
+        assert state.linger_task is not None
+        _cancel_linger(state)  # what /api/send does on any new message
+        await coord.handle_message("d", "one more thing", [])
+        await _maybe_suspend_worker(state)  # buffered batch -> must NOT re-arm
+        assert state.linger_task is None
+        await asyncio.sleep(0.1)  # well past the linger window
+        assert render.suspended == 0
+
+    _run(scenario())
+
+
+def test_linger_fire_recheck_blocks_suspend_when_work_arrived():
+    """Even an uncancelled countdown must not nap the worker if work showed up
+    during the linger: the fire-time re-check covers both a buffered batch and
+    a job already sitting in the queue."""
+    from paratrooper.web.app import _maybe_suspend_worker
+
+    async def scenario():
+        enq, intr, *_ = _recorders()
+        render = _FakeRender()
+        # a message buffers into a long batch window while the countdown runs
+        coord = ThreadCoordinator(enq, intr, window=60)
+        state = _linger_state(render, coord, _FakeJobQueue(0), linger_s=0.02)
+        await _maybe_suspend_worker(state)
+        await coord.handle_message("d", "surprise", [])  # nothing cancels the countdown
+        await asyncio.sleep(0.06)
+        assert render.suspended == 0  # re-check saw the buffer
+        # a job lands in the queue while the countdown runs
+        idle_coord = ThreadCoordinator(enq, intr, window=60)
+        state = _linger_state(render, idle_coord, _FakeJobQueue(0), linger_s=0.02)
+        await _maybe_suspend_worker(state)
+        state.queue.pending = 1
+        await asyncio.sleep(0.06)
+        assert render.suspended == 0  # re-check saw the queued job
+
+    _run(scenario())
+
+
+def test_send_route_resets_linger(client):
+    """The wiring: /api/send cancels a pending countdown and re-arms only when
+    the message leaves everything drained (_FakeCoordinator holds nothing, so
+    each send ends drained -> a fresh countdown replaces the old one)."""
+    state = client.app.state.app_state
+    render = _FakeRender()
+    state.render, state.queue, state.linger_s = render, _FakeJobQueue(0), 9999.0
+    auth = {"Authorization": "Bearer tok"}
+    client.post("/api/send", headers=auth, json={"thread_id": "d", "text": "hi"})
+    first = state.linger_task
+    assert first is not None and not first.done()
+    client.post("/api/send", headers=auth, json={"thread_id": "d", "text": "again"})
+    assert state.linger_task is not first  # replaced, never stacked
+    assert render.suspended == 0  # long linger: nothing fired during the test
 
 
 def test_push_routes(client, monkeypatch):

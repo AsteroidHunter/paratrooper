@@ -152,6 +152,22 @@ def context_line(event: ThreadEvent) -> str | None:
     return f"{event.role}: {text}" if text else None
 
 
+# a drained worker lingers awake this long before suspending, so the next turn
+# of an active conversation doesn't pay the ~30-60s cold boot
+DEFAULT_LINGER_S = 300.0
+
+
+def _linger_seconds() -> float:
+    raw = os.environ.get("PARATROOPER_WORKER_LINGER_S", "")
+    if not raw:
+        return DEFAULT_LINGER_S
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("ignoring PARATROOPER_WORKER_LINGER_S=%r (want seconds)", raw)
+        return DEFAULT_LINGER_S
+
+
 @dataclass
 class AppState:
     config: Config
@@ -160,6 +176,8 @@ class AppState:
     coordinator: ThreadCoordinator
     inbox: InboxStore
     render: RenderControl | None = None  # set -> worker wakes/sleeps per job
+    linger_s: float = field(default_factory=_linger_seconds)
+    linger_task: asyncio.Task | None = None  # armed countdown to suspend (at most one)
     sockets: dict[str, set[WebSocket]] = field(default_factory=dict)
     relay_task: asyncio.Task | None = None
 
@@ -185,6 +203,7 @@ async def _enqueue_job(
     # misses it live never gets it again (reconnect replay starts past its seq)
     await _send_to_sockets(state, thread_id, {"seq": seq, **marker.model_dump()})
     if state.render:  # wake the worker; the job waits durably in the list meanwhile
+        _cancel_linger(state)  # new work: a pending suspend countdown must not fire now
         await state.render.resume_worker()
 
 
@@ -199,14 +218,52 @@ async def recover_unprocessed(state: AppState) -> int:
     return len(rows)
 
 
+async def _worker_idle(state: AppState) -> bool:
+    """The drain check: no running job, no buffered batch, no job still
+    waiting in the queue."""
+    if state.coordinator.has_pending():
+        return False
+    return await state.queue.pending_jobs() == 0
+
+
 async def _maybe_suspend_worker(state: AppState) -> None:
-    """Sleep the worker once nothing needs it: no running job, no buffered
-    batch, no job still waiting in the queue."""
-    if state.render is None or state.coordinator.has_pending():
+    """The worker looks idle — arm the linger countdown instead of suspending
+    on the spot (an immediate suspend put a cold boot between conversational
+    turns). The suspend lands in ``_linger_then_suspend`` only if the drain
+    still holds when the countdown ends; new activity cancels it meanwhile."""
+    if state.render is not None and await _worker_idle(state):
+        _arm_linger(state)
+
+
+def _cancel_linger(state: AppState) -> None:
+    """Drop the pending suspend countdown — new activity means the worker is
+    (or is about to be) needed."""
+    if state.linger_task is not None and not state.linger_task.done():
+        state.linger_task.cancel()
+    state.linger_task = None
+
+
+def _arm_linger(state: AppState) -> None:
+    """(Re)start the countdown to suspend. Replaces any armed one, so
+    countdowns never stack."""
+    _cancel_linger(state)
+    state.linger_task = asyncio.ensure_future(_linger_then_suspend(state))
+
+
+async def _linger_then_suspend(state: AppState) -> None:
+    try:
+        await asyncio.sleep(state.linger_s)
+    except asyncio.CancelledError:
         return
-    if await state.queue.pending_jobs() > 0:
-        return
-    await state.render.suspend_worker()
+    try:
+        # re-check with the same drain test that armed us: anything that arrived
+        # during the linger (buffered batch, queued job) keeps the worker awake
+        if state.render is not None and await _worker_idle(state):
+            await state.render.suspend_worker()
+    except (redis_exc.ConnectionError, redis_exc.TimeoutError) as exc:
+        # best-effort like every render call: a missed nap costs money, not
+        # correctness — the next drain arms a fresh countdown
+        logger.warning("linger suspend check failed: %s", exc)
 
 
 async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
@@ -266,7 +323,7 @@ async def _result_relay(state: AppState) -> None:
                 await _maybe_push(state, result.kind)
                 if policy.terminal:
                     # job_finished first: it re-arms the timer for any buffered
-                    # batch, so has_pending() correctly blocks the suspend then
+                    # batch, so has_pending() correctly blocks the linger then
                     await state.coordinator.job_finished(thread_id)
                     await _maybe_suspend_worker(state)
         except (redis_exc.ConnectionError, redis_exc.TimeoutError) as exc:
@@ -307,6 +364,7 @@ def _lifespan(injected: AppState | None):
         finally:
             if state.relay_task:
                 state.relay_task.cancel()
+            _cancel_linger(state)
             store.close()
 
     return lifespan
@@ -356,12 +414,18 @@ def create_app(injected: AppState | None = None) -> FastAPI:
     @app.post("/api/send", dependencies=[Depends(require_token)])
     async def send(req: SendRequest) -> dict:
         state = st()
+        # activity: cancel any suspend countdown BEFORE the first await, so a
+        # countdown firing mid-request can't nap the worker under this message
+        _cancel_linger(state)
         msg = ThreadEvent(
             thread_id=req.thread_id, role="user", payload=req.text,
             attachments=req.attachments, ts=_now(),
         )
         seq = await asyncio.to_thread(state.store.add_message, msg)
         status = await state.coordinator.handle_message(req.thread_id, req.text, req.attachments)
+        # re-arm if this message left everything drained (a STOP can discard
+        # the only pending batch — the worker must still get to sleep later)
+        await _maybe_suspend_worker(state)
         return {"status": status, "seq": seq}  # seq: client advances its catch-up cursor
 
     @app.get("/api/thread/{thread_id}", dependencies=[Depends(require_token)])

@@ -2,8 +2,10 @@
 
 Render background workers can't scale to zero, so the web service drives the
 worker's lifecycle over the Render API: **resume** when a batch is enqueued,
-**suspend** once the queue drains. Jobs wait durably in the Key Value list while
-the worker boots (~30-60s), so nothing is lost during the wake.
+**suspend** once the queue has stayed drained for a linger window (default 5
+min; ``PARATROOPER_WORKER_LINGER_S`` — see ``app.py``), so back-to-back turns
+don't each pay a cold boot. Jobs wait durably in the Key Value list while the
+worker boots (~30-60s), so nothing is lost during the wake.
 
 Configured by two env vars on the WEB service — ``RENDER_API_KEY`` (Account
 Settings -> API Keys) and ``RENDER_WORKER_SERVICE_ID`` (the worker's ``srv-...``
@@ -63,5 +65,6 @@ class RenderControl:
         return await self._post("resume")
 
     async def suspend_worker(self) -> bool:
-        """Sleep the worker (call once the queue is drained). Idempotent."""
+        """Sleep the worker (called after the queue stays drained for the
+        linger window). Idempotent."""
         return await self._post("suspend")
