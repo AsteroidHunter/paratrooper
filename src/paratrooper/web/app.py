@@ -70,6 +70,10 @@ logger = logging.getLogger(__name__)
 # leaking the real token into Render logs. Scrub it before any record is emitted.
 _TOKEN_PARAM_RE = re.compile(r"(token=)[^&\s\"']+")
 
+# an access line already merged into record.msg, split back into the five fields
+# uvicorn's template ('%s - "%s %s HTTP/%s" %d') produced them from
+_ACCESS_LINE_RE = re.compile(r'^(.*?) - "(\S+) (\S*) HTTP/([^"]*)" (\d+)$')
+
 
 class _RedactTokenFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
@@ -82,6 +86,20 @@ class _RedactTokenFilter(logging.Filter):
             )
         if isinstance(record.msg, str) and "token=" in record.msg:
             record.msg = _TOKEN_PARAM_RE.sub(r"\1REDACTED", record.msg)
+        # a uvicorn.access record arriving pre-merged (msg is the whole line,
+        # args None — e.g. rebuilt by a queueing handler; the Render
+        # "--- Logging error ---" tracebacks on 404 thumb requests showed
+        # exactly 'Message: <line>' / 'Arguments: None') cannot survive
+        # AccessFormatter, which unpacks record.args into five fields
+        # unconditionally. Re-split the line into the native five-tuple so the
+        # formatter gets the shape it demands; never null args, never drop the
+        # line.
+        if record.name == "uvicorn.access" and not record.args and isinstance(record.msg, str):
+            m = _ACCESS_LINE_RE.match(record.msg)
+            if m:
+                client, method, path, version, status = m.groups()
+                record.msg = '%s - "%s %s HTTP/%s" %d'
+                record.args = (client, method, path, version, int(status))
         return True
 
 

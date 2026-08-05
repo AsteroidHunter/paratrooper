@@ -1257,6 +1257,59 @@ def test_token_redaction_scrubs_argless_records():
     assert "token=REDACTED" in rec.getMessage()
 
 
+_ACCESS_FMT = '%(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+
+
+def test_token_redaction_rebuilds_premerged_access_records():
+    """The crash that outlived the first redaction fix (Render '--- Logging
+    error ---' tracebacks on 404s for missing /api/thumb keys): an access
+    record arriving pre-merged — msg is the whole line, args None, exactly
+    what the traceback tail showed ('Message: ...token=REDACTED... 404' /
+    'Arguments: None'). AccessFormatter unpacks record.args into five fields
+    unconditionally, so scrubbing msg alone still dies with 'TypeError:
+    cannot unpack non-iterable NoneType object'. The filter must hand the
+    formatter the native five-tuple shape, token scrubbed."""
+    import logging as _logging
+
+    from uvicorn.logging import AccessFormatter
+
+    from paratrooper.web.app import _RedactTokenFilter
+
+    rec = _logging.LogRecord(
+        "uvicorn.access", _logging.INFO, __file__, 0,
+        '1.2.3.4:5 - "GET /api/thumb/0dfcd1df.jpeg?token=hunter2 HTTP/1.1" 404',
+        None, None,
+    )
+    assert _RedactTokenFilter().filter(rec)
+    line = AccessFormatter(_ACCESS_FMT, use_colors=False).format(rec)  # raised before
+    assert "hunter2" not in line
+    assert '1.2.3.4:5 - "GET /api/thumb/0dfcd1df.jpeg?token=REDACTED HTTP/1.1" 404' in line
+
+
+def test_token_redaction_native_access_records_survive_real_formatter():
+    """Native access records (five-tuple args, the shape uvicorn itself logs
+    for every /api/thumb response, 404s included) must pass through the real
+    AccessFormatter with only the token scrubbed — the pre-merged rebuild
+    must not fire on them."""
+    import logging as _logging
+
+    from uvicorn.logging import AccessFormatter
+
+    from paratrooper.web.app import _RedactTokenFilter
+
+    rec = _logging.LogRecord(
+        "uvicorn.access", _logging.INFO, __file__, 0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("1.2.3.4:5", "GET", "/api/thumb/gone.webp?token=hunter2", "1.1", 404),
+        None,
+    )
+    assert _RedactTokenFilter().filter(rec)
+    assert len(rec.args) == 5
+    line = AccessFormatter(_ACCESS_FMT, use_colors=False).format(rec)
+    assert "hunter2" not in line
+    assert '1.2.3.4:5 - "GET /api/thumb/gone.webp?token=REDACTED HTTP/1.1" 404 Not Found' in line
+
+
 # --- live job-marker broadcast (roadmap 7) ------------------------------------
 
 def test_enqueue_broadcasts_job_marker_to_connected_sockets(tmp_path):
