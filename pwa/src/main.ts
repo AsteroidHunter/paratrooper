@@ -7,7 +7,7 @@ import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.66"; // failed sends: bubble stays, red badge + Not Delivered, Try Again / Delete
+const APP_VERSION = "0.1.67"; // hold glow → single even face brighten (overlay opacity only, caret-safe)
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -69,36 +69,18 @@ interface ServerMsg {
 const app = document.getElementById("app")!;
 initShell(app); // keyboard/focus/picker state converges through shell.ts
 
-// editor hold-glow (iMessage): the pill brightens while a finger rests on it
-// and fades back on release. Skipped during the settling window — a held tap
-// must not glow a switched-off box. Module-level with live lookups, like the
-// menu-close below, so re-renders can't stack listeners.
-// the glow's light spot sits at the finger: --gx/--gy feed the overlay's
-// radial gradient (styles.css .field::before) and track while held
-function aimGlow(field: HTMLElement, e: PointerEvent): void {
-  const r = field.getBoundingClientRect();
-  field.style.setProperty("--gx", `${e.clientX - r.left}px`);
-  field.style.setProperty("--gy", `${e.clientY - r.top}px`);
-}
+// editor hold-brighten: while a finger rests on the pill its face brightens
+// evenly (one flat veil, styles.css .field::before — overlay opacity only,
+// nothing positional) and fades back on release. Skipped during the settling
+// window — a held tap must not brighten a switched-off box. Module-level with
+// live lookups, like the menu-close below, so re-renders can't stack listeners.
 document.addEventListener(
   "pointerdown",
   (e) => {
     const t = e.target;
     if (t instanceof HTMLElement && t.id === "text" && !app.classList.contains("settling")) {
-      const field = t.parentElement;
-      if (field) {
-        aimGlow(field, e);
-        field.classList.add("glow");
-      }
+      t.parentElement?.classList.add("glow");
     }
-  },
-  true,
-);
-document.addEventListener(
-  "pointermove",
-  (e) => {
-    const field = document.querySelector<HTMLElement>(".field.glow");
-    if (field) aimGlow(field, e);
   },
   true,
 );

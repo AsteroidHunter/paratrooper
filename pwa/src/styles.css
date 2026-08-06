@@ -21,7 +21,7 @@
   /* The glass lighting stacks, v6 — iMessage-faithful edges: definition comes
      from the canonical hairline ring (no layout-affecting border, so the ＋
      centering math holds), with a white top catch over it and a 2px melt.
-     The glow lives on the .field::before overlay, not here. */
+     The hold-brighten veil lives on the .field::before overlay, not here. */
   --glass-stack:
     inset 0 1px 0 rgba(255, 255, 255, 0.9),
     inset 0 0 0 1px var(--hairline),
@@ -40,8 +40,8 @@
   --bar-grad-bottom: rgba(249, 249, 249, 0.45);
   --menu-bg: #f2f2f4; /* fully opaque dropdown / alert card */
   --accent: #432bff; /* sent bubbles, compose caret, and the ↑ send button */
-  /* hold-glow: the white-capped core of the touch-point light */
-  --pill-glow: rgba(255, 255, 255, 0.95);
+  /* hold-brighten: the flat white veil that evens up the whole pill face */
+  --pill-veil: rgba(255, 255, 255, 0.55);
   color-scheme: light;
 }
 
@@ -73,7 +73,8 @@
     --bar-grad-top: rgba(22, 22, 24, 1);
     --bar-grad-bottom: rgba(22, 22, 24, 0.45);
     --menu-bg: #2c2c2e;
-    --pill-glow: rgba(255, 255, 255, 0.4); /* gentler core on dark glass */
+    --pill-veil: rgba(255, 255, 255, 0.12); /* faint lift on dark glass — any
+      stronger and the veil reads as a grey slab, not light */
     color-scheme: dark;
   }
 }
@@ -510,29 +511,22 @@ html, body {
   box-shadow: var(--glass-stack);
   transition: opacity 0.3s ease; /* the settling re-enable fade */
 }
-/* iMessage hold-glow, three channels revealed by ONE opacity fade (the only
+/* Hold-brighten: ONE flat veil revealed by ONE opacity fade (the only
    animated property — composite-only, so the text/caret layer never repaints;
-   ::before paints above the material, below the letters):
-   1. a white-capped light spot at the actual touch point (--gx/--gy) — its
-      internal gradient stays visible even on the near-white face;
-   2. the rim flaring bright (inset ring + tight bloom);
-   3. the under-shadow deepening, so the face reads brighter by contrast —
-      the "dynamic range" trick from Apple's own material description. */
+   ::before paints above the material, below the letters). While a finger
+   rests on the pill the whole face brightens EVENLY: a uniform white-ish
+   veil, no gradient, no shadow, nothing positional — nothing that suggests
+   a light source or the pill growing/lifting. (Replaced the v0.1.51
+   three-channel glow — touch-point spot + rim flare + under-shadow — whose
+   spot hid under the finger and whose stack read as the box growing.)
+   HARD RULE, learned via caret drift: never animate, transform, or filter
+   the textarea's own layer — only this overlay's opacity may move. */
 .field::before {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: 18px;
-  background: radial-gradient(
-    120px circle at var(--gx, 50%) var(--gy, 50%),
-    var(--pill-glow) 0%,
-    rgba(255, 255, 255, 0) 75%
-  );
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.9),
-    inset 0 0 10px rgba(255, 255, 255, 0.7),
-    0 2px 6px -2px rgba(0, 0, 0, 0.2); /* dark but hugging: contrast without
-      the outward bloom that reads as "the pill lifted/grew" */
+  background: var(--pill-veil); /* one even color across the face */
   opacity: 0;
   transition: opacity 0.5s ease; /* release: fades off gently */
   pointer-events: none;
