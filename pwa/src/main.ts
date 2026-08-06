@@ -7,7 +7,7 @@ import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.65"; // empty-thread stub removed: a new chat shows nothing, iMessage-style
+const APP_VERSION = "0.1.66"; // failed sends: bubble stays, red badge + Not Delivered, Try Again / Delete
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1125,63 +1125,154 @@ async function send(): Promise<void> {
 
   sendBtn.disabled = true; // no double-fire while the network work runs
   try {
-    const keys: string[] = [];
-    for (const file of files) {
-      const fd = new FormData();
-      fd.append("file", file);
-      let r: Response;
-      try {
-        r = await fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd });
-      } catch (e) {
-        hideTyping();
-        localBubble("agent", "error", `⚠ not sent — upload of ${file.name} failed: ${e}`);
-        return;
-      }
-      if (!r.ok) {
-        hideTyping();
-        localBubble("agent", "error",
-          `⚠ not sent — upload of ${file.name} failed (${r.status} ${r.statusText})`);
-        return;
-      }
-      keys.push((await r.json()).inbox_key);
-    }
-    let resp: Response;
-    try {
-      resp = await fetch("/api/send", {
-        method: "POST",
-        headers: { ...authHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
-      });
-    } catch (e) {
-      hideTyping();
-      localBubble("agent", "error", `⚠ not sent, server unreachable: ${e}`);
-      return;
-    }
-    if (!resp.ok) {
-      hideTyping();
-      localBubble("agent", "error", `⚠ not sent (${resp.status})`);
-      return;
-    }
-    const { seq } = (await resp.json()) as { seq?: number };
-    if (seq) {
-      if (store.has(seq)) {
-        w.remove(); // a reconnect replay beat the ACK; the keyed wrapper won
-        decorate();
-      } else {
-        // upgrade in place: the optimistic wrapper becomes the event's wrapper
-        w.dataset.seq = String(seq);
-        store.set(seq, {
-          seq, role: "user", payload: text, attachments: keys,
-          ts: new Date().toISOString(),
-        });
-        if (seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
-        if (oldestSeq === 0 || seq < oldestSeq) oldestSeq = seq;
-      }
-    }
-    updateReceipt(); // the server has it: the stored row now derives Delivered
+    await transmit(w, text, files);
   } finally {
     sendBtn.disabled = false;
   }
+}
+
+// The network half of a send — uploads, then POST /api/send — shared by the
+// first attempt and every Try Again, so a retry takes the exact same path,
+// ACK/seq adoption included. Any failure marks the wrapper failed (iMessage
+// treatment below) instead of raising a separate error bubble; the typed text
+// and File objects stay held for the next retry.
+async function transmit(w: HTMLElement, text: string, files: File[]): Promise<void> {
+  const keys: string[] = [];
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append("file", file);
+    let r: Response;
+    try {
+      r = await fetch("/api/upload", { method: "POST", headers: authHeaders(), body: fd });
+    } catch {
+      return markFailed(w, text, files);
+    }
+    if (!r.ok) return markFailed(w, text, files);
+    keys.push((await r.json()).inbox_key);
+  }
+  let resp: Response;
+  try {
+    resp = await fetch("/api/send", {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
+    });
+  } catch {
+    return markFailed(w, text, files);
+  }
+  if (!resp.ok) return markFailed(w, text, files);
+  const { seq } = (await resp.json()) as { seq?: number };
+  if (seq) {
+    if (store.has(seq)) {
+      w.remove(); // a reconnect replay beat the ACK; the keyed wrapper won
+      decorate();
+    } else {
+      // upgrade in place: the optimistic wrapper becomes the event's wrapper
+      w.dataset.seq = String(seq);
+      store.set(seq, {
+        seq, role: "user", payload: text, attachments: keys,
+        ts: new Date().toISOString(),
+      });
+      if (seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
+      if (oldestSeq === 0 || seq < oldestSeq) oldestSeq = seq;
+    }
+  }
+  updateReceipt(); // the server has it: the stored row now derives Delivered
+}
+
+// --- failed sends (iMessage): the bubble STAYS, marked by a red !-in-circle
+// to its right and a small red "Not Delivered" underneath. The payload (text +
+// File objects) is held in memory, keyed by the wrapper, so each failed send
+// retries independently. Memory-only by design: it survives everything except
+// closing the app (the on-disk outbox is future work).
+
+const failedSends = new Map<HTMLElement, { text: string; files: File[] }>();
+
+function markFailed(w: HTMLElement, text: string, files: File[]): void {
+  failedSends.set(w, { text, files });
+  w.classList.add("failed");
+  if (w.querySelector(".sendfail-badge")) return; // already marked (re-failure)
+  // badge on the last bubble's row, absolutely positioned in the column the
+  // .failed row padding frees — no flex children, so bubble geometry holds.
+  // No entrance animation: the badge just appears, like the reference.
+  const rows = w.querySelectorAll<HTMLElement>(":scope > .row");
+  const lastRow = rows[rows.length - 1];
+  if (!lastRow) return;
+  const badge = document.createElement("button");
+  badge.type = "button";
+  badge.className = "sendfail-badge";
+  badge.textContent = "!";
+  badge.setAttribute("aria-label", "Not Delivered — options");
+  badge.addEventListener("click", () => openFailSheet(w));
+  lastRow.appendChild(badge);
+  const label = document.createElement("div");
+  label.className = "sendfail";
+  label.textContent = "Not Delivered";
+  label.addEventListener("click", () => openFailSheet(w));
+  w.appendChild(label);
+  if (followTail) scrollToBottom(); // the label adds height under the bubble
+}
+
+// drops the failure UI and the held payload — used by a successful/in-flight
+// retry (transmit re-marks if it fails again) and by Delete
+function clearFailed(w: HTMLElement): void {
+  failedSends.delete(w);
+  w.classList.remove("failed");
+  w.querySelector(".sendfail-badge")?.remove();
+  w.querySelector(":scope > .sendfail")?.remove();
+}
+
+function retrySend(w: HTMLElement): void {
+  const held = failedSends.get(w);
+  if (!held) return;
+  clearFailed(w); // badge/label hide while the retry is in flight
+  void transmit(w, held.text, held.files); // success adopts the seq; failure re-marks
+}
+
+function deleteFailed(w: HTMLElement): void {
+  clearFailed(w);
+  // release the object URLs backing the optimistic image previews
+  w.querySelectorAll<HTMLImageElement>("img").forEach((img) => {
+    if (img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+  });
+  w.remove();
+  decorate();
+}
+
+// tapping the badge or label opens a bottom action sheet — the log-out
+// confirm's visual language (safe default bold/blue, destructive red) in
+// Apple's bottom-anchored shape: Try Again / Delete, Cancel on its own card
+function openFailSheet(w: HTMLElement): void {
+  if (document.querySelector(".sheet")) return; // one sheet at a time
+  const sheet = document.createElement("div");
+  sheet.className = "sheet";
+  const dismiss = (): void => {
+    sheet.classList.remove("open");
+    setTimeout(() => sheet.remove(), 150); // matches the .sheet fade
+  };
+  const mk = (label: string, cls: string, fn: () => void): HTMLButtonElement => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = cls;
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      dismiss();
+      fn();
+    });
+    return b;
+  };
+  const card = document.createElement("div");
+  card.className = "sheet-card";
+  card.append(
+    mk("Try Again", "sheet-item", () => retrySend(w)),
+    mk("Delete", "sheet-item sheet-danger", () => deleteFailed(w)),
+  );
+  sheet.append(card, mk("Cancel", "sheet-cancel", () => {}));
+  sheet.addEventListener("click", (e) => {
+    if (e.target === sheet) dismiss(); // backdrop tap = Cancel
+  });
+  document.body.appendChild(sheet);
+  requestAnimationFrame(() => sheet.classList.add("open")); // let the fade run
 }
 
 let publishing = false;

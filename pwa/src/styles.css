@@ -344,11 +344,11 @@ html, body {
 /* swipe-to-peek: visible thread pieces track --peek (set by JS during the
    drag) and spring back through the transition. Targeted by class because .evt
    wrappers generate no boxes for a `>` selector to catch. */
-.thread :where(.row, .stamp, .receipt, .typing, .empty) {
+.thread :where(.row, .stamp, .receipt, .typing, .empty, .sendfail) {
   transform: translateX(var(--peek, 0px));
   transition: transform 0.25s ease;
 }
-.thread.dragging :where(.row, .stamp, .receipt, .typing, .empty) { transition: none; }
+.thread.dragging :where(.row, .stamp, .receipt, .typing, .empty, .sendfail) { transition: none; }
 
 /* one full-width row per bubble; the timestamp sits just past the row's right
    edge, clipped by the thread until the pull slides it into view */
@@ -807,3 +807,82 @@ html, body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
+
+/* --- failed send (iMessage): the bubble stays; a red !-in-circle sits to its
+   right, small red "Not Delivered" underneath. The failed wrapper's rows keep
+   their flex layout — padding frees a right-hand column and the badge is
+   absolutely positioned into it, so bubble geometry and clustering hold. No
+   entrance animation: the badge just appears, like the reference. */
+.evt.failed .row.user { padding-right: 26px; }
+.sendfail-badge {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #ff3b30; /* iMessage systemRed, both modes */
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+/* mirrors the receipt's seat under the bubble; the 26px margin re-aligns it
+   with the bubble's shifted right edge. Tappable — same sheet as the badge. */
+.sendfail {
+  align-self: flex-end;
+  margin-right: 26px;
+  padding: 1px 4px 0;
+  color: #ff3b30;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* failed-send action sheet: bottom-anchored iOS sheet in the log-out confirm's
+   visual language — blue actions, red destructive Delete, and Cancel bold blue
+   on its own card (the safe default, like the confirm's "No") */
+.sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 8px max(0.5rem, env(safe-area-inset-bottom));
+  background: rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.sheet.open { opacity: 1; }
+.sheet-card {
+  border-radius: 14px;
+  background: var(--menu-bg);
+  overflow: hidden; /* button corners stay inside the card's radius */
+}
+.sheet button {
+  display: block;
+  width: 100%;
+  padding: 15px 0;
+  border: none;
+  background: none;
+  color: var(--sent);
+  font: inherit;
+  font-size: 17px;
+  text-align: center;
+  cursor: pointer;
+}
+.sheet .sheet-danger { color: var(--error-text); }
+.sheet .sheet-cancel {
+  border-radius: 14px;
+  background: var(--menu-bg);
+  font-weight: 600; /* the safe default gets the bold, per Apple's alerts */
+}
+.sheet-item + .sheet-item { border-top: 0.5px solid var(--hairline); }
