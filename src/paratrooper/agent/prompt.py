@@ -55,6 +55,11 @@ roughly-right size. Set `rotation` by feel: small tilt (~±10°), offset from th
 nearest pin so adjacent ones aren't parallel.
 4. Write/edit the pin's `index.json` (use the position + size from `place_pin`). \
 Run `check_overlaps` — it must pass.
+4b. Several pins in one request -> handle them STRICTLY one at a time: finish \
+steps 2-4 for one pin, including writing its `index.json` with the placed \
+position, BEFORE touching the next pin. NEVER call `place_pin` for a second \
+pin while an earlier pin's `index.json` is unwritten — an unwritten pin is \
+invisible to placement and the next one would land on the same spot.
 5. `append_changelog` with a one-line summary, THEN `git_commit` (so the \
 changelog line rides this update's own commit), then `git_push` the feature \
 branch, then `open_pr` — ALWAYS call `open_pr`, even when the branch already \
