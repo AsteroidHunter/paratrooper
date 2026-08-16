@@ -3,6 +3,8 @@
 import "./styles.css";
 import { receiptFor } from "./receipts";
 import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell";
+import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
+import type { OutboxRecord } from "./outbox";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
@@ -46,6 +48,7 @@ let threadTouching = false; // finger on the thread: never insert under it
 let lastScrollAt = 0; // scroll events still arriving = momentum still running
 let ws: WebSocket | null = null;
 let closingOnPurpose = false; // logout: suppress the auto-reconnect
+let restoredOutbox = false; // once-per-session guard for the durable-outbox restore
 
 // The client-side event store: seq → ThreadEvent, THE display truth. Apply is
 // idempotent (duplicate seqs no-op — reconnect replays and zombie-socket
@@ -329,8 +332,12 @@ function renderChat(): void {
   fetchCursor = 0;
   historyDone = false;
   followTail = true;
+  restoredOutbox = false; // a fresh shell re-reads the durable outbox
   threadObserver?.disconnect(); // the old shell's thread element is gone
   threadObserver?.observe(thread);
+  // rebuild any failed sends persisted from a prior session; async and marked
+  // .restored so the server replay (kicked off right after) stays above them
+  void restoreOutbox();
 }
 
 // --- older history (recent-first: the socket sends a window, we page back) ----
@@ -600,7 +607,14 @@ function applyEvent(m: ServerMsg): void {
   // end so in-flight optimistic (unkeyed) bubbles keep their place above it
   const next = eventWrappers().find((w) => w.dataset.seq && Number(w.dataset.seq) > seq);
   if (next) threadEl().insertBefore(wrapper, next);
-  else threadEl().appendChild(wrapper);
+  else {
+    // restored failed bubbles (a prior session's unsent sends) sit at the very
+    // tail; a keyed frame that would append past them slots in just above them,
+    // so replayed history and live events never land beneath an old failure
+    const restored = threadEl().querySelector<HTMLElement>(".evt.restored");
+    if (restored) threadEl().insertBefore(wrapper, restored);
+    else threadEl().appendChild(wrapper);
+  }
   decorate();
   // pinned-viewport handling for older pages lives in loadOlder; only tail
   // applies drive the scroll/chevron rules
@@ -853,10 +867,35 @@ function chip(label: string): HTMLSpanElement {
 // per the stored working row -> Read). Anchored inside the newest sent
 // message's wrapper, so it stays under that bubble when replies land below.
 
-// The label flip (Delivered -> Read) dips through transparent instead of
-// snapping. 250ms end to end — styles.css `.receipt.flip` carries the matching
-// duration — with the text swapped at the invisible midpoint.
-const RECEIPT_FLIP_MS = 250;
+// The label flip (Delivered -> Read) is a two-phase opacity fade. The current
+// word fades fully out, its text is swapped only once the layer is invisible,
+// then the new word fades back in. The swap runs on the layer's transitionend,
+// when opacity has already reached 0, never on a timer, so the text can never
+// change while any of it still shows. It is smooth by construction, with no
+// per-device timing. The fade lives on an inner .rc layer (opacity only,
+// caret-safe) so the receipt's own transform transition for swipe-peek (the
+// :where rule in styles.css) is left untouched.
+
+// build a fresh receipt: an .rc text layer inside the #receipt box, plus the
+// one persistent handler that drives every later flip. Reaching opacity 0 (the
+// rc-hide fade-out just finished) swaps the now-invisible text to the newest
+// target and releases the fade back in; reaching opacity 1 is the end, no work.
+function buildReceipt(state: string): HTMLElement {
+  const el = document.createElement("div");
+  el.id = "receipt";
+  el.className = "receipt";
+  el.dataset.state = state;
+  const layer = document.createElement("span");
+  layer.className = "rc";
+  layer.textContent = state;
+  layer.addEventListener("transitionend", (e) => {
+    if (e.propertyName !== "opacity" || !layer.classList.contains("rc-hide")) return;
+    layer.textContent = el.dataset.state ?? ""; // swapped while fully invisible
+    layer.classList.remove("rc-hide"); // fade the new word in
+  });
+  el.appendChild(layer);
+  return el;
+}
 
 function updateReceipt(): void {
   const r = receiptFor(store.values());
@@ -868,28 +907,21 @@ function updateReceipt(): void {
   }
   if (existing && existing.parentElement === wrapper) {
     // Same bubble, so only the LABEL can have changed: fade it, don't snap it.
-    // dataset.state holds the TARGET label — repeat calls while a dip is
-    // mid-flight compare against it and no-op instead of stacking dips, and
-    // the midpoint timer reads it so the newest state always wins.
+    // dataset.state holds the newest TARGET label. A repeat call with the same
+    // target no-ops (no stacked fades), and the transitionend swap reads it so
+    // the latest state always wins even if it changes mid-fade.
     if (existing.dataset.state !== r.state) {
       existing.dataset.state = r.state;
-      existing.classList.remove("flip");
-      void existing.offsetWidth; // flush so a re-added .flip restarts the animation
-      existing.classList.add("flip");
-      setTimeout(() => {
-        existing.textContent = existing.dataset.state ?? "";
-      }, RECEIPT_FLIP_MS / 2);
+      // fade fully out; the persistent handler swaps the text and fades it back
+      // in once the layer is invisible. Re-adding rc-hide mid-fade is a harmless
+      // no-op, so repeat flips never stack.
+      existing.querySelector<HTMLElement>(".rc")?.classList.add("rc-hide");
     }
     if (followTail) scrollToBottom();
     return;
   }
   existing?.remove(); // the anchor moved to a new bubble: fresh stamp, no dip
-  const el = document.createElement("div");
-  el.id = "receipt";
-  el.className = "receipt";
-  el.dataset.state = r.state;
-  el.textContent = r.state;
-  wrapper.appendChild(el);
+  wrapper.appendChild(buildReceipt(r.state));
   if (followTail) scrollToBottom();
 }
 
@@ -1143,6 +1175,10 @@ async function transmit(w: HTMLElement, text: string, files: File[]): Promise<vo
     return markFailed(w, text, files);
   }
   if (!resp.ok) return markFailed(w, text, files);
+  // the server accepted this send: drop any durable failed-copy for this wrapper
+  // and release its tail-pinning marker (it is a real keyed bubble now)
+  if (w.dataset.outboxId) void outboxDelete(w.dataset.outboxId);
+  w.classList.remove("restored");
   const { seq } = (await resp.json()) as { seq?: number };
   if (seq) {
     if (store.has(seq)) {
@@ -1165,13 +1201,43 @@ async function transmit(w: HTMLElement, text: string, files: File[]): Promise<vo
 // --- failed sends (iMessage): the bubble STAYS, marked by a red !-in-circle
 // to its right and a small red "Not Delivered" underneath. The payload (text +
 // File objects) is held in memory, keyed by the wrapper, so each failed send
-// retries independently. Memory-only by design: it survives everything except
-// closing the app (the on-disk outbox is future work).
+// retries independently, and is mirrored to an on-disk outbox (outbox.ts) keyed
+// by a stable id, so it now also survives closing the app: on the next open the
+// records are read back and rebuilt as failed bubbles (see restoreOutbox).
 
-const failedSends = new Map<HTMLElement, { text: string; files: File[] }>();
+const failedSends = new Map<HTMLElement, { id: string; text: string; files: File[] }>();
+
+function newId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `ob-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+// persist a failed send's bytes for durability across an app close. Fire and
+// forget: reading the File bytes or the IndexedDB write can fail on iOS, and a
+// failed persist must never break the in-memory failed-send UI above it.
+function persistFailed(id: string, ts: number, text: string, files: File[]): void {
+  void (async () => {
+    try {
+      const stored: OutboxRecord["files"] = [];
+      for (const f of files) {
+        stored.push({ name: f.name, type: f.type, buf: await f.arrayBuffer() });
+      }
+      await outboxPut({ id, text, files: stored, ts });
+    } catch {
+      /* storage is best-effort; the in-memory failed send still stands */
+    }
+  })();
+}
 
 function markFailed(w: HTMLElement, text: string, files: File[]): void {
-  failedSends.set(w, { text, files });
+  // stable id per logical failed send, reused across retries (kept on the
+  // wrapper so a re-failure overwrites its record rather than duplicating it)
+  const id = w.dataset.outboxId ?? newId();
+  w.dataset.outboxId = id;
+  failedSends.set(w, { id, text, files });
+  // persist with the wrapper's own send time so a restored record keeps its
+  // original timestamp instead of drifting forward on each re-persist
+  persistFailed(id, Number(w.dataset.ts) || Date.now(), text, files);
   w.classList.add("failed");
   if (w.querySelector(".sendfail-badge")) return; // already marked (re-failure)
   // badge on the last bubble's row, absolutely positioned in the column the
@@ -1198,6 +1264,8 @@ function markFailed(w: HTMLElement, text: string, files: File[]): void {
 // drops the failure UI and the held payload — used by a successful/in-flight
 // retry (transmit re-marks if it fails again) and by Delete
 function clearFailed(w: HTMLElement): void {
+  const id = w.dataset.outboxId; // kept on the wrapper so a re-failure reuses it
+  if (id) void outboxDelete(id); // drop the durable copy alongside the in-memory one
   failedSends.delete(w);
   w.classList.remove("failed");
   w.querySelector(".sendfail-badge")?.remove();
@@ -1219,6 +1287,47 @@ function deleteFailed(w: HTMLElement): void {
   });
   w.remove();
   decorate();
+}
+
+// --- durable outbox restore: a prior session's failed sends -------------------
+// On boot (and re-login) the persisted failed sends are read back and rebuilt as
+// failed bubbles at the tail, reusing the optimistic-bubble body and the same
+// markFailed treatment. Marked .restored so applyEvent keeps replayed history
+// and live frames above them; Try Again and Delete then behave exactly as for a
+// live failed send, and Try Again reuses the same transmit path (seq/ACK
+// adoption included) so a restored retry cannot double-send.
+async function restoreOutbox(): Promise<void> {
+  if (restoredOutbox) return; // once per session; a reconnect must not re-add them
+  restoredOutbox = true;
+  let records: OutboxRecord[];
+  try {
+    records = await outboxGetAll();
+  } catch {
+    return; // a broken or unavailable store must never block boot
+  }
+  if (!records.length || !document.getElementById("thread")) return;
+  records.sort((a, b) => a.ts - b.ts); // oldest first: appended in order at the tail
+  const prevSuppress = suppressAnim;
+  suppressAnim = true; // a batch of restored bubbles must not pop one by one
+  for (const rec of records) {
+    const files = rec.files.map((f) => new File([f.buf], f.name, { type: f.type }));
+    const w = localWrapper("user");
+    w.classList.add("restored");
+    w.dataset.outboxId = rec.id; // reuse the stored id, not a fresh one
+    w.dataset.ts = String(rec.ts); // markFailed re-persists with this same ts (no drift)
+    for (const file of files) {
+      const div = rowEl(w, "user", "shot", rec.ts);
+      const img = document.createElement("img");
+      img.src = URL.createObjectURL(file);
+      img.addEventListener("click", () => openLightbox(img.src));
+      div.appendChild(img);
+    }
+    if (rec.text) rowEl(w, "user", "text", rec.ts).textContent = rec.text;
+    markFailed(w, rec.text, files); // red badge + Not Delivered + in-memory entry
+  }
+  suppressAnim = prevSuppress;
+  decorate();
+  if (followTail) scrollToBottom(true);
 }
 
 // tapping the badge or label opens a bottom action sheet — the log-out
@@ -1363,3 +1472,72 @@ if (token) {
 } else {
   renderTokenGate();
 }
+
+// ===================== TEMP DIAGNOSTIC (remove after screenshot) =====================
+// history-spinner clip probe. On-screen because console.log is unreachable on the
+// iPhone: while the older-history ring (#histspin .ring) is on screen, an overlay
+// prints the ring's box, every ancestor box up to the scroll container (#thread)
+// with its overflow / clip-path / border-radius / transform, and the paint stack
+// at the ring's center (document.elementsFromPoint = what is drawn over/clipping
+// it). One phone screenshot captures all of it while the spinner is showing.
+// TO REMOVE: delete this whole block AND the matching "TEMP DIAGNOSTIC" block in
+// styles.css. Nothing else references either; the app is unchanged without them.
+function startSpinDiag(): void {
+  const box = document.createElement("pre");
+  box.id = "spindiag";
+  box.style.display = "none";
+  document.body.appendChild(box);
+
+  const rect = (r: DOMRect): string =>
+    `x${Math.round(r.x)} y${Math.round(r.y)} w${Math.round(r.width)} h${Math.round(r.height)}`;
+  const label = (el: Element): string => {
+    const id = el.id ? `#${el.id}` : "";
+    const cls = el.classList.length ? `.${Array.from(el.classList).join(".")}` : "";
+    return `${el.tagName.toLowerCase()}${id}${cls}`;
+  };
+  const onScreen = (r: DOMRect): boolean =>
+    r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+
+  const tick = (): void => {
+    const ring = document.querySelector<HTMLElement>("#histspin .ring");
+    const scroller = document.getElementById("thread");
+    // hidden = absent, display:none somewhere up the chain (offsetParent null), or
+    // scrolled out of the viewport: nothing to screenshot, so no overlay
+    if (!ring || !scroller || ring.offsetParent === null) {
+      box.style.display = "none";
+      requestAnimationFrame(tick);
+      return;
+    }
+    const rr = ring.getBoundingClientRect();
+    if (!onScreen(rr)) {
+      box.style.display = "none";
+      requestAnimationFrame(tick);
+      return;
+    }
+    const out: string[] = ["spindiag", `ring: ${rect(rr)}`, "chain (ring -> scroller):"];
+    // walk ring -> ... -> scroll container, inclusive of both ends
+    let node: HTMLElement | null = ring;
+    while (node) {
+      const cs = getComputedStyle(node);
+      out.push(`${label(node)}  ${rect(node.getBoundingClientRect())}`);
+      out.push(
+        `  ov:${cs.overflowX}/${cs.overflowY} clip:${cs.clipPath} rad:${cs.borderRadius} tf:${cs.transform}`,
+      );
+      if (node === scroller) break;
+      node = node.parentElement;
+    }
+    // what is painted at the ring's center (clamped into view so the sample is
+    // valid even when the ring is partly clipped); topmost element first
+    const cx = Math.min(Math.max(rr.left + rr.width / 2, 0), innerWidth - 1);
+    const cy = Math.min(Math.max(rr.top + rr.height / 2, 0), innerHeight - 1);
+    out.push(`paint @ ${Math.round(cx)},${Math.round(cy)} (top first):`);
+    for (const el of document.elementsFromPoint(cx, cy).slice(0, 6)) out.push(`  ${label(el)}`);
+
+    box.textContent = out.join("\n");
+    box.style.display = "block";
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+startSpinDiag();
+// =================== END TEMP DIAGNOSTIC (remove after screenshot) ===================
