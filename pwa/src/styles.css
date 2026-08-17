@@ -737,7 +737,6 @@ html, body {
   justify-content: center;
   padding: 12px 0 4px;
   max-height: 40px;
-  overflow: hidden;
   transition: max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease;
 }
 .thread:has(.evt) .histspin { display: flex; }
@@ -747,6 +746,7 @@ html, body {
   max-height: 0;
   padding: 0;
   opacity: 0;
+  overflow: hidden; /* clip only while collapsing away; the open row must never crop the ring */
 }
 .histspin .ring {
   width: 18px;
