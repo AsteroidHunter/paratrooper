@@ -795,10 +795,10 @@ html, body {
    main.ts fades it fully out, swaps the text only once it is invisible (on the
    transitionend), then fades it back in, so the swap is never seen. Opacity
    lives here on the inner layer, not on .receipt, so the swipe-peek transform
-   transition above (the :where rule) is left untouched. Duration and easing are
-   plain constants, not measured per device. */
-.receipt .rc { transition: opacity 0.16s ease; }
-.receipt .rc.rc-hide { opacity: 0; }
+   transition above (the :where rule) is left untouched. The fade-out is quick and
+   the fade-in gentler; the durations are plain constants, not measured per device. */
+.receipt .rc { transition: opacity 0.34s ease; } /* fade in (rc-hide removed): gentle */
+.receipt .rc.rc-hide { opacity: 0; transition: opacity 0.16s ease; } /* fade out: quick */
 
 /* --- failed send (iMessage): the bubble stays; a red !-in-circle sits to its
    right, small red "Not Delivered" underneath. The failed wrapper's rows keep
@@ -878,28 +878,3 @@ html, body {
   font-weight: 600; /* the safe default gets the bold, per Apple's alerts */
 }
 .sheet-item + .sheet-item { border-top: 0.5px solid var(--hairline); }
-
-/* ===================== TEMP DIAGNOSTIC (remove after screenshot) =====================
-   history-spinner clip probe overlay. Paired with the "TEMP DIAGNOSTIC" block in
-   main.ts (search that phrase). Fixed and high z so it reads in a screenshot;
-   pointer-events:none so it neither blocks taps nor pollutes the ring-center
-   elementsFromPoint reading. Sat low-left so it clears the top-of-thread spinner,
-   both visible in one shot. TO REMOVE: delete this block and the main.ts block;
-   nothing else depends on either. */
-#spindiag {
-  position: fixed;
-  left: 4px;
-  bottom: calc(84px + env(safe-area-inset-bottom));
-  z-index: 99999;
-  max-width: calc(100vw - 8px);
-  margin: 0;
-  padding: 6px 8px;
-  background: rgba(0, 0, 0, 0.9);
-  color: #00ff6a;
-  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-  border-radius: 6px;
-  pointer-events: none;
-}
-/* =================== END TEMP DIAGNOSTIC (remove after screenshot) =================== */

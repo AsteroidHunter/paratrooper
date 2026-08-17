@@ -1474,22 +1474,23 @@ if (token) {
 }
 
 // ===================== TEMP DIAGNOSTIC (remove after screenshot) =====================
-// history-spinner clip probe. On-screen because console.log is unreachable on the
-// iPhone: while the older-history ring (#histspin .ring) is on screen, an overlay
-// prints the ring's box, every ancestor box up to the scroll container (#thread)
-// with its overflow / clip-path / border-radius / transform, and the paint stack
-// at the ring's center (document.elementsFromPoint = what is drawn over/clipping
-// it). One phone screenshot captures all of it while the spinner is showing.
-// TO REMOVE: delete this whole block AND the matching "TEMP DIAGNOSTIC" block in
-// styles.css. Nothing else references either; the app is unchanged without them.
+// history-spinner clip probe. The iPhone has no reachable console, so instead of an
+// on-screen overlay the client POSTs the measurements to the server, where a plain
+// curl reads them back (see /api/debug/spindiag in web/app.py). While the older-
+// history ring (#histspin .ring) is laid out and on screen, ONE send per appearance
+// carries the ring's box, every ancestor box up to the scroll container (#thread)
+// with its overflow / clip-path / border-radius / transform, and the paint stack at
+// the ring's center (document.elementsFromPoint = what is drawn over/clipping it).
+// Debounced: a 300ms settle after the ring appears, then one POST — never per frame,
+// and a blink shorter than the settle sends nothing. The temp route is
+// unauthenticated so its GET is a plain curl, so no auth header is sent here.
+// TO REMOVE: delete this whole block AND the matching "TEMP DIAGNOSTIC" blocks in
+// styles.css and web/app.py. Nothing else references any of them.
 function startSpinDiag(): void {
-  const box = document.createElement("pre");
-  box.id = "spindiag";
-  box.style.display = "none";
-  document.body.appendChild(box);
-
-  const rect = (r: DOMRect): string =>
-    `x${Math.round(r.x)} y${Math.round(r.y)} w${Math.round(r.width)} h${Math.round(r.height)}`;
+  const rect = (r: DOMRect): Record<string, number> => ({
+    x: Math.round(r.x), y: Math.round(r.y),
+    w: Math.round(r.width), h: Math.round(r.height),
+  });
   const label = (el: Element): string => {
     const id = el.id ? `#${el.id}` : "";
     const cls = el.classList.length ? `.${Array.from(el.classList).join(".")}` : "";
@@ -1498,31 +1499,30 @@ function startSpinDiag(): void {
   const onScreen = (r: DOMRect): boolean =>
     r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
 
-  const tick = (): void => {
+  // build the same measurements the old overlay drew and POST them as JSON. Reads
+  // geometry fresh at send time (fired from the settle timer), so the values are
+  // the ring's resting clip, not a mid-scroll frame.
+  const sendSpinDiag = (): void => {
     const ring = document.querySelector<HTMLElement>("#histspin .ring");
     const scroller = document.getElementById("thread");
-    // hidden = absent, display:none somewhere up the chain (offsetParent null), or
-    // scrolled out of the viewport: nothing to screenshot, so no overlay
-    if (!ring || !scroller || ring.offsetParent === null) {
-      box.style.display = "none";
-      requestAnimationFrame(tick);
-      return;
-    }
+    // absent, display:none somewhere up the chain (offsetParent null), or scrolled
+    // out of the viewport: nothing to probe, so send nothing
+    if (!ring || !scroller || ring.offsetParent === null) return;
     const rr = ring.getBoundingClientRect();
-    if (!onScreen(rr)) {
-      box.style.display = "none";
-      requestAnimationFrame(tick);
-      return;
-    }
-    const out: string[] = ["spindiag", `ring: ${rect(rr)}`, "chain (ring -> scroller):"];
+    if (!onScreen(rr)) return;
     // walk ring -> ... -> scroll container, inclusive of both ends
+    const chain: Record<string, unknown>[] = [];
     let node: HTMLElement | null = ring;
     while (node) {
       const cs = getComputedStyle(node);
-      out.push(`${label(node)}  ${rect(node.getBoundingClientRect())}`);
-      out.push(
-        `  ov:${cs.overflowX}/${cs.overflowY} clip:${cs.clipPath} rad:${cs.borderRadius} tf:${cs.transform}`,
-      );
+      chain.push({
+        el: label(node),
+        rect: rect(node.getBoundingClientRect()),
+        overflow: `${cs.overflowX}/${cs.overflowY}`,
+        clipPath: cs.clipPath,
+        borderRadius: cs.borderRadius,
+        transform: cs.transform,
+      });
       if (node === scroller) break;
       node = node.parentElement;
     }
@@ -1530,11 +1530,46 @@ function startSpinDiag(): void {
     // valid even when the ring is partly clipped); topmost element first
     const cx = Math.min(Math.max(rr.left + rr.width / 2, 0), innerWidth - 1);
     const cy = Math.min(Math.max(rr.top + rr.height / 2, 0), innerHeight - 1);
-    out.push(`paint @ ${Math.round(cx)},${Math.round(cy)} (top first):`);
-    for (const el of document.elementsFromPoint(cx, cy).slice(0, 6)) out.push(`  ${label(el)}`);
+    const paint = document.elementsFromPoint(cx, cy).slice(0, 6).map(label);
+    const payload = {
+      ts: new Date().toISOString(),
+      viewport: { w: innerWidth, h: innerHeight },
+      ring: rect(rr),
+      center: { x: Math.round(cx), y: Math.round(cy) },
+      chain,
+      paint,
+    };
+    void fetch("/api/debug/spindiag", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).catch(() => {
+      /* diagnostic only: a failed post must never disturb the app */
+    });
+  };
 
-    box.textContent = out.join("\n");
-    box.style.display = "block";
+  // one send per appearance: arm on the rising edge (ring becomes visible),
+  // schedule a single trailing POST after a 300ms settle, and disarm when the ring
+  // hides so the next appearance sends afresh. Never a POST per frame.
+  let armed = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const disarm = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    armed = false;
+  };
+  const tick = (): void => {
+    const ring = document.querySelector<HTMLElement>("#histspin .ring");
+    const scroller = document.getElementById("thread");
+    const shown =
+      ring !== null && scroller !== null && ring.offsetParent !== null &&
+      onScreen(ring.getBoundingClientRect());
+    if (!shown) {
+      disarm();
+    } else if (!armed) {
+      armed = true;
+      timer = setTimeout(sendSpinDiag, 300);
+    }
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
