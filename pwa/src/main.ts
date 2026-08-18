@@ -3,6 +3,7 @@
 import "./styles.css";
 import { receiptFor } from "./receipts";
 import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell";
+import { installStartupImage } from "./splash";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
 import type { OutboxRecord } from "./outbox";
 
@@ -1465,6 +1466,10 @@ if ("serviceWorker" in navigator) {
     }
   });
 }
+
+// paint this device's iOS launch image once per load (see splash.ts): the same
+// top-bar logo centered on white, sized to the current screen. No-ops off iOS.
+installStartupImage("/topbar-logo.png");
 
 if (token) {
   renderChat();
