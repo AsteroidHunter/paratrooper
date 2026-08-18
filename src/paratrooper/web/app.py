@@ -388,14 +388,6 @@ def _lifespan(injected: AppState | None):
     return lifespan
 
 
-# ===================== TEMP DIAGNOSTIC (remove after screenshot) =====================
-# Latest history-spinner clip probe POSTed by the PWA (main.ts, same banner). The
-# phone has no reachable console, so the client posts its measurements here and they
-# are read back with a plain curl on GET /api/debug/spindiag. Single web instance, so
-# a module global (latest wins) is fine. TO REMOVE: delete this variable, the two
-# /api/debug/spindiag routes below, and the matching main.ts / styles.css blocks.
-_spindiag_latest: dict[str, Any] = {}
-# =================== END TEMP DIAGNOSTIC (remove after screenshot) ===================
 
 
 def create_app(injected: AppState | None = None) -> FastAPI:
@@ -546,22 +538,6 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         finally:
             state.sockets.get(thread_id, set()).discard(websocket)
 
-    # ===================== TEMP DIAGNOSTIC (remove after screenshot) =====================
-    # history-spinner clip probe: the PWA POSTs its measurements (the phone has no
-    # reachable console) and they are read back with a plain curl. Unauthenticated on
-    # purpose so the GET needs no bearer token; latest POST wins. TO REMOVE: delete
-    # these two routes, the _spindiag_latest global above, and the matching main.ts /
-    # styles.css blocks.
-    @app.post("/api/debug/spindiag")
-    async def debug_spindiag_post(payload: dict) -> dict:
-        _spindiag_latest.clear()
-        _spindiag_latest.update(payload)
-        return {"ok": True}
-
-    @app.get("/api/debug/spindiag")
-    async def debug_spindiag_get() -> dict:
-        return _spindiag_latest
-    # =================== END TEMP DIAGNOSTIC (remove after screenshot) ===================
 
     # serve the built PWA if present (mounted last so /api and /ws win)
     pwa_dist = _pwa_dist()
