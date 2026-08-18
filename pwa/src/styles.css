@@ -97,7 +97,13 @@ html, body {
   font: 17px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
     system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
-  overscroll-behavior: none; /* no rubber-band revealing the page background */
+  /* no rubber-band revealing the page background. These rules stop USER
+     scrolling of the shell; iOS's programmatic caret-reveal still scrolls the
+     window when the composer grows a line — main.ts snaps that back to 0
+     while the composer is focused. (#app deliberately keeps overflow:visible:
+     a visible box is not a scroll container, so the reveal has nothing there
+     to grab — overflow:hidden would CREATE a programmatic scroller.) */
+  overscroll-behavior: none;
 }
 
 /* Fixed app shell pinned by inset alone — pinning both edges needs no viewport
@@ -667,7 +673,16 @@ html, body {
 .buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }
 
 /* jump-to-latest chevron: floats above the compose bar while reading history —
-   same liquid-glass material as the rest, lifted clear of the bar */
+   same liquid-glass material as the rest, lifted clear of the bar. The button
+   itself is now a bare hit shell that must NOT form a stacking context (no
+   z-index, opacity, or filter here): the glyph reads over any background by
+   difference-blending against what is actually behind the button, and a
+   stacking context on .jump would trap that blend inside the button's own
+   near-transparent tint (difference against nothing = a white glyph). The
+   glass face lives on ::before — the exact background/blur/shadow stack the
+   button used to carry, same geometry — and the face and glyph each carry the
+   old level-4 stacking and the old 0.15s show/hide fade, so the material and
+   its layering over the compose bar are unchanged. */
 .jump {
   position: absolute;
   right: 12px;
@@ -676,21 +691,41 @@ html, body {
   height: 36px;
   border: none;
   border-radius: 50%;
+  background: none;
+  font-size: 1.1rem;
+  cursor: pointer;
+  pointer-events: none;
+}
+.jump::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  z-index: 4;
   background-color: var(--glass-bg);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
   box-shadow: var(--glass-stack-sm);
-  color: var(--sent);
-  font-size: 1.1rem;
-  cursor: pointer;
   opacity: 0;
-  pointer-events: none;
   transition: opacity 0.15s;
+}
+/* the arrow inverts whatever shows through the glass under it — white page,
+   colored bubbles, photos — because difference(white, backdrop) = 1−backdrop.
+   Its own opacity fade scales the blend, so it fades in with the face. */
+.jump-glyph {
+  position: relative;
   z-index: 4;
+  mix-blend-mode: difference;
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.15s;
 }
 .jump.show {
-  opacity: 1;
   pointer-events: auto;
+}
+.jump.show::before,
+.jump.show .jump-glyph {
+  opacity: 1;
 }
 
 /* pending attachment thumbnails (picked, not yet sent) — float on the canvas

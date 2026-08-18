@@ -1,10 +1,12 @@
 // Paratrooper PWA — message the pinboard agent. Vanilla TS + DOM (lightest build).
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
+import { createDownButton } from "./downbtn";
 import { createReplyHold } from "./hold";
 import { receiptFor } from "./receipts";
 import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell";
 import { installStartupImage } from "./splash";
+import { compensationFor } from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
 import type { OutboxRecord } from "./outbox";
 
@@ -65,6 +67,14 @@ const store = new Map<number, ServerMsg>();
 // (the reply is in server history; that's the point).
 const replyHold = createReplyHold<ServerMsg>((m) => applyEvent(m));
 
+// jump-chevron visibility (downbtn.ts owns the state machine): it appears only
+// after 7s of scroll stillness while away from the bottom — never because new
+// content landed. The scroll handler feeds it, this one callback drives the
+// class; live lookup, so renderChat re-renders can't strand a stale element.
+const downBtn = createDownButton((show) =>
+  document.getElementById("jump")?.classList.toggle("show", show),
+);
+
 // The canonical ThreadEvent frame — one shape for live pushes, socket replay,
 // and history pages alike. Ephemeral kinds (working/typing) ride without a seq.
 interface ServerMsg {
@@ -113,6 +123,26 @@ document.addEventListener(
     menu.classList.remove("open");
   },
   true,
+);
+
+// iOS caret-shove counter: the shell itself never scrolls (styles.css —
+// html/body are overflow:hidden at 100vh, #app is inset-pinned, only .thread
+// scrolls), but iOS still programmatically scrolls the WINDOW to "reveal" the
+// caret when the composer grows a line, shoving the header off-screen and the
+// last reply out of view. The composer is always fully visible in our layout,
+// so any window scroll while it holds focus is iOS fighting the shell — snap
+// it straight back, same frame. shell.ts owns the OTHER displacement (the
+// visualViewport offsetTop pan of the kb-vv keyboard modes) and only zeroes
+// window scroll when leaving them; this covers the document scroller those
+// paths never touch. Snapping to 0 refires "scroll" once with scrollY already
+// 0, so it cannot loop.
+window.addEventListener(
+  "scroll",
+  () => {
+    if (document.activeElement?.id !== "text") return;
+    if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
+  },
+  { passive: true },
 );
 
 function authHeaders(): Record<string, string> {
@@ -172,7 +202,8 @@ function renderChat(): void {
     <main id="thread" class="thread">
       <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
     </main>
-    <button type="button" id="jump" class="jump" title="Jump to latest">↓</button>
+    <button type="button" id="jump" class="jump" title="Jump to latest"><span
+      class="jump-glyph">↓</span></button>
     <div id="pending" class="pending"></div>
     <form id="compose" class="compose">
       <button type="button" id="attach" class="attach" title="Attach">＋</button>
@@ -227,15 +258,10 @@ function renderChat(): void {
   // the ↑ must not steal focus from the textarea (that collapsed the keyboard
   // on every send); the shield mirrors the ＋'s, and shell.ts owns the rule
   bindSendShield(document.getElementById("sendbtn")!);
-  // compose grows with content like iMessage (1 -> ~5 lines, then inner scroll)
+  // compose auto-grow lives in autosize() (module level, by the scroll
+  // helpers): it resizes the box AND compensates the thread's scroll in the
+  // same frame, so send() can route its bar collapse through the same path
   const textEl = document.getElementById("text") as HTMLTextAreaElement;
-  const autosize = (): void => {
-    textEl.style.height = "auto";
-    // exact fit = nothing to scroll-bounce. The textarea is borderless now
-    // (the .field wrapper carries the glass), so scrollHeight IS the full
-    // border-box need — the old +2 border compensation would reopen the gap
-    textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
-  };
   textEl.addEventListener("input", () => {
     autosize();
     refreshSend();
@@ -264,7 +290,7 @@ function renderChat(): void {
     // the ONE place following flips: away from the bottom = reading history,
     // back at the bottom = following again (programmatic pins land here too)
     followTail = nearBottom();
-    if (followTail) document.getElementById("jump")?.classList.remove("show");
+    downBtn.scrolled(followTail); // away restarts its 7s stillness window; bottom hides it
     // start BANKING older pages while the user is still ~1.5 screens away —
     // inserts happen separately, at glide boundaries
     if (thread.scrollTop < 1200) void loadOlder();
@@ -284,7 +310,7 @@ function renderChat(): void {
     });
   }
   document.getElementById("jump")!.addEventListener("click", () => {
-    document.getElementById("jump")!.classList.remove("show");
+    downBtn.bottomReached(); // hides now; the pin's own scroll event agrees
     followTail = true;
     scrollToBottom(true);
   });
@@ -343,6 +369,7 @@ function renderChat(): void {
   fetchCursor = 0;
   historyDone = false;
   followTail = true;
+  downBtn.bottomReached(); // fresh shell opens pinned: no chevron, no pending timer
   restoredOutbox = false; // a fresh shell re-reads the durable outbox
   threadObserver?.disconnect(); // the old shell's thread element is gone
   threadObserver?.observe(thread);
@@ -499,6 +526,31 @@ function scrollToBottom(force = false): void {
   t.scrollTo({ top: t.scrollHeight, behavior: suppressAnim || force ? "auto" : "smooth" });
 }
 
+// compose grows with content like iMessage (1 -> ~5 lines, then inner scroll)
+// and collapses on send. Every such resize moves the thread's bottom edge, so
+// the compensation happens HERE, synchronously between the height write and
+// this frame's paint — viewport.ts decides. Waiting for the threadObserver
+// alone painted the slipped frame first (the visible bounce), and mid-history
+// nothing compensated at all. At the tail this pins instantly, so the
+// observer's later scrollToBottom(true) hits an already-correct scrollTop and
+// moves nothing; keep-position is deliberately no write (viewport.ts explains
+// the geometry); atBottom is read BEFORE the resize, while the distance to
+// the bottom still means what the user last saw.
+function autosize(): void {
+  const textEl = document.getElementById("text") as HTMLTextAreaElement | null;
+  if (!textEl) return;
+  const oldHeight = textEl.offsetHeight;
+  const atBottom = followTail || nearBottom();
+  textEl.style.height = "auto";
+  // exact fit = nothing to scroll-bounce. The textarea is borderless now
+  // (the .field wrapper carries the glass), so scrollHeight IS the full
+  // border-box need — the old +2 border compensation would reopen the gap
+  textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
+  if (compensationFor(oldHeight, textEl.offsetHeight, atBottom) === "pin-bottom") {
+    scrollToBottom(true); // instant: the resize and the re-pin paint as one
+  }
+}
+
 // --- rendering ---------------------------------------------------------------
 
 // iMessage clustering: consecutive same-sender bubbles inside RUN_GAP_MS form a
@@ -628,11 +680,10 @@ function applyEvent(m: ServerMsg): void {
   }
   decorate();
   // pinned-viewport handling for older pages lives in loadOlder; only tail
-  // applies drive the scroll/chevron rules
+  // applies drive the scroll rule (the chevron is scroll-pause-only, downbtn.ts)
   if (isTail && wrapper.childElementCount > 0) {
     if (m.role === "user") followTail = true; // your own message snaps you back
     if (followTail) scrollToBottom();
-    else document.getElementById("jump")?.classList.add("show");
   }
   if (m.kind === "published") flipCorrelatedPr(m);
   updateReceipt(); // any event can move the watermark (user row, job row, working)
@@ -1029,7 +1080,28 @@ function settleAnim(): void {
     // boot settled: probe the history bank once — a short thread never
     // scrolls, so without this the spinner would sit unresolved forever
     tryApplyOlder();
+    void bootSettlePin();
   }, 400);
+}
+
+// A truly fresh open must LAND at the very bottom, every time. The replay's
+// per-frame pins can die early: an unsized image (a non-PNG screenshot, a
+// restored-outbox blob) growing the thread between one pin and that pin's own
+// scroll event makes the event read "away from the bottom" and flip followTail
+// off — and every later re-pin hook is followTail-gated, so the boot strands a
+// few messages up. So the FIRST settle of this page load — and only the first:
+// reconnects and background-resumes must never yank a reader — forces every
+// still-pending thread image to decode (decode() resolves after load+decode,
+// so all late height is in), then pins once more, unconditionally. The pin's
+// own scroll event then re-derives followTail=true through the one usual place.
+let bootPinDone = false;
+async function bootSettlePin(): Promise<void> {
+  if (bootPinDone || !document.getElementById("thread")) return;
+  bootPinDone = true;
+  const pending = Array.from(threadEl().querySelectorAll<HTMLImageElement>("img"))
+    .filter((img) => !img.complete);
+  await Promise.allSettled(pending.map((img) => img.decode()));
+  scrollToBottom(true); // a settled layout must not glide
 }
 
 function connect(): void {
@@ -1080,21 +1152,14 @@ function flyFromField(wrapper: HTMLElement): void {
     const end = msg.getBoundingClientRect();
     const dx = start.right - end.right;
     const dy = start.top - end.top;
-    msg.style.transition = "none";
-    msg.style.transform = `translate(${dx}px, ${dy}px)`;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        msg.style.transition = "transform 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.08)";
-        msg.style.transform = "";
-        msg.addEventListener(
-          "transitionend",
-          () => {
-            msg.style.transition = "";
-          },
-          { once: true },
-        );
-      });
-    });
+    // Web Animations API, not a transition: the start state lives inside the
+    // animation itself, so WebKit cannot coalesce the two style writes into
+    // one and silently skip the motion (which is what killed the old
+    // transition + double-rAF version on iOS).
+    msg.animate(
+      [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }],
+      { duration: 450, easing: "cubic-bezier(0.2, 0.9, 0.3, 1.08)" },
+    );
   });
 }
 
@@ -1115,7 +1180,6 @@ function localBubble(role: string, cls: string, text: string): void {
   decorate();
   if (role === "user") followTail = true;
   if (followTail) scrollToBottom();
-  else document.getElementById("jump")?.classList.add("show");
 }
 
 async function send(): Promise<void> {
@@ -1151,7 +1215,7 @@ async function send(): Promise<void> {
   scrollToBottom(true); // instant pin: the flight is the only motion
   flyFromField(w);
   textEl.value = "";
-  textEl.style.height = "auto"; // collapse the auto-grown compose bar
+  autosize(); // collapse the auto-grown bar through the same compensated path
   pendingFiles = [];
   renderPending();
 
@@ -1337,6 +1401,11 @@ async function restoreOutbox(): Promise<void> {
       const div = rowEl(w, "user", "shot", rec.ts);
       const img = document.createElement("img");
       img.src = URL.createObjectURL(file);
+      img.onload = () => {
+        // blob decode lands after this batch's final pin; re-pin like every
+        // other image kind, instantly — a layout completion must never glide
+        if (followTail) scrollToBottom(true);
+      };
       img.addEventListener("click", () => openLightbox(img.src));
       div.appendChild(img);
     }
