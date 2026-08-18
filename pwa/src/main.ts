@@ -13,7 +13,7 @@ import type { OutboxRecord } from "./outbox";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.68"; // iOS launch splash build, bumped so phones can tell it apart
+const APP_VERSION = "0.1.69"; // keypress hold rule build, bumped so phones can tell it apart
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -265,7 +265,7 @@ function renderChat(): void {
   textEl.addEventListener("input", () => {
     autosize();
     refreshSend();
-    replyHold.typed(textEl.value); // composing state for the finished-reply hold
+    replyHold.typed(); // composing = keystroke freshness; content is irrelevant
   });
   // the editor's width moves when the ＋ yields/reclaims its slot (styles.css
   // .kb): existing text re-wraps at the new width, so its height must be
@@ -1190,7 +1190,10 @@ async function send(): Promise<void> {
   if (!text && files.length === 0) return;
 
   // a held reply renders FIRST, so the live view shows reply-then-your-message
-  // — the same order the store (reply's seq is older) replays after a reload
+  // — the same order the store (reply's seq is older) replays after a reload.
+  // flush() also zeroes the composing clock: the textarea clear below fires no
+  // input event, and after a send he is not composing — a reply arriving
+  // moments later must render immediately, not park on pre-send keystrokes
   replyHold.flush();
 
   // INSTANT feedback on tap: one optimistic wrapper appears immediately; the
