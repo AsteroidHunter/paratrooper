@@ -10,7 +10,7 @@ import type { OutboxRecord } from "./outbox";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.67"; // hold glow → single even face brighten (overlay opacity only, caret-safe)
+const APP_VERSION = "0.1.68"; // iOS launch splash build, bumped so phones can tell it apart
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
