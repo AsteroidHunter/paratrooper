@@ -315,16 +315,23 @@ async def _relay_result(state: AppState, thread_id: str, result: ResultMessage) 
     lost the race included) may reach the store or a socket; only the terminal
     bookkeeping still runs, releasing the rerun."""
     policy = EVENT_POLICY[result.kind]
+    sockets = len(state.sockets.get(thread_id, set()))
     if state.coordinator.was_superseded(thread_id, result.job_id):
+        _diag.info("holddiag relay drop kind=%s job=%s thread=%s reason=superseded terminal=%s",
+                   result.kind, result.job_id, thread_id, policy.terminal)
         if policy.terminal:
             await state.coordinator.job_finished(thread_id)
             await _maybe_suspend_worker(state)
         return
     event = _to_event(thread_id, result)
     if policy.ephemeral:  # sockets only: never persisted, never replayed
+        _diag.info("holddiag relay ephemeral kind=%s job=%s thread=%s sockets=%d",
+                   result.kind, result.job_id, thread_id, sockets)
         await _send_to_sockets(state, thread_id, event.model_dump())
         return
     seq = state.store.add_message(event)  # persisted verbatim
+    _diag.info("holddiag relay persist kind=%s job=%s thread=%s seq=%d terminal=%s sockets=%d",
+               result.kind, result.job_id, thread_id, seq, policy.terminal, sockets)
     # broadcast the STORED event (+seq so clients advance their
     # catch-up cursor on live pushes) — replay re-sends this frame
     await _send_to_sockets(state, thread_id, {"seq": seq, **event.model_dump()})
@@ -403,6 +410,30 @@ def _lifespan(injected: AppState | None):
     return lifespan
 
 
+# ===================== TEMP DIAGNOSTIC (remove after the hold session) =====================
+# Reply-hold probe, same shape as the removed history-spinner one (74b0095).
+# Two halves:
+#   - _holddiag_latest: the latest hold event trail POSTed by the PWA
+#     (pwa/src/hold.ts, same banner). The phone has no reachable console, so
+#     the client posts its trail here and it is read back with a plain curl on
+#     GET /api/debug/holddiag. Single web instance, so a module global (latest
+#     wins) is fine.
+#   - the "paratrooper.holddiag" logger: one structured line per batching and
+#     delivery decision (this file + batching.py), tagged "holddiag" so the
+#     deploy logs alone reconstruct a session. It carries its own INFO
+#     StreamHandler because nothing configures the root logger under uvicorn,
+#     so plain logger.info from app modules never reaches the deploy logs.
+# TO REMOVE: delete this block, the two /api/debug/holddiag routes below, every
+# _diag line in this file and batching.py, and the matching TEMP DIAGNOSTIC
+# block in pwa/src/hold.ts.
+_holddiag_latest: dict[str, Any] = {}
+_diag = logging.getLogger("paratrooper.holddiag")
+if not _diag.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    _diag.addHandler(_handler)
+    _diag.setLevel(logging.INFO)
+# =================== END TEMP DIAGNOSTIC (remove after the hold session) ===================
 
 
 def create_app(injected: AppState | None = None) -> FastAPI:
@@ -458,6 +489,7 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         )
         seq = await asyncio.to_thread(state.store.add_message, msg)
         status = await state.coordinator.handle_message(req.thread_id, req.text, req.attachments)
+        _diag.info("holddiag send thread=%s seq=%d status=%s", req.thread_id, seq, status)
         # re-arm if this message left everything drained (a STOP can discard
         # the only pending batch — the worker must still get to sleep later)
         await _maybe_suspend_worker(state)
@@ -545,6 +577,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         dims = await asyncio.to_thread(_page_dims, state.store, rows)
         for seq, m in rows:
             await websocket.send_json(_frame(seq, m, dims))
+        _diag.info("holddiag ws open thread=%s since=%d replayed=%d sockets=%d",
+                   thread_id, since, len(rows), len(state.sockets.get(thread_id, set())))
         try:
             while True:
                 await websocket.receive_text()  # client keepalive / pings; sends go via POST
@@ -552,7 +586,43 @@ def create_app(injected: AppState | None = None) -> FastAPI:
             pass
         finally:
             state.sockets.get(thread_id, set()).discard(websocket)
+            _diag.info("holddiag ws close thread=%s sockets=%d",
+                       thread_id, len(state.sockets.get(thread_id, set())))
 
+    # ===================== TEMP DIAGNOSTIC (remove after the hold session) =====================
+    # reply-hold probe: the PWA POSTs its hold event trail (the phone has no
+    # reachable console) and it is read back with a plain curl. Unauthenticated
+    # on purpose so the GET needs no bearer token; latest POST wins, and the
+    # trail carries no message content (hold.ts records event names only). The
+    # digest line puts the release reasons into the deploy logs, so logs alone
+    # tell WHY the hold let go even if nobody curls the GET. TO REMOVE: delete
+    # these two routes, the TEMP DIAGNOSTIC block above _holddiag_latest, and
+    # the matching pwa/src/hold.ts block.
+    @app.post("/api/debug/holddiag")
+    async def debug_holddiag_post(payload: dict) -> dict:
+        _holddiag_latest.clear()
+        _holddiag_latest.update(payload)
+        events = payload.get("events") or []
+        marks = [e for e in events if isinstance(e, dict)
+                 and e.get("ev") in ("held", "release", "pass", "reset", "vis")]
+        _diag.info("holddiag client build=%s events=%d marks=%s",
+                   payload.get("build"), len(events), json.dumps(marks[-10:]))
+        # viewport/flight digest, its own line so the hold pin above holds: the
+        # autosize decisions, snap-back doors, followTail flips, and flight
+        # deltas the client recorded — deploy logs alone reconstruct why the
+        # view moved even if nobody curls the GET
+        vp = [e for e in events if isinstance(e, dict)
+              and e.get("ev") in ("autosize", "vv-geom", "snapback",
+                                  "followtail", "ft-suppress", "flight")]
+        if vp:
+            _diag.info("holddiag viewport events=%d tail=%s",
+                       len(vp), json.dumps(vp[-20:]))
+        return {"ok": True}
+
+    @app.get("/api/debug/holddiag")
+    async def debug_holddiag_get() -> dict:
+        return _holddiag_latest
+    # =================== END TEMP DIAGNOSTIC (remove after the hold session) ===================
 
     # serve the built PWA if present (mounted last so /api and /ws win)
     pwa_dist = _pwa_dist()

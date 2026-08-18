@@ -14,7 +14,7 @@
 // beneath a thin wiring in main.ts: the scroll handler feeds it at-bottom
 // facts, and it drives the .show class through the one callback.
 
-export const PAUSE_MS = 7000;
+export const PAUSE_MS = 4000;
 
 export interface DownButton {
   /** every thread scroll event, with the handler's own nearBottom() verdict */
@@ -60,4 +60,20 @@ export function createDownButton(
   }
 
   return { scrolled, bottomReached, visible: () => shown };
+}
+
+// Tap-to-bottom glide plan — the capped-distance pattern polished messaging
+// apps use. behavior:"smooth" over a whole long thread sails for seconds, so
+// the animated stretch is capped at one viewport: from farther up, first
+// teleport to exactly one viewport above the bottom and glide only that final
+// stretch — always short, always decelerating into the same landing. Returns
+// the scrollTop to teleport to before the smooth scroll, or null when the
+// remaining distance already fits inside the cap.
+export function glideHop(
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+): number | null {
+  const bottom = scrollHeight - clientHeight; // the landing scrollTop
+  return bottom - scrollTop > clientHeight ? bottom - clientHeight : null;
 }

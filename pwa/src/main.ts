@@ -1,19 +1,27 @@
 // Paratrooper PWA — message the pinboard agent. Vanilla TS + DOM (lightest build).
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
-import { createDownButton } from "./downbtn";
-import { createReplyHold } from "./hold";
+import { createBootGate } from "./bootgate";
+import { caretCountsAsComposing } from "./caret";
+import { moveTypingAfter, placeTyping } from "./dots";
+import { createDownButton, glideHop } from "./downbtn";
+import { createReplyHold, holdDiagRecord } from "./hold";
 import { receiptFor } from "./receipts";
 import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell";
 import { installStartupImage } from "./splash";
-import { compensationFor } from "./viewport";
+import {
+  USER_SCROLL_INTENT_MS,
+  compensationFor,
+  followFlipDecision,
+  shoveResponse,
+} from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
 import type { OutboxRecord } from "./outbox";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.70"; // branch-guard rules deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.71"; // viewport-glue/send-flight/dots-order deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -68,11 +76,18 @@ const store = new Map<number, ServerMsg>();
 const replyHold = createReplyHold<ServerMsg>((m) => applyEvent(m));
 
 // jump-chevron visibility (downbtn.ts owns the state machine): it appears only
-// after 7s of scroll stillness while away from the bottom — never because new
+// after 4s of scroll stillness while away from the bottom — never because new
 // content landed. The scroll handler feeds it, this one callback drives the
 // class; live lookup, so renderChat re-renders can't strand a stale element.
 const downBtn = createDownButton((show) =>
   document.getElementById("jump")?.classList.toggle("show", show),
+);
+
+// fresh-open first-paint gate (bootgate.ts owns the latch): the thread builds
+// behind the .booting veil and shows only once the boot settle pin has landed
+// (or the socket died first — see bootSettlePin/connect). Live lookup again.
+const bootGate = createBootGate(() =>
+  document.getElementById("thread")?.classList.remove("booting"),
 );
 
 // The canonical ThreadEvent frame — one shape for live pushes, socket replay,
@@ -131,19 +146,71 @@ document.addEventListener(
 // caret when the composer grows a line, shoving the header off-screen and the
 // last reply out of view. The composer is always fully visible in our layout,
 // so any window scroll while it holds focus is iOS fighting the shell — snap
-// it straight back, same frame. shell.ts owns the OTHER displacement (the
-// visualViewport offsetTop pan of the kb-vv keyboard modes) and only zeroes
-// window scroll when leaving them; this covers the document scroller those
-// paths never touch. Snapping to 0 refires "scroll" once with scrollY already
-// 0, so it cannot loop.
+// it straight back, same frame. shell.ts owns the kb-vv keyboard pans (it
+// translates the app WITH them on the same event) and zeroes window scroll
+// when leaving those modes; this door covers the document scroller, and the
+// vv guard below covers the pans no keyboard mode owns. Snapping to 0 refires
+// "scroll" once with scrollY already 0, so it cannot loop.
 window.addEventListener(
   "scroll",
   () => {
     if (document.activeElement?.id !== "text") return;
-    if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
+    if (window.scrollX !== 0 || window.scrollY !== 0) {
+      holdDiagRecord("snapback", {
+        door: "window", x: Math.round(window.scrollX), y: Math.round(window.scrollY),
+      });
+      window.scrollTo(0, 0);
+    }
   },
   { passive: true },
 );
+
+// The shove's SECOND door: iOS can also reveal the caret by panning the
+// VISUAL viewport (vv.offsetTop goes nonzero) — no window scroll event fires,
+// so the snap-back above never sees it, and shell.ts only clears the pan when
+// leaving the kb-vv modes. viewport.ts decides which pans are shoves (a pure
+// pan while focused with the shell not tracking) versus legitimate keyboard
+// geometry; countering runs inside the vv event itself, before the next
+// paint. Registered AFTER initShell, so shell's reconcile has already applied
+// or withheld kb-vv for this same event by the time the guard reads the
+// class. Every geometry change while focused is recorded, countered or not.
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  let prevVvHeight = vv.height;
+  const vvGuard = (src: string): void => {
+    const heightChanged = Math.abs(vv.height - prevVvHeight) > 1;
+    prevVvHeight = vv.height;
+    if (document.activeElement?.id !== "text") return;
+    const tracking = app.classList.contains("kb-vv");
+    holdDiagRecord("vv-geom", {
+      src, h: Math.round(vv.height), top: Math.round(vv.offsetTop),
+      ih: window.innerHeight, kbvv: tracking,
+    });
+    if (shoveResponse(tracking, vv.offsetTop, heightChanged) === "snap") {
+      holdDiagRecord("snapback", { door: "vv-pan", top: Math.round(vv.offsetTop) });
+      window.scrollTo(0, 0);
+    }
+  };
+  vv.addEventListener("resize", () => vvGuard("resize"));
+  vv.addEventListener("scroll", () => vvGuard("scroll"));
+}
+
+// caret moves and text selection count as composing for the reply hold: a
+// reply must not land mid-thumb-drag any more than mid-keystroke.
+// selectionchange fires document-wide (and once per keystroke too — the input
+// listener already fed the clock then, a second reset is harmless), so it is
+// gated to the focused composer and to a grace window after our own composer
+// writes (the send-path clear echoes a selectionchange that must not undo
+// flush — caret.ts explains); recorded under its own name so the trail tells
+// selection activity from text changes.
+let composerWroteAt = -Infinity; // performance.now() of the last programmatic value write
+document.addEventListener("selectionchange", () => {
+  if (!caretCountsAsComposing(document.activeElement?.id, performance.now() - composerWroteAt)) {
+    return;
+  }
+  holdDiagRecord("caret");
+  replyHold.typed();
+});
 
 function authHeaders(): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
@@ -199,11 +266,9 @@ function renderChat(): void {
         </div>
       </div>
     </div>
-    <main id="thread" class="thread">
+    <main id="thread" class="thread booting">
       <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
     </main>
-    <button type="button" id="jump" class="jump" title="Jump to latest"><span
-      class="jump-glyph">↓</span></button>
     <div id="pending" class="pending"></div>
     <form id="compose" class="compose">
       <button type="button" id="attach" class="attach" title="Attach">＋</button>
@@ -214,6 +279,8 @@ function renderChat(): void {
           placeholder="${PROMPTS[Math.floor(Math.random() * PROMPTS.length)]}"></textarea>
         <button type="submit" id="sendbtn" class="send">↑</button>
       </div>
+      <button type="button" id="jump" class="jump" title="Jump to latest"><span
+        class="jump-glyph">↓</span></button>
     </form>`;
   document.getElementById("settings")!.addEventListener("click", () => {
     document.getElementById("menu")!.classList.toggle("open");
@@ -286,11 +353,24 @@ function renderChat(): void {
   // older engines fall back to a scroll-quiet debounce
   const hasScrollend = "onscrollend" in thread;
   let restTimer: ReturnType<typeof setTimeout> | null = null;
+  // gesture evidence feeding userScrollIntent(): wheel and pointer cover the
+  // desktop paths (scrollbar drags land pointerdown on the thread), touch is
+  // marked in the peek handlers below
+  thread.addEventListener("wheel", () => { lastGestureAt = performance.now(); },
+    { passive: true });
+  thread.addEventListener("pointerdown", () => { lastGestureAt = performance.now(); });
   thread.addEventListener("scroll", () => {
     // the ONE place following flips: away from the bottom = reading history,
-    // back at the bottom = following again (programmatic pins land here too)
-    followTail = nearBottom();
-    downBtn.scrolled(followTail); // away restarts its 7s stillness window; bottom hides it
+    // back at the bottom = following again (programmatic pins land here too).
+    // While the composer is focused, an away reading needs a real gesture to
+    // unfollow — shove/pin scroll events hold the line (viewport.ts explains)
+    const flip = followFlipDecision(
+      nearBottom(), document.activeElement?.id === "text", userScrollIntent(),
+    );
+    if (flip === "follow") setFollowTail(true, "scroll-bottom");
+    else if (flip === "unfollow") setFollowTail(false, "scroll-away");
+    else holdDiagRecord("ft-suppress", { st: Math.round(thread.scrollTop) });
+    downBtn.scrolled(followTail); // away restarts its 4s stillness window; bottom hides it
     // start BANKING older pages while the user is still ~1.5 screens away —
     // inserts happen separately, at glide boundaries
     if (thread.scrollTop < 1200) void loadOlder();
@@ -311,8 +391,16 @@ function renderChat(): void {
   }
   document.getElementById("jump")!.addEventListener("click", () => {
     downBtn.bottomReached(); // hides now; the pin's own scroll event agrees
-    followTail = true;
-    scrollToBottom(true);
+    setFollowTail(true, "jump");
+    // capped glide (downbtn.ts): from far up, teleport to one viewport above
+    // the bottom first, then glide only that short decelerating stretch.
+    // Mid-glide scroll events read !nearBottom and flip followTail off, so
+    // the followTail-gated instant pins cannot cut the glide short; the
+    // landing's own scroll event re-derives followTail=true as usual.
+    const t = threadEl();
+    const hop = glideHop(t.scrollTop, t.scrollHeight, t.clientHeight);
+    if (hop !== null) t.scrollTop = hop;
+    t.scrollTo({ top: t.scrollHeight, behavior: "smooth" });
   });
   // swipe-left to peek per-message times (iMessage): a decisively LEFTWARD
   // hold-and-drag pulls the thread with tanh resistance, revealing the time
@@ -327,12 +415,14 @@ function renderChat(): void {
       startY = e.touches[0].clientY;
       peeking = null;
       threadTouching = true; // no history inserts under a resting finger
+      lastGestureAt = performance.now();
     },
     { passive: true },
   );
   thread.addEventListener(
     "touchmove",
     (e) => {
+      lastGestureAt = performance.now();
       const dx = e.touches[0].clientX - startX;
       const dy = e.touches[0].clientY - startY;
       if (peeking === null) {
@@ -368,8 +458,9 @@ function renderChat(): void {
   pendingOlder = []; // banked pages hold stale seqs from the old session
   fetchCursor = 0;
   historyDone = false;
-  followTail = true;
+  setFollowTail(true, "fresh-shell");
   downBtn.bottomReached(); // fresh shell opens pinned: no chevron, no pending timer
+  bootGate.reset(); // the fresh markup raised the veil; re-arm the settle pin
   restoredOutbox = false; // a fresh shell re-reads the durable outbox
   threadObserver?.disconnect(); // the old shell's thread element is gone
   threadObserver?.observe(thread);
@@ -504,7 +595,26 @@ const threadEl = () => document.getElementById("thread")!;
 // user scrolls away (the scroll handler derives it) and resumes at the bottom;
 // a moment-of-apply nearBottom() check can't do this, because a tall image
 // above the fold pushes the bottom out of its threshold and pinning dies.
+// While the composer is FOCUSED, "scrolls away" additionally requires a real
+// gesture (viewport.ts followFlipDecision): a caret shove, its snap-back, or
+// our own pin writes fire away-reading scroll events too, and letting those
+// flip following off is what let each new composer line slip the view a
+// little further on device. Every flip is recorded with its trigger.
 let followTail = true;
+
+function setFollowTail(next: boolean, trigger: string): void {
+  if (next !== followTail) holdDiagRecord("followtail", { to: next, trigger });
+  followTail = next;
+}
+
+// genuine-gesture evidence for the scroll handler: a finger currently on the
+// thread, or wheel/pointer/touch activity inside the intent window. Starts
+// at -Infinity so a boot-time scroll event can never read as a gesture.
+let lastGestureAt = -Infinity;
+
+function userScrollIntent(): boolean {
+  return threadTouching || performance.now() - lastGestureAt < USER_SCROLL_INTENT_MS;
+}
 
 // re-pin when the THREAD BOX resizes (keyboard up/down, compose growth);
 // content growth inside it re-pins via applyEvent and image onload hooks
@@ -539,16 +649,25 @@ function scrollToBottom(force = false): void {
 function autosize(): void {
   const textEl = document.getElementById("text") as HTMLTextAreaElement | null;
   if (!textEl) return;
+  const t = threadEl();
   const oldHeight = textEl.offsetHeight;
-  const atBottom = followTail || nearBottom();
+  const nb = nearBottom();
+  const atBottom = followTail || nb;
+  const stBefore = t.scrollTop;
   textEl.style.height = "auto";
   // exact fit = nothing to scroll-bounce. The textarea is borderless now
   // (the .field wrapper carries the glass), so scrollHeight IS the full
   // border-box need — the old +2 border compensation would reopen the gap
   textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
-  if (compensationFor(oldHeight, textEl.offsetHeight, atBottom) === "pin-bottom") {
+  const newHeight = textEl.offsetHeight;
+  const decision = compensationFor(oldHeight, newHeight, atBottom);
+  if (decision === "pin-bottom") {
     scrollToBottom(true); // instant: the resize and the re-pin paint as one
   }
+  holdDiagRecord("autosize", {
+    oldH: oldHeight, newH: newHeight, ft: followTail, nb, atB: atBottom,
+    dec: decision, stB: Math.round(stBefore), stA: Math.round(t.scrollTop),
+  });
 }
 
 // --- rendering ---------------------------------------------------------------
@@ -677,12 +796,16 @@ function applyEvent(m: ServerMsg): void {
     const restored = threadEl().querySelector<HTMLElement>(".evt.restored");
     if (restored) threadEl().insertBefore(wrapper, restored);
     else threadEl().appendChild(wrapper);
+    // live dots stay below the newest content: a user frame landing during
+    // them (agent replies removed them above) moves them back behind it,
+    // same frame, a plain structural reorder (dots.ts)
+    moveTypingAfter(threadEl(), wrapper);
   }
   decorate();
   // pinned-viewport handling for older pages lives in loadOlder; only tail
   // applies drive the scroll rule (the chevron is scroll-pause-only, downbtn.ts)
   if (isTail && wrapper.childElementCount > 0) {
-    if (m.role === "user") followTail = true; // your own message snaps you back
+    if (m.role === "user") setFollowTail(true, "apply-user"); // your own message snaps you back
     if (followTail) scrollToBottom();
   }
   if (m.kind === "published") flipCorrelatedPr(m);
@@ -1003,7 +1126,7 @@ function showTyping(): void {
   el.innerHTML = "<span></span><span></span><span></span>";
   const t = document.getElementById("thread");
   if (t) {
-    t.appendChild(el);
+    placeTyping(t, el); // after the newest content, above restored failures (dots.ts)
     if (followTail) scrollToBottom();
   }
 }
@@ -1069,9 +1192,13 @@ async function checkServerVersion(): Promise<void> {
 
 // The socket never announces "replay finished", and the old fixed 600ms guess
 // let slow replays leak animated glides onto the opening screen. Instead:
-// quiet-for-400ms means settled — every replay frame pushes the deadline back,
-// so however long the backlog takes, the thread builds with instant pins and
-// only starts animating once it is genuinely done.
+// quiet means settled — every replay frame pushes the deadline back, so
+// however long the backlog takes, the thread builds with instant pins and
+// only starts animating once it is genuinely done. The quiet window comes in
+// two sizes: while the boot veil is still up nothing is on screen, so the
+// window is generous — a replay frame straggling in on network jitter must
+// land under the veil, not pop in animated right after a hasty reveal. Once
+// revealed (reconnect catch-ups), the tight window keeps live feel intact.
 let settleTimer: ReturnType<typeof setTimeout> | null = null;
 function settleAnim(): void {
   if (settleTimer) clearTimeout(settleTimer);
@@ -1081,27 +1208,37 @@ function settleAnim(): void {
     // scrolls, so without this the spinner would sit unresolved forever
     tryApplyOlder();
     void bootSettlePin();
-  }, 400);
+  }, bootGate.revealed() ? 400 : 800);
 }
 
-// A truly fresh open must LAND at the very bottom, every time. The replay's
-// per-frame pins can die early: an unsized image (a non-PNG screenshot, a
-// restored-outbox blob) growing the thread between one pin and that pin's own
-// scroll event makes the event read "away from the bottom" and flip followTail
-// off — and every later re-pin hook is followTail-gated, so the boot strands a
-// few messages up. So the FIRST settle of this page load — and only the first:
-// reconnects and background-resumes must never yank a reader — forces every
-// still-pending thread image to decode (decode() resolves after load+decode,
-// so all late height is in), then pins once more, unconditionally. The pin's
-// own scroll event then re-derives followTail=true through the one usual place.
-let bootPinDone = false;
+// A truly fresh open must LAND at the very bottom with zero visible motion.
+// Two halves. The PIN: the replay's per-frame pins can die early — an unsized
+// image (a non-PNG screenshot, a restored-outbox blob) growing the thread
+// between one pin and that pin's own scroll event makes the event read "away
+// from the bottom" and flip followTail off, and every later re-pin hook is
+// followTail-gated — so the first settle of each shell (and only the first:
+// reconnect settles must never yank a reader; bootgate.ts keeps that ledger)
+// forces every still-pending thread image to decode (decode() resolves after
+// load+decode, so all late height is in), then pins one final time without
+// any gate. The pin's own scroll event re-derives followTail=true through
+// the one usual place. The REVEAL: the thread built behind the .booting
+// veil, and the veil lifts only here, after that pin — the first painted
+// frame anyone sees is the settled bottom state, not the replay streaming in.
 async function bootSettlePin(): Promise<void> {
-  if (bootPinDone || !document.getElementById("thread")) return;
-  bootPinDone = true;
-  const pending = Array.from(threadEl().querySelectorAll<HTMLImageElement>("img"))
-    .filter((img) => !img.complete);
-  await Promise.allSettled(pending.map((img) => img.decode()));
-  scrollToBottom(true); // a settled layout must not glide
+  if (!document.getElementById("thread")) return;
+  if (bootGate.claimSettlePin()) {
+    const pending = Array.from(threadEl().querySelectorAll<HTMLImageElement>("img"))
+      .filter((img) => !img.complete);
+    // bounded wait: a slow thumb fetch must not hold the whole open hostage
+    // behind the veil — anything landing later re-pins through the usual
+    // followTail onload hooks (and sized images shift nothing anyway)
+    await Promise.race([
+      Promise.allSettled(pending.map((img) => img.decode())),
+      new Promise((r) => setTimeout(r, 1200)),
+    ]);
+    scrollToBottom(true); // a settled layout must not glide
+  }
+  bootGate.pinLanded();
 }
 
 function connect(): void {
@@ -1129,9 +1266,16 @@ function connect(): void {
     // the finished reply must not land under his thumbs: mid-composition it
     // parks in the hold and renders after 7s of quiet (or on empty/send)
     if (m.role === "agent" && m.kind === "done" && replyHold.maybeHold(m.seq, m)) return;
+    // every socket frame that passes (or bypasses) the hold is visible in the
+    // trail with its kind — a rendered seq with no ws-apply record came from
+    // some other route (history page, hold release, optimistic ACK)
+    holdDiagRecord("ws-apply", { seq: m.seq, kind: m.kind ?? null, role: m.role ?? null });
     applyEvent(m); // live, replayed, and paged frames all take the same path
   };
   ws.onclose = () => {
+    // no server, no replay: the veil must not sit over an offline open's
+    // restored-outbox bubbles (no-op once lifted)
+    bootGate.socketClosed();
     if (closingOnPurpose || !token) return; // logout: stay closed
     setTimeout(connect, 2000); // dropped: reconnect; catch-up via ?since=
   };
@@ -1141,14 +1285,18 @@ function connect(): void {
 // springs up into its thread seat. FLIP — the bubble is laid out in its final
 // spot, instantly translated back to the field's rect, then released on a
 // spring ease. Right edges are pinned (both are right-aligned); replayed and
-// received bubbles keep their ordinary entrance.
+// received bubbles keep their ordinary entrance. The flight must always play
+// (standing order) — no reduced-motion gate. Every invocation leaves a trail
+// record with the measured per-bubble dx/dy and the animation's start and
+// finish/cancel, so a device session where nothing visibly moved shows WHY
+// (near-zero deltas are themselves the finding).
 function flyFromField(wrapper: HTMLElement): void {
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   const field = document.querySelector(".field");
   const msgs = wrapper.querySelectorAll<HTMLElement>(".msg");
+  holdDiagRecord("flight", { phase: "invoke", msgs: msgs.length, field: field !== null });
   if (!field || !msgs.length) return;
   const start = field.getBoundingClientRect();
-  msgs.forEach((msg) => {
+  msgs.forEach((msg, i) => {
     const end = msg.getBoundingClientRect();
     const dx = start.right - end.right;
     const dy = start.top - end.top;
@@ -1156,9 +1304,16 @@ function flyFromField(wrapper: HTMLElement): void {
     // animation itself, so WebKit cannot coalesce the two style writes into
     // one and silently skip the motion (which is what killed the old
     // transition + double-rAF version on iOS).
-    msg.animate(
+    const anim = msg.animate(
       [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }],
       { duration: 450, easing: "cubic-bezier(0.2, 0.9, 0.3, 1.08)" },
+    );
+    holdDiagRecord("flight", {
+      phase: "start", i, dx: Math.round(dx * 10) / 10, dy: Math.round(dy * 10) / 10,
+    });
+    anim.finished.then(
+      () => holdDiagRecord("flight", { phase: "finish", i }),
+      () => holdDiagRecord("flight", { phase: "cancel", i }),
     );
   });
 }
@@ -1171,6 +1326,9 @@ function localWrapper(role: string): HTMLElement {
   wrapper.dataset.ts = String(Date.now());
   wrapper.dataset.role = role;
   threadEl().appendChild(wrapper);
+  // a send during visible dots must stack under the previous message with the
+  // dots below it, not land beneath them — same-frame reorder (dots.ts)
+  moveTypingAfter(threadEl(), wrapper);
   return wrapper;
 }
 
@@ -1178,7 +1336,7 @@ function localBubble(role: string, cls: string, text: string): void {
   const w = localWrapper(role);
   rowEl(w, role, cls, Date.now()).textContent = text;
   decorate();
-  if (role === "user") followTail = true;
+  if (role === "user") setFollowTail(true, "local-user");
   if (followTail) scrollToBottom();
 }
 
@@ -1214,9 +1372,10 @@ async function send(): Promise<void> {
   if (text) rowEl(w, "user", "text", Date.now()).textContent = text;
   suppressAnim = prevSuppress;
   decorate();
-  followTail = true; // sending snaps you to the tail
+  setFollowTail(true, "send"); // sending snaps you to the tail
   scrollToBottom(true); // instant pin: the flight is the only motion
   flyFromField(w);
+  composerWroteAt = performance.now(); // the clear's selectionchange is ours, not composing
   textEl.value = "";
   autosize(); // collapse the auto-grown bar through the same compensated path
   pendingFiles = [];

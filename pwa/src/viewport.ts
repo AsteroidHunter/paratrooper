@@ -31,3 +31,50 @@ export function compensationFor(
   if (newHeight === oldHeight) return "none";
   return atBottom ? "pin-bottom" : "keep-position";
 }
+
+// followTail protection while composing — the decision half of the device bug
+// where each new composer line slid the view up a little more. Failure shape:
+// an iOS caret shove (or our own snap-back / pin write) fires thread scroll
+// events that momentarily read "away from the bottom", followTail flips false,
+// and every later growth line picks keep-position — the slip compounds until
+// whole messages are hidden. While the composer is FOCUSED, only a genuine
+// user gesture (finger on the thread, or wheel/pointer within the intent
+// window — main.ts tracks the timestamps) may turn following off; any other
+// away-reading scroll is a shove or a programmatic write and must not disarm
+// the re-pin. Reaching the bottom always resumes following, focused or not,
+// and with the composer unfocused nothing changes from the shipped rule.
+export const USER_SCROLL_INTENT_MS = 600;
+
+export type FollowFlip = "follow" | "unfollow" | "hold";
+
+export function followFlipDecision(
+  nearBottom: boolean,
+  composerFocused: boolean,
+  userIntent: boolean,
+): FollowFlip {
+  if (nearBottom) return "follow";
+  if (!composerFocused || userIntent) return "unfollow";
+  return "hold";
+}
+
+// Caret-shove second door — the visualViewport pan the window-scroll snap-back
+// never sees. iOS can "reveal" the caret by panning the visual viewport
+// (vv.offsetTop goes nonzero, no window scroll event fires). Two legitimate
+// owners of a pan exist and must not be fought: the kb-vv keyboard modes
+// (shell.ts tracks the pan and translates the app with it, same event), and a
+// keyboard transition in flight (the pan rides a height change). Anything
+// else — a pure pan while the composer is focused and the shell is not
+// tracking — is the shove: snap the window back to 0,0, which clears the pan
+// on the unscrollable document (the same write shell.ts uses when leaving
+// kb-vv).
+export type ShoveAction = "snap" | "none";
+
+export function shoveResponse(
+  tracking: boolean,
+  offsetTop: number,
+  heightChanged: boolean,
+): ShoveAction {
+  if (tracking) return "none"; // kb-vv owns the pan: the shell translates with it
+  if (heightChanged) return "none"; // keyboard geometry in motion, not a shove
+  return offsetTop !== 0 ? "snap" : "none";
+}

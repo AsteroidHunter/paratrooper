@@ -18,10 +18,16 @@ callbacks, so it's driven directly in tests with a tiny window.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+
+# temporary: every "_diag" line below belongs to the reply-hold diagnostic and
+# goes when it does (see the TEMP DIAGNOSTIC banner in app.py, which owns the
+# handler that puts these into the deploy logs)
+_diag = logging.getLogger("paratrooper.holddiag")
 
 # one quiet window for both jobs of the timer: batching sends before a run and
 # holding the rerun after a mid-run send are the same mechanism (same timer,
@@ -80,6 +86,7 @@ class ThreadCoordinator:
         # watchdog: a job whose completion event never arrived must not block
         # the thread forever (its batch is abandoned with it)
         if st.running_job and (time.monotonic() - st.started_at) > self._deadline:
+            _diag.info("holddiag batch watchdog-abandon thread=%s job=%s", thread_id, st.running_job)
             st.running_job = None
             st.running_batch = []
             st.superseded = None
@@ -99,8 +106,11 @@ class ThreadCoordinator:
             st.buffer.clear()
             st.running_batch = []
             if st.running_job is not None:
+                _diag.info("holddiag batch stop thread=%s job=%s status=interrupted",
+                           thread_id, st.running_job)
                 await self._interrupt(thread_id, st.running_job)
                 return "interrupted"
+            _diag.info("holddiag batch stop thread=%s status=discarded", thread_id)
             return "discarded"
 
         st.buffer.append((text, attachments))
@@ -112,10 +122,14 @@ class ThreadCoordinator:
             st.superseded = st.running_job
             st.buffer = st.running_batch + st.buffer
             st.running_batch = []
+            _diag.info("holddiag batch supersede thread=%s job=%s buffered=%d",
+                       thread_id, st.superseded, len(st.buffer))
             await self._interrupt(thread_id, st.superseded)
             self._arm_timer(thread_id)
             return "superseded"
         self._arm_timer(thread_id)
+        _diag.info("holddiag batch buffered thread=%s buffered=%d running=%s",
+                   thread_id, len(st.buffer), st.running_job)
         return "buffered"
 
     def _cancel_timer(self, st: _ThreadState) -> None:
@@ -127,11 +141,13 @@ class ThreadCoordinator:
         st = self._state(thread_id)
         self._cancel_timer(st)
         st.timer = asyncio.ensure_future(self._after_window(thread_id))
+        _diag.info("holddiag batch timer-armed thread=%s window=%.1fs", thread_id, self._window)
 
     async def _after_window(self, thread_id: str) -> None:
         try:
             await asyncio.sleep(self._window)
         except asyncio.CancelledError:
+            _diag.info("holddiag batch timer-cancelled thread=%s", thread_id)
             return
         await self._fire(thread_id)
 
@@ -140,6 +156,8 @@ class ThreadCoordinator:
         if not st.buffer or st.running_job is not None:
             # a still-cancelling superseded run holds the slot: job_finished
             # re-arms the window once its terminal lands, so nothing is lost
+            _diag.info("holddiag batch fire-skipped thread=%s buffered=%d running=%s",
+                       thread_id, len(st.buffer), st.running_job)
             return
         texts = [t for t, _ in st.buffer]
         attachments: list[str] = []
@@ -151,6 +169,8 @@ class ThreadCoordinator:
         st.running_job = job_id
         st.started_at = time.monotonic()
         st.timer = None
+        _diag.info("holddiag batch fire thread=%s job=%s msgs=%d",
+                   thread_id, job_id, len(st.running_batch))
         await self._enqueue(thread_id, job_id, "\n".join(t for t in texts if t), attachments)
 
     async def job_finished(self, thread_id: str) -> None:
@@ -161,7 +181,10 @@ class ThreadCoordinator:
         st.running_job = None
         st.running_batch = []
         st.superseded = None
-        if st.buffer and (st.timer is None or st.timer.done()):
+        rearm = bool(st.buffer and (st.timer is None or st.timer.done()))
+        _diag.info("holddiag batch finished thread=%s buffered=%d rearm=%s",
+                   thread_id, len(st.buffer), rearm)
+        if rearm:
             self._arm_timer(thread_id)
 
     def was_superseded(self, thread_id: str, job_id: str) -> bool:
