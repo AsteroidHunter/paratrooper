@@ -57,6 +57,29 @@ from paratrooper.agent.tools import ToolContext, build_tool_server
         "echo hi && git push --all origin",  # compound
         "git push origin --delete main",  # remote-delete is still a push to main
         "git push origin :main",  # old-style remote delete of main
+        # the paratrooper/* allowlist: creation outside the prefix
+        "git checkout -B feature/x",
+        "git checkout -b hotfix",
+        "git switch -c develop",
+        "git checkout --orphan gh-pages",
+        "git branch new-branch",  # bare creation must target the prefix too
+        # plain branch switching outside the prefix (bare main included)
+        "git checkout main",
+        "git switch main",
+        "git checkout feature/x",
+        "git checkout -",  # previous branch: unverifiable target
+        # the reset carve-out is exact-shape only
+        "git checkout -B main origin/master",  # wrong start point
+        "git checkout -B main",  # missing start point
+        # push destinations must all be paratrooper/*
+        "git push origin somebranch",
+        "git push -u origin feature/x",
+        "git push origin --delete develop",
+        "git push",  # no refspec: implicit upstream could be anything
+        # git branch delete/rename outside the prefix
+        "git branch -D develop",
+        "git branch -m paratrooper/keep renamed",  # rename away from the prefix
+        "git branch -M main paratrooper/sneak",  # rename of main, even into the prefix
     ],
 )
 def test_git_violation_denies(command):
@@ -74,11 +97,15 @@ def test_git_violation_denies(command):
         "ls -la && cat index.json",
         "git status",
         "git log --oneline -5",
-        "git push origin feature/x",
         "git push --set-upstream origin paratrooper/foo:paratrooper/foo",
         "git push origin HEAD:refs/heads/paratrooper/foo",  # full ref, feature dest
+        "git fetch origin",
         "git fetch origin main",
-        "git checkout main",
+        "git switch paratrooper/foo",
+        "git switch -c paratrooper/foo",
+        "git checkout .",  # pathspec, not a branch: file restore stays allowed
+        "git branch -m paratrooper/old paratrooper/new",  # rename inside the prefix
+        "git branch --list",  # listing/query forms never touch a branch
         # the prompt-driven workflow: the agent's own branch/push/PR commands
         "git checkout -B main origin/main",  # reset local default to origin tip
         "git checkout -B paratrooper/twen-new-photo origin/paratrooper/twen-new-photo",
@@ -91,6 +118,10 @@ def test_git_violation_denies(command):
         "git clean -fd",
         "git branch -D paratrooper/stale-attempt",
         "git push origin --delete paratrooper/stale-attempt",
+        # the fresh-fork chain, compounded the way the agent actually runs it
+        "git fetch origin main && git checkout -B main origin/main"
+        " && git checkout -B paratrooper/twen-new-photo",
+        "git checkout -- . && git clean -fd",
     ],
 )
 def test_git_violation_allows(command):
@@ -98,9 +129,13 @@ def test_git_violation_allows(command):
 
 
 def test_git_violation_respects_default_branch_name():
-    # if the default branch were "trunk", pushing to main is fine but trunk isn't
+    # the carve-out and the push rules follow whatever the default branch is
+    # named; the paratrooper/* allowlist holds regardless
     assert git_violation("git push origin trunk", "trunk") is not None
-    assert git_violation("git push origin main", "trunk") is None
+    assert git_violation("git push origin main", "trunk") is not None  # not paratrooper/*
+    assert git_violation("git push origin paratrooper/x", "trunk") is None
+    assert git_violation("git checkout -B trunk origin/trunk", "trunk") is None  # carve-out
+    assert git_violation("git checkout -B main origin/main", "trunk") is not None
 
 
 def test_hook_returns_deny_shape():
@@ -115,6 +150,66 @@ def test_hook_returns_deny_shape():
     assert deny["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
     assert call("Bash", "git status") == {}
     assert call("Write") == {}  # non-Bash tools pass through untouched
+
+
+# --- the paratrooper/* branch cap (effectful: counts the site checkout) -------
+
+def _seed_site_checkout(tmp_path, n_branches):
+    """A temp git checkout holding ``n_branches`` local paratrooper/* branches
+    (same `git init` bootstrap the siterepo tests use)."""
+    root = tmp_path / "site"
+    root.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(root)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+         "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "seed"],
+        cwd=root, check=True, capture_output=True,
+    )
+    for i in range(n_branches):
+        subprocess.run(
+            ["git", "branch", f"paratrooper/b{i}"], cwd=root, check=True, capture_output=True
+        )
+    return root
+
+
+def _call_hook(hook, command):
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    return asyncio.run(hook(payload, None, None))
+
+
+def test_branch_cap_denies_eighth_creation(tmp_path):
+    root = _seed_site_checkout(tmp_path, 7)
+    hook = make_main_guard_hook("main", repo_root=root)
+    out = _call_hook(hook, "git checkout -B paratrooper/new")
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    # the agent reads deny reasons: it must be told the way out
+    assert "reuse" in reason and "clean up" in reason
+
+
+def test_branch_cap_allows_seventh_creation(tmp_path):
+    root = _seed_site_checkout(tmp_path, 6)
+    hook = make_main_guard_hook("main", repo_root=root)
+    assert _call_hook(hook, "git checkout -B paratrooper/new") == {}
+
+
+def test_branch_cap_spares_existing_branches(tmp_path):
+    root = _seed_site_checkout(tmp_path, 7)
+    hook = make_main_guard_hook("main", repo_root=root)
+    # re-creating / switching to an existing paratrooper branch never caps
+    assert _call_hook(hook, "git checkout -B paratrooper/b0 origin/paratrooper/b0") == {}
+    assert _call_hook(hook, "git checkout paratrooper/b3") == {}
+    # non-creating commands are untouched by the cap
+    assert _call_hook(hook, "git status") == {}
+    # and the pure allowlist still runs ahead of the cap
+    deny = _call_hook(hook, "git checkout -B feature/x")
+    assert deny["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_branch_cap_skipped_without_repo_root():
+    # no site checkout configured: the hook stays fully pure, cap disabled
+    hook = make_main_guard_hook("main")
+    assert _call_hook(hook, "git checkout -B paratrooper/anything") == {}
 
 
 def test_prompt_first_look_sweeps_interrupted_leftovers():

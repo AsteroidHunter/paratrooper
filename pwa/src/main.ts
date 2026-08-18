@@ -13,7 +13,7 @@ import type { OutboxRecord } from "./outbox";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.69"; // keypress hold rule build, bumped so phones can tell it apart
+const APP_VERSION = "0.1.70"; // branch-guard rules deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

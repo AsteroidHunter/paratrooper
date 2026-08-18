@@ -147,7 +147,9 @@ async def run_job(
         emit_update=emit_update,
     )
     server, tool_names = build_tool_server(ctx)
-    guard = make_main_guard_hook(config.default_branch)
+    # the guard fences the agent onto paratrooper/* branches; the site checkout
+    # root lets it also enforce the local paratrooper-branch cap by counting there
+    guard = make_main_guard_hook(config.default_branch, repo_root=config.site_root)
 
     options = ClaudeAgentOptions(
         model=model,
