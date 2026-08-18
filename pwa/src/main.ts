@@ -1,6 +1,7 @@
 // Paratrooper PWA — message the pinboard agent. Vanilla TS + DOM (lightest build).
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
+import { createReplyHold } from "./hold";
 import { receiptFor } from "./receipts";
 import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell";
 import { installStartupImage } from "./splash";
@@ -56,6 +57,13 @@ let restoredOutbox = false; // once-per-session guard for the durable-outbox res
 // re-deliveries vanish here) and ordered (older pages and out-of-order frames
 // insert in position). The DOM is a projection of this map, never the state.
 const store = new Map<number, ServerMsg>();
+
+// finished-reply hold (hold.ts owns the state machine): a "done" landing while
+// Akash is mid-keystroke parks until 7s of composer quiet, an emptied box, or
+// a send. Release renders through the one applyEvent path below, so seq
+// ordering and idempotence hold unchanged — and nothing survives a reload
+// (the reply is in server history; that's the point).
+const replyHold = createReplyHold<ServerMsg>((m) => applyEvent(m));
 
 // The canonical ThreadEvent frame — one shape for live pushes, socket replay,
 // and history pages alike. Ephemeral kinds (working/typing) ride without a seq.
@@ -231,6 +239,7 @@ function renderChat(): void {
   textEl.addEventListener("input", () => {
     autosize();
     refreshSend();
+    replyHold.typed(textEl.value); // composing state for the finished-reply hold
   });
   // the editor's width moves when the ＋ yields/reclaims its slot (styles.css
   // .kb): existing text re-wraps at the new width, so its height must be
@@ -328,6 +337,7 @@ function renderChat(): void {
   thread.addEventListener("touchcancel", endPeek);
   // fresh thread DOM: the store must match (login/logout re-renders the shell)
   store.clear();
+  replyHold.reset(); // parked frames die with the old shell; replay re-delivers
   oldestSeq = 0;
   pendingOlder = []; // banked pages hold stale seqs from the old session
   fetchCursor = 0;
@@ -1044,6 +1054,9 @@ function connect(): void {
       if (m.kind === "typing") showTyping(); // dots self-expire if it wasn't for you
       return;
     }
+    // the finished reply must not land under his thumbs: mid-composition it
+    // parks in the hold and renders after 7s of quiet (or on empty/send)
+    if (m.role === "agent" && m.kind === "done" && replyHold.maybeHold(m.seq, m)) return;
     applyEvent(m); // live, replayed, and paged frames all take the same path
   };
   ws.onclose = () => {
@@ -1111,6 +1124,10 @@ async function send(): Promise<void> {
   const text = textEl.value.trim();
   const files = [...pendingFiles];
   if (!text && files.length === 0) return;
+
+  // a held reply renders FIRST, so the live view shows reply-then-your-message
+  // — the same order the store (reply's seq is older) replays after a reload
+  replyHold.flush();
 
   // INSTANT feedback on tap: one optimistic wrapper appears immediately; the
   // uploads/POST happen behind it. On ACK the wrapper adopts the server seq,
@@ -1469,7 +1486,7 @@ if ("serviceWorker" in navigator) {
 
 // paint this device's iOS launch image once per load (see splash.ts): the same
 // top-bar logo centered on white, sized to the current screen. No-ops off iOS.
-installStartupImage("/topbar-logo.png");
+installStartupImage("/splash-logo.png"); // full-res cut-out; the 140px topbar file pixelates at splash size
 
 if (token) {
   renderChat();

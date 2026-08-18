@@ -144,13 +144,17 @@ class Worker:
                 await asyncio.sleep(2)
 
     def _bootstrap_checkout(self) -> None:
-        """Clone the site repo on first boot (idempotent)."""
+        """Clone the site repo on first boot and pin the bot commit identity on
+        the checkout (idempotent) — the agent commits via its own shell, so the
+        identity must already sit in the repo-local git config."""
         cfg = self._cfg()
         SiteRepo(
             cfg.site_root,
             default_branch=cfg.default_branch,
             github_token=github_token(),
             remote=cfg.remote,
+            git_name=cfg.git_name,
+            git_email=cfg.git_email,
         ).ensure_checkout()
 
     def _install_shutdown_handler(self) -> None:

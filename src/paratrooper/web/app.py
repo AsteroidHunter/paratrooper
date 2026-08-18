@@ -307,11 +307,40 @@ async def _maybe_push(state: AppState, kind: str) -> None:
     await asyncio.to_thread(_send)
 
 
+async def _relay_result(state: AppState, thread_id: str, result: ResultMessage) -> None:
+    """Relay ONE worker result: persist + fan out per its kind's policy; on a
+    terminal ('done'/'error') release the thread's batch. A superseded job — a
+    run cancelled because newer messages arrived — is swallowed whole: the
+    cancel came before anything was saved, so no event of that run (a done that
+    lost the race included) may reach the store or a socket; only the terminal
+    bookkeeping still runs, releasing the rerun."""
+    policy = EVENT_POLICY[result.kind]
+    if state.coordinator.was_superseded(thread_id, result.job_id):
+        if policy.terminal:
+            await state.coordinator.job_finished(thread_id)
+            await _maybe_suspend_worker(state)
+        return
+    event = _to_event(thread_id, result)
+    if policy.ephemeral:  # sockets only: never persisted, never replayed
+        await _send_to_sockets(state, thread_id, event.model_dump())
+        return
+    seq = state.store.add_message(event)  # persisted verbatim
+    # broadcast the STORED event (+seq so clients advance their
+    # catch-up cursor on live pushes) — replay re-sends this frame
+    await _send_to_sockets(state, thread_id, {"seq": seq, **event.model_dump()})
+    await _maybe_push(state, result.kind)
+    if policy.terminal:
+        # job_finished first: it re-arms the timer for any buffered
+        # batch, so has_pending() correctly blocks the linger then
+        await state.coordinator.job_finished(thread_id)
+        await _maybe_suspend_worker(state)
+
+
 async def _result_relay(state: AppState) -> None:
-    """Subscribe to all worker result channels: persist each to the thread and
-    fan out to connected sockets; on 'done'/'error' release the thread's batch.
-    Transient redis errors re-subscribe rather than silently killing the task —
-    a dead relay means results stop reaching the phone with no visible crash."""
+    """Subscribe to all worker result channels and feed each into
+    ``_relay_result``. Transient redis errors re-subscribe rather than silently
+    killing the task — a dead relay means results stop reaching the phone with
+    no visible crash."""
     while True:
         pubsub = state.queue.r.pubsub()
         try:
@@ -329,21 +358,7 @@ async def _result_relay(state: AppState) -> None:
                     # kill the relay task — skip it, keep relaying
                     logger.warning("relay: skipped unparseable result on %s", channel)
                     continue
-                policy = EVENT_POLICY[result.kind]
-                event = _to_event(thread_id, result)
-                if policy.ephemeral:  # sockets only: never persisted, never replayed
-                    await _send_to_sockets(state, thread_id, event.model_dump())
-                    continue
-                seq = state.store.add_message(event)  # persisted verbatim
-                # broadcast the STORED event (+seq so clients advance their
-                # catch-up cursor on live pushes) — replay re-sends this frame
-                await _send_to_sockets(state, thread_id, {"seq": seq, **event.model_dump()})
-                await _maybe_push(state, result.kind)
-                if policy.terminal:
-                    # job_finished first: it re-arms the timer for any buffered
-                    # batch, so has_pending() correctly blocks the linger then
-                    await state.coordinator.job_finished(thread_id)
-                    await _maybe_suspend_worker(state)
+                await _relay_result(state, thread_id, result)
         except (redis_exc.ConnectionError, redis_exc.TimeoutError) as exc:
             logger.warning("result relay redis error, resubscribing: %s", exc)
             await asyncio.sleep(2)

@@ -125,24 +125,166 @@ def test_batching_stop_interrupts_running_job():
     _run(scenario())
 
 
-def test_batching_buffers_while_running_then_fires():
+def test_midrun_send_cancels_run_and_reruns_once():
+    """A send while a run is in flight supersedes it: the run is interrupted
+    (same machinery as STOP), its batch folds back in front of the new message,
+    and after the quiet window ONE fresh job covers everything."""
     async def scenario():
-        enq, intr, enqueued, _ = _recorders()
+        enq, intr, enqueued, interrupted = _recorders()
         coord = ThreadCoordinator(enq, intr, window=0.02)
-        await coord.handle_message("d", "first", [])
-        await asyncio.sleep(0.05)  # first job running
-        await coord.handle_message("d", "second", [])  # buffers (job running)
+        await coord.handle_message("d", "first", ["k1"])
+        await asyncio.sleep(0.05)  # fires -> running
+        status = await coord.handle_message("d", "actually blue", ["k2"])
+        assert status == "superseded"
+        assert interrupted == [enqueued[0]["job"]]  # cancelled the running job
+        assert coord.was_superseded("d", enqueued[0]["job"])
+        await coord.job_finished("d")  # the cancelled run lands its terminal
+        assert not coord.was_superseded("d", enqueued[0]["job"])  # bookkeeping done
         await asyncio.sleep(0.05)
-        assert [e["text"] for e in enqueued] == ["first"]  # second hasn't fired yet
-        await coord.job_finished("d")  # releases the next batch
-        await asyncio.sleep(0.05)
-        assert [e["text"] for e in enqueued] == ["first", "second"]
+        assert [e["text"] for e in enqueued] == ["first", "first\nactually blue"]
+        assert enqueued[1]["atts"] == ["k1", "k2"]  # attachments fold back too
+        assert enqueued[1]["job"] != enqueued[0]["job"]  # a genuinely fresh run
 
     _run(scenario())
 
 
-def test_default_window_is_ten_seconds():
-    assert DEFAULT_WINDOW == 10.0
+def test_burst_folds_into_one_rerun():
+    """Three texts in a burst -> one interrupt, one rerun, every message in it."""
+    async def scenario():
+        enq, intr, enqueued, interrupted = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.02)
+        await coord.handle_message("d", "first", [])
+        await asyncio.sleep(0.05)  # running
+        await coord.handle_message("d", "two", [])  # supersedes the run
+        await coord.handle_message("d", "three", [])  # cancel already sent: buffers
+        assert interrupted == [enqueued[0]["job"]]  # ONE interrupt, not one per text
+        await coord.job_finished("d")
+        await coord.handle_message("d", "four", [])  # lands inside the window
+        await asyncio.sleep(0.05)
+        assert len(enqueued) == 2  # exactly one rerun for the whole burst
+        assert enqueued[1]["text"] == "first\ntwo\nthree\nfour"
+
+    _run(scenario())
+
+
+def test_rerun_window_resets_on_each_send():
+    async def scenario():
+        enq, intr, enqueued, _ = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.06)
+        await coord.handle_message("d", "first", [])
+        await asyncio.sleep(0.1)  # fires -> running
+        await coord.handle_message("d", "two", [])  # supersede; window armed
+        await coord.job_finished("d")  # cancel confirmed quickly
+        await asyncio.sleep(0.04)
+        await coord.handle_message("d", "three", [])  # resets the window
+        await asyncio.sleep(0.04)  # past the FIRST window's expiry, not the reset one
+        assert len(enqueued) == 1  # not fired: the window counts from the last send
+        await asyncio.sleep(0.05)  # now past quiet since "three"
+        assert len(enqueued) == 2
+        assert enqueued[1]["text"] == "first\ntwo\nthree"
+
+    _run(scenario())
+
+
+def test_stop_mid_window_cancels_without_rerun():
+    """STOP arriving while a rerun waits out its quiet window kills the rerun —
+    whether the superseded run is still dying or already reported terminal."""
+    async def scenario():
+        enq, intr, enqueued, _ = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.02)
+        # STOP while the superseded run is still dying
+        await coord.handle_message("d", "first", [])
+        await asyncio.sleep(0.05)  # running
+        await coord.handle_message("d", "wait", [])  # supersede; window armed
+        status = await coord.handle_message("d", "STOP", [])
+        assert status == "interrupted"
+        await coord.job_finished("d")  # the cancelled run lands its terminal
+        await asyncio.sleep(0.06)
+        assert len(enqueued) == 1  # no rerun ever fires
+        assert not coord.has_pending()
+        # STOP after the terminal already landed (pure window pending)
+        await coord.handle_message("e", "first", [])
+        await asyncio.sleep(0.05)
+        await coord.handle_message("e", "wait", [])
+        await coord.job_finished("e")
+        status = await coord.handle_message("e", "CANCEL", [])
+        assert status == "discarded"
+        await asyncio.sleep(0.06)
+        assert [x["thread"] for x in enqueued] == ["d", "e"]  # no rerun on either
+
+    _run(scenario())
+
+
+def test_default_window_is_seven_seconds():
+    # Akash's number — and ONE number: the pre-run batch window and the rerun
+    # quiet window are the same timer over the same buffer
+    assert DEFAULT_WINDOW == 7.0
+
+
+def _relay_state(tmp_path, coord):
+    """AppState trimmed to what _relay_result touches (no render -> the
+    suspend machinery short-circuits before ever reaching the queue)."""
+    return AppState(config=None, store=ThreadStore(tmp_path / "t.sqlite"),
+                    queue=object(), coordinator=coord, inbox=DiskInbox(tmp_path / "ib"))
+
+
+def test_relay_discards_everything_from_a_superseded_run(tmp_path, monkeypatch):
+    """The history invariant behind send-while-running: the run is cancelled
+    BEFORE anything is saved, so no event it still emits — interim or terminal
+    — may reach the store; the terminal only does its bookkeeping, releasing
+    the rerun, whose own results then persist exactly as always."""
+    from paratrooper.web.app import _relay_result
+    from paratrooper.web.models import ResultMessage
+
+    monkeypatch.delenv("VAPID_PUBLIC_KEY", raising=False)
+
+    async def scenario():
+        enq, intr, enqueued, interrupted = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.02)
+        state = _relay_state(tmp_path, coord)
+        await coord.handle_message("d", "first", [])
+        await asyncio.sleep(0.05)  # fires -> running
+        job1 = enqueued[0]["job"]
+        await coord.handle_message("d", "wait, also this", [])  # supersedes job1
+        assert interrupted == [job1]
+        for r in [ResultMessage(job_id=job1, kind="update", payload="halfway"),
+                  ResultMessage(job_id=job1, kind="error", payload="interrupted")]:
+            await _relay_result(state, "d", r)
+        assert state.store.messages("d") == []  # nothing of the dead run saved
+        await asyncio.sleep(0.05)  # the terminal released the rerun's window
+        assert [e["text"] for e in enqueued] == ["first", "first\nwait, also this"]
+        done = ResultMessage(job_id=enqueued[1]["job"], kind="done", payload="fresh reply")
+        await _relay_result(state, "d", done)
+        [(_seq, ev)] = state.store.messages("d")
+        assert ev.kind == "done" and ev.payload == "fresh reply"  # today-path intact
+
+    _run(scenario())
+
+
+def test_relay_discards_a_done_that_lost_the_race(tmp_path, monkeypatch):
+    """cancel-before-finish, the razor's edge: the run finished and its 'done'
+    was already in flight when the new text superseded it. The cancel decision
+    preceded persistence, so that reply must still be discarded — the burst
+    ends with the ONE rerun reply, never two."""
+    from paratrooper.web.app import _relay_result
+    from paratrooper.web.models import ResultMessage
+
+    monkeypatch.delenv("VAPID_PUBLIC_KEY", raising=False)
+
+    async def scenario():
+        enq, intr, enqueued, _ = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.02)
+        state = _relay_state(tmp_path, coord)
+        await coord.handle_message("d", "first", [])
+        await asyncio.sleep(0.05)  # running
+        await coord.handle_message("d", "one more thing", [])  # supersede
+        stale = ResultMessage(job_id=enqueued[0]["job"], kind="done", payload="stale reply")
+        await _relay_result(state, "d", stale)  # the racing terminal
+        assert state.store.messages("d") == []  # never saved
+        await asyncio.sleep(0.05)
+        assert len(enqueued) == 2  # its terminal still released the rerun
+
+    _run(scenario())
 
 
 # --- uploads (4.3) ------------------------------------------------------------
@@ -896,31 +1038,6 @@ def test_requeue_front_puts_job_next_in_line():
     q = JobQueue(_R())
     _run(q.requeue_front(JobMessage(job_id="j", thread_id="d", text="x")))
     assert calls == [("rpush", "paratrooper:jobs")]  # consumption end of the list
-
-
-def test_open_pr_returns_existing_pr(monkeypatch, tmp_path):
-    """Pushing more commits to a branch that already has a PR must yield that
-    PR's URL (the phone's Publish button depends on it), not a 422 error."""
-    import httpx as _httpx
-
-    from paratrooper.agent import siterepo as sr
-
-    def fake_post(url, **kw):
-        return _httpx.Response(
-            422, text='{"message": "A pull request already exists for x."}',
-            request=_httpx.Request("POST", url),
-        )
-
-    def fake_get(url, **kw):
-        return _httpx.Response(
-            200, json=[{"html_url": "https://github.com/o/r/pull/7"}],
-            request=_httpx.Request("GET", url),
-        )
-
-    monkeypatch.setattr(sr.httpx, "post", fake_post)
-    monkeypatch.setattr(sr.httpx, "get", fake_get)
-    repo = sr.SiteRepo(tmp_path, github_token="tok", remote="https://github.com/o/r.git")
-    assert repo.open_pr("paratrooper/x", "t") == "https://github.com/o/r/pull/7"
 
 
 def test_publish_maps_error_to_409_with_detail(client, monkeypatch):

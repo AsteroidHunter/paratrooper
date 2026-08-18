@@ -1,11 +1,13 @@
 """The worker entry point: run one pin-update job through the Agent SDK.
 
 Ties Phase 3 together. Per request: lock in auth (subscription/api, no fallback),
-prepare a fresh feature branch off origin/main (3.5), build the in-process tool
-server + the custom system prompt (with the hot memory digest) + the main-guard
-PreToolUse hook, then drive a headless ``query()`` session. Progress (logs,
-screenshot, PR) is streamed to an optional callback so the web service can relay
-it over the socket; the final result + artifacts are returned.
+build the in-process tool server + the custom system prompt (with the hot memory
+digest) + the main-guard PreToolUse hook, then drive a headless ``query()``
+session. The agent does its own git/gh through Bash (branch off origin/main or
+continue an open PR's branch; the hook fences main/merges) and reports the PR
+back via the report_pr tool. Progress (logs, screenshot, PR) is streamed to an
+optional callback so the web service can relay it over the socket; the final
+result + artifacts are returned.
 
 One session per request, started fresh — matching the task-based session model.
 """
@@ -30,7 +32,7 @@ from .config import Config, ConfigError, github_token, load_config, spotify_cred
 from .hooks import make_main_guard_hook
 from .memory import Changelog, format_digest
 from .prompt import build_system_prompt
-from .siterepo import SiteRepo
+from .siterepo import write_askpass_helper
 from .tools import SERVER_NAME, ToolContext, build_tool_server
 
 DEFAULT_MODEL = "claude-opus-4-8"
@@ -106,15 +108,6 @@ async def run_job(
     async def emit(kind: str, payload: object) -> None:
         await _emit(on_event, {"job_id": job.job_id, "kind": kind, "payload": payload})
 
-    repo = SiteRepo(
-        config.site_root,
-        default_branch=config.default_branch,
-        branch_prefix=config.branch_prefix,
-        github_token=github_token(),
-        remote=config.remote,
-        git_name=config.git_name,
-        git_email=config.git_email,
-    )
     changelog = Changelog(config.changelog)
 
     try:
@@ -122,15 +115,33 @@ async def run_job(
     except ConfigError:
         spotify_creds = None  # Spotify name-search is optional; links still resolve
 
+    # GitHub auth for the agent's shell: `gh` reads GH_TOKEN directly, and git
+    # authenticates through the same askpass helper the clone bootstrap uses
+    # (token rides only in env values — never argv, never the helper file).
+    # Without a configured token (local dev) the session env stays empty and
+    # the session runs exactly as before.
+    try:
+        gh_token = github_token()
+    except ConfigError:
+        gh_token = None
+    session_env: dict[str, str] = {}
+    if gh_token:
+        session_env = {
+            "GH_TOKEN": gh_token,
+            "GIT_ASKPASS": write_askpass_helper(),
+            "PARATROOPER_GIT_ASKPASS_TOKEN": gh_token,
+            "GIT_TERMINAL_PROMPT": "0",  # fail fast, never hang on a prompt
+        }
+
     async def emit_update(text: str) -> None:
         # the post_update tool's live channel: an agent-authored interim bubble
         await emit("update", text)
 
-    # No branch yet: the agent creates one via the start_branch tool only when
-    # it actually changes the board — pure conversation never touches git.
+    # No branch/PR yet: the agent branches (or continues an open PR's branch)
+    # in its own shell only when it actually changes the board, then records
+    # the PR via report_pr — pure conversation never touches git.
     ctx = ToolContext(
         config=config,
-        repo=repo,
         changelog=changelog,
         spotify_creds=spotify_creds,
         emit_update=emit_update,
@@ -142,6 +153,9 @@ async def run_job(
         model=model,
         system_prompt=build_system_prompt(format_digest(changelog.hot_digest())),
         cwd=str(config.site_root),
+        # extra vars for the CLI subprocess (and so the agent's Bash shells);
+        # merged over the inherited worker env by the SDK transport
+        env=session_env,
         mcp_servers={SERVER_NAME: server},
         allowed_tools=tool_names + BUILTIN_TOOLS,
         # headless least-privilege: listed tools run, unlisted are denied without

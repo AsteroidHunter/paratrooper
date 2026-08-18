@@ -2,10 +2,12 @@
 
 Each tool is a thin async ``@tool`` wrapper around the SDK-independent core
 modules, bundled into one in-process MCP server via ``create_sdk_mcp_server``.
-The wrappers close over a :class:`ToolContext` (config + repo + changelog +
-the request's feature branch) so the handlers stay arg-only as the SDK expects.
-Synchronous core work is offloaded to a thread so the event loop isn't blocked;
-tools return ``{"content": [...], "is_error"?: bool}``.
+The wrappers close over a :class:`ToolContext` (config + changelog + artifacts)
+so the handlers stay arg-only as the SDK expects. Git lives elsewhere: the agent
+runs git/gh through its own Bash (fenced by the main-guard hook) and reports the
+resulting PR back through ``report_pr``. Synchronous core work is offloaded to a
+thread so the event loop isn't blocked; tools return
+``{"content": [...], "is_error"?: bool}``.
 
 Tool names the agent sees are ``mcp__paratrooper__<name>`` — :func:`build_tool_server`
 returns both the server and the matching ``allowed_tools`` list.
@@ -25,7 +27,6 @@ from ..placement import NewItem, check_overlaps, place_pin, sanity_check
 from . import images, pins, screenshot, spotify
 from .config import OPENED_ASSET, PREVIEW_ASSET, Config
 from .memory import Changelog, ChangelogEntry
-from .siterepo import SiteRepo
 
 SERVER_NAME = "paratrooper"
 
@@ -33,11 +34,10 @@ SERVER_NAME = "paratrooper"
 @dataclass
 class ToolContext:
     config: Config
-    repo: SiteRepo
     changelog: Changelog
-    # The feature branch, created lazily by the start_branch tool ONLY when the
-    # agent decides to change the board — a purely conversational message never
-    # touches git. Mutating tools require it.
+    # The PR's head branch as reported by the report_pr tool — bookkeeping for
+    # the worker's "pr" event and JobResult, not a gate. The agent branches in
+    # its own shell; a purely conversational message never touches git.
     branch: str | None = None
     spotify_creds: tuple[str, str] | None = None
     now: Any = None  # callable -> ISO timestamp; injectable for tests
@@ -60,30 +60,6 @@ def _err(message: str) -> dict:
 
 def build_tool_server(ctx: ToolContext):
     """Construct the in-process MCP server + the ``allowed_tools`` names."""
-
-    def _require_branch() -> str | None:
-        """Denial message for mutating tools used before start_branch (guards
-        against edits landing on — and being reset with — the local default
-        branch)."""
-        if ctx.branch is None:
-            return "no feature branch yet — call start_branch first (never edit before it)"
-        return None
-
-    @tool("start_branch", "Create the fresh feature branch for this change (fetches and "
-          "forks from the latest default branch). Call BEFORE editing any file/pin. "
-          "Args: slug (short kebab-case description, e.g. 'twen-new-photo').",
-          {"slug": str})
-    async def start_branch_tool(args: dict) -> dict:
-        if ctx.branch is not None:
-            return _ok({"branch": ctx.branch, "note": "already started"})
-        try:
-            branch = await anyio.to_thread.run_sync(
-                ctx.repo.prepare_branch, pins.slugify(args["slug"])
-            )
-            ctx.branch = branch
-            return _ok({"branch": branch})
-        except Exception as exc:
-            return _err(f"start_branch failed: {exc}")
 
     @tool("place_pin", "Compute non-overlapping {position,size} for a pin. Args: pin_id, "
           "aspect (asset width/height), optional rotation, optional sample(bool).",
@@ -146,9 +122,6 @@ def build_tool_server(ctx: ToolContext):
           "stage ('on-display' default | 'for-later').",
           {"inbox_key": str, "pin_id": str, "opened": bool, "stage": str})
     async def process_image_tool(args: dict) -> dict:
-        if (deny := _require_branch()) is not None:
-            return _err(deny)
-
         def _run() -> dict:
             src = ctx.config.inbox / args["inbox_key"]
             asset = OPENED_ASSET if args.get("opened") else PREVIEW_ASSET
@@ -193,9 +166,6 @@ def build_tool_server(ctx: ToolContext):
           "Args: pin_id, to ('on-display'|'off-display'|'for-later'). Source is "
           "auto-detected.", {"pin_id": str, "to": str})
     async def move_pin_tool(args: dict) -> dict:
-        if (deny := _require_branch()) is not None:
-            return _err(deny)
-
         def _run() -> dict:
             pin_id, to = args["pin_id"], args["to"]
             dst_dir = _stage_dir(to)
@@ -217,39 +187,18 @@ def build_tool_server(ctx: ToolContext):
         except Exception as exc:
             return _err(f"move_pin failed: {exc}")
 
-    @tool("git_commit", "Stage the worktree and commit. Args: message.", {"message": str})
-    async def git_commit_tool(args: dict) -> dict:
-        if (deny := _require_branch()) is not None:
-            return _err(deny)
-        try:
-            sha = await anyio.to_thread.run_sync(ctx.repo.commit_all, args["message"])
-            return _ok({"sha": sha})
-        except Exception as exc:
-            return _err(f"git_commit failed: {exc}")
-
-    @tool("git_push", "Push the current feature branch to origin (never main). No args.", {})
-    async def git_push_tool(args: dict) -> dict:
-        if (deny := _require_branch()) is not None:
-            return _err(deny)
-        try:
-            await anyio.to_thread.run_sync(ctx.repo.push_branch, ctx.branch)
-            return _ok({"pushed": ctx.branch})
-        except Exception as exc:
-            return _err(f"git_push failed: {exc}")
-
-    @tool("open_pr", "Open a PR from the feature branch into the default branch. "
-          "Args: title, optional body.", {"title": str, "body": str})
-    async def open_pr_tool(args: dict) -> dict:
-        if (deny := _require_branch()) is not None:
-            return _err(deny)
-        try:
-            url = await anyio.to_thread.run_sync(
-                ctx.repo.open_pr, ctx.branch, args["title"], args.get("body", "")
-            )
-            ctx.last_pr = url
-            return _ok({"pr": url})
-        except Exception as exc:
-            return _err(f"open_pr failed: {exc}")
+    @tool("report_pr", "Report the PR for this update so the app can show its link and "
+          "Publish button. Call it after opening a new PR, AND after pushing more "
+          "commits to an already-open one. Args: url (the PR link), branch (the PR's "
+          "head branch).", {"url": str, "branch": str})
+    async def report_pr_tool(args: dict) -> dict:
+        url = str(args.get("url", "")).strip()
+        branch = str(args.get("branch", "")).strip()
+        if not url or not branch:
+            return _err("report_pr needs both url and branch")
+        ctx.last_pr = url
+        ctx.branch = branch
+        return _ok({"recorded": {"pr": url, "branch": branch}})
 
     @tool("screenshot_board", "Build the site and screenshot the board (.cloth). Returns a "
           "PNG path. No args.", {})
@@ -288,8 +237,9 @@ def build_tool_server(ctx: ToolContext):
         return _ok({"entries": entries})
 
     @tool("append_changelog", "Record one update in the changelog (rides the PR branch). "
-          "Args: pin_id, action, summary, optional pr.",
-          {"pin_id": str, "action": str, "summary": str, "pr": str})
+          "Args: pin_id, action, summary, optional pr, optional branch (the branch "
+          "you're committing on).",
+          {"pin_id": str, "action": str, "summary": str, "pr": str, "branch": str})
     async def append_changelog_tool(args: dict) -> dict:
         ts = ctx.now() if callable(ctx.now) else _utc_now()
         entry = ChangelogEntry(
@@ -298,21 +248,18 @@ def build_tool_server(ctx: ToolContext):
             action=args["action"],
             summary=args["summary"],
             pr=args.get("pr"),
-            branch=ctx.branch,
+            branch=args.get("branch"),
         )
         written = ctx.changelog.append(entry)
         return _ok({"recorded": written})
 
     handlers = [
-        start_branch_tool,
         place_pin_tool,
         check_overlaps_tool,
         process_image_tool,
         resolve_spotify_tool,
         move_pin_tool,
-        git_commit_tool,
-        git_push_tool,
-        open_pr_tool,
+        report_pr_tool,
         screenshot_board_tool,
         post_update_tool,
         fetch_history_tool,

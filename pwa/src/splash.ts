@@ -4,7 +4,8 @@
 // <link rel="apple-touch-startup-image">, and each tag's media query has to
 // match the device's exact pixel size — there is no fixed set of images that
 // covers every iPhone, so the standard fix is to paint one on load. We draw the
-// same logo the top bar shows, centered on white, onto a canvas sized to the
+// logo art (a full-res cut-out of the same trooper the top bar shows, served as
+// /splash-logo.png), centered on white, onto a canvas sized to the
 // current screen in device pixels, then inject a link whose media query targets
 // this device. Android builds its splash from the manifest and every non-iOS
 // browser ignores these tags, so we only do the work on iOS.

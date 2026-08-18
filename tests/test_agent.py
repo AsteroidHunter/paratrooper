@@ -26,7 +26,7 @@ from paratrooper.agent.config import (
     require_env,
 )
 from paratrooper.agent.hooks import git_violation, make_main_guard_hook
-from paratrooper.agent.siterepo import GitError, SiteRepo
+from paratrooper.agent.siterepo import SiteRepo
 from paratrooper.agent.tools import ToolContext, build_tool_server
 
 # --- hooks (3.2b): the main/merge boundary -----------------------------------
@@ -55,6 +55,8 @@ from paratrooper.agent.tools import ToolContext, build_tool_server
         "git push --mirror origin",
         "git push --branches origin",  # --all's alias
         "echo hi && git push --all origin",  # compound
+        "git push origin --delete main",  # remote-delete is still a push to main
+        "git push origin :main",  # old-style remote delete of main
     ],
 )
 def test_git_violation_denies(command):
@@ -77,6 +79,18 @@ def test_git_violation_denies(command):
         "git push origin HEAD:refs/heads/paratrooper/foo",  # full ref, feature dest
         "git fetch origin main",
         "git checkout main",
+        # the prompt-driven workflow: the agent's own branch/push/PR commands
+        "git checkout -B main origin/main",  # reset local default to origin tip
+        "git checkout -B paratrooper/twen-new-photo origin/paratrooper/twen-new-photo",
+        "git push -u origin paratrooper/twen-new-photo",
+        "gh pr list --json title,headRefName,url",
+        'gh pr create --title "add twen pin" --body "adds the new twen photo"',
+        "gh pr view 7 --json url",
+        # step 1c's interrupted-attempt sweep: feature-branch cleanup, local + remote
+        "git checkout -- .",
+        "git clean -fd",
+        "git branch -D paratrooper/stale-attempt",
+        "git push origin --delete paratrooper/stale-attempt",
     ],
 )
 def test_git_violation_allows(command):
@@ -101,6 +115,21 @@ def test_hook_returns_deny_shape():
     assert deny["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
     assert call("Bash", "git status") == {}
     assert call("Write") == {}  # non-Bash tools pass through untouched
+
+
+def test_prompt_first_look_sweeps_interrupted_leftovers():
+    """WORKFLOW step 1c: an interrupted earlier run (a mid-run cancel kills the
+    session wherever it stood) can strand a dirty tree or a pushed-but-PR-less
+    branch. The standing first look must tell the agent to sweep both — and to
+    spare the open PR's branch it is continuing."""
+    from paratrooper.agent.prompt import SYSTEM_PROMPT
+
+    assert "1c." in SYSTEM_PROMPT
+    assert "`git checkout -- .`" in SYSTEM_PROMPT  # dirty tree: discard
+    assert "`git clean -fd`" in SYSTEM_PROMPT
+    assert "`git branch -D <branch>`" in SYSTEM_PROMPT  # stray local branch
+    assert "`git push origin --delete <branch>`" in SYSTEM_PROMPT  # pushed, no PR
+    assert "never clean up" in SYSTEM_PROMPT  # the open PR's branch is spared
 
 
 # --- auth (3.2): manual mode, no fallback ------------------------------------
@@ -188,9 +217,9 @@ def test_load_config_env_overrides(tmp_path, monkeypatch):
 def test_ensure_checkout_noop_and_no_remote(tmp_path):
     from paratrooper.agent.siterepo import GitError, SiteRepo
 
-    (tmp_path / ".git").mkdir()  # already a checkout
+    subprocess.run(["git", "init", "-b", "main", str(tmp_path)], check=True, capture_output=True)
     existing = SiteRepo(tmp_path, remote="https://github.com/o/r.git")
-    existing.ensure_checkout()  # no-op, no raise (already a checkout)
+    existing.ensure_checkout()  # already a checkout: no clone, no raise
     fresh = tmp_path / "fresh"
     with pytest.raises(GitError, match="no remote"):
         SiteRepo(fresh).ensure_checkout()
@@ -328,35 +357,21 @@ def test_build_tool_server(tmp_path):
     )
     ctx = ToolContext(
         config=cfg,
-        repo=SiteRepo(cfg.site_root),
         changelog=memory.Changelog(cfg.changelog),
-        branch="paratrooper/x",
     )
     server, names = build_tool_server(ctx)
     assert server["name"] == "paratrooper"
     assert "mcp__paratrooper__place_pin" in names
-    assert "mcp__paratrooper__open_pr" in names
     assert "mcp__paratrooper__move_pin" in names
-    assert "mcp__paratrooper__start_branch" in names
+    assert "mcp__paratrooper__report_pr" in names
     assert "mcp__paratrooper__post_update" in names
-    assert len(names) == 13
+    # the git tools are gone — the agent runs git/gh through its own shell now
+    for gone in ("start_branch", "git_commit", "git_push", "open_pr"):
+        assert f"mcp__paratrooper__{gone}" not in names
+    assert len(names) == 10
 
 
-# --- siterepo (pure parts) ---------------------------------------------------
-
-def test_branch_name_and_owner_repo(tmp_path):
-    repo = SiteRepo(tmp_path, remote="https://github.com/AsteroidHunter/webpage.git")
-    assert repo.branch_name("twen", "new-band") == "paratrooper/twen-new-band"
-    assert repo.branch_name("", "add-photo") == "paratrooper/add-photo"
-    assert repo.branch_name() == "paratrooper/update"
-    assert repo._owner_repo() == ("AsteroidHunter", "webpage")
-
-
-def test_push_refuses_default_branch(tmp_path):
-    repo = SiteRepo(tmp_path, default_branch="main")
-    with pytest.raises(GitError, match="default branch"):
-        repo.push_branch("main")
-
+# --- siterepo (bootstrap) ----------------------------------------------------
 
 def test_git_auth_never_embeds_token(tmp_path, monkeypatch):
     """The PAT must never ride in git argv (visible in `ps`, persisted by clone
@@ -373,29 +388,43 @@ def test_git_auth_never_embeds_token(tmp_path, monkeypatch):
         remote="https://github.com/o/r.git",
     )
     repo.ensure_checkout()
-    repo.push_branch("paratrooper/x")
-    assert len(calls) == 2
-    for cmd, env in calls:
+    # clone (authenticated), then the two identity config calls (local, no auth)
+    assert [cmd[:2] for cmd, _ in calls] == [
+        ["git", "clone"], ["git", "config"], ["git", "config"],
+    ]
+    for cmd, _ in calls:
         assert all("sekret" not in part for part in cmd)
-        assert env["PARATROOPER_GIT_ASKPASS_TOKEN"] == "sekret"
-        askpass = Path(env["GIT_ASKPASS"])
-        assert askpass.exists() and "sekret" not in askpass.read_text()
-        assert os.access(askpass, os.X_OK)
+    clone_env = calls[0][1]
+    assert clone_env["PARATROOPER_GIT_ASKPASS_TOKEN"] == "sekret"
+    askpass = Path(clone_env["GIT_ASKPASS"])
+    assert askpass.exists() and "sekret" not in askpass.read_text()
+    assert os.access(askpass, os.X_OK)
+    assert calls[1][1] is None and calls[2][1] is None  # config runs env-untouched
 
 
-def test_commit_all_uses_bot_identity(tmp_path):
+def test_ensure_checkout_pins_bot_identity(tmp_path):
+    """Identity is set once on the checkout (bootstrap), not per branch — a
+    plain `git commit` from the agent's own shell must carry the linked bot
+    attribution."""
     subprocess.run(["git", "init", "-b", "main", str(tmp_path)], check=True, capture_output=True)
-    (tmp_path / "pin.txt").write_text("hello")
     repo = SiteRepo(tmp_path)
-    sha = repo.commit_all("add pin")
-    author = repo._git("show", "-s", "--format=%an <%ae>", sha)
+    repo.ensure_checkout()
+    assert repo._git("config", "user.name") == DEFAULT_GIT_NAME
+    assert repo._git("config", "user.email") == DEFAULT_GIT_EMAIL
+    # commit the way the agent does: plain git in the checkout, no env forcing
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "add pin"],
+        cwd=tmp_path, check=True, capture_output=True, env=clean_env,
+    )
+    author = repo._git("show", "-s", "--format=%an <%ae>", "HEAD")
     assert author == f"{DEFAULT_GIT_NAME} <{DEFAULT_GIT_EMAIL}>"
 
     # self-hosters can point commits at their own app/account
-    (tmp_path / "pin.txt").write_text("bye")
-    custom = SiteRepo(tmp_path, git_name="other[bot]", git_email="1+other[bot]@users.noreply.github.com")
-    sha = custom.commit_all("edit pin")
-    assert custom._git("show", "-s", "--format=%an", sha) == "other[bot]"
+    custom = SiteRepo(tmp_path, git_name="other[bot]",
+                      git_email="1+other[bot]@users.noreply.github.com")
+    custom.ensure_checkout()
+    assert custom._git("config", "user.name") == "other[bot]"
 
 
 def test_move_pin_between_stages(tmp_path):
@@ -417,31 +446,11 @@ def test_move_pin_between_stages(tmp_path):
         pins.move_pin(on, off, "future")
 
 
-def test_mutating_tools_require_branch(tmp_path):
-    """Before start_branch, every checkout-mutating tool must refuse — an edit
-    landing on the local default branch would be wiped by the next branch prep."""
-    from paratrooper.agent.config import Config
-    from paratrooper.agent.tools import build_tool_server
-
-    cfg = Config(
-        inbox=tmp_path / "inbox",
-        site_root=tmp_path / "site",
-        pins_dir=tmp_path / "pins",
-        archive_dir=tmp_path / "arch",
-        later_dir=tmp_path / "later",
-        changelog=tmp_path / "cl.jsonl",
-        remote=None,
-        default_branch="main",
-        branch_prefix="paratrooper",
-    )
-    ctx = ToolContext(
-        config=cfg,
-        repo=SiteRepo(cfg.site_root),
-        changelog=memory.Changelog(cfg.changelog),
-    )
-    assert ctx.branch is None
-    # rebuild to capture handlers; call the mutating ones directly
+def _tool_handlers(ctx) -> dict:
+    """Build the tool server while capturing each handler by bare name, so
+    tests can call the tools directly."""
     import paratrooper.agent.tools as tools_mod
+    from paratrooper.agent.tools import build_tool_server
 
     handlers = {}
     orig = tools_mod.create_sdk_mcp_server
@@ -456,26 +465,13 @@ def test_mutating_tools_require_branch(tmp_path):
         build_tool_server(ctx)
     finally:
         tools_mod.create_sdk_mcp_server = orig
-
-    for name, args in [
-        ("git_commit", {"message": "x"}),
-        ("git_push", {}),
-        ("open_pr", {"title": "x"}),
-        ("move_pin", {"pin_id": "p", "to": "off-display"}),
-        ("process_image", {"inbox_key": "k", "pin_id": "p"}),
-    ]:
-        out = asyncio.run(handlers[name](args))
-        assert out.get("is_error"), f"{name} ran without a branch"
-        assert "start_branch" in out["content"][0]["text"]
+    return handlers
 
 
-def test_post_update_tool(tmp_path):
-    """post_update pushes an interim 'update' through the live channel; empty
-    text is refused; without a channel (CLI/offline runs) it no-ops quietly."""
-    import paratrooper.agent.tools as tools_mod
+def _tool_cfg(tmp_path):
     from paratrooper.agent.config import Config
 
-    cfg = Config(
+    return Config(
         inbox=tmp_path / "inbox",
         site_root=tmp_path / "site",
         pins_dir=tmp_path / "pins",
@@ -486,30 +482,89 @@ def test_post_update_tool(tmp_path):
         default_branch="main",
         branch_prefix="paratrooper",
     )
+
+
+def test_edit_tools_run_without_branch(tmp_path):
+    """Branching moved into the agent's own shell (prompt-driven), so the edit
+    tools must run without any in-process branch state — no gate left."""
+    cfg = _tool_cfg(tmp_path)
+    cfg.inbox.mkdir(parents=True)
+    Image.new("RGB", (64, 32), "navy").save(cfg.inbox / "k.png")
+    pins.write_pin(cfg.later_dir, "future", {
+        "type": "text", "text": "v",
+        "position": {"x": 50, "y": 50}, "size": {"w": 10, "h": 10},
+    })
+    ctx = ToolContext(config=cfg, changelog=memory.Changelog(cfg.changelog))
+    assert ctx.branch is None
+    handlers = _tool_handlers(ctx)
+
+    out = asyncio.run(handlers["process_image"]({"inbox_key": "k.png", "pin_id": "p1"}))
+    assert not out.get("is_error"), out
+    assert (cfg.pins_dir / "p1" / "preview.webp").is_file()
+
+    out = asyncio.run(handlers["move_pin"]({"pin_id": "future", "to": "on-display"}))
+    assert not out.get("is_error"), out
+    assert (cfg.pins_dir / "future" / "index.json").is_file()
+
+
+def test_report_pr_records_url_and_branch(tmp_path):
+    """report_pr is the one seam left between the agent's shell git and the
+    app: the url + branch it records are exactly what the worker's 'pr' event
+    (and so the Publish button) is built from."""
+    ctx = ToolContext(config=_tool_cfg(tmp_path), changelog=memory.Changelog(tmp_path / "cl.jsonl"))
+    handlers = _tool_handlers(ctx)
+
+    out = asyncio.run(handlers["report_pr"]({
+        "url": "https://github.com/o/r/pull/7", "branch": "paratrooper/twen-new-photo",
+    }))
+    assert not out.get("is_error")
+    assert ctx.last_pr == "https://github.com/o/r/pull/7"
+    assert ctx.branch == "paratrooper/twen-new-photo"
+
+    # missing pieces are loud — a silent no-op here kills the Publish button
+    out = asyncio.run(handlers["report_pr"]({"url": "", "branch": "x"}))
+    assert out.get("is_error")
+    out = asyncio.run(handlers["report_pr"]({"url": "https://github.com/o/r/pull/7"}))
+    assert out.get("is_error")
+
+
+def test_append_changelog_branch_is_explicit(tmp_path):
+    """The changelog no longer tags entries from in-process branch state — the
+    agent passes the branch it created in its own shell (or omits it)."""
+    cfg = _tool_cfg(tmp_path)
+    ctx = ToolContext(
+        config=cfg, changelog=memory.Changelog(cfg.changelog),
+        now=lambda: "2026-08-17T00:00:00+00:00",
+    )
+    handlers = _tool_handlers(ctx)
+
+    out = asyncio.run(handlers["append_changelog"]({
+        "pin_id": "twen", "action": "add", "summary": "s",
+        "branch": "paratrooper/twen-new-photo",
+    }))
+    assert not out.get("is_error")
+    assert memory.Changelog(cfg.changelog).read_all()[-1]["branch"] == "paratrooper/twen-new-photo"
+
+    # no branch passed -> untagged entry; ctx.branch must never leak in
+    ctx.branch = "paratrooper/should-not-leak"
+    asyncio.run(handlers["append_changelog"]({"pin_id": "twen", "action": "edit", "summary": "s2"}))
+    assert "branch" not in memory.Changelog(cfg.changelog).read_all()[-1]
+
+
+def test_post_update_tool(tmp_path):
+    """post_update pushes an interim 'update' through the live channel; empty
+    text is refused; without a channel (CLI/offline runs) it no-ops quietly."""
     sent: list[str] = []
 
     async def channel(text: str) -> None:
         sent.append(text)
 
     ctx = ToolContext(
-        config=cfg,
-        repo=SiteRepo(cfg.site_root),
-        changelog=memory.Changelog(cfg.changelog),
+        config=_tool_cfg(tmp_path),
+        changelog=memory.Changelog(tmp_path / "cl.jsonl"),
         emit_update=channel,
     )
-    handlers = {}
-    orig = tools_mod.create_sdk_mcp_server
-
-    def capture(name, version, tools):
-        for t in tools:
-            handlers[t.name] = t.handler
-        return orig(name=name, version=version, tools=tools)
-
-    tools_mod.create_sdk_mcp_server = lambda name, version, tools: capture(name, version, tools)
-    try:
-        build_tool_server(ctx)
-    finally:
-        tools_mod.create_sdk_mcp_server = orig
+    handlers = _tool_handlers(ctx)
 
     out = asyncio.run(handlers["post_update"]({"text": "On it, adding the pin now."}))
     assert not out.get("is_error")
@@ -529,7 +584,6 @@ def test_run_job_wires_live_update_channel(tmp_path, monkeypatch):
     post_update sends has to reach on_event as an 'update' result mid-job,
     before the final 'done'."""
     import paratrooper.agent.worker as worker_mod
-    from paratrooper.agent.config import Config
 
     captured: dict = {}
     events: list[dict] = []
@@ -545,23 +599,13 @@ def test_run_job_wires_live_update_channel(tmp_path, monkeypatch):
             yield
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
-    monkeypatch.setattr(worker_mod, "github_token", lambda: "gh-test-token")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
     monkeypatch.setattr(worker_mod, "query", fake_query)
 
-    cfg = Config(
-        inbox=tmp_path / "inbox",
-        site_root=tmp_path / "site",
-        pins_dir=tmp_path / "pins",
-        archive_dir=tmp_path / "arch",
-        later_dir=tmp_path / "later",
-        changelog=tmp_path / "cl.jsonl",
-        remote=None,
-        default_branch="main",
-        branch_prefix="paratrooper",
-    )
     job = worker_mod.Job(job_id="j1", thread_id="t1", text="add the pin")
-    result = asyncio.run(worker_mod.run_job(job, config=cfg, on_event=events.append))
+    result = asyncio.run(
+        worker_mod.run_job(job, config=_tool_cfg(tmp_path), on_event=events.append)
+    )
 
     assert result.status == "done"
     kinds = [e["kind"] for e in events]
@@ -569,6 +613,108 @@ def test_run_job_wires_live_update_channel(tmp_path, monkeypatch):
     assert kinds.index("update") < kinds.index("done")
     update = next(e for e in events if e["kind"] == "update")
     assert update == {"job_id": "j1", "kind": "update", "payload": "On it."}
+
+
+def test_run_job_emits_pr_event_from_reported_pr(tmp_path, monkeypatch):
+    """The Publish button path end to end at the worker seam: whatever the
+    report_pr tool recorded on the context must leave run_job as a 'pr' event
+    carrying {branch, url} and land on the JobResult."""
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {}
+    events: list[dict] = []
+
+    def fake_build_tool_server(ctx):
+        captured["ctx"] = ctx
+        return {"name": "paratrooper"}, []
+
+    async def fake_query(*, prompt, options):
+        # stand-in for the agent calling report_pr after its shell git/gh work
+        captured["ctx"].last_pr = "https://github.com/o/r/pull/9"
+        captured["ctx"].branch = "paratrooper/twen-new-photo"
+        if False:
+            yield
+
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
+    monkeypatch.setattr(worker_mod, "query", fake_query)
+
+    job = worker_mod.Job(job_id="j2", thread_id="t1", text="make it bigger")
+    result = asyncio.run(
+        worker_mod.run_job(job, config=_tool_cfg(tmp_path), on_event=events.append)
+    )
+
+    pr = next(e for e in events if e["kind"] == "pr")
+    assert pr["payload"] == {
+        "branch": "paratrooper/twen-new-photo",
+        "url": "https://github.com/o/r/pull/9",
+    }
+    assert result.pr == "https://github.com/o/r/pull/9"
+    assert result.branch == "paratrooper/twen-new-photo"
+
+
+def test_run_job_hands_github_auth_to_the_session_env(tmp_path, monkeypatch):
+    """With the PAT configured, the session options must carry what git/gh
+    actually read — GH_TOKEN plus the askpass wiring — with the token only in
+    env values, never inside the helper file (it echoes the var by name)."""
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {}
+
+    def fake_build_tool_server(ctx):
+        return {"name": "paratrooper"}, []
+
+    async def fake_query(*, prompt, options):
+        captured["options"] = options
+        if False:
+            yield
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "ghp-sekret")
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
+    monkeypatch.setattr(worker_mod, "query", fake_query)
+
+    job = worker_mod.Job(job_id="j3", thread_id="t1", text="push the change")
+    result = asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path)))
+
+    assert result.status == "done"
+    env = captured["options"].env
+    assert env["GH_TOKEN"] == "ghp-sekret"  # gh's native variable
+    assert env["PARATROOPER_GIT_ASKPASS_TOKEN"] == "ghp-sekret"
+    askpass = Path(env["GIT_ASKPASS"])
+    assert askpass.exists() and os.access(askpass, os.X_OK)
+    body = askpass.read_text()
+    assert "PARATROOPER_GIT_ASKPASS_TOKEN" in body  # echoes by name...
+    assert "ghp-sekret" not in body  # ...never by value
+
+
+def test_run_job_without_github_token_skips_auth_env(tmp_path, monkeypatch):
+    """No PAT (local dev) must mean no partial wiring: the session env stays
+    empty and the job still runs cleanly."""
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {}
+
+    def fake_build_tool_server(ctx):
+        return {"name": "paratrooper"}, []
+
+    async def fake_query(*, prompt, options):
+        captured["options"] = options
+        if False:
+            yield
+
+    monkeypatch.delenv("PARATROOPER_GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
+    monkeypatch.setattr(worker_mod, "query", fake_query)
+
+    job = worker_mod.Job(job_id="j4", thread_id="t1", text="just chatting")
+    result = asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path)))
+
+    assert result.status == "done"
+    env = captured["options"].env
+    for key in ("GH_TOKEN", "GIT_ASKPASS", "PARATROOPER_GIT_ASKPASS_TOKEN", "GIT_TERMINAL_PROMPT"):
+        assert key not in env
 
 
 def test_is_text_delta_classifier():
