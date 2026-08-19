@@ -1,6 +1,6 @@
 // Pins for the jump-chevron behavior (src/downbtn.ts) — the state machine
 // that surfaces the scroll-down button ONLY after a scroll pause while away
-// from the bottom, plus the tap's cruise-then-brake glide plan. Pure with an
+// from the bottom, plus the tap's damped-spring glide plan. Pure with an
 // injectable pause window, so every scenario runs on fake timers: show on 4s
 // of stillness while away, every scroll restarting that window, staying up
 // until the bottom takes it down, and never appearing at the bottom — a
@@ -8,10 +8,11 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  GLIDE_BRAKE_SCREENS,
+  GLIDE_DAMPING_RATIO,
+  GLIDE_DT_MAX,
   GLIDE_MAX_SPEED,
-  GLIDE_SOFT_FLOOR,
-  GLIDE_SOFT_SCREENS,
+  GLIDE_SNAP_SPEED,
+  GLIDE_SPRING_SCREENS,
   PAUSE_MS,
   createDownButton,
   createGlide,
@@ -148,107 +149,122 @@ describe("at the bottom it never appears", () => {
   });
 });
 
-describe("createGlide — flat cruise while far, distance-proportional brake near the landing", () => {
+describe("createGlide — a capped damped spring: flat cruise far out, one physical settle", () => {
   const VH = 700; // the driver feeds the real container height every frame
-  const ZONE = GLIDE_BRAKE_SCREENS * VH; // the slowdown may only show inside this
   const CAP = GLIDE_MAX_SPEED * 16; // full-speed px per 60fps frame
 
-  it("the tuning: 25px/ms cruise, two-screen brake, half-strength landing ramp", () => {
-    expect(GLIDE_MAX_SPEED).toBe(25);
-    expect(GLIDE_BRAKE_SCREENS).toBe(2);
-    expect(GLIDE_SOFT_SCREENS).toBe(0.5); // the extra softening spans the final half screen
-    expect(GLIDE_SOFT_FLOOR).toBe(0.5); // ...easing the brake constant to half at the sill
-  });
+  // drive one glide over fixed frames until it lands; the per-frame ledger is
+  // the proof material for every claim below
+  function ride(start: number, vh = VH, dt = 16) {
+    const g = createGlide(0);
+    let remaining = start;
+    const steps: number[] = [];
+    const remainingBefore: number[] = [];
+    for (let ms = dt; !g.done() && steps.length < 5000; ms += dt) {
+      remainingBefore.push(remaining);
+      const s = g.step(ms, remaining, vh);
+      steps.push(s);
+      remaining -= s;
+    }
+    return { g, remaining, steps, remainingBefore };
+  }
 
-  it("far away the speed is capped flat — the step is distance-blind", () => {
-    expect(createGlide(0).step(16, 50_000, VH)).toBe(CAP);
-    expect(createGlide(0).step(16, ZONE + 1, VH)).toBe(CAP); // still outside: same step
+  it("the tuning: 25px/ms cap, 1.7-screen spring reach, damping held above critical", () => {
+    expect(GLIDE_MAX_SPEED).toBe(25);
+    expect(GLIDE_SPRING_SCREENS).toBe(1.7);
+    expect(GLIDE_DAMPING_RATIO).toBe(1.2);
+    expect(GLIDE_DAMPING_RATIO).toBeGreaterThanOrEqual(1); // ζ<1 would ring — never
+    expect(GLIDE_SNAP_SPEED).toBeLessThanOrEqual(0.1); // the snap fires only at a crawl
   });
 
   it("frame zero moves nothing: the tap's own frame is not a hop", () => {
     expect(createGlide(1000).step(1000, 5000, VH)).toBe(0);
   });
 
-  it("braking onset sits exactly two viewport heights out", () => {
-    expect(createGlide(0).step(16, ZONE, VH)).toBe(CAP); // the crossover: both rules agree
-    expect(createGlide(0).step(16, ZONE - 1, VH)).toBeLessThan(CAP); // one px inside: braking
-    // ZONE/2 is a full viewport out — above the landing ramp, still plain ∝ remaining
-    expect(createGlide(0).step(16, ZONE / 2, VH)).toBeCloseTo(CAP / 2, 8);
+  it("far away the advance pins flat at the cap — the cruise is distance-blind", () => {
+    // a screens-long stretch: the spring's pull saturates the cap immediately
+    expect(createGlide(0).step(16, 50_000, VH)).toBe(CAP);
+    const far = ride(20_000);
+    const cruise = far.steps.filter((s) => s === CAP);
+    expect(cruise.length).toBeGreaterThan(20); // most of the ride is exact-cap frames
+    expect(far.steps[0]).toBe(CAP); // pinned from the first frame, no wind-up hop
+    expect(Math.max(...far.steps)).toBe(CAP); // and nothing ever outruns it
   });
 
-  describe("the landing ramp — the final half screen brakes down to half strength", () => {
-    const SOFT = GLIDE_SOFT_SCREENS * VH; // 350: where the extra softening begins
-    const plain = (r: number) => ((GLIDE_MAX_SPEED * r) / ZONE) * 16; // the old one-k step
-
-    it("joins the plain rule continuously at the ramp's edge — no felt hitch", () => {
-      expect(createGlide(0).step(16, SOFT, VH)).toBeCloseTo(plain(SOFT), 8);
-      expect(createGlide(0).step(16, SOFT + 1, VH)).toBeCloseTo(plain(SOFT + 1), 8);
-    });
-
-    it("inside, the constant eases linearly: 3/4 strength mid-ramp, ~half at the sill", () => {
-      expect(createGlide(0).step(16, SOFT / 2, VH)).toBeCloseTo(plain(SOFT / 2) * 0.75, 8);
-      const nearSill = createGlide(0).step(16, 10, VH);
-      expect(nearSill).toBeCloseTo(plain(10) * (0.5 + 0.5 * (10 / SOFT)), 8);
-      expect(nearSill / plain(10)).toBeLessThan(0.52); // the approach speed halved vs the old law
-    });
-
-    it("the last viewport-height now takes 36 frames (576ms) — 21 (336ms) before", () => {
-      const g = createGlide(0);
-      let r = VH;
-      let frames = 0;
-      for (let ms = 16; !g.done() && frames < 1000; ms += 16) {
-        r -= g.step(ms, r, VH);
-        frames++;
+  it("NO overshoot, cap held, exact landing — a sweep of rides, viewports, clocks", () => {
+    const clocks: Array<(i: number) => number> = [
+      () => 16,
+      () => 16.667,
+      (i) => (i % 3 === 0 ? 33.4 : 8.3), // a jittery main thread
+      (i) => (i === 20 ? 400 : 16.667), // a background-tab stall mid-ride
+    ];
+    for (const start of [80, 500, 1200, 2500, 6340, 20_000, 120_000]) {
+      for (const vh of [568, 700, 844]) {
+        for (const clock of clocks) {
+          const g = createGlide(0);
+          let remaining = start;
+          let now = 0;
+          for (let i = 0; !g.done() && i < 5000; i++) {
+            const dt = clock(i);
+            now += dt;
+            const s = g.step(now, remaining, vh);
+            const dtSeen = Math.min(dt, GLIDE_DT_MAX); // the plan's own stall ceiling
+            expect(s).toBeGreaterThanOrEqual(0);
+            expect(s).toBeLessThanOrEqual(GLIDE_MAX_SPEED * dtSeen + 1e-9); // cap, every frame
+            remaining -= s;
+            expect(remaining).toBeGreaterThanOrEqual(0); // position NEVER passes the target
+          }
+          expect(g.done()).toBe(true);
+          expect(remaining).toBe(0); // exact landing, no sub-pixel residue
+        }
       }
-      expect(r).toBe(0); // still an exact landing, just a softer one
-      expect(frames).toBe(36); // the old single-k law did the same stretch in 21
-    });
-  });
-
-  it("inside the zone every frame is slower than the last — monotonic brake", () => {
-    const g = createGlide(0);
-    let remaining = ZONE;
-    let prev = Number.POSITIVE_INFINITY;
-    for (let ms = 16; remaining > 1; ms += 16) {
-      const step = g.step(ms, remaining, VH);
-      expect(step).toBeGreaterThan(0);
-      expect(step).toBeLessThan(prev);
-      prev = step;
-      remaining -= step;
     }
   });
 
-  it("a long ride is cruise-then-brake and lands EXACTLY — never a teleport", () => {
+  it("a stalled tab's huge dt integrates as at most the ceiling — no teleport frame", () => {
     const g = createGlide(0);
-    let remaining = 4300; // a typical far-up jump: several screens
-    const steps: number[] = [];
-    for (let ms = 16; !g.done() && steps.length < 1000; ms += 16) {
+    g.step(16, 50_000, VH); // clean first frame
+    expect(g.step(16 + 400, 49_600, VH)).toBe(GLIDE_MAX_SPEED * GLIDE_DT_MAX); // not 25·400
+  });
+
+  it("the brake is one monotone slide: once off the cap for good, every frame is slower", () => {
+    const { steps, remaining } = ride(6340);
+    expect(remaining).toBe(0);
+    // the ride's shape: a wind-up frame or two, the capped cruise, then decay —
+    // the monotone claim starts where the cap lets go
+    const brakeStart = steps.lastIndexOf(Math.max(...steps));
+    expect(Math.max(...steps)).toBe(CAP); // this long a ride does reach the cruise cap
+    // bar the final frame — the sub-pixel exact-landing snap takes what's left
+    for (let i = brakeStart + 1; i < steps.length - 1; i++) {
+      expect(steps[i]).toBeLessThan(steps[i - 1]); // no surge, no shudder, no bounce
+    }
+  });
+
+  it("velocity carries across a retarget: content growing mid-flight bends the ride", () => {
+    const g = createGlide(0);
+    let remaining = 2000;
+    let ms = 0;
+    let speed = 0;
+    while (remaining >= 600) {
+      ms += 16;
       const s = g.step(ms, remaining, VH);
-      steps.push(s);
+      speed = s / 16;
       remaining -= s;
     }
-    expect(remaining).toBe(0); // exact landing, no sub-pixel residue
-    expect(g.done()).toBe(true);
-    expect(Math.max(...steps)).toBe(CAP); // nothing ever outruns the cruise cap
-    const cruise = steps.filter((s) => s === CAP);
-    expect(cruise.length).toBeGreaterThanOrEqual(7); // (4300 − ZONE) / CAP flat-out frames
-    // once braking begins it only slows, bar the final sub-pixel landing snap
-    const brake = steps.slice(cruise.length, -1);
-    for (let i = 1; i < brake.length; i++) {
-      expect(brake[i]).toBeLessThan(brake[i - 1]);
-    }
-  });
-
-  it("content growing mid-flight re-opens the throttle, still landing on the NEW bottom", () => {
-    const g = createGlide(0);
-    let remaining = 600; // deep in the brake zone, easing in
-    const crawl = g.step(16, remaining, VH);
-    expect(crawl).toBeLessThan(CAP);
-    remaining -= crawl;
-    remaining += 5000; // a tall message lands: the bottom leaps away again
-    expect(g.step(32, remaining, VH)).toBe(CAP); // back to flat cruise, still capped
-    remaining -= CAP;
-    let ms = 32;
+    expect(speed).toBeLessThan(8); // deep in the approach, crawling
+    remaining += 3000; // a tall message lands: the bottom leaps away again
+    ms += 16;
+    const after1 = g.step(ms, remaining, VH) / 16;
+    remaining -= after1 * 16;
+    ms += 16;
+    const after2 = g.step(ms, remaining, VH) / 16;
+    remaining -= after2 * 16;
+    // the throttle re-opens through the spring, not a jump cut: speed climbs
+    // from the carried value over frames (the old law leapt straight to 25)
+    expect(after1).toBeGreaterThan(speed);
+    expect(after1).toBeLessThan(16);
+    expect(after2).toBeGreaterThan(after1);
+    expect(after2).toBeLessThanOrEqual(GLIDE_MAX_SPEED);
     for (let i = 0; i < 1000 && !g.done(); i++) {
       ms += 16;
       remaining -= g.step(ms, remaining, VH);
@@ -256,9 +272,40 @@ describe("createGlide — flat cruise while far, distance-proportional brake nea
     expect(remaining).toBe(0); // the retargeted run still ends exactly
   });
 
+  it("a bottom that moved UP mid-cruise lands NOW, exactly, never past", () => {
+    const g = createGlide(0);
+    let ms = 0;
+    let remaining = 8000;
+    for (let i = 0; i < 5; i++) {
+      ms += 16;
+      remaining -= g.step(ms, remaining, VH); // at full cruise
+    }
+    ms += 16;
+    expect(g.step(ms, 50, VH)).toBe(50); // collapsed content: the landing is the remaining, whole
+    expect(g.done()).toBe(true);
+    expect(g.step(ms + 16, 0, VH)).toBe(0); // and the run stays over
+  });
+
+  it("the settle through the final viewport of a long ride: 592ms — 576ms before", () => {
+    // the same fixed-frame sim the soften ramp was measured with (6340px ride):
+    // frames spent under one viewport-height of remaining, at 16ms each
+    const { steps, remaining, remainingBefore } = ride(6340);
+    expect(remaining).toBe(0);
+    const inside = remainingBefore.filter((r) => r <= VH).length;
+    expect(inside).toBe(37); // 592ms; the retired soften ramp did 36 (576ms)
+    // and the touch itself is a crawl, not a slam
+    expect(steps[steps.length - 1] / 16).toBeLessThan(0.1);
+  });
+
+  it("from rest one viewport out the ride takes 40 frames (640ms) — 36 before", () => {
+    const { steps, remaining } = ride(VH);
+    expect(remaining).toBe(0); // still an exact landing, just a softer one
+    expect(steps.length).toBe(40); // the soften ramp did 36; the single-k law 21
+  });
+
   it("a user gesture cancels mid-flight: over immediately, steps stop dead", () => {
     const g = createGlide(0);
-    expect(g.step(16, 5000, VH)).toBe(CAP);
+    expect(g.step(16, 5000, VH)).toBeGreaterThan(0);
     expect(g.done()).toBe(false);
     g.cancel();
     expect(g.cancelled()).toBe(true);

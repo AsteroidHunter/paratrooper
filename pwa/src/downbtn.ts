@@ -62,27 +62,32 @@ export function createDownButton(
   return { scrolled, bottomReached, visible: () => shown };
 }
 
-// Tap-to-bottom glide plan — constant full speed while far away, braking only
-// near the landing (the fixed-400ms-beat version scaled its speed with the
-// distance, so a far jump blurred past and a short one crawled). Each frame's
-// velocity is min(maxSpeed, k·remaining) with k = maxSpeed / (BRAKE_SCREENS
-// viewports): beyond that crossover the cap wins (flat cruise, distance-blind),
-// inside it speed falls in proportion to what's left — the exponential-feeling
-// approach that eases to a stop. The final approach brakes harder still
-// (device test: the single-k landing still arrived a bit hot): inside the
-// last SOFT_SCREENS of a viewport the constant itself eases linearly from
-// full strength at the ramp's edge down to SOFT_FLOOR of it at the sill, so
-// the near-bottom speed is half the plain rule's — continuous where the ramp
-// begins, monotone all the way in, cruise and brake onset untouched. Pure and
-// position-less: the wiring feeds it frame times, the live remaining
-// distance, and the container height every frame, so content landing
-// mid-glide simply grows `remaining` and the plan re-opens the throttle,
-// still ending exactly at the true bottom. cancel() is the user taking the
-// scroll back mid-flight — the run reports done and the wiring stops writing.
+// Tap-to-bottom glide plan — a weight on a damped spring (device verdict on
+// the piecewise cruise/brake/soften stack: do the motion right). The state is
+// (remaining, velocity) and the one law is Hooke's with damping,
+// x″ = −k·x − c·x′ on the remaining distance, with the damping ratio
+// ζ = c/(2√k) held above critical: an at-least-critically damped spring
+// cannot cross its rest point from this side of it, so no overshoot and no
+// bounce ever, by construction rather than by clamp. Each frame integrates
+// the CLOSED-FORM two-mode solution over the real dt (no Euler step to blow
+// up; dt itself clamped so a background tab's stalled frame can't teleport),
+// then caps: velocity and the frame's advance never exceed maxSpeed — the
+// capped spring, so a far jump still cruises flat at the old full speed and
+// only the approach changes. Stiffness comes from the live viewport
+// (ω = maxSpeed / (SPRING_SCREENS·height)), tuned so the settle through the
+// final screen runs a touch gentler than the retired soften ramp. Pure and
+// position-less as before: the wiring feeds frame times, live remaining, and
+// container height every frame, so content landing mid-glide simply grows
+// `remaining` and the spring stretches — velocity carries over, the same
+// flight bends instead of restarting, and it still ends exactly at the true
+// bottom (converge, then snap once under a pixel and nearly still). cancel()
+// is the user taking the scroll back mid-flight — the run reports done and
+// the wiring stops writing.
 export const GLIDE_MAX_SPEED = 25; // px per ms of full-speed cruise
-export const GLIDE_BRAKE_SCREENS = 2; // slowdown shows within this many viewports
-export const GLIDE_SOFT_SCREENS = 0.5; // the landing ramp spans this last fraction of a viewport
-export const GLIDE_SOFT_FLOOR = 0.5; // the brake constant's strength at the sill itself
+export const GLIDE_SPRING_SCREENS = 1.7; // ω = maxSpeed / (this · viewport): the spring's reach
+export const GLIDE_DAMPING_RATIO = 1.2; // ζ, kept above 1 (critical): overshoot is impossible
+export const GLIDE_DT_MAX = 48; // ms of frame time integrated at most — a stalled tab's ceiling
+export const GLIDE_SNAP_SPEED = 0.05; // px/ms; under a pixel out and this slow = landed
 
 export interface Glide {
   /** px to advance toward the landing this frame; 0 once landed or cancelled */
@@ -95,30 +100,38 @@ export interface Glide {
 
 export function createGlide(startMs: number, maxSpeed: number = GLIDE_MAX_SPEED): Glide {
   let lastMs = startMs;
+  let velocity = 0; // px/ms toward the bottom — the spring's carried state
   let landed = false;
   let cancelled = false;
   return {
     step(nowMs: number, remaining: number, viewportHeight: number): number {
-      // rAF stamps the frame's vsync, which can predate the tap's own now()
-      const dt = Math.max(nowMs - lastMs, 0);
+      // rAF stamps the frame's vsync, which can predate the tap's own now();
+      // the ceiling keeps a background tab's stalled frame from teleporting
+      const dt = Math.min(Math.max(nowMs - lastMs, 0), GLIDE_DT_MAX);
       lastMs = nowMs;
       if (landed || cancelled) return 0;
-      // the proportional rule only ever approaches the bottom, never touches
-      // it — inside a sub-pixel (or past a bottom that moved up) land NOW
-      if (remaining <= 1) {
+      // the spring only ever converges on the bottom, never touches it — once
+      // under a pixel and nearly still (or past a bottom that moved up) land
+      // NOW, exactly
+      if (remaining <= 0 || (remaining <= 1 && velocity <= GLIDE_SNAP_SPEED)) {
         landed = true;
         return remaining;
       }
-      const softZone = GLIDE_SOFT_SCREENS * viewportHeight;
-      const soften =
-        remaining >= softZone
-          ? 1
-          : GLIDE_SOFT_FLOOR + (1 - GLIDE_SOFT_FLOOR) * (remaining / softZone);
-      const speed = Math.min(
-        maxSpeed,
-        (maxSpeed * remaining * soften) / (GLIDE_BRAKE_SCREENS * viewportHeight),
-      );
-      const step = Math.min(remaining, speed * dt); // a stalled tab's huge dt must not overshoot
+      const omega = maxSpeed / (GLIDE_SPRING_SCREENS * viewportHeight);
+      const spread = Math.sqrt(GLIDE_DAMPING_RATIO * GLIDE_DAMPING_RATIO - 1);
+      const fast = omega * (GLIDE_DAMPING_RATIO + spread);
+      const slow = omega * (GLIDE_DAMPING_RATIO - spread);
+      // exact overdamped solution of x″ = −k·x − c·x′ across this frame
+      // (x = remaining, x′ = −velocity): r(t) = a·e^(−fast·t) + b·e^(−slow·t)
+      const a = (velocity - slow * remaining) / (fast - slow);
+      const b = (fast * remaining - velocity) / (fast - slow);
+      const decayFast = Math.exp(-fast * dt);
+      const decaySlow = Math.exp(-slow * dt);
+      const springRemaining = a * decayFast + b * decaySlow;
+      // the capped spring: a huge displacement may not stretch speed past the
+      // cruise cap — velocity state and this frame's advance both saturate
+      velocity = Math.min(fast * a * decayFast + slow * b * decaySlow, maxSpeed);
+      const step = Math.min(remaining - springRemaining, maxSpeed * dt, remaining);
       if (step === remaining) landed = true;
       return step;
     },

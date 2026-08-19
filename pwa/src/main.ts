@@ -32,7 +32,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.84"; // adaptive window-arrow experiment deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.85"; // damped-spring glide deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -527,7 +527,7 @@ function renderChat(): void {
     downBtn.bottomReached(); // hides now; the landing's own scroll event agrees
     setFollowTail(true, "jump");
     // one continuous ride (downbtn.ts): flat cruise speed however far up,
-    // braking only inside two screens of the landing, never a teleport step.
+    // then a damped-spring settle into the landing, never a teleport step.
     // Mid-glide scroll events read !nearBottom and flip followTail off, so the
     // followTail-gated instant pins cannot cut the glide short; the landing's
     // own scroll event re-derives followTail=true as usual.
@@ -769,8 +769,8 @@ function scrollToBottom(force = false): void {
 }
 
 // the jump tap's glide: one rAF-driven ride, full cruise speed while far out,
-// braking inside two screens of the landing (downbtn.ts owns the velocity
-// rule) — never behavior:"smooth", whose duration scales with distance and
+// settling on a damped spring (downbtn.ts owns the physics)
+// — never behavior:"smooth", whose duration scales with distance and
 // sails for seconds over a long thread, and never a teleport hop. The live
 // bottom and container height are re-read every frame, so content landing
 // mid-glide grows the remaining distance and the plan re-opens the throttle,
