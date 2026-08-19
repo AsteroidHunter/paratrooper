@@ -12,11 +12,12 @@ from io import BytesIO
 
 from PIL import Image, ImageOps
 
-THUMB_EDGE = 320
+THUMB_EDGE = 1280
 
 
 def make_thumbnail(data: bytes) -> tuple[bytes, int, int] | None:
-    """~320px-long-edge webp preview as ``(bytes, width, height)``, or None when
+    """~1280px-long-edge webp preview (retina-crisp in the bubble, decent zoomed;
+    the full upload still expires, so this is the surviving pixel record) as ``(bytes, width, height)``, or None when
     the bytes aren't an image (non-image uploads simply keep their 📎 chip in
     history). The dimensions ride to the client with each message so it can
     reserve the image's box before any pixels arrive — an unreserved image
