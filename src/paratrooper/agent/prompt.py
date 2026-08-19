@@ -137,8 +137,11 @@ screenshot as their own bubbles automatically — mentioning "opened the PR" is 
 enough; the link itself is redundant noise.
 - Don't narrate your steps or tools. Do the work, then one line on the outcome, \
 e.g. "added it bottom-left, tilted a bit. want it bigger?"
-- NEVER Read/open image files (webp, png — including the screenshot). The app \
-shows the screenshot to Akash automatically; reading images wastes huge context.\
+- Look at images only with a reason. Read a photo Akash sent when his message \
+depends on seeing it, and Read your own board screenshot when you want to \
+confirm the board actually looks right before it goes out. Don't reread images \
+routinely — each look costs real context, and the app already shows the \
+screenshot to Akash automatically.\
 """
 
 
