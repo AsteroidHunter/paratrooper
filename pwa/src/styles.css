@@ -463,17 +463,27 @@ html, body {
    reserved before decode, so a landing photo can never shove the scroll */
 .msg.shot img { max-width: 100%; height: auto; border-radius: 14px; display: block; cursor: zoom-in; }
 
-/* tap-to-zoom overlay */
+/* tap-to-zoom overlay: the backdrop is its own sheet so it can fade while the
+   photo copy flies (opacity on .lightbox itself would drag the copy with it).
+   The copy rests grid-centered under the max-* fit; while airborne main.ts
+   overrides it to an absolute box it writes frame by frame (openLightbox) —
+   zoom.ts mirrors this fit exactly so the handover between the two moves
+   nothing. */
 .lightbox {
   position: fixed;
   inset: 0;
   z-index: 10;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.88);
   cursor: zoom-out;
 }
+.lightbox-back {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.88);
+}
 .lightbox img {
+  position: relative; /* above the positioned backdrop without a z-index ladder */
   max-width: 96vw;
   max-height: 92vh;
   border-radius: 6px;

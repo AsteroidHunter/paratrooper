@@ -21,6 +21,8 @@ import {
   newbornEnter,
   shiftParticipates,
 } from "./shift";
+import type { MorphBox } from "./shift";
+import { zoomFit, zoomReturn } from "./zoom";
 import {
   bindPicker,
   bindSendShield,
@@ -43,7 +45,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.94"; // gentle chevron appear deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.95"; // photo zoom flight deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -959,14 +961,136 @@ function thumbUrl(key: string): string {
   return `/api/thumb/${encodeURIComponent(key)}?token=${encodeURIComponent(token)}`;
 }
 
-function openLightbox(src: string): void {
+// --- tap-to-zoom: the photo grows out of its spot and shrinks back into it ----
+// The lightbox copy launches from the tapped photo's exact box and corner
+// radius and flies to the fitted centered box the resting CSS would give
+// (zoom.ts mirrors that fit, so the landing handover to the grid layout moves
+// nothing), the backdrop fading in alongside. The geometry is real box
+// interpolation on the send-flight's beat and ease, driven per rAF frame like
+// the send morph (morphBox/flightEase — never transform scale, which would
+// squash the corner circles). The thread photo hides beneath the copy for the
+// whole zoom — two identical images a frame apart read as a doubling — and is
+// handed back byte-clean as the copy lands home. Dismissal re-reads the
+// photo's rect at that moment: the thread may have scrolled or gained rows
+// while zoomed, and the copy must land where the photo IS. A spot scrolled
+// off-screen gets the edge return (shrink toward its direction while fading);
+// a spot whose row is gone gets the center fade (zoom.ts decides). Records
+// ride the flight channel like every other motion.
+function openLightbox(src: string, from?: HTMLImageElement): void {
+  if (document.querySelector(".lightbox")) return; // a double-tap must not stack overlays
   const overlay = document.createElement("div");
   overlay.className = "lightbox";
+  const back = document.createElement("div");
+  back.className = "lightbox-back";
+  overlay.appendChild(back);
   const img = document.createElement("img");
   img.src = src;
   overlay.appendChild(img);
-  overlay.addEventListener("click", () => overlay.remove());
   document.body.appendChild(overlay);
+  if (!from?.naturalWidth) {
+    // nothing decoded to grow from (a not-yet-loaded optimistic blob): the
+    // plain overlay, instant both ways
+    overlay.addEventListener("click", () => overlay.remove());
+    return;
+  }
+  const boxOf = (r: DOMRect): MorphBox => ({
+    left: r.left, top: r.top, width: r.width, height: r.height,
+  });
+  const writeBox = (b: MorphBox): void => {
+    img.style.left = `${b.left}px`;
+    img.style.top = `${b.top}px`;
+    img.style.width = `${b.width}px`;
+    img.style.height = `${b.height}px`;
+  };
+  // the copy owns its geometry while airborne: absolute in the overlay's
+  // fixed box (viewport coordinates), the resting max-* fit released so the
+  // interpolated box is never clamped mid-flight (a tall screenshot's height
+  // crosses 92vh on the way in)
+  const freeze = (b: MorphBox, radius: number): void => {
+    img.style.position = "absolute";
+    img.style.maxWidth = "none";
+    img.style.maxHeight = "none";
+    writeBox(b);
+    img.style.borderRadius = `${radius.toFixed(1)}px`;
+  };
+  let raf = 0;
+  // the send morph's driver shape (armFieldMorph): eased box and corner
+  // writes per frame, fades riding the clock, and the landed frame painting
+  // once BEFORE the settle so the swap can never read as a snap
+  const fly = (
+    a: MorphBox, b: MorphBox, rA: number, rB: number,
+    fade: (f: number) => void, settle: () => void,
+  ): void => {
+    if (raf) cancelAnimationFrame(raf);
+    const t0 = performance.now();
+    const step = (now: number): void => {
+      raf = 0;
+      const f = Math.min((now - t0) / FLIGHT_MS, 1);
+      const p = flightEase(f);
+      writeBox(morphBox(a, b, p));
+      img.style.borderRadius = `${morphCorners(rA, [rB], p)[0].toFixed(1)}px`;
+      fade(f);
+      if (f < 1) raf = requestAnimationFrame(step);
+      else raf = requestAnimationFrame(settle);
+    };
+    raf = requestAnimationFrame(step);
+  };
+  const fromBox = boxOf(from.getBoundingClientRect());
+  const fromRadius = parseFloat(getComputedStyle(from).borderTopLeftRadius) || 0;
+  const restRadius = parseFloat(getComputedStyle(img).borderTopLeftRadius) || 0;
+  const to = zoomFit(from.naturalWidth, from.naturalHeight, window.innerWidth, window.innerHeight);
+  freeze(fromBox, fromRadius);
+  back.style.opacity = "0";
+  from.style.opacity = "0"; // the copy IS the photo until it lands back home
+  holdDiagRecord("flight", {
+    phase: "zoom-open",
+    dx: Math.round((to.left - fromBox.left) * 10) / 10,
+    dy: Math.round((to.top - fromBox.top) * 10) / 10,
+    dw: Math.round(to.width - fromBox.width),
+    dh: Math.round(to.height - fromBox.height),
+  });
+  fly(fromBox, to, fromRadius, restRadius, (f) => {
+    back.style.opacity = String(f);
+  }, () => {
+    // the grid layout takes the resting geometry over (zoomFit mirrors its
+    // fit, so nothing moves) — kept only if the copy's pixels are somehow
+    // still inbound, where an intrinsic-size layout would have no size at all
+    back.removeAttribute("style");
+    if (img.naturalWidth) img.removeAttribute("style");
+  });
+  let closing = false;
+  overlay.addEventListener("click", () => {
+    if (closing) return;
+    closing = true;
+    // the spot is re-read NOW, not remembered from the open
+    const origin = from.isConnected ? boxOf(from.getBoundingClientRect()) : null;
+    const cur = boxOf(img.getBoundingClientRect());
+    const ret = zoomReturn(origin, cur, window.innerWidth, window.innerHeight);
+    const curRadius = parseFloat(getComputedStyle(img).borderTopLeftRadius) || 0;
+    const endRadius = ret.mode === "exact"
+      ? parseFloat(getComputedStyle(from).borderTopLeftRadius) || 0
+      : curRadius;
+    const back0 = back.style.opacity ? parseFloat(back.style.opacity) : 1;
+    freeze(cur, curRadius); // a mid-open tap turns home from wherever the copy is
+    holdDiagRecord("flight", {
+      phase: "zoom-close",
+      mode: ret.mode,
+      dx: Math.round((ret.box.left - cur.left) * 10) / 10,
+      dy: Math.round((ret.box.top - cur.top) * 10) / 10,
+      dw: Math.round(ret.box.width - cur.width),
+      dh: Math.round(ret.box.height - cur.height),
+    });
+    fly(cur, ret.box, curRadius, endRadius, (f) => {
+      back.style.opacity = String(back0 * (1 - f));
+      if (ret.mode !== "exact") img.style.opacity = String(1 - f); // no spot to land on: dissolve
+    }, () => {
+      // the landed copy painted exactly over the photo once; now, one task:
+      // the photo back, the copy gone — no frame holds both, none holds neither
+      from.style.removeProperty("opacity");
+      if (!from.getAttribute("style")) from.removeAttribute("style");
+      overlay.remove();
+    });
+  });
 }
 
 // --- pr ↔ published correlation (Publish button state survives replay) --------
@@ -1050,7 +1174,7 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
       div.appendChild(chip("📎 photo"));
       img.remove();
     };
-    img.addEventListener("click", () => openLightbox(img.src));
+    img.addEventListener("click", () => openLightbox(img.src, img));
     div.appendChild(img);
   });
   if (value) rowEl(wrapper, "user", "text", at).textContent = value;
@@ -1095,7 +1219,7 @@ function renderScreenshot(_m: ServerMsg, wrapper: HTMLElement, at: number, value
   img.onload = () => {
     if (followTail) scrollToBottom(true); // height lands after decode; never glide
   };
-  img.addEventListener("click", () => openLightbox(value));
+  img.addEventListener("click", () => openLightbox(value, img));
   div.appendChild(img);
 }
 
@@ -2140,7 +2264,7 @@ async function send(): Promise<void> {
     const div = rowEl(w, "user", "shot", Date.now());
     const img = document.createElement("img");
     img.src = URL.createObjectURL(file);
-    img.addEventListener("click", () => openLightbox(img.src));
+    img.addEventListener("click", () => openLightbox(img.src, img));
     div.appendChild(img);
   }
   if (text) rowEl(w, "user", "text", Date.now()).textContent = text;
@@ -2362,7 +2486,7 @@ async function restoreOutbox(): Promise<void> {
         // other image kind, instantly — a layout completion must never glide
         if (followTail) scrollToBottom(true);
       };
-      img.addEventListener("click", () => openLightbox(img.src));
+      img.addEventListener("click", () => openLightbox(img.src, img));
       div.appendChild(img);
     }
     if (rec.text) rowEl(w, "user", "text", rec.ts).textContent = rec.text;
