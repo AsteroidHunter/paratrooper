@@ -731,6 +731,50 @@ html, body {
   pointer-events: auto;
 }
 
+/* --- send morph: the bar leaving the box (armFieldMorph, main.ts) --- */
+/* The shell is fixed in <body>: the thread is a scroll container and clips its
+   children at its box, so only an outside element can stand exactly over the
+   field and rise across the thread's bottom edge. Its box and per-corner
+   radius are written frame-by-frame by main.ts (real geometry, never scale).
+   The face is three stacked sheets: an opaque canvas base (the real field
+   collapsing beneath must not show through), the field's glass tint over it —
+   blur is inert over the flat canvas (see .bar), so the flat pair IS the
+   bar's face — and the accent fading in as the bar becomes the bubble. The
+   text layers are FIXED layouts that only crossfade while the box compresses
+   around them: no frame ever shows a half-rewrapped line. */
+.morph {
+  position: fixed;
+  z-index: 7; /* over the chrome (bar 5) and chevron (4), under the lightbox (10) */
+  overflow: hidden; /* the compressing box clips its outgoing text */
+  pointer-events: none;
+}
+.morph > div {
+  position: absolute;
+  border-radius: inherit; /* the glass inset ring follows the live corners */
+}
+.morph-face-under,
+.morph-face-bar,
+.morph-face-accent { inset: 0; }
+.morph-face-under { background: var(--bg); }
+.morph-face-bar { background: var(--glass-bg); box-shadow: var(--glass-stack); }
+.morph-face-accent { background: var(--accent); opacity: 0; }
+.morph-text-bar {
+  color: var(--text);
+  font-size: 17px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.morph-text-bubble {
+  top: 0;
+  right: 0;
+  padding: 10px 16px; /* .msg's exact inset, so the landing swap is pixel-clean */
+  color: var(--sent-text);
+  font-size: 17px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  opacity: 0;
+}
+
 .buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }
 
 /* jump-to-latest chevron: seated at the bar's RIGHT end, floating just above

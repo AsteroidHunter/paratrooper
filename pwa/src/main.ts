@@ -8,7 +8,19 @@ import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { receiptFor } from "./receipts";
-import { ENTER_RISE_PX, FLIGHT_EASE, FLIGHT_MS, newbornEnter, shiftParticipates } from "./shift";
+import {
+  ENTER_RISE_PX,
+  FLIGHT_EASE,
+  FLIGHT_MS,
+  accentAlpha,
+  barTextAlpha,
+  bubbleTextAlpha,
+  flightEase,
+  morphBox,
+  morphCorners,
+  newbornEnter,
+  shiftParticipates,
+} from "./shift";
 import {
   bindPicker,
   bindSendShield,
@@ -31,7 +43,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.92"; // the original font arrow back with a smoother ring, bumped so the build is verifiable
+const APP_VERSION = "0.1.93"; // bar-to-bubble send morph deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1567,22 +1579,177 @@ function flightSettled(): void {
   shift.play();
 }
 
+// --- the send morph: the bar leaves the box (his order) -----------------------
+// The true iMessage send is not the finished bubble translated down to the
+// field — it is the BAR: a shell the typing box's exact rect, pill, face, and
+// as-typed text, which lifts out of the composer and compresses into the
+// bubble's box while it rises, landing on the seat. The shell is a
+// fixed-position element in <body>: the thread is a scroll container, so
+// anything inside it is clipped at the thread's box and could never stand
+// over the field — and a fixed shell's per-frame layout is its own, touching
+// nothing in the thread (no transformed overflow inflating scrollHeight, the
+// old flight's known tax). Its box is real geometry (left/top/width/height
+// plus per-corner radius), never transform scale: scale would squash the
+// corner circles and the glyphs. The real bubble holds its seat in layout the
+// whole time, hidden, and takes over in the shell's landing frame — the
+// thread's layout after touchdown is exactly what it would have been with no
+// flight at all. armFieldMorph is called BEFORE the composer collapse (the
+// shell must snapshot the bar while the text is still in it; the collapse
+// then happens beneath the opaque shell, so no bare-field frame ever paints),
+// and launch() runs in send()'s insert task like the old flight did.
+
+interface FieldMorph {
+  launch(msg: HTMLElement): void;
+  launched(): boolean;
+  cancel(): void;
+}
+
+const MORPH_CORNER_PROPS = [
+  "borderTopLeftRadius",
+  "borderTopRightRadius",
+  "borderBottomRightRadius",
+  "borderBottomLeftRadius",
+] as const;
+
+function armFieldMorph(textEl: HTMLTextAreaElement): FieldMorph | null {
+  const field = document.querySelector(".field");
+  if (!field) return null;
+  const barRect = field.getBoundingClientRect();
+  const bar = {
+    left: barRect.left, top: barRect.top, width: barRect.width, height: barRect.height,
+  };
+  const textRect = textEl.getBoundingClientRect();
+  const barRadius = parseFloat(getComputedStyle(field).borderTopLeftRadius) || 18;
+  const shell = document.createElement("div");
+  shell.className = "morph";
+  const writeBox = (b: { left: number; top: number; width: number; height: number }): void => {
+    shell.style.left = `${b.left}px`;
+    shell.style.top = `${b.top}px`;
+    shell.style.width = `${b.width}px`;
+    shell.style.height = `${b.height}px`;
+  };
+  writeBox(bar);
+  shell.style.borderRadius = `${barRadius}px`;
+  const layer = (cls: string): HTMLDivElement => {
+    const el = document.createElement("div");
+    el.className = cls;
+    shell.appendChild(el);
+    return el;
+  };
+  layer("morph-face-under");
+  layer("morph-face-bar");
+  const accent = layer("morph-face-accent");
+  // the bar's text: cloned at the textarea's exact offset, width, padding, and
+  // inner scroll, so the shell's first painted frame is indistinguishable from
+  // the box it lifts out of
+  const barText = layer("morph-text-bar");
+  barText.style.left = `${textRect.left - bar.left}px`;
+  barText.style.top = `${textRect.top - bar.top}px`;
+  barText.style.width = `${textRect.width}px`;
+  barText.style.padding = getComputedStyle(textEl).padding;
+  barText.style.transform = `translateY(${-textEl.scrollTop}px)`;
+  barText.textContent = textEl.value;
+  const bubbleText = layer("morph-text-bubble"); // geometry lands at launch
+  document.body.appendChild(shell);
+  holdDiagRecord("flight", {
+    phase: "morph-arm", barW: Math.round(bar.width), barH: Math.round(bar.height),
+  });
+  let raf = 0;
+  let up = false;
+  const settle = (msg: HTMLElement, phase: string): void => {
+    // hand the seat back to the real bubble, byte-clean: the flight was pure
+    // presentation, so the landed thread must carry no trace of it
+    msg.style.removeProperty("opacity");
+    if (!msg.getAttribute("style")) msg.removeAttribute("style");
+    shell.remove();
+    holdDiagRecord("flight", { phase });
+    flightSettled();
+  };
+  return {
+    launched: () => up,
+    cancel(): void {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      shell.remove(); // never launched: nothing hidden, nothing airborne
+    },
+    launch(msg: HTMLElement): void {
+      up = true;
+      const seat0 = msg.getBoundingClientRect();
+      const style = getComputedStyle(msg);
+      const corners = MORPH_CORNER_PROPS.map((prop) => parseFloat(style[prop]) || 0);
+      // the bubble's laid-out text, locked to the seat's width so it wraps
+      // exactly as the real bubble did — the landing swap is pixel-identical
+      bubbleText.style.width = `${seat0.width}px`;
+      bubbleText.textContent = msg.textContent;
+      msg.style.opacity = "0"; // the shell IS the bubble until it lands
+      flightsUp++;
+      holdDiagRecord("flight", {
+        phase: "morph-launch",
+        dx: Math.round((bar.left + bar.width - seat0.right) * 10) / 10,
+        dy: Math.round((bar.top - seat0.top) * 10) / 10,
+        toW: Math.round(seat0.width), toH: Math.round(seat0.height),
+      });
+      const t0 = performance.now();
+      const step = (now: number): void => {
+        raf = 0;
+        if (!msg.isConnected) return settle(msg, "morph-cancel"); // replay/teardown took the seat
+        const f = Math.min((now - t0) / FLIGHT_MS, 1);
+        const p = flightEase(f);
+        // the seat is re-read every frame: a second send's pin-and-shift (or a
+        // reply landing mid-flight) moves it, and the shell must land on the
+        // seat as it IS, not as it was at launch — the tracking the old FLIP
+        // translate got for free by riding the element itself
+        const seat = msg.getBoundingClientRect();
+        writeBox(morphBox(
+          bar,
+          { left: seat.left, top: seat.top, width: seat.width, height: seat.height },
+          p,
+        ));
+        shell.style.borderRadius =
+          morphCorners(barRadius, corners, p).map((c) => `${c.toFixed(1)}px`).join(" ");
+        accent.style.opacity = String(accentAlpha(f));
+        barText.style.opacity = String(barTextAlpha(f));
+        bubbleText.style.opacity = String(bubbleTextAlpha(f));
+        if (f < 1) {
+          raf = requestAnimationFrame(step);
+        } else {
+          // the landed box paints once (shell and bubble now pixel-identical),
+          // THEN the swap — settling in the write's own frame could drop the
+          // landing frame under load and read as a snap
+          raf = requestAnimationFrame(() => settle(msg, "morph-finish"));
+        }
+      };
+      raf = requestAnimationFrame(step);
+    },
+  };
+}
+
 // iMessage send flight: the fresh bubble lifts out of the compose field and
-// springs up into its thread seat. FLIP — the bubble is laid out in its final
-// spot, instantly translated back to the field's rect, then released on a
-// spring ease. Right edges are pinned (both are right-aligned); replayed and
-// received bubbles keep their ordinary entrance. The flight must always play
-// (standing order) — no reduced-motion gate. Every invocation leaves a trail
-// record with the measured per-bubble dx/dy and the animation's start and
-// finish/cancel, so a device session where nothing visibly moved shows WHY
-// (near-zero deltas are themselves the finding).
-function flyFromField(wrapper: HTMLElement): void {
+// rises into its thread seat. The TEXT row rides the morph above — the bar
+// itself compressing into the bubble; photo rows keep the FLIP translate (the
+// bubble laid out in its final spot, instantly translated back to the field's
+// rect, then released), because the bar never contained the photos — they
+// stage in the pending tray, and a bar morphing into a photo would be a
+// motion with no referent. Replayed and received bubbles keep their ordinary
+// entrance. The flight must always play (standing order) — no reduced-motion
+// gate. Every invocation leaves a trail record with the measured per-bubble
+// dx/dy and the animation's start and finish/cancel, so a device session
+// where nothing visibly moved shows WHY (near-zero deltas are themselves the
+// finding).
+function flyFromField(wrapper: HTMLElement, morph: FieldMorph | null = null): void {
   const field = document.querySelector(".field");
   const msgs = wrapper.querySelectorAll<HTMLElement>(".msg");
   holdDiagRecord("flight", { phase: "invoke", msgs: msgs.length, field: field !== null });
-  if (!field || !msgs.length) return;
+  if (!field || !msgs.length) {
+    morph?.cancel();
+    return;
+  }
   const start = field.getBoundingClientRect();
   msgs.forEach((msg, i) => {
+    if (morph && msg.classList.contains("text")) {
+      morph.launch(msg);
+      return;
+    }
     const end = msg.getBoundingClientRect();
     const dx = start.right - end.right;
     const dy = start.top - end.top;
@@ -1610,6 +1777,7 @@ function flyFromField(wrapper: HTMLElement): void {
       },
     );
   });
+  if (morph && !morph.launched()) morph.cancel(); // no text row rendered: no seat to morph into
   recordSendMotion(msgs[msgs.length - 1]);
 }
 
@@ -1942,6 +2110,12 @@ async function send(): Promise<void> {
   // delta); the deferred collapse's own re-pin residue is bounded by the
   // remaining translate and decays with it.
   const airborne = performance.now() - lastLaunchAt < FLIGHT_MS;
+  // the morph shell snapshots the bar BEFORE the collapse empties it — rect,
+  // pill, and the typed text, standing over the field — so the collapse (and
+  // its re-pin wait) happens beneath the shell and no bare-field frame ever
+  // paints; the launch itself still runs after the collapse, in the insert
+  // task below. Photo-only sends arm nothing: the bar never contained them.
+  const morph = text ? armFieldMorph(textEl) : null;
   if (!airborne) {
     const fieldHBefore = textEl.offsetHeight;
     collapseBar();
@@ -1975,7 +2149,7 @@ async function send(): Promise<void> {
   setFollowTail(true, "send"); // sending snaps you to the tail
   scrollToBottom(true); // instant pin first; the transforms below play over it
   shift.play(); // preceding rows glide, newborn stamps fade up: no white strip, no pop
-  flyFromField(w);
+  flyFromField(w, morph);
   lastLaunchAt = performance.now();
   if (airborne) collapseBar(); // the shipped order when a flight is already up
 

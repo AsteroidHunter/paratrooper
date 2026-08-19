@@ -11,7 +11,22 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { ENTER_RISE_PX, FLIGHT_EASE, FLIGHT_MS, newbornEnter, shiftParticipates } from "../src/shift";
+import {
+  ENTER_RISE_PX,
+  FLIGHT_EASE,
+  FLIGHT_EASE_POINTS,
+  FLIGHT_MS,
+  MORPH_TEXT_IN,
+  MORPH_TEXT_OUT,
+  accentAlpha,
+  barTextAlpha,
+  bubbleTextAlpha,
+  flightEase,
+  morphBox,
+  morphCorners,
+  newbornEnter,
+  shiftParticipates,
+} from "../src/shift";
 
 describe("flight motion constants", () => {
   it("the beat sits inside the owner's 350-450ms band", () => {
@@ -30,6 +45,83 @@ describe("flight motion constants", () => {
     expect(y1).toBeGreaterThanOrEqual(0); // and no anticipation dip either
     expect(y2).toBeGreaterThanOrEqual(0);
     expect(x1).toBeLessThan(x2); // decelerating: fast launch, soft landing
+  });
+
+  it("the CSS string and the solved curve share the same control points", () => {
+    expect(FLIGHT_EASE).toBe(`cubic-bezier(${FLIGHT_EASE_POINTS.join(", ")})`);
+  });
+});
+
+describe("flightEase — the browser's curve, solved for the morph's rAF frames", () => {
+  it("pins the endpoints, clamped past them", () => {
+    expect(flightEase(0)).toBe(0);
+    expect(flightEase(1)).toBe(1);
+    expect(flightEase(-0.2)).toBe(0);
+    expect(flightEase(1.3)).toBe(1);
+  });
+
+  it("monotone inside [0,1]: the no-overshoot rule holds numerically too", () => {
+    let prev = 0;
+    for (let i = 1; i <= 100; i++) {
+      const y = flightEase(i / 100);
+      expect(y).toBeGreaterThanOrEqual(prev - 1e-9);
+      expect(y).toBeGreaterThanOrEqual(0);
+      expect(y).toBeLessThanOrEqual(1);
+      prev = y;
+    }
+  });
+
+  it("decelerates: most of the travel lands early, like the CSS twin", () => {
+    expect(flightEase(0.35)).toBeGreaterThan(0.8);
+    expect(flightEase(0.5)).toBeGreaterThan(flightEase(0.35));
+  });
+});
+
+describe("morph box math — shape by geometry, never by scale", () => {
+  const bar = { left: 12, top: 700, width: 360, height: 39 };
+  const seat = { left: 200, top: 620, width: 180, height: 39 };
+
+  it("p=0 is the bar and p=1 is the seat, exactly", () => {
+    expect(morphBox(bar, seat, 0)).toEqual(bar);
+    expect(morphBox(bar, seat, 1)).toEqual(seat);
+  });
+
+  it("mid-flight is the straight mix of the two boxes", () => {
+    const half = morphBox(bar, seat, 0.5);
+    expect(half.left).toBeCloseTo(106);
+    expect(half.top).toBeCloseTo(660);
+    expect(half.width).toBeCloseTo(270);
+    expect(half.height).toBeCloseTo(39);
+  });
+
+  it("corners travel each on their own (the 4px tail corner)", () => {
+    expect(morphCorners(18, [18, 18, 4, 18], 0)).toEqual([18, 18, 18, 18]);
+    expect(morphCorners(18, [18, 18, 4, 18], 1)).toEqual([18, 18, 4, 18]);
+    expect(morphCorners(18, [18, 18, 4, 18], 0.5)).toEqual([18, 18, 11, 18]);
+  });
+});
+
+describe("morph text crossfade — the rewrap cover", () => {
+  it("the bar text is gone before the bubble text begins: no double-text frame", () => {
+    expect(MORPH_TEXT_OUT).toBeLessThan(MORPH_TEXT_IN);
+  });
+
+  it("bar text: full at launch, gone early", () => {
+    expect(barTextAlpha(0)).toBe(1);
+    expect(barTextAlpha(MORPH_TEXT_OUT)).toBe(0);
+    expect(barTextAlpha(1)).toBe(0);
+  });
+
+  it("bubble text: absent until the settle, full exactly at landing", () => {
+    expect(bubbleTextAlpha(0)).toBe(0);
+    expect(bubbleTextAlpha(MORPH_TEXT_IN)).toBe(0);
+    expect(bubbleTextAlpha(1)).toBe(1);
+  });
+
+  it("the accent face is solid before the bubble text starts: white lands on blue, never glass", () => {
+    expect(accentAlpha(0)).toBe(0);
+    expect(accentAlpha(MORPH_TEXT_IN)).toBe(1);
+    expect(accentAlpha(1)).toBe(1);
   });
 });
 
@@ -114,7 +206,7 @@ describe("sibling shift wiring — the order that kills the white strip", () => 
     const wrapper = send.indexOf('localWrapper("user")');
     const pin = send.indexOf("scrollToBottom(true)");
     const play = send.indexOf("shift.play()");
-    const fly = send.indexOf("flyFromField(w)");
+    const fly = send.indexOf("flyFromField(w, morph)");
     expect(measure).toBeGreaterThan(-1);
     expect(measure).toBeLessThan(wrapper); // before-rects predate the insert
     expect(pin).toBeLessThan(play); // the pin fires first
@@ -159,7 +251,7 @@ describe("sibling shift wiring — the order that kills the white strip", () => 
     // field and shrink the sibling deltas, tearing a band open between the
     // riding first bubble and the departing second one — so a send within
     // FLIGHT_MS of the last launch defers the collapse past the launch
-    const fly = send.indexOf("flyFromField(w)");
+    const fly = send.indexOf("flyFromField(w, morph)");
     const airborneCollapse = send.lastIndexOf("collapseBar();");
     expect(send).toContain("lastLaunchAt < FLIGHT_MS"); // the airborne test
     expect(send).toContain("if (airborne) collapseBar();");
