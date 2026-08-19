@@ -1,13 +1,19 @@
 // Pins for the jump-chevron behavior (src/downbtn.ts) — the state machine
 // that surfaces the scroll-down button ONLY after a scroll pause while away
-// from the bottom, plus the tap's one-swoosh glide plan. Pure with an
+// from the bottom, plus the tap's cruise-then-brake glide plan. Pure with an
 // injectable pause window, so every scenario runs on fake timers: show on 4s
 // of stillness while away, every scroll restarting that window, staying up
 // until the bottom takes it down, and never appearing at the bottom — a
 // fresh open pinned there shows nothing.
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { GLIDE_MS, PAUSE_MS, createDownButton, createGlide } from "../src/downbtn";
+import {
+  GLIDE_BRAKE_SCREENS,
+  GLIDE_MAX_SPEED,
+  PAUSE_MS,
+  createDownButton,
+  createGlide,
+} from "../src/downbtn";
 
 function harness() {
   const calls: boolean[] = []; // every setVisible edge, in order
@@ -140,64 +146,98 @@ describe("at the bottom it never appears", () => {
   });
 });
 
-describe("createGlide — one continuous decelerating swoosh, whole distance, fixed beat", () => {
-  it("the beat is 400ms regardless of distance — a long jump just moves faster", () => {
-    expect(GLIDE_MS).toBe(400);
-    const short = createGlide(4000, 0); // 300 from the landing
-    const long = createGlide(0, 0); // 4300 from the landing
-    expect(short.done(399)).toBe(false);
-    expect(short.done(400)).toBe(true);
-    expect(long.done(399)).toBe(false);
-    expect(long.done(400)).toBe(true); // same beat either way
+describe("createGlide — flat cruise while far, distance-proportional brake near the landing", () => {
+  const VH = 700; // the driver feeds the real container height every frame
+  const ZONE = GLIDE_BRAKE_SCREENS * VH; // the slowdown may only show inside this
+  const CAP = GLIDE_MAX_SPEED * 16; // full-speed px per 60fps frame
+
+  it("the tuning: 25px/ms cruise, braking within two screens of the bottom", () => {
+    expect(GLIDE_MAX_SPEED).toBe(25);
+    expect(GLIDE_BRAKE_SCREENS).toBe(2);
   });
 
-  it("starts at the start and lands exactly on the target — no teleport step", () => {
-    const g = createGlide(0, 1000);
-    expect(g.at(1000, 4300)).toBe(0); // frame zero: still where the tap found it
-    expect(g.at(1016, 4300)).toBeLessThan(600); // one frame in: moving, not hopping
-    expect(g.at(1400, 4300)).toBe(4300); // the beat ends exactly on the landing
-    expect(g.at(1500, 4300)).toBe(4300); // past the beat it stays put
+  it("far away the speed is capped flat — the step is distance-blind", () => {
+    expect(createGlide(0).step(16, 50_000, VH)).toBe(CAP);
+    expect(createGlide(0).step(16, ZONE + 1, VH)).toBe(CAP); // still outside: same step
   });
 
-  it("decelerates: the front half covers far more ground than the back half", () => {
-    const g = createGlide(0, 0);
-    const mid = g.at(GLIDE_MS / 2, 1000);
-    expect(mid).toBeGreaterThan(800); // ease-out cubic: 87.5% done at half-beat
-    expect(1000 - mid).toBeLessThan(200); // the rest is the soft landing
+  it("frame zero moves nothing: the tap's own frame is not a hop", () => {
+    expect(createGlide(1000).step(1000, 5000, VH)).toBe(0);
   });
 
-  it("moves monotonically toward the landing, never past it", () => {
-    const g = createGlide(500, 0);
-    let prev = 500;
-    for (let ms = 0; ms <= GLIDE_MS; ms += 16) {
-      const pos = g.at(ms, 9000);
-      expect(pos).toBeGreaterThanOrEqual(prev);
-      expect(pos).toBeLessThanOrEqual(9000);
-      prev = pos;
+  it("braking onset sits exactly two viewport heights out", () => {
+    expect(createGlide(0).step(16, ZONE, VH)).toBe(CAP); // the crossover: both rules agree
+    expect(createGlide(0).step(16, ZONE - 1, VH)).toBeLessThan(CAP); // one px inside: braking
+    expect(createGlide(0).step(16, ZONE / 2, VH)).toBeCloseTo(CAP / 2, 8); // speed ∝ remaining
+  });
+
+  it("inside the zone every frame is slower than the last — monotonic brake", () => {
+    const g = createGlide(0);
+    let remaining = ZONE;
+    let prev = Number.POSITIVE_INFINITY;
+    for (let ms = 16; remaining > 1; ms += 16) {
+      const step = g.step(ms, remaining, VH);
+      expect(step).toBeGreaterThan(0);
+      expect(step).toBeLessThan(prev);
+      prev = step;
+      remaining -= step;
     }
   });
 
-  it("the target is re-read live: content landing mid-glide still ends exactly", () => {
-    const g = createGlide(0, 0);
-    g.at(200, 4300); // half-flight against the old bottom
-    expect(g.at(400, 4550)).toBe(4550); // a message grew the thread; the beat ends at the NEW bottom
+  it("a long ride is cruise-then-brake and lands EXACTLY — never a teleport", () => {
+    const g = createGlide(0);
+    let remaining = 4300; // a typical far-up jump: several screens
+    const steps: number[] = [];
+    for (let ms = 16; !g.done() && steps.length < 1000; ms += 16) {
+      const s = g.step(ms, remaining, VH);
+      steps.push(s);
+      remaining -= s;
+    }
+    expect(remaining).toBe(0); // exact landing, no sub-pixel residue
+    expect(g.done()).toBe(true);
+    expect(Math.max(...steps)).toBe(CAP); // nothing ever outruns the cruise cap
+    const cruise = steps.filter((s) => s === CAP);
+    expect(cruise.length).toBeGreaterThanOrEqual(7); // (4300 − ZONE) / CAP flat-out frames
+    // once braking begins it only slows, bar the final sub-pixel landing snap
+    const brake = steps.slice(cruise.length, -1);
+    for (let i = 1; i < brake.length; i++) {
+      expect(brake[i]).toBeLessThan(brake[i - 1]);
+    }
   });
 
-  it("a user gesture cancels mid-flight: the run is over immediately and stays over", () => {
-    const g = createGlide(0, 0);
-    expect(g.done(200)).toBe(false);
+  it("content growing mid-flight re-opens the throttle, still landing on the NEW bottom", () => {
+    const g = createGlide(0);
+    let remaining = 600; // deep in the brake zone, easing in
+    const crawl = g.step(16, remaining, VH);
+    expect(crawl).toBeLessThan(CAP);
+    remaining -= crawl;
+    remaining += 5000; // a tall message lands: the bottom leaps away again
+    expect(g.step(32, remaining, VH)).toBe(CAP); // back to flat cruise, still capped
+    remaining -= CAP;
+    let ms = 32;
+    for (let i = 0; i < 1000 && !g.done(); i++) {
+      ms += 16;
+      remaining -= g.step(ms, remaining, VH);
+    }
+    expect(remaining).toBe(0); // the retargeted run still ends exactly
+  });
+
+  it("a user gesture cancels mid-flight: over immediately, steps stop dead", () => {
+    const g = createGlide(0);
+    expect(g.step(16, 5000, VH)).toBe(CAP);
+    expect(g.done()).toBe(false);
     g.cancel();
     expect(g.cancelled()).toBe(true);
-    expect(g.done(200)).toBe(true); // done mid-beat: the wiring stops writing
-    expect(g.done(400)).toBe(true);
+    expect(g.done()).toBe(true); // done mid-ride: the wiring stops writing
+    expect(g.step(32, 5000, VH)).toBe(0);
   });
 });
 
 // Presentation pins: the chevron's disc and seat live in styles.css/markup,
 // so these read the source directly — cheap tripwires for exactly what the
 // device test ruled on: the original glass back, the arrow a fixed color,
-// the disc seated in the ＋'s column directly above it.
-describe("presentation — original glass, fixed arrow, above-the-＋ seat", () => {
+// the disc seated at the bar's right end, right edges flush with the pill.
+describe("presentation — original glass, fixed arrow, right-tangent seat", () => {
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   const jumpRule = css.match(/\n\.jump \{([^}]*)\}/)?.[1] ?? "";
@@ -224,17 +264,17 @@ describe("presentation — original glass, fixed arrow, above-the-＋ seat", () 
     expect(glyphRule).toContain("transition: opacity 0.15s");
   });
 
-  it("seated in the ＋'s column, directly above it", () => {
-    const attachRule = css.match(/\n\.attach \{([^}]*)\}/)?.[1] ?? "";
-    expect(attachRule).toContain("width: 34px"); // the ＋'s circle
-    expect(jumpRule).toContain("left: calc(0.75rem - 1px)"); // 36px disc centered on the 34px column
-    expect(jumpRule).not.toContain("right:"); // off the right edge for good
-    expect(jumpRule).toContain("bottom: calc(var(--pad-b) + 36.5px + 0.5rem)"); // one bar gap above the ＋
+  it("seated at the bar's right end: disc and pill right edges flush", () => {
+    const composeRule = css.match(/\n\.compose \{([^}]*)\}/)?.[1] ?? "";
+    expect(composeRule).toContain("padding: 0.5rem 0.75rem var(--pad-b)"); // the pill's right edge: 0.75rem in
+    expect(jumpRule).toContain("right: 0.75rem"); // the same inset = the two right edges tangent
+    expect(jumpRule).not.toContain("left:"); // off the ＋'s column for good
+    expect(jumpRule).toContain("bottom: calc(var(--pad-b) + 36.5px + 0.5rem)"); // vertical seat unchanged
     // and the button actually lives inside the compose bar's anchor box
     expect(main).toMatch(/<form id="compose"[\s\S]*id="jump"[\s\S]*<\/form>/);
   });
 
-  it("the tap runs the one-swoosh glide, cancelled by any real gesture", () => {
+  it("the tap runs the cruise-then-brake glide, cancelled by any real gesture", () => {
     expect(main).not.toContain("glideHop"); // the teleport hop is gone
     expect(main).toMatch(/Id\("jump"\)!\.addEventListener\("click",[\s\S]{0,700}startGlide\(\)/);
     expect(main).toMatch(/"wheel",[\s\S]{0,80}cancelGlide\(\)/);

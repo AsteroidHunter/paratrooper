@@ -62,33 +62,55 @@ export function createDownButton(
   return { scrolled, bottomReached, visible: () => shown };
 }
 
-// Tap-to-bottom glide plan — ONE continuous decelerating scroll over the
-// whole distance in a fixed beat, so a long jump simply moves faster: no
-// teleport step anywhere (the hop-then-glide version read as a jump cut from
-// far up). Pure: the wiring drives it from rAF timestamps and re-reads the
-// live bottom every frame, so content landing mid-glide still ends the run
-// exactly at the true bottom. cancel() is the user taking the scroll back
-// mid-flight — the run reports done and the wiring stops writing.
-export const GLIDE_MS = 400;
+// Tap-to-bottom glide plan — constant full speed while far away, braking only
+// near the landing (the fixed-400ms-beat version scaled its speed with the
+// distance, so a far jump blurred past and a short one crawled). Each frame's
+// velocity is min(maxSpeed, k·remaining) with k = maxSpeed / (BRAKE_SCREENS
+// viewports): beyond that crossover the cap wins (flat cruise, distance-blind),
+// inside it speed falls in proportion to what's left — the exponential-feeling
+// approach that eases to a stop. Pure and position-less: the wiring feeds it
+// frame times, the live remaining distance, and the container height every
+// frame, so content landing mid-glide simply grows `remaining` and the plan
+// re-opens the throttle, still ending exactly at the true bottom. cancel() is
+// the user taking the scroll back mid-flight — the run reports done and the
+// wiring stops writing.
+export const GLIDE_MAX_SPEED = 25; // px per ms of full-speed cruise
+export const GLIDE_BRAKE_SCREENS = 2; // slowdown shows within this many viewports
 
 export interface Glide {
-  /** eased scrollTop for this frame; target is the CURRENT landing scrollTop */
-  at(nowMs: number, target: number): number;
-  /** the run is over: the beat has elapsed, or a gesture cancelled it */
-  done(nowMs: number): boolean;
+  /** px to advance toward the landing this frame; 0 once landed or cancelled */
+  step(nowMs: number, remaining: number, viewportHeight: number): number;
+  /** the run is over: it landed exactly, or a gesture cancelled it */
+  done(): boolean;
   cancel(): void;
   cancelled(): boolean;
 }
 
-export function createGlide(from: number, startMs: number, beatMs: number = GLIDE_MS): Glide {
+export function createGlide(startMs: number, maxSpeed: number = GLIDE_MAX_SPEED): Glide {
+  let lastMs = startMs;
+  let landed = false;
   let cancelled = false;
   return {
-    at(nowMs: number, target: number): number {
-      const t = Math.min(Math.max((nowMs - startMs) / beatMs, 0), 1);
-      const eased = 1 - (1 - t) ** 3; // ease-out cubic: fast launch, soft landing
-      return from + (target - from) * eased;
+    step(nowMs: number, remaining: number, viewportHeight: number): number {
+      // rAF stamps the frame's vsync, which can predate the tap's own now()
+      const dt = Math.max(nowMs - lastMs, 0);
+      lastMs = nowMs;
+      if (landed || cancelled) return 0;
+      // the proportional rule only ever approaches the bottom, never touches
+      // it — inside a sub-pixel (or past a bottom that moved up) land NOW
+      if (remaining <= 1) {
+        landed = true;
+        return remaining;
+      }
+      const speed = Math.min(
+        maxSpeed,
+        (maxSpeed * remaining) / (GLIDE_BRAKE_SCREENS * viewportHeight),
+      );
+      const step = Math.min(remaining, speed * dt); // a stalled tab's huge dt must not overshoot
+      if (step === remaining) landed = true;
+      return step;
     },
-    done: (nowMs: number) => cancelled || nowMs - startMs >= beatMs,
+    done: () => cancelled || landed,
     cancel(): void {
       cancelled = true;
     },

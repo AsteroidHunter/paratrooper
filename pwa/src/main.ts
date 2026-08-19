@@ -25,7 +25,7 @@ import type { OutboxRecord } from "./outbox";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.76"; // polaroid close-up screenshots deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.77"; // right-seat chevron + distance-braked glide deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -487,11 +487,11 @@ function renderChat(): void {
   document.getElementById("jump")!.addEventListener("click", () => {
     downBtn.bottomReached(); // hides now; the landing's own scroll event agrees
     setFollowTail(true, "jump");
-    // one continuous decelerating swoosh over the WHOLE distance (downbtn.ts):
-    // a long jump just moves faster, never a teleport step. Mid-glide scroll
-    // events read !nearBottom and flip followTail off, so the followTail-gated
-    // instant pins cannot cut the glide short; the landing's own scroll event
-    // re-derives followTail=true as usual.
+    // one continuous ride (downbtn.ts): flat cruise speed however far up,
+    // braking only inside two screens of the landing, never a teleport step.
+    // Mid-glide scroll events read !nearBottom and flip followTail off, so the
+    // followTail-gated instant pins cannot cut the glide short; the landing's
+    // own scroll event re-derives followTail=true as usual.
     startGlide();
   });
   // swipe-left to peek per-message times (iMessage): a decisively LEFTWARD
@@ -729,11 +729,13 @@ function scrollToBottom(force = false): void {
   t.scrollTo({ top: t.scrollHeight, behavior: suppressAnim || force ? "auto" : "smooth" });
 }
 
-// the jump tap's glide: one rAF-driven decelerating swoosh (downbtn.ts owns
-// the curve) — never behavior:"smooth", whose duration scales with distance
-// and sails for seconds over a long thread, and never a teleport hop. The
-// live bottom is re-read every frame, so content landing mid-glide still
-// ends the run exactly at the true bottom; any real gesture on the thread
+// the jump tap's glide: one rAF-driven ride, full cruise speed while far out,
+// braking inside two screens of the landing (downbtn.ts owns the velocity
+// rule) — never behavior:"smooth", whose duration scales with distance and
+// sails for seconds over a long thread, and never a teleport hop. The live
+// bottom and container height are re-read every frame, so content landing
+// mid-glide grows the remaining distance and the plan re-opens the throttle,
+// still ending exactly at the true bottom; any real gesture on the thread
 // (wheel, pointer, touch — the handlers in renderChat) cancels it mid-flight.
 let glide: Glide | null = null;
 let glideRaf = 0;
@@ -747,13 +749,17 @@ function cancelGlide(): void {
 
 function startGlide(): void {
   cancelGlide();
-  const run = createGlide(threadEl().scrollTop, performance.now());
+  const run = createGlide(performance.now());
   glide = run;
+  // float cursor: the DOM rounds scrollTop writes, and the brake's shrinking
+  // steps would round away to a stall — the fractional position lives here
+  let pos = threadEl().scrollTop;
   const step = (now: number): void => {
     const t = document.getElementById("thread");
     if (!t || run.cancelled()) return; // shell torn down, or a gesture took over
-    t.scrollTop = run.at(now, t.scrollHeight - t.clientHeight);
-    if (run.done(now)) {
+    pos += run.step(now, t.scrollHeight - t.clientHeight - pos, t.clientHeight);
+    t.scrollTop = pos;
+    if (run.done()) {
       glide = null;
       glideRaf = 0;
       return;

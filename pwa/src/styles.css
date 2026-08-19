@@ -676,21 +676,23 @@ html, body {
 
 .buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }
 
-/* jump-to-latest chevron: seated in the ＋'s own column, floating just above
+/* jump-to-latest chevron: seated at the bar's RIGHT end, floating just above
    it — same liquid-glass material as the rest, lifted clear of the bar. It
-   lives inside the .compose anchor box and is bottom-anchored past the ＋'s
-   circle, so the ＋ (itself bottom-aligned) and the disc hold their pairing
-   while the pill grows. The glass face lives on ::before — the original
-   disc's exact background/blur/shadow stack and geometry — and the face and
-   glyph each carry the level-4 stacking and the 0.15s show/hide fade. The
-   arrow itself is one fixed color per scheme (--jump-fg): no blending
-   against the backdrop. */
+   lives inside the .compose anchor box, its right edge tangent to the field
+   pill's outer right edge: one vertical line grazes both (the device-test
+   spec). The glass face lives on ::before — the original disc's exact
+   background/blur/shadow stack and geometry — and the face and glyph each
+   carry the level-4 stacking and the 0.15s show/hide fade. The arrow itself
+   is one fixed color per scheme (--jump-fg): no blending against the
+   backdrop. */
 .jump {
   position: absolute;
-  /* the ＋ is a 34px circle inset 0.75rem; this disc is 36px, so a 1px
-     outdent centers the two on the same column axis */
-  left: calc(0.75rem - 1px);
-  /* one bar gap (0.5rem) above the ＋'s top: its 2.5px centering lift + 34px */
+  /* the bar's 0.75rem side padding puts the pill's outer right edge exactly
+     0.75rem in from the box; the same inset seats the disc's right edge flush
+     on that line (offsets resolve against .compose's padding box) */
+  right: 0.75rem;
+  /* height carried over from the old above-the-＋ seat (its 2.5px centering
+     lift + 34px circle + one 0.5rem bar gap), keeping the gap rhythm */
   bottom: calc(var(--pad-b) + 36.5px + 0.5rem);
   width: 36px;
   height: 36px;
