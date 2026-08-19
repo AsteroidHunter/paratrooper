@@ -55,5 +55,5 @@ describe("followFlipDecision", () => {
 });
 
 // The mid-typing shove doors and the kb-vv counter were retired with the
-// vv-sized shell (shell.ts owns keyboard geometry; its close-only correction
-// and heal decisions are pinned in shell.test.ts).
+// vv-sized shell (shell.ts owns keyboard geometry; its close-time correction,
+// heal, and growth-time shove decisions are pinned in shell.test.ts).

@@ -165,6 +165,52 @@ def test_holddiag_viewport_digest_carries_keyboard_regime_marks(client, caplog):
     assert '"vv-geom"' in vp[0]
 
 
+def test_holddiag_viewport_digest_carries_typing_shove_marks(client, caplog):
+    """The typing card's marks ride the viewport digest line: grow-blink for
+    every growth frame whose caret reveal was suppressed at the source, and
+    kb-shove for the shove-vs-truth verdicts (a scroll-sourced offsetTop jump
+    cleared same-frame, or yielded once to the close pass when it re-lands) —
+    so deploy logs alone show whether a typing session still moved."""
+    trail = {
+        "build": "b",
+        "events": [
+            {"t": 1, "ev": "grow-blink", "d": {"oldH": 39, "newH": 61}},
+            {"t": 2, "ev": "kb-shove", "d": {"act": "clear", "x": 0, "y": 50, "top": 412}},
+            {"t": 3, "ev": "kb-shove", "d": {"act": "yield", "x": 0, "y": 50, "top": 412}},
+        ],
+    }
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"grow-blink"' in vp[0]
+    assert '"kb-shove"' in vp[0]
+    assert '"act": "clear"' in vp[0] and '"act": "yield"' in vp[0]
+
+
+def test_holddiag_viewport_digest_carries_keyboard_dynamics_marks(client, caplog):
+    """The keyboard-dynamics card's marks ride the viewport digest line:
+    kb-focusing for the tap-time choreography signal's lifecycle (focus,
+    keyboard handover, hardware-keyboard lapse, blur) and kb-glide for the
+    open/close edges that scope the shell's transition window — so deploy
+    logs alone reconstruct how an open and a close played out."""
+    trail = {
+        "build": "b",
+        "events": [
+            {"t": 1, "ev": "kb-focusing", "d": {"phase": "focus"}},
+            {"t": 2, "ev": "kb-glide", "d": {"edge": "open"}},
+            {"t": 3, "ev": "kb-focusing", "d": {"phase": "kb"}},
+            {"t": 4, "ev": "kb-glide", "d": {"edge": "close"}},
+        ],
+    }
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"kb-focusing"' in vp[0] and '"phase": "focus"' in vp[0]
+    assert '"kb-glide"' in vp[0] and '"edge": "open"' in vp[0] and '"edge": "close"' in vp[0]
+
+
 def test_holddiag_boot_digest_carries_boot_motion_head_first(client, caplog):
     """The boot-window motion recorder's records ride their own digest line,
     HEAD-first: the frame settles right after first paint, so the earliest

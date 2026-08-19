@@ -60,5 +60,8 @@ export function followFlipDecision(
 // The mid-typing shove doors and the kb-vv counter that lived below are
 // retired (2026-08): the shell is sized from the visual viewport for the
 // whole keyboard session (shell.ts), the composer's focus blink suppresses
-// the caret reveal at the source (styles.css), and displacement is corrected
-// once at keyboard close — so there is nothing left to fight mid-typing.
+// the caret reveal at the source (styles.css) and is re-armed per grown line
+// (autosize's growth blink, main.ts), displacement is corrected once at
+// keyboard close, and the one mid-typing decision left — a scroll-sourced
+// shove refused rather than tracked, with a yield guard against the old
+// counter's loop — lives in shell.ts (shoveVerdict), not here.

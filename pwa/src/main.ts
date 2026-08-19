@@ -31,7 +31,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.90"; // crisp surviving photos deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.91"; // typing shove fix and gentle keyboard deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -186,9 +186,11 @@ document.addEventListener(
 // always fully visible in our layout, so a window scroll while it holds focus
 // with NO keyboard is iOS fighting the shell: snap it straight back, same
 // frame (snapping to 0 refires "scroll" once with scrollY already 0, so it
-// cannot loop). WITH the keyboard up (.kb) there is no fighting at all: the
-// shell rides the visual viewport (shell.ts) and displacement is corrected
-// once at close — mid-typing window wars were the retired counter's loop.
+// cannot loop). WITH the keyboard up (.kb) the shell owns the whole affair
+// (shell.ts): it rides the visual viewport, refuses to track a scroll-sourced
+// growth shove (clearing it in its own frame, with a yield guard so the
+// retired counter's window war cannot restart), and corrects residue once at
+// close.
 window.addEventListener(
   "scroll",
   () => {
@@ -739,6 +741,18 @@ function autosize(): void {
   // border-box need — the old +2 border compensation would reopen the gap
   textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
   const newHeight = textEl.offsetHeight;
+  // A GROWN line hands iOS a caret to reveal, and it scrolls the whole page
+  // one step to do it (the typing-test shove: vv.offsetTop 362 -> 412 per
+  // line, 412px piled up by close). The same one-frame opacity blink that
+  // suppresses the reveal on focus (styles.css focus-blink) runs here around
+  // the height write — via WAAPI, so each growth re-triggers cleanly without
+  // touching the :focus animation (flyFromField leans on the same WebKit
+  // property). Growth only, and only while the composer holds focus: shrink
+  // reveals nothing, and the reveal is a focus behavior.
+  if (newHeight > oldHeight && document.activeElement === textEl) {
+    textEl.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 20 });
+    holdDiagRecord("grow-blink", { oldH: oldHeight, newH: newHeight });
+  }
   const decision = compensationFor(oldHeight, newHeight, atBottom);
   if (decision === "pin-bottom") {
     scrollToBottom(true); // instant: the resize and the re-pin paint as one

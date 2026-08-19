@@ -634,7 +634,9 @@ def create_app(injected: AppState | None = None) -> FastAPI:
               and e.get("ev") in ("autosize", "vv-geom", "snapback",
                                   "followtail", "ft-suppress", "flight",
                                   "shell-size", "kb-close", "send-motion",
-                                  "receipt-hold", "boot-motion", "boot-repin")]
+                                  "receipt-hold", "boot-motion", "boot-repin",
+                                  "grow-blink", "kb-shove",
+                                  "kb-focusing", "kb-glide")]
         if vp:
             _diag.info("holddiag viewport events=%d tail=%s",
                        len(vp), json.dumps(vp[-20:]))

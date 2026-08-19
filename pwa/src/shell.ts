@@ -30,13 +30,17 @@
 //   against a BASELINE full-screen height captured while no editor is
 //   focused, never innerHeight - vvHeight (that reads 0 in window-shrink
 //   mode, and 10 of 14 taps landed there).
-// - Corrections run at CLOSE only, never mid-typing (Telegram never fights
-//   the keyboard): a window.scrollTo(0,0) conditional on displacement being
+// - Corrections run at CLOSE, never mid-typing (Telegram never fights the
+//   keyboard): a window.scrollTo(0,0) conditional on displacement being
 //   actually stuck — iOS 26 can leave vv.offsetTop nonzero after dismissal
 //   (Apple forums 800125) and reports late values, so the pass re-reads and
 //   retries once — plus the iOS 17/18 standalone stuck-small-viewport heal:
 //   one display-none reflow when innerHeight stays short of the baseline
-//   after the close settles (dev.to cederhook).
+//   after the close settles (dev.to cederhook). ONE narrow exception exists
+//   mid-typing, and it is not a correction of tracked state but a refusal to
+//   track: the growth-time shove clear (shoveVerdict below) — the deploy-log
+//   proof that "track everything" faithfully turned iOS's caret-reveal scroll
+//   into a visible step per grown line, 412px piled up by close (2026-08-18).
 // - Dismissing the picker menu only LOOKS instant: WKFileUploadPanel keeps
 //   tearing down natively for another ~0.5–2s, and a files.click() forwarded
 //   inside that window is silently DROPPED by WebKit — the dead-＋-tap bug.
@@ -105,6 +109,38 @@ export function closeCorrectionNeeded(x: number, y: number, vvTop: number): bool
   return x !== 0 || y !== 0 || vvTop > 1;
 }
 
+// Mid-typing shove vs layout truth (the growth-step hole, typing test
+// 2026-08-18): each composer line GROWTH makes iOS scroll the page one step
+// to reveal the caret — the event batch reports window.scrollY nonzero and a
+// vv.offsetTop jump with vv.height untouched (observed 362 -> 412) — and a
+// shell that faithfully tracks that jump renders the shove as a sudden
+// visible step, 412px piled up by close. While the keyboard is up and STEADY,
+// a scroll-sourced offsetTop move is displacement, not geometry: clear it
+// (window.scrollTo(0,0), same frame) and leave the shell box unwritten.
+// Geometry the keyboard actually changed (vv.height moved: the rise, the
+// close, an accessory bar) keeps being tracked, and the open/close edges
+// never reach this decision. The yield arm is the re-shove guard the retired
+// kb-vv counter lacked — it re-fought the same scroll after every clear,
+// forever: a shove re-landing inside RESHOVE_YIELD_MS of a clear is tracked
+// once and left to the close-time correction instead.
+export const RESHOVE_YIELD_MS = 500;
+
+export type ShoveVerdict = "track" | "clear" | "yield";
+
+export function shoveVerdict(
+  kbWasUp: boolean,
+  kbStillUp: boolean,
+  scrollX: number,
+  scrollY: number,
+  heightChanged: boolean,
+  sinceClearMs: number,
+): ShoveVerdict {
+  if (!kbWasUp || !kbStillUp) return "track"; // the edges are the shell's own business
+  if (heightChanged) return "track"; // the keyboard/viewport truly moved
+  if (scrollX === 0 && scrollY === 0) return "track"; // no scroll source: a pan is truth
+  return sinceClearMs < RESHOVE_YIELD_MS ? "yield" : "clear";
+}
+
 // iOS 17/18 standalone stuck-small-viewport: after the keyboard closes the
 // window can stay shrunken for good. Past this threshold below the learned
 // full-screen baseline, one display-none reflow on the shell root heals it.
@@ -121,6 +157,33 @@ export function healNeeded(baseline: number, innerHeight: number): boolean {
 export function preservesFocus(w: World): boolean {
   return w.editorFocused || w.fileFocused;
 }
+
+// Tap-time choreography signal (the pop-then-expand fix): .kb latches only
+// after the viewport provably shrinks, so keying the ＋-collapse/editor-widen
+// off it starts the bar's move a whole keyboard-rise late — the bar pops
+// AFTER the keyboard has landed instead of expanding while it rises. The
+// focusing signal turns on synchronously with editor focus (styles.css keys
+// the same choreography off .focusing as off .kb) and hands over to .kb the
+// moment the keyboard proves itself; when no shrink follows inside
+// FOCUSING_MAX_MS (hardware keyboard, or iOS declining to present) it lapses
+// so the bar never sticks mid-state. Pure, so the lifecycle tests run on a
+// plain clock.
+export const FOCUSING_MAX_MS = 1000;
+
+export function focusingActive(
+  editorFocused: boolean,
+  kb: boolean,
+  sinceFocusMs: number,
+): boolean {
+  return editorFocused && !kb && sinceFocusMs < FOCUSING_MAX_MS;
+}
+
+// Keyboard open/close glide: WebKit can publish a keyboard's whole geometry
+// change as ONE vv event, and a shell box applied in one write is a jump cut.
+// Box writes landing inside this window after a .kb edge animate (styles.css
+// #app.gliding, 0.2s ease-out); outside it — every mid-typing write — they
+// stay instant, so an active-growth frame never smears.
+export const GLIDE_SETTLE_MS = 450;
 
 // The teardown window cannot be shortened, survived, or recovered from (three
 // shipped mechanisms and the v0.1.21 focus-cycle all falsified on device), so
@@ -248,6 +311,18 @@ let appliedHeight: number | null = null;
 // close is the ONLY moment corrections may run
 let kbUp = false;
 let closeRetry: ReturnType<typeof setTimeout> | null = null;
+// the re-shove guard's clock (shoveVerdict's yield arm): when the last
+// growth-time shove clear ran; -Infinity = armed to clear
+let lastShoveClearAt = -Infinity;
+// when an editor last gained focus — the focusing signal's clock
+let focusStartAt = -Infinity;
+// the focusing class as applied, so its edges record to the trail once each
+let appliedFocusing = false;
+// the .kb class as applied; its edges (and only they) open the glide window
+let appliedKb = false;
+// box writes animate until this deadline — the kb-edge settle window
+let glideUntil = 0;
+let glideTimer: ReturnType<typeof setTimeout> | null = null;
 
 function readWorld(): World {
   const a = document.activeElement;
@@ -272,21 +347,65 @@ function readWorld(): World {
   };
 }
 
-// THE one writer of shell presentation: two mode classes plus the measured
-// box. styles.css owns what they mean (.kb collapses --pad-b, vanishes the ＋,
-// AND sizes the shell from --shell-top/--shell-h; .settling greys the bar for
-// the whole picker session). Every vv event lands here, so the box is always
-// the freshest numbers iOS has published — no latch, nothing to retract.
+// a .kb edge opens the glide window: box writes inside it animate (styles.css
+// #app.gliding), so the keyboard's rise and close read as motion even when
+// WebKit publishes the whole geometry change as one event. The timer
+// re-converges once the window ends — reconcile drops .gliding (and a close
+// glide's numeric rest box) through the one writer; a stale or duplicate fire
+// reconciles an already-converged state, harmlessly.
+function armGlide(edge: "open" | "close"): void {
+  glideUntil = performance.now() + GLIDE_SETTLE_MS;
+  holdDiagRecord("kb-glide", { edge });
+  if (glideTimer) clearTimeout(glideTimer);
+  glideTimer = setTimeout(() => {
+    glideTimer = null;
+    reconcile();
+  }, GLIDE_SETTLE_MS + 20);
+}
+
+// THE one writer of shell presentation: four mode classes plus the measured
+// box. styles.css owns what they mean (.kb collapses --pad-b and vanishes the
+// ＋; .focusing runs that same bar choreography from the focus tap itself;
+// .kb/.gliding size the shell from --shell-top/--shell-h and .gliding alone
+// carries their transition; .settling greys the bar for the whole picker
+// session). Every vv event lands here, so the box is always the freshest
+// numbers iOS has published — no latch, nothing to retract.
 function applyShell(t: ShellTarget, settling: boolean): void {
   if (!appEl) return;
+  if (t.kb !== appliedKb) {
+    appliedKb = t.kb;
+    armGlide(t.kb ? "open" : "close");
+  }
+  const gliding = performance.now() < glideUntil;
+  const editorFocused = isEditable(document.activeElement);
+  const focusing = focusingActive(editorFocused, t.kb, performance.now() - focusStartAt);
+  if (focusing !== appliedFocusing) {
+    appliedFocusing = focusing;
+    // the off edge names its cause: the keyboard proved itself, the window
+    // lapsed with no shrink (hardware keyboard), or focus simply left
+    holdDiagRecord("kb-focusing", {
+      phase: focusing ? "focus" : t.kb ? "kb" : editorFocused ? "expire" : "blur",
+    });
+  }
   appEl.classList.toggle("kb", t.kb);
   appEl.classList.toggle("settling", settling);
+  appEl.classList.toggle("gliding", gliding);
+  appEl.classList.toggle("focusing", focusing);
 
   const box = shellBox(t);
   if (box) {
     const top = Math.round(box.top);
     const height = Math.round(box.height);
     if (top !== appliedTop || height !== appliedHeight) {
+      if (gliding && appliedTop === null && appliedHeight === null) {
+        // entering from the four-edge pin, a glide has no numeric FROM value
+        // (the pin's height is `auto`, which no transition interpolates):
+        // seed the pin's own geometry and commit it with a reflow so the
+        // real write below animates from rest instead of snapping
+        appEl.style.setProperty("--shell-top", "0px");
+        appEl.style.setProperty("--shell-h", `${Math.round(baseline)}px`);
+        void appEl.offsetHeight;
+      }
       appliedTop = top;
       appliedHeight = height;
       appEl.style.setProperty("--shell-top", `${box.top}px`);
@@ -295,10 +414,24 @@ function applyShell(t: ShellTarget, settling: boolean): void {
       holdDiagRecord("shell-size", { top, h: height });
     }
   } else if (appliedTop !== null || appliedHeight !== null) {
-    appliedTop = null;
-    appliedHeight = null;
-    appEl.style.removeProperty("--shell-top");
-    appEl.style.removeProperty("--shell-h");
+    if (gliding) {
+      // the close glide: ride a numeric box home to the pin's geometry (the
+      // pin itself cannot animate); armGlide's timer drops it below once the
+      // window ends, landing on the measurement-free pin as before
+      const restH = Math.round(baseline);
+      if (appliedTop !== 0 || appliedHeight !== restH) {
+        appliedTop = 0;
+        appliedHeight = restH;
+        appEl.style.setProperty("--shell-top", "0px");
+        appEl.style.setProperty("--shell-h", `${restH}px`);
+        holdDiagRecord("shell-size", { top: 0, h: restH });
+      }
+    } else {
+      appliedTop = null;
+      appliedHeight = null;
+      appEl.style.removeProperty("--shell-top");
+      appEl.style.removeProperty("--shell-h");
+    }
   }
 }
 
@@ -341,6 +474,7 @@ function correctionPass(phase: "close" | "retry"): void {
 
 function keyboardClosed(): void {
   if (closeRetry) clearTimeout(closeRetry);
+  lastShoveClearAt = -Infinity; // a new session must not inherit the yield state
   correctionPass("close");
   closeRetry = setTimeout(() => {
     closeRetry = null;
@@ -372,11 +506,38 @@ export function reconcile(): void {
   const t = computeShell(readWorld());
   const wasUp = kbUp;
   kbUp = t.kb;
+  // Growth-time shove backstop: while the keyboard is up and steady, a vv
+  // move sourced from a window scroll (this same batch's scrollX/Y) is
+  // cleared in this same frame and the box is NOT rewritten — the stable
+  // target hands applyShell the applied numbers, so the write guard sees no
+  // change and nothing moves. scrollTo(0,0) refires scroll once with
+  // everything already zero, so a clear cannot loop; a re-shove inside the
+  // yield window is tracked once and left to the close-time correction
+  // (shoveVerdict owns the whole decision).
+  let target = t;
+  if (appEl) {
+    const x = Math.round(window.scrollX);
+    const y = Math.round(window.scrollY);
+    const heightChanged = appliedHeight === null || Math.round(t.vvHeight) !== appliedHeight;
+    const verdict = shoveVerdict(
+      wasUp, t.kb, x, y, heightChanged, performance.now() - lastShoveClearAt,
+    );
+    if (verdict === "clear" && appliedTop !== null && appliedHeight !== null) {
+      lastShoveClearAt = performance.now();
+      window.scrollTo(0, 0);
+      target = { kb: t.kb, vvTop: appliedTop, vvHeight: appliedHeight };
+      holdDiagRecord("kb-shove", { act: "clear", x, y, top: Math.round(t.vvTop) });
+    } else if (verdict === "yield") {
+      lastShoveClearAt = -Infinity; // yielded once; the next distinct shove clears again
+      holdDiagRecord("kb-shove", { act: "yield", x, y, top: Math.round(t.vvTop) });
+    }
+  }
   // the visual off-state covers the whole session; the tap hold stays
   // teardown-only (see holdsBarTap)
-  applyShell(t, picker.isOpen() || picker.isTearing());
+  applyShell(target, picker.isOpen() || picker.isTearing());
   // corrections belong to the close edge alone — mid-typing the shell rides
-  // the viewport and never writes a scroll (the retired counter's lesson)
+  // the viewport (except a scroll-sourced shove, refused above) and never
+  // rewrites tracked displacement (the retired counter's lesson)
   if (wasUp && !t.kb) keyboardClosed();
 }
 
@@ -439,7 +600,16 @@ function bindInputSignals(input: HTMLInputElement): void {
 
 export function initShell(el: HTMLElement): void {
   appEl = el;
-  document.addEventListener("focusin", reconcile);
+  document.addEventListener("focusin", (e) => {
+    if (isEditable(e.target)) {
+      focusStartAt = performance.now();
+      // a hardware keyboard produces no vv shrink, so the focusing window's
+      // lapse must arrive by clock; stale or duplicate fires reconcile an
+      // already-converged state, harmlessly
+      setTimeout(reconcile, FOCUSING_MAX_MS + 20);
+    }
+    reconcile();
+  });
   // one frame's grace on focusout: focus may be hopping between editables
   document.addEventListener("focusout", () => requestAnimationFrame(reconcile));
   window.visualViewport?.addEventListener("resize", reconcile);

@@ -2,20 +2,25 @@
 // Every case is a bug that shipped to Akash's phone once; it does not ship twice.
 // These run without a DOM — the decision functions take World data and return
 // targets, so each iOS lie is encoded as plain inputs.
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
+  FOCUSING_MAX_MS,
   HEAL_THRESHOLD_PX,
   MIN_KEYBOARD_PX,
+  RESHOVE_YIELD_MS,
   SETTLE_GUARD_MS,
   TEARDOWN_MAX_MS,
   closeCorrectionNeeded,
   computeShell,
   createPickerLifecycle,
+  focusingActive,
   healNeeded,
   holdsBarTap,
   keyboardInset,
   preservesFocus,
   shellBox,
+  shoveVerdict,
   type World,
 } from "../src/shell";
 
@@ -298,6 +303,127 @@ describe("picker lifecycle — the WebKit teardown window", () => {
       expect(p.open()).toBe("presented");
       expect(present).toHaveBeenLastCalledWith(false);
     });
+  });
+});
+
+describe("shoveVerdict — growth-time shove vs layout truth (typing test 2026-08-18)", () => {
+  it("the observed shove: kb steady, height steady, a window scroll in the batch -> clear (362 -> 412 stays unwritten)", () => {
+    expect(shoveVerdict(true, true, 0, 50, false, Infinity)).toBe("clear");
+  });
+
+  it("horizontal displacement is a shove too", () => {
+    expect(shoveVerdict(true, true, 3, 0, false, Infinity)).toBe("clear");
+  });
+
+  it("a genuine keyboard move (vv.height changed) is tracked even with a scroll in the same batch", () => {
+    expect(shoveVerdict(true, true, 0, 50, true, Infinity)).toBe("track");
+  });
+
+  it("no window scroll: a pan is layout truth, tracked as today", () => {
+    expect(shoveVerdict(true, true, 0, 0, false, Infinity)).toBe("track");
+  });
+
+  it("the open and close edges never reach the decision — the shell owns them", () => {
+    expect(shoveVerdict(false, true, 0, 50, false, Infinity)).toBe("track");
+    expect(shoveVerdict(true, false, 0, 50, false, Infinity)).toBe("track");
+  });
+
+  it("the re-shove guard: a shove re-landing inside the window yields to the close-time correction (the retired counter's loop)", () => {
+    expect(shoveVerdict(true, true, 0, 50, false, RESHOVE_YIELD_MS - 1)).toBe("yield");
+    expect(shoveVerdict(true, true, 0, 50, false, RESHOVE_YIELD_MS)).toBe("clear");
+  });
+});
+
+// Set 1 wiring pins: the clear must keep the shell box stable (the whole
+// point — tracking the shove WAS the visible step) and the growth blink must
+// ride autosize's own height write. Source-read tripwires, downbtn-style.
+describe("wiring — shove clear keeps the box, growth re-arms the blink", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+
+  it("a cleared shove writes the scroll, not the box: the stable target reuses the applied numbers", () => {
+    expect(shell).toMatch(
+      /verdict === "clear"[\s\S]{0,200}window\.scrollTo\(0, 0\);\n\s*target = \{ kb: t\.kb, vvTop: appliedTop, vvHeight: appliedHeight \};/,
+    );
+    expect(shell).toMatch(/holdDiagRecord\("kb-shove", \{ act: "clear"/);
+    expect(shell).toMatch(/holdDiagRecord\("kb-shove", \{ act: "yield"/);
+  });
+
+  it("a yield re-arms the guard and a close resets it — no yield state leaks across sessions", () => {
+    expect(shell).toMatch(/verdict === "yield"[\s\S]{0,120}lastShoveClearAt = -Infinity/);
+    expect(shell).toMatch(/function keyboardClosed[\s\S]{0,200}lastShoveClearAt = -Infinity/);
+  });
+
+  it("autosize re-arms the one-frame blink on GROWTH only, while the composer holds focus", () => {
+    expect(main).toMatch(
+      /if \(newHeight > oldHeight && document\.activeElement === textEl\) \{\n\s*textEl\.animate\(\[\{ opacity: 0 \}, \{ opacity: 1 \}\], \{ duration: 20 \}\);/,
+    );
+    expect(main).toMatch(/holdDiagRecord\("grow-blink", \{ oldH: oldHeight, newH: newHeight \}\)/);
+  });
+});
+
+describe("focusingActive — the tap-time choreography signal (the pop-then-expand fix)", () => {
+  it("fires with editor focus, before any vv shrink has been seen", () => {
+    expect(focusingActive(true, false, 0)).toBe(true);
+    expect(focusingActive(true, false, 10)).toBe(true);
+  });
+
+  it("hands over to .kb the moment the keyboard proves itself", () => {
+    expect(focusingActive(true, true, 10)).toBe(false);
+  });
+
+  it("lapses when no keyboard materializes inside the window (hardware keyboard)", () => {
+    expect(focusingActive(true, false, FOCUSING_MAX_MS - 1)).toBe(true);
+    expect(focusingActive(true, false, FOCUSING_MAX_MS)).toBe(false);
+  });
+
+  it("blur ends it whatever the clock says", () => {
+    expect(focusingActive(false, false, 10)).toBe(false);
+    expect(focusingActive(false, true, 10)).toBe(false);
+  });
+});
+
+// Presentation pins for the glide's scoping: the transition lives on .gliding
+// ALONE — shell.ts arms it on the .kb edges for a settle window — so keyboard
+// open/close glide while every mid-typing box write stays instant. The box
+// vars must survive into .gliding without .kb (the close ride home), and the
+// focusing class must key the same bar choreography as .kb.
+describe("presentation — glide scoped to kb edges, focusing keys the choreography", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+
+  it("only .gliding carries the top/height transition, 0.2s ease-out", () => {
+    expect(css).toMatch(
+      /\n#app\.gliding \{\n  transition: top 0\.2s ease-out, height 0\.2s ease-out;\n\}/,
+    );
+    const kbRule = css.match(/\n#app\.kb \{([^}]*)\}/)?.[1] ?? "";
+    expect(kbRule).toContain("--pad-b: 0.5rem"); // the keyboard hug is untouched
+    expect(kbRule).not.toContain("transition"); // .kb alone never animates the box
+    expect(kbRule).not.toContain("top:"); // the box moved to the shared rule below
+    const appRule = css.match(/\n#app \{([^}]*)\}/)?.[1] ?? "";
+    expect(appRule).not.toContain("transition"); // the rest pin stays inert
+  });
+
+  it("the box vars apply under .kb and stay through .gliding for the close ride home", () => {
+    expect(css).toMatch(
+      /#app\.kb,\n#app\.gliding \{\n  top: var\(--shell-top, 0px\);\n  height: var\(--shell-h, 100vh\);\n\}/,
+    );
+  });
+
+  it("shell.ts arms the glide on the .kb edge alone and lets the window expire by clock", () => {
+    expect(shell).toMatch(/if \(t\.kb !== appliedKb\) \{[\s\S]{0,80}armGlide\(t\.kb \? "open" : "close"\)/);
+    expect(shell).toMatch(/GLIDE_SETTLE_MS \+ 20/); // the expiry reconverges via reconcile
+  });
+
+  it("an open from the pin seeds a numeric FROM box — `auto` interpolates with nothing", () => {
+    expect(shell).toMatch(
+      /gliding && appliedTop === null && appliedHeight === null[\s\S]{0,700}void appEl\.offsetHeight;/,
+    );
+  });
+
+  it("the focusing class keys the same bar choreography as .kb", () => {
+    expect(css).toMatch(/#app\.kb \.compose textarea,\n#app\.focusing \.compose textarea \{/);
+    expect(css).toMatch(/#app\.kb \.compose \.attach,\n#app\.focusing \.compose \.attach \{/);
   });
 });
 

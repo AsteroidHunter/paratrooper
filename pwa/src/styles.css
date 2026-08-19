@@ -112,8 +112,10 @@ html, body {
      .thread declares its own pan (scroll containers re-open touch-action for
      themselves, so the thread and the textarea's inner scroll still work).
      iOS's programmatic caret-reveal is suppressed at the source by the
-     composer's focus blink (see .compose textarea:focus); outside a keyboard
-     session main.ts keeps one same-frame snap-back as the last defense.
+     composer's focus blink (see .compose textarea:focus) and its per-grown-
+     line re-arm (autosize, main.ts); a reveal that lands anyway is refused
+     mid-session by the shell's shove clear (shell.ts shoveVerdict), and
+     outside a keyboard session main.ts keeps one same-frame snap-back.
      (#app deliberately keeps overflow:visible: a visible box is not a scroll
      container, so a reveal has nothing there to grab — overflow:hidden would
      CREATE a programmatic scroller.) */
@@ -148,8 +150,22 @@ html, body {
    the keyboard like iMessage instead of floating a dead band above it. */
 #app.kb {
   --pad-b: 0.5rem;
+}
+/* the box vars apply while the keyboard is provably up AND through the close
+   glide (.gliding without .kb): the ride home needs a numeric box to animate
+   — the pin's own `auto` height interpolates with nothing. shell.ts drops
+   both class and vars when the settle window ends, landing back on the pin. */
+#app.kb,
+#app.gliding {
   top: var(--shell-top, 0px);
   height: var(--shell-h, 100vh);
+}
+/* keyboard open/close glide (shell.ts arms .gliding on the .kb edge alone,
+   for GLIDE_SETTLE_MS): box writes inside the window animate, so one reported
+   geometry jump reads as motion; outside it — every mid-typing write — the
+   box stays instant, so an active-growth frame never smears. */
+#app.gliding {
+  transition: top 0.2s ease-out, height 0.2s ease-out;
 }
 
 /* --- token gate --- */
@@ -542,8 +558,10 @@ html, body {
    spot hid under the finger and whose stack read as the box growing.)
    HARD RULE, learned via caret drift: never animate, transform, or filter
    the textarea's own layer while it is in use — only this overlay's opacity
-   may move. The one carve-out is the 0.02s focus blink below: over before
-   the keyboard even starts to rise, and itself a load-bearing iOS fix. */
+   may move. Two narrow carve-outs, both load-bearing iOS fixes and both a
+   single frame the eye cannot catch: the 0.02s focus blink below, over
+   before the keyboard even starts to rise, and the same blink re-armed via
+   WAAPI around each GROWN line's height write (autosize, main.ts). */
 .field::before {
   content: "";
   position: absolute;
@@ -581,18 +599,25 @@ html, body {
    vacated space (34px ＋ + 0.5rem flex gap) is absorbed by the RIGHT inset,
    where ragged line-ends live, so the wrap width is identical in both states
    and nothing visibly changes but the glide. Same duration and delay as the
-   ＋'s width collapse, so the wrap width holds frame-by-frame. */
-#app.kb .compose textarea {
+   ＋'s width collapse, so the wrap width holds frame-by-frame. Keyed off
+   .focusing too (shell.ts, set synchronously on the focus tap): the widen
+   runs WHILE the keyboard rises instead of popping after .kb finally latches
+   on the proven shrink. */
+#app.kb .compose textarea,
+#app.focusing .compose textarea {
   padding-right: calc(74px + 0.5rem); /* 40px ↑ column + 34px ＋ + the gap */
   transition: padding-right 0.13s ease 0.1s;
 }
 /* iOS skips its caret-reveal scroll when the freshly focused control sits at
    opacity 0 (the verified ios-chat/kiding mechanism): one 0.02s opacity blink
    on focus — a single frame the eye cannot catch — so the focus tap never
-   hands iOS a reason to scroll the page. This is the narrow one-shot
-   exception to the hold-brighten HARD RULE above: that rule's caret drift
-   came from effects that ride the layer while typing; this one is finished
-   before the keyboard begins to rise. */
+   hands iOS a reason to scroll the page. This is a narrow one-shot exception
+   to the hold-brighten HARD RULE above: that rule's caret drift came from
+   effects that ride the layer while typing; this one is finished before the
+   keyboard begins to rise. The reveal fires again each time the box GROWS a
+   line, so autosize (main.ts) re-arms this same suppression around every
+   growth height write, via WAAPI so the re-trigger never touches this
+   :focus animation. */
 .compose textarea:focus {
   animation: focus-blink 0.02s;
 }
@@ -632,13 +657,19 @@ html, body {
     filter 0.3s ease;
 }
 
-/* The ＋ and the keyboard never coexist. While the keyboard is provably up
+/* The ＋ and the keyboard never coexist. From the focus tap itself (.focusing,
+   shell.ts's tap-synchronous signal) or while the keyboard is provably up
    (.kb — the shell's baseline-tested signal) the ＋ fades out, THEN yields its
    flex slot so the editor widens leftward into it, both inside the keyboard's
-   own rise; when the keyboard leaves, the editor shrinks back first and the ＋
-   fades in after. With no ＋ to tap while typing, a picker can never present
-   over a live keyboard — the teardown snatch has nothing left to snatch. */
-#app.kb .compose .attach {
+   own rise — .focusing starts the choreography with the tap and .kb takes
+   over when the shrink proves out, so the bar expands while the keyboard
+   rises instead of popping after it lands; a keyboard-less focus lapses the
+   signal and the bar returns. When the keyboard leaves, the editor shrinks
+   back first and the ＋ fades in after. With no ＋ to tap while typing, a
+   picker can never present over a live keyboard — the teardown snatch has
+   nothing left to snatch. */
+#app.kb .compose .attach,
+#app.focusing .compose .attach {
   opacity: 0;
   width: 0;
   margin-right: -0.5rem; /* swallow the flex gap so the slot truly closes */
