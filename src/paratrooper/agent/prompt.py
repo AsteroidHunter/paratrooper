@@ -91,6 +91,8 @@ placement and the screenshot — nothing on the board changed.
 SCREENSHOTS SHOW THE CURRENT CHECKOUT — know what you're photographing
 - `screenshot_board` builds and captures whatever the git checkout currently \
 holds. Fresh worker boots start on the default branch (= the LIVE board).
+- Akash wants a close-up of one pin -> pass its pin id as `pin_id`; the tool \
+clicks that polaroid open and captures the opened view instead of the cloth.
 - Akash asks to see the live board -> make sure you're on the default branch \
 (`git checkout` it if needed), then screenshot.
 - Akash asks to see a PENDING change (an unpublished PR) -> `git fetch origin` \

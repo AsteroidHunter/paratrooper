@@ -3,7 +3,8 @@
 Per the architecture: after the pin folder is written on the feature branch, run
 ``astro build`` in the checkout, serve the built ``dist/`` over an ephemeral
 local HTTP server, open it with headless Chromium at a fixed desktop viewport,
-and capture the ``.cloth`` element. Building (rather than a persistent dev
+and capture the ``.cloth`` element (or, with ``pin_id``, click that polaroid
+open and capture the opened view). Building (rather than a persistent dev
 server) means each screenshot reflects exactly the committed state; the server
 is spun up per-capture and torn down.
 
@@ -18,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import re
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +27,12 @@ from pathlib import Path
 DEFAULT_VIEWPORT = (1440, 1440)  # square-ish desktop; the board is square
 DEFAULT_SELECTOR = ".cloth"
 DEFAULT_BUILD_CMD = ("npm", "run", "build")
+# The board's polaroid markup (src/pages/index.astro in the site repo): each
+# pin renders as a clickable ``.board-pin`` div carrying its id in
+# ``data-pin-id``; clicking it opens the ``.polaroid-overlay`` lightbox (a
+# fixed full-viewport backdrop) with the ``.polaroid-card`` zooming in.
+PIN_SELECTOR = ".board-pin"
+CARD_SELECTOR = ".polaroid-card"
 
 
 class ScreenshotError(RuntimeError):
@@ -55,6 +63,47 @@ def _serve(directory: Path):
         thread.join(timeout=5)
 
 
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def _match_pin(requested: str, ids: list[str]) -> str | None:
+    """Resolve ``requested`` against the board's ``data-pin-id`` values: exact
+    first, then a normalized (slugified) match if it is unambiguous."""
+    if requested in ids:
+        return requested
+    want = _slug(requested)
+    hits = [i for i in ids if i and _slug(i) == want]
+    return hits[0] if len(hits) == 1 else None
+
+
+async def _shoot_opened(page, pin_id: str, out_path: Path) -> None:
+    """Click open the polaroid whose ``data-pin-id`` matches ``pin_id`` and
+    capture the viewport. The lightbox is a fixed full-viewport overlay (dim
+    backdrop + centered card + the floating title on multi-song pins), so the
+    viewport IS the opened view; shooting only the card would crop those out."""
+    ids = await page.locator(PIN_SELECTOR).evaluate_all(
+        "els => els.map(e => e.dataset.pinId ?? '')"
+    )
+    target = _match_pin(pin_id, ids)
+    if target is None:
+        known = ", ".join(i for i in ids if i) or "(none)"
+        raise ScreenshotError(f"no polaroid matches {pin_id!r}; the board has: {known}")
+    await page.locator(PIN_SELECTOR).nth(ids.index(target)).click(timeout=15_000)
+    card = page.locator(CARD_SELECTOR)
+    await card.wait_for(state="visible", timeout=15_000)
+    # the card zooms in via a CSS animation and its artwork is injected on
+    # open — capture only once both have settled
+    await page.wait_for_function(
+        "sel => { const c = document.querySelector(sel);"
+        " return c && c.getAnimations().every(a => a.playState === 'finished')"
+        " && [...c.querySelectorAll('img')].every(i => i.complete); }",
+        arg=CARD_SELECTOR,
+        timeout=15_000,
+    )
+    await page.screenshot(path=str(out_path))
+
+
 async def screenshot_board(
     site_root: str | Path,
     out_path: str | Path,
@@ -64,9 +113,13 @@ async def screenshot_board(
     build: bool = True,
     build_cmd: tuple[str, ...] = DEFAULT_BUILD_CMD,
     dist_subdir: str = "dist",
+    pin_id: str | None = None,
 ) -> Path:
     """Build the site (unless ``build=False``) and screenshot the ``.cloth``
-    element to ``out_path`` (PNG). Returns the path."""
+    element to ``out_path`` (PNG). With ``pin_id``, click that polaroid open
+    once the board is visible and capture the opened view (full viewport)
+    instead; an unknown id raises :class:`ScreenshotError` naming the ids
+    that exist. Returns the path."""
     from playwright.async_api import async_playwright  # lazy: browser dep is heavy
 
     site_root = Path(site_root)
@@ -93,7 +146,10 @@ async def screenshot_board(
                 await page.goto(base_url, wait_until="networkidle")
                 element = page.locator(selector).first
                 await element.wait_for(state="visible", timeout=15_000)
-                await element.screenshot(path=str(out_path))
+                if pin_id is None:
+                    await element.screenshot(path=str(out_path))
+                else:
+                    await _shoot_opened(page, pin_id, out_path)
             finally:
                 await browser.close()
     return out_path

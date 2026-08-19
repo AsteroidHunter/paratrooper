@@ -200,12 +200,14 @@ def build_tool_server(ctx: ToolContext):
         ctx.branch = branch
         return _ok({"recorded": {"pr": url, "branch": branch}})
 
-    @tool("screenshot_board", "Build the site and screenshot the board (.cloth). Returns a "
-          "PNG path. No args.", {})
+    @tool("screenshot_board", "Build the site and screenshot the board (.cloth). Optional "
+          "pin_id: click that polaroid open and capture the opened view instead. Returns "
+          "a PNG path.", {"pin_id": str})
     async def screenshot_board_tool(args: dict) -> dict:
         try:
+            pin_id = str(args.get("pin_id") or "").strip() or None
             out = ctx.config.site_root / "_paratrooper_board.png"
-            path = await screenshot.screenshot_board(ctx.config.site_root, out)
+            path = await screenshot.screenshot_board(ctx.config.site_root, out, pin_id=pin_id)
             ctx.last_screenshot = str(path)
             return _ok({"screenshot": str(path)})
         except Exception as exc:
