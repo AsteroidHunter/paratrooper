@@ -8,6 +8,7 @@ import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { receiptFor } from "./receipts";
+import { FLIGHT_EASE, FLIGHT_MS, shiftParticipates } from "./shift";
 import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell";
 import { installStartupImage } from "./splash";
 import {
@@ -22,7 +23,7 @@ import type { OutboxRecord } from "./outbox";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.73"; // reply take-back deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.74"; // send flight polish deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1403,10 +1404,11 @@ function flyFromField(wrapper: HTMLElement): void {
     // Web Animations API, not a transition: the start state lives inside the
     // animation itself, so WebKit cannot coalesce the two style writes into
     // one and silently skip the motion (which is what killed the old
-    // transition + double-rAF version on iOS).
+    // transition + double-rAF version on iOS). The beat and ease are shared
+    // with the sibling shift (shift.ts) — one motion, no overshoot.
     const anim = msg.animate(
       [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }],
-      { duration: 450, easing: "cubic-bezier(0.2, 0.9, 0.3, 1.08)" },
+      { duration: FLIGHT_MS, easing: FLIGHT_EASE },
     );
     holdDiagRecord("flight", {
       phase: "start", i, dx: Math.round(dx * 10) / 10, dy: Math.round(dy * 10) / 10,
@@ -1416,6 +1418,84 @@ function flyFromField(wrapper: HTMLElement): void {
       () => holdDiagRecord("flight", { phase: "cancel", i }),
     );
   });
+}
+
+// --- send-time sibling shift (the white-strip fix; shift.ts holds the why) ----
+// The instant bottom pin on a send teleports the older content up by the new
+// bubble's height while the bubble is still down at the field — a bare strip
+// under the older message for the whole flight. FLIP over the preceding rows:
+// each candidate's position is measured BEFORE the insert (with any mid-shift
+// transform still applied, so a second rapid send starts every row from where
+// it visually is), the running shift set is cancelled, the insert and the pin
+// land, positions are measured again, and each row that moved animates from
+// its old spot to its new one on the flight's own beat and ease.
+
+const SHIFT_MAX_TARGETS = 40; // a couple of screens; the shift is a tail affair
+
+let shiftAnims: Animation[] = [];
+
+// the elements the thread actually lays out (the .evt wrappers are
+// display:contents shells): rows, stamps, receipts, failure labels, spinner,
+// dots. Walked newest-first from the tail (or from just above `stopBefore`),
+// bounded — the shift only ever concerns the last screen or two.
+function laidOutTail(stopBefore: Element | null): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  let n = stopBefore ? stopBefore.previousElementSibling : threadEl().lastElementChild;
+  for (; n && out.length < SHIFT_MAX_TARGETS; n = n.previousElementSibling) {
+    if (!(n instanceof HTMLElement)) continue;
+    if (n.classList.contains("evt")) {
+      for (let i = n.children.length - 1; i >= 0 && out.length < SHIFT_MAX_TARGETS; i--) {
+        const c = n.children[i];
+        if (c instanceof HTMLElement) out.push(c);
+      }
+    } else {
+      out.push(n);
+    }
+  }
+  return out;
+}
+
+function beginSiblingShift(): { play(w: HTMLElement): void } {
+  // eligibility is the pre-send view: pinned (or near) the bottom. A send from
+  // deep in history pins with an intentional jump cut — animating THAT would
+  // turn the instant pin into a slow scroll of the whole distance.
+  const eligible = followTail || nearBottom();
+  const before = new Map<HTMLElement, number>();
+  if (eligible) {
+    for (const el of laidOutTail(null)) before.set(el, el.getBoundingClientRect().top);
+  }
+  // measured first, cancelled second: the before-tops keep the mid-flight
+  // visual truth, and everything from here through play() is one synchronous
+  // task — nothing paints in the cancelled state
+  for (const a of shiftAnims) a.cancel();
+  shiftAnims = [];
+  return {
+    play(w: HTMLElement): void {
+      if (!eligible) {
+        holdDiagRecord("flight", { phase: "shift-skip", reason: "away" });
+        return;
+      }
+      const view = threadEl().getBoundingClientRect();
+      let maxDelta = 0;
+      let rows = 0;
+      for (const el of laidOutTail(w)) {
+        const beforeTop = before.get(el);
+        if (beforeTop === undefined) continue; // born by this send; nothing to close
+        const r = el.getBoundingClientRect();
+        const delta = beforeTop - r.top;
+        if (!shiftParticipates(r.top, r.bottom, delta, view.top, view.bottom)) continue;
+        shiftAnims.push(el.animate(
+          [{ transform: `translateY(${delta}px)` }, { transform: "none" }],
+          { duration: FLIGHT_MS, easing: FLIGHT_EASE },
+        ));
+        if (delta > maxDelta) maxDelta = delta;
+        rows++;
+      }
+      holdDiagRecord("flight", {
+        phase: "shift-start", delta: Math.round(maxDelta * 10) / 10, rows,
+      });
+    },
+  };
 }
 
 // client-local bubbles (optimistic sends, network-failure notices) live in
@@ -1458,6 +1538,10 @@ async function send(): Promise<void> {
   const retractSeqs = taken.map(([seq]) => seq);
   if (retractSeqs.length) holdDiagRecord("retract-sent", { seqs: retractSeqs });
 
+  // the white-strip fix measures the older content BEFORE anything is
+  // inserted; the pin below fires first, then play() starts the transforms
+  const shift = beginSiblingShift();
+
   // INSTANT feedback on tap: one optimistic wrapper appears immediately; the
   // uploads/POST happen behind it. On ACK the wrapper adopts the server seq,
   // so a later replay of the same event no-ops instead of duplicating.
@@ -1477,7 +1561,8 @@ async function send(): Promise<void> {
   suppressAnim = prevSuppress;
   decorate();
   setFollowTail(true, "send"); // sending snaps you to the tail
-  scrollToBottom(true); // instant pin: the flight is the only motion
+  scrollToBottom(true); // instant pin first; the transforms below play over it
+  shift.play(w); // preceding rows glide from their old spot: no white strip
   flyFromField(w);
   composerWroteAt = performance.now(); // the clear's selectionchange is ours, not composing
   textEl.value = "";
