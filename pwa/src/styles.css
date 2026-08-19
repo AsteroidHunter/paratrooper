@@ -820,7 +820,7 @@ html, body {
   -webkit-backdrop-filter: blur(16px) saturate(180%);
   box-shadow: var(--glass-stack-sm);
   opacity: 0;
-  transition: opacity 0.15s;
+  transition: opacity 0.15s; /* hiding stays quick; .show below slows the appear */
 }
 .jump-glyph {
   position: relative;
@@ -853,6 +853,9 @@ html, body {
 .jump.show::before,
 .jump.show .jump-glyph {
   opacity: 1;
+  /* the gentle appear (his 20260819 ask): fading in takes 0.35s eased, while
+     the base rules keep the 0.15s hide so leaving never lingers in the way */
+  transition: opacity 0.35s ease;
 }
 
 /* pending attachment thumbnails (picked, not yet sent) — float on the canvas
