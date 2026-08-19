@@ -41,6 +41,19 @@ describe("send flight (flyFromField)", () => {
   it("still animates via the Web Animations API (the WebKit-proof path)", () => {
     expect(body).toContain("msg.animate(");
   });
+
+  it("a fresh send collapses the composer before it launches", () => {
+    // the field rect is the flight's start seat and the thread pin is its
+    // landing seat: both must be final when the FLIP measures, so a fresh
+    // launch runs the collapse (and its re-pin wait) before flyFromField;
+    // only a send onto a still-airborne flight defers the collapse past it
+    const send = fnBody("send");
+    const freshCollapse = send.indexOf("collapseBar();");
+    const fly = send.indexOf("flyFromField(w)");
+    expect(freshCollapse).toBeGreaterThan(-1);
+    expect(freshCollapse).toBeLessThan(fly);
+    expect(send.indexOf("if (airborne) collapseBar();")).toBeGreaterThan(fly);
+  });
 });
 
 describe("socket apply trail (ws onmessage)", () => {

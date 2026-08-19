@@ -25,7 +25,7 @@ import type { OutboxRecord } from "./outbox";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.77"; // right-seat chevron + distance-braked glide deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.78"; // collapse-first send flight deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1626,6 +1626,11 @@ function localBubble(role: string, cls: string, text: string): void {
   if (followTail) scrollToBottom();
 }
 
+// when the last send's flight left the field: a send composing onto a still-
+// airborne flight must stay one synchronous composition (see send()), while a
+// fresh send may wait out the composer collapse first
+let lastLaunchAt = -Infinity;
+
 async function send(): Promise<void> {
   const textEl = document.getElementById("text") as HTMLTextAreaElement;
   const sendBtn = document.getElementById("sendbtn") as HTMLButtonElement;
@@ -1643,6 +1648,47 @@ async function send(): Promise<void> {
   const taken = replyHold.take();
   const retractSeqs = taken.map(([seq]) => seq);
   if (retractSeqs.length) holdDiagRecord("retract-sent", { seqs: retractSeqs });
+
+  // clear the field and collapse the auto-grown bar (and the pending tray)
+  // through the one compensated path; called at a branch-dependent moment
+  const collapseBar = (): void => {
+    composerWroteAt = performance.now(); // the clear's selectionchange is ours, not composing
+    textEl.value = "";
+    autosize();
+    pendingFiles = [];
+    renderPending();
+  };
+
+  // WHEN the bar collapses is the mid-flight drag fix. On a FRESH launch it
+  // collapses BEFORE anything measures: collapsing after the launch shrank a
+  // multi-line composer mid-flight (82 -> 39 on device) and the pin riding
+  // that resize slid the fresh bubble's seat 51px underneath it — the landing
+  // read as a drag. And when the bar actually resized, take off on the frame
+  // after next: the threadObserver re-pin for the resize is delivered after
+  // the launch frame's rAF callbacks, and by then the flight transform holds
+  // the bubble below the content edge — scrollHeight counts transformed
+  // overflow, so that pin overshoots by the bubble's translate and the
+  // shrinking overflow then drags the pinned scroller (the seat) for the rest
+  // of the flight (Chrome traces in /tmp/m217-evidence/). Two rAFs put the
+  // collapse's paint and its honest re-pin fully before the launch, so no
+  // bottom pin fires while the bubble is in the air. One-line sends are
+  // untouched (39 -> 39, no height write, no pin, no wait).
+  //
+  // Composing onto a still-AIRBORNE flight (a rapid second send) instead
+  // keeps the whole task in the shipped order, collapse after the launch:
+  // a collapse landing between the measure and the launch would lower the
+  // field AND shrink the sibling deltas, opening a band between the riding
+  // first bubble and the departing second one (measured at ~2x the bar
+  // delta); the deferred collapse's own re-pin residue is bounded by the
+  // remaining translate and decays with it.
+  const airborne = performance.now() - lastLaunchAt < FLIGHT_MS;
+  if (!airborne) {
+    const fieldHBefore = textEl.offsetHeight;
+    collapseBar();
+    if (textEl.offsetHeight !== fieldHBefore || files.length > 0) {
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    }
+  }
 
   // the white-strip fix measures the older content BEFORE anything is
   // inserted; the pin below fires first, then play() starts the transforms
@@ -1670,11 +1716,8 @@ async function send(): Promise<void> {
   scrollToBottom(true); // instant pin first; the transforms below play over it
   shift.play(w); // preceding rows glide from their old spot: no white strip
   flyFromField(w);
-  composerWroteAt = performance.now(); // the clear's selectionchange is ours, not composing
-  textEl.value = "";
-  autosize(); // collapse the auto-grown bar through the same compensated path
-  pendingFiles = [];
-  renderPending();
+  lastLaunchAt = performance.now();
+  if (airborne) collapseBar(); // the shipped order when a flight is already up
 
   sendBtn.disabled = true; // no double-fire while the network work runs
   try {

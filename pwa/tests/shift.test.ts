@@ -99,6 +99,51 @@ describe("sibling shift wiring — the order that kills the white strip", () => 
     expect(play).toBeLessThan(fly); // then the shift, then the flight
   });
 
+  it("a fresh launch collapses the composer first (the mid-flight drag fix)", () => {
+    // a multi-line send used to clear + autosize AFTER the launch: the bar
+    // shrank 82 -> 39 mid-flight and the pin riding the resize moved the
+    // fresh bubble's seat under it. On a fresh launch the collapse (clear,
+    // autosize, pending tray) now precedes the measure and the flight, so
+    // the launch measures final geometry and departs from the collapsed bar.
+    const grace = send.indexOf("composerWroteAt = performance.now()");
+    const clear = send.indexOf('textEl.value = ""');
+    const collapse = send.indexOf("autosize()");
+    const tray = send.indexOf("renderPending()");
+    expect(grace).toBeGreaterThan(-1);
+    expect(grace).toBeLessThan(clear); // the grace mark still covers the clear
+    expect(clear).toBeLessThan(collapse); // clear, then the height re-derive
+    expect(collapse).toBeLessThan(tray); // the tray collapse is geometry too
+    const freshCollapse = send.indexOf("collapseBar();");
+    const measure = send.indexOf("beginSiblingShift()");
+    expect(freshCollapse).toBeGreaterThan(-1);
+    expect(freshCollapse).toBeLessThan(measure); // settled bar, then before-rects
+  });
+
+  it("a resized bar on a fresh launch waits out its re-pin (no pin mid-air)", () => {
+    // the threadObserver's pin for the bar resize lands after the launch
+    // frame's rAF callbacks and reads a scrollHeight inflated by the flying
+    // bubble's translate — so a fresh send whose bar resized waits two rAFs
+    // (collapse painted, honest re-pin done) before measuring and launching
+    const wait = send.indexOf("requestAnimationFrame");
+    const freshCollapse = send.indexOf("collapseBar();");
+    const measure = send.indexOf("beginSiblingShift()");
+    expect(wait).toBeGreaterThan(freshCollapse);
+    expect(wait).toBeLessThan(measure);
+    expect(send.slice(wait)).toMatch(/requestAnimationFrame\(\(\) => requestAnimationFrame/);
+  });
+
+  it("composing onto a live flight keeps the shipped order (collapse last)", () => {
+    // a collapse landing between the measure and the launch would lower the
+    // field and shrink the sibling deltas, tearing a band open between the
+    // riding first bubble and the departing second one — so a send within
+    // FLIGHT_MS of the last launch defers the collapse past the launch
+    const fly = send.indexOf("flyFromField(w)");
+    const airborneCollapse = send.lastIndexOf("collapseBar();");
+    expect(send).toContain("lastLaunchAt < FLIGHT_MS"); // the airborne test
+    expect(send).toContain("if (airborne) collapseBar();");
+    expect(airborneCollapse).toBeGreaterThan(fly);
+  });
+
   it("before-tops are measured with mid-flight transforms still applied", () => {
     // measure first, cancel second: a second rapid send composes from where
     // the first shift visually is instead of snapping
