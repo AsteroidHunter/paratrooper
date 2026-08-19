@@ -9,12 +9,14 @@ import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { receiptFor } from "./receipts";
 import { FLIGHT_EASE, FLIGHT_MS, shiftParticipates } from "./shift";
-import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell";
+import { bindPicker, bindSendShield, currentFileInput, initShell, reconcile } from "./shell";
 import { installStartupImage } from "./splash";
 import {
+  RESHOVE_WINDOW_MS,
   USER_SCROLL_INTENT_MS,
   compensationFor,
   followFlipDecision,
+  kbvvCounterDecision,
   shoveResponse,
 } from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
@@ -23,7 +25,7 @@ import type { OutboxRecord } from "./outbox";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.74"; // send flight polish deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.75"; // kbvv keyboard counter deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -141,6 +143,73 @@ document.addEventListener(
   true,
 );
 
+// --- kb-vv keyboard-mode counter (the typing-view creep) ----------------------
+// Deploy-log evidence (2026-08): with the keyboard in a kb-vv mode, each
+// composer line made iOS reveal-shove (snapback door window, y 45-52,
+// recurring), the vv door stood aside by design, and the view crept upward
+// with zero effective correction. The counter below engages UNDER kb-vv:
+// viewport.ts decides (zero-baseline pans and window scrolls are displacement,
+// nonzero-baseline pans are the keyboard's own math, never twice inside the
+// re-shove window, dormant past the session cap), this runner acts — the snap
+// is the same window.scrollTo(0,0) the shell itself uses when leaving kb-vv,
+// so no new writer of shell state exists. A yield arms ONE trailing settle
+// attempt: when the burst quiets, a single snap restores canonical zero
+// without fighting iOS mid-burst. Every engagement records a vv-counter with
+// the displacement it saw, so the next device session reads back from deploy
+// logs whether the counter engaged and won.
+let vvLastCounterAt = -Infinity; // performance.now() of the last counter snap
+let vvCounterActs = 0; // snaps this keyboard session; the cap ends the fight
+let vvPanBaseline = -1; // the session's settled pan; -1 = not latched yet
+let vvHeightChangedAt = -Infinity; // vv height moved: keyboard geometry in motion
+let vvSettleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function vvCounterSessionReset(): void {
+  vvCounterActs = 0;
+  vvPanBaseline = -1;
+  if (vvSettleTimer) clearTimeout(vvSettleTimer);
+  vvSettleTimer = null;
+}
+
+function armVvSettle(): void {
+  if (vvSettleTimer) clearTimeout(vvSettleTimer);
+  vvSettleTimer = setTimeout(() => {
+    vvSettleTimer = null;
+    runVvCounter("settle", true); // records even a clean verdict: the burst's end state
+  }, RESHOVE_WINDOW_MS + 80);
+}
+
+// alwaysRecord: the autosize preempt and the settle probe record even a clean
+// "none" verdict — the trail must show the counter ENGAGED, not just that it
+// won; the shove doors record only when there is displacement to name.
+function runVvCounter(trigger: string, alwaysRecord = false): void {
+  const vv = window.visualViewport;
+  if (!vv || !app.classList.contains("kb-vv")) return;
+  if (vvPanBaseline < 0) vvPanBaseline = Math.round(vv.offsetTop); // first tracked look
+  const focused = document.activeElement?.id === "text";
+  const wy = Math.round(window.scrollY);
+  const pan = Math.round(vv.offsetTop);
+  const geomMoving = performance.now() - vvHeightChangedAt < 150;
+  const act = kbvvCounterDecision(
+    focused, geomMoving, wy, pan, vvPanBaseline,
+    performance.now() - vvLastCounterAt, vvCounterActs,
+  );
+  if (act === "none" && !alwaysRecord) return;
+  // how far the caret row's box sits past the visual viewport's bottom edge
+  // (>0 = spilled: iOS has a reason to shove; <=0 = inside: it does not)
+  const field = document.querySelector(".field")?.getBoundingClientRect();
+  const spill = field ? Math.round(field.bottom - (vv.offsetTop + vv.height)) : 0;
+  holdDiagRecord("vv-counter", {
+    trigger, act, y: wy, top: pan, base: vvPanBaseline, spill,
+  });
+  if (act === "snap") {
+    vvLastCounterAt = performance.now();
+    vvCounterActs++;
+    window.scrollTo(0, 0); // clears scroll AND pan, the shell's own leave-write
+  } else if (act === "yield") {
+    armVvSettle(); // one trailing correction once the burst quiets
+  }
+}
+
 // iOS caret-shove counter: the shell itself never scrolls (styles.css —
 // html/body are overflow:hidden at 100vh, #app is inset-pinned, only .thread
 // scrolls), but iOS still programmatically scrolls the WINDOW to "reveal" the
@@ -151,12 +220,18 @@ document.addEventListener(
 // translates the app WITH them on the same event) and zeroes window scroll
 // when leaving those modes; this door covers the document scroller, and the
 // vv guard below covers the pans no keyboard mode owns. Snapping to 0 refires
-// "scroll" once with scrollY already 0, so it cannot loop.
+// "scroll" once with scrollY already 0, so it cannot loop. UNDER kb-vv the
+// unconditional snap is exactly the recorded re-shove loop — there the door
+// routes through the rate-limited counter above instead.
 window.addEventListener(
   "scroll",
   () => {
     if (document.activeElement?.id !== "text") return;
     if (window.scrollX !== 0 || window.scrollY !== 0) {
+      if (app.classList.contains("kb-vv")) {
+        runVvCounter("window");
+        return;
+      }
       holdDiagRecord("snapback", {
         door: "window", x: Math.round(window.scrollX), y: Math.round(window.scrollY),
       });
@@ -181,8 +256,17 @@ if (window.visualViewport) {
   const vvGuard = (src: string): void => {
     const heightChanged = Math.abs(vv.height - prevVvHeight) > 1;
     prevVvHeight = vv.height;
-    if (document.activeElement?.id !== "text") return;
+    // counter session bookkeeping runs on EVERY event, focused or not: the
+    // keyboard leaving (a blur, a mode drop) must reset the session, and a
+    // height change while tracked re-latches the pan baseline — a settling
+    // keyboard's own pan must never later read as drift
     const tracking = app.classList.contains("kb-vv");
+    if (!tracking) vvCounterSessionReset();
+    else if (heightChanged) {
+      vvHeightChangedAt = performance.now();
+      vvPanBaseline = Math.round(vv.offsetTop);
+    }
+    if (document.activeElement?.id !== "text") return;
     holdDiagRecord("vv-geom", {
       src, h: Math.round(vv.height), top: Math.round(vv.offsetTop),
       ih: window.innerHeight, kbvv: tracking,
@@ -191,6 +275,10 @@ if (window.visualViewport) {
       holdDiagRecord("snapback", { door: "vv-pan", top: Math.round(vv.offsetTop) });
       window.scrollTo(0, 0);
     }
+    // kb-vv no longer stands aside: a pure pan drifting off a zero baseline
+    // (the overlay-mode creep the logs caught) is neutralized here, rate-
+    // limited so the correction cannot become the re-shove loop
+    if (tracking) runVvCounter(src === "resize" ? "vv-resize" : "vv-scroll");
   };
   vv.addEventListener("resize", () => vvGuard("resize"));
   vv.addEventListener("scroll", () => vvGuard("scroll"));
@@ -707,6 +795,18 @@ function autosize(): void {
     oldH: oldHeight, newH: newHeight, ft: followTail, nb, atB: atBottom,
     dec: decision, stB: Math.round(stBefore), stA: Math.round(t.scrollTop),
   });
+  // kb-vv preempt (the cause, not the symptom): a composer height change is
+  // exactly what makes iOS reveal-shove. Converge the shell NOW, in the same
+  // frame as the height write — reconcile() is the shell's own one writer, so
+  // --vv-top/--vv-height are fresh and the caret row is back inside the
+  // visual viewport before iOS's reveal check can find it hidden — then run
+  // the counter over any displacement already on the books, recording even a
+  // clean verdict so the trail shows the preempt engaged.
+  if (newHeight !== oldHeight && app.classList.contains("kb-vv")
+      && document.activeElement?.id === "text") {
+    reconcile();
+    runVvCounter("autosize", true);
+  }
 }
 
 // --- rendering ---------------------------------------------------------------

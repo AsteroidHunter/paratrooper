@@ -78,3 +78,43 @@ export function shoveResponse(
   if (heightChanged) return "none"; // keyboard geometry in motion, not a shove
   return offsetTop !== 0 ? "snap" : "none";
 }
+
+// The kb-vv counter — the decision half of the typing-view creep. Device
+// evidence (deploy logs, 2026-08): with the keyboard in a kb-vv mode, every
+// composer line made iOS reveal-scroll (snapback door window, y 45-52,
+// recurring), the vv door above stood aside by design, and the view crept up
+// line by line. The counter engages UNDER kb-vv now, with two rules the logs
+// forced:
+//   - a pan is fought only off a ZERO baseline. In shrink-AND-pan mode the
+//     keyboard itself parks the page at a large offset (vvTop ~362, the
+//     2026-07-30 finding); clearing THAT pan just makes iOS re-assert it —
+//     a guaranteed loop. The session's settled pan is the baseline; only
+//     drift off a zero baseline (the overlay-mode creep) is displacement.
+//     A nonzero window scroll is displacement in every mode: nothing
+//     legitimate ever scrolls the window under the fixed shell.
+//   - never counter twice inside the re-shove window. A shove recurring that
+//     fast is iOS re-asserting; fighting it frame-for-frame is the recorded
+//     loop. The counter yields (the shell's own follow keeps the view glued),
+//     the caller arms one trailing settle attempt, and past the session cap
+//     it goes dormant — the correction must never become its own shove loop.
+export const RESHOVE_WINDOW_MS = 700;
+export const SESSION_COUNTER_CAP = 4;
+
+export type VvCounterAction = "snap" | "yield" | "dormant" | "none";
+
+export function kbvvCounterDecision(
+  focused: boolean,
+  heightChanged: boolean,
+  windowY: number,
+  pan: number,
+  panBaseline: number,
+  sinceLastCounterMs: number,
+  actsThisSession: number,
+): VvCounterAction {
+  if (!focused || heightChanged) return "none"; // keyboard geometry in motion
+  const panDrift = panBaseline === 0 ? pan : 0; // nonzero-baseline pans are iOS's keyboard math
+  if (windowY === 0 && panDrift <= 1) return "none"; // nothing to neutralize
+  if (actsThisSession >= SESSION_COUNTER_CAP) return "dormant";
+  if (sinceLastCounterMs < RESHOVE_WINDOW_MS) return "yield";
+  return "snap";
+}
