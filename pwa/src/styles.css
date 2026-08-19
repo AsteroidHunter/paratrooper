@@ -117,13 +117,18 @@ html, body {
   font: 17px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
     system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
-  /* no rubber-band revealing the page background. These rules stop USER
-     scrolling of the shell; iOS's programmatic caret-reveal still scrolls the
-     window when the composer grows a line — main.ts snaps that back to 0
-     while the composer is focused. (#app deliberately keeps overflow:visible:
-     a visible box is not a scroll container, so the reveal has nothing there
-     to grab — overflow:hidden would CREATE a programmatic scroller.) */
+  /* no rubber-band revealing the page background, and no page pan for iOS to
+     give away: user scrolling/panning of the shell is off entirely — only
+     .thread declares its own pan (scroll containers re-open touch-action for
+     themselves, so the thread and the textarea's inner scroll still work).
+     iOS's programmatic caret-reveal is suppressed at the source by the
+     composer's focus blink (see .compose textarea:focus); outside a keyboard
+     session main.ts keeps one same-frame snap-back as the last defense.
+     (#app deliberately keeps overflow:visible: a visible box is not a scroll
+     container, so a reveal has nothing there to grab — overflow:hidden would
+     CREATE a programmatic scroller.) */
   overscroll-behavior: none;
+  touch-action: none;
 }
 
 /* Fixed app shell pinned by inset alone — pinning both edges needs no viewport
@@ -141,21 +146,20 @@ html, body {
      iMessage instead of floating a dead band above it */
   --pad-b: max(0.5rem, env(safe-area-inset-bottom));
 }
-/* Keyboard provably up: no home indicator to clear, so the compose bar hugs
-   the keyboard like iMessage instead of floating a dead band above it. This
-   applies in BOTH of iOS 26's keyboard modes. */
+/* Keyboard provably up (shell.ts's baseline-tested signal): the shell box IS
+   the visual viewport. top translates the fixed shell into the visible region
+   when iOS slides the layout viewport (shrink-AND-pan), and top+height ends
+   the shell at the keyboard's top edge (overlay); in window-shrink mode the
+   numbers equal the pin, so ONE rule serves all three iOS 26 modes.
+   Over-constrained absolute positioning drops `bottom` while top+height are
+   set; shell.ts rewrites the vars from fresh visual-viewport numbers on every
+   vv event and removes them at rest, returning to the measurement-free pin
+   above. The home-indicator clearance also collapses, so the compose bar hugs
+   the keyboard like iMessage instead of floating a dead band above it. */
 #app.kb {
   --pad-b: 0.5rem;
-}
-/* Overlay mode ONLY: the layout viewport stayed full height, so the four-edge
-   pin now reaches under the keyboard and must be corrected. top+height
-   override the inset's bottom pin (over-constrained absolute positioning drops
-   `bottom`), putting the compose bar on the keyboard's top edge. In the other
-   mode iOS shrinks the window itself and the pin is already exact — writing
-   these would move the shell off-screen, so shell.ts withholds this class. */
-#app.kb-vv {
-  top: var(--vv-top, 0px);
-  height: var(--vv-height, 100vh);
+  top: var(--shell-top, 0px);
+  height: var(--shell-h, 100vh);
 }
 
 /* --- token gate --- */
@@ -362,6 +366,7 @@ html, body {
   flex-direction: column;
   gap: 2px;
   touch-action: pan-y; /* leftward drags belong to the time-peek gesture */
+  overscroll-behavior: contain; /* a thread overscroll must never chain to a page pan */
 }
 
 /* each chat event renders inside one .evt wrapper; display:contents keeps its
@@ -546,7 +551,9 @@ html, body {
    three-channel glow — touch-point spot + rim flare + under-shadow — whose
    spot hid under the finger and whose stack read as the box growing.)
    HARD RULE, learned via caret drift: never animate, transform, or filter
-   the textarea's own layer — only this overlay's opacity may move. */
+   the textarea's own layer while it is in use — only this overlay's opacity
+   may move. The one carve-out is the 0.02s focus blink below: over before
+   the keyboard even starts to rise, and itself a load-bearing iOS fix. */
 .field::before {
   content: "";
   position: absolute;
@@ -588,6 +595,19 @@ html, body {
 #app.kb .compose textarea {
   padding-right: calc(74px + 0.5rem); /* 40px ↑ column + 34px ＋ + the gap */
   transition: padding-right 0.13s ease 0.1s;
+}
+/* iOS skips its caret-reveal scroll when the freshly focused control sits at
+   opacity 0 (the verified ios-chat/kiding mechanism): one 0.02s opacity blink
+   on focus — a single frame the eye cannot catch — so the focus tap never
+   hands iOS a reason to scroll the page. This is the narrow one-shot
+   exception to the hold-brighten HARD RULE above: that rule's caret drift
+   came from effects that ride the layer while typing; this one is finished
+   before the keyboard begins to rise. */
+.compose textarea:focus {
+  animation: focus-blink 0.02s;
+}
+@keyframes focus-blink {
+  from { opacity: 0; }
 }
 .attach {
   display: grid;

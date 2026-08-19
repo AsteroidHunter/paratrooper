@@ -4,14 +4,18 @@
 // targets, so each iOS lie is encoded as plain inputs.
 import { describe, expect, it, vi } from "vitest";
 import {
+  HEAL_THRESHOLD_PX,
   MIN_KEYBOARD_PX,
   SETTLE_GUARD_MS,
   TEARDOWN_MAX_MS,
+  closeCorrectionNeeded,
   computeShell,
   createPickerLifecycle,
+  healNeeded,
   holdsBarTap,
   keyboardInset,
   preservesFocus,
+  shellBox,
   type World,
 } from "../src/shell";
 
@@ -20,7 +24,6 @@ function world(over: Partial<World> = {}): World {
     editorFocused: false,
     fileFocused: false,
     baseline: 844, // full-screen visual viewport, learned with no keyboard
-    innerHeight: 844, // iPhone-ish logical viewport
     vvHeight: 844,
     vvTop: 0,
     ...over,
@@ -42,47 +45,85 @@ describe("keyboardInset — the iOS 26 lie filter (webkit bug 297779)", () => {
   });
 });
 
-describe("computeShell — iOS 26's two keyboard modes (taplog-proven 2026-07-25)", () => {
-  it("overlay mode: layout viewport stayed tall, so track the visual viewport", () => {
+describe("computeShell + shellBox — one rule for iOS 26's keyboard modes (taplogs 2026-07-25/30)", () => {
+  it("overlay mode: only the visual viewport shrank — the shell box IS the visual viewport", () => {
     const t = computeShell(world({ editorFocused: true, vvHeight: 508, vvTop: 40 }));
-    expect(t).toEqual({ kb: true, trackViewport: true, vvTop: 40, vvHeight: 508 });
+    expect(t.kb).toBe(true);
+    expect(shellBox(t)).toEqual({ top: 40, height: 508 });
   });
 
-  it("window-shrink mode: innerHeight shrank too — STILL a keyboard (v0.1.16 bug: read as none)", () => {
-    const t = computeShell(world({ editorFocused: true, innerHeight: 508, vvHeight: 508 }));
+  it("window-shrink mode: STILL a keyboard (v0.1.16 bug: read as none), and the box equals the pin", () => {
+    // innerHeight shrank to match the viewport, so top 0 / height 508 is
+    // exactly what the four-edge pin already renders — writing it moves
+    // nothing, which is why one rule can serve every mode
+    const t = computeShell(world({ editorFocused: true, vvHeight: 508, vvTop: 0 }));
+    expect(t.kb).toBe(true);
+    expect(shellBox(t)).toEqual({ top: 0, height: 508 });
+  });
+
+  it("shrink-AND-pan: top rides the pan, so the header stays on screen (the 2026-07-30 hidden-header session)", () => {
+    const t = computeShell(world({ editorFocused: true, vvHeight: 400, vvTop: 362 }));
+    expect(t.kb).toBe(true);
+    expect(shellBox(t)).toEqual({ top: 362, height: 400 });
+  });
+
+  it("baseline decides there is a keyboard — no innerHeight comparison exists to lie mid-animation", () => {
+    // the transient innerHeight frame used to flip the old per-mode override
+    // off inside 16ms; the box derives from baseline + vv numbers alone
+    const t = computeShell(world({ editorFocused: true, vvHeight: 508, baseline: 844 }));
     expect(t.kb).toBe(true);
   });
 
-  it("window-shrink WITHOUT a pan does NOT override the four-edge pin — writing top/height moved the shell off-screen", () => {
-    const t = computeShell(world({ editorFocused: true, innerHeight: 508, vvHeight: 508, vvTop: 0 }));
-    expect(t.trackViewport).toBe(false);
-  });
-
-  it("shrink-AND-pan DOES override: iOS shrank innerHeight and slid the page up, hiding the header (taplog 2026-07-30)", () => {
-    // device numbers: baseline 812, keyboard up, inner shrank to 400 AND the
-    // page was panned 362px — the old inner-only test read this as "no
-    // correction needed" and the top bar vanished for the session
-    const t = computeShell(world({ editorFocused: true, innerHeight: 400, vvHeight: 400, vvTop: 362 }));
-    expect(t.kb).toBe(true);
-    expect(t.trackViewport).toBe(true);
-  });
-
-  it("baseline, not innerHeight, decides there is a keyboard — innerHeight lies mid-animation", () => {
-    // the transient frame that used to flip the shell off inside 16ms
-    const t = computeShell(world({ editorFocused: true, innerHeight: 508, vvHeight: 508, baseline: 844 }));
-    expect(t.kb).toBe(true);
-  });
-
-  it("focusin before the keyboard moves (delta 0) stays in pure-CSS mode", () => {
-    expect(computeShell(world({ editorFocused: true })).kb).toBe(false);
+  it("focusin before the keyboard moves (delta 0): no box — the four-edge pin holds", () => {
+    const t = computeShell(world({ editorFocused: true }));
+    expect(t.kb).toBe(false);
+    expect(shellBox(t)).toBeNull();
   });
 
   it("no editor focused: a shrunken viewport is never trusted (stale after blur)", () => {
-    expect(computeShell(world({ vvHeight: 508 })).kb).toBe(false);
+    const t = computeShell(world({ vvHeight: 508 }));
+    expect(t.kb).toBe(false);
+    expect(shellBox(t)).toBeNull();
   });
 
-  it("parked file-input focus is not 'keyboard up' — no shell nudge for the picker", () => {
+  it("parked file-input focus is not 'keyboard up' — no shell resize for the picker", () => {
     expect(computeShell(world({ fileFocused: true, vvHeight: 508 })).kb).toBe(false);
+  });
+});
+
+describe("closeCorrectionNeeded — the close-only scrollTo(0,0); mid-typing never fights", () => {
+  it("clean close: nothing stuck, nothing written", () => {
+    expect(closeCorrectionNeeded(0, 0, 0)).toBe(false);
+  });
+
+  it("a stuck window scroll is displacement on either axis", () => {
+    expect(closeCorrectionNeeded(0, 48, 0)).toBe(true);
+    expect(closeCorrectionNeeded(3, 0, 0)).toBe(true);
+  });
+
+  it("the iOS 26 regression: offsetTop still nonzero after dismissal (Apple forums 800125)", () => {
+    expect(closeCorrectionNeeded(0, 0, 362)).toBe(true);
+    expect(closeCorrectionNeeded(0, 0, 44)).toBe(true);
+  });
+
+  it("sub-pixel pan residue is measurement noise, not displacement", () => {
+    expect(closeCorrectionNeeded(0, 0, 1)).toBe(false);
+  });
+});
+
+describe("healNeeded — the iOS 17/18 standalone stuck-small-viewport reflow", () => {
+  it("innerHeight stuck well short of the learned full-screen baseline -> heal", () => {
+    expect(healNeeded(844, 700)).toBe(true);
+  });
+
+  it("threshold boundary: more than HEAL_THRESHOLD_PX short heals, exactly it does not", () => {
+    expect(healNeeded(844, 844 - HEAL_THRESHOLD_PX - 1)).toBe(true);
+    expect(healNeeded(844, 844 - HEAL_THRESHOLD_PX)).toBe(false);
+  });
+
+  it("a settled viewport, or a just-reset baseline after rotation, never heals", () => {
+    expect(healNeeded(844, 844)).toBe(false);
+    expect(healNeeded(0, 844)).toBe(false);
   });
 });
 

@@ -140,6 +140,31 @@ def test_holddiag_viewport_digest_carries_send_motion(client, caplog):
     assert '"receipt-hold"' in vp[0] and '"apply"' in vp[0]
 
 
+def test_holddiag_viewport_digest_carries_keyboard_regime_marks(client, caplog):
+    """The vv-sized shell's marks ride the viewport digest line: shell-size for
+    every shell resize the keyboard caused, kb-close for the close-time
+    correction/heal verdict, vv-geom for the raw viewport moves — so deploy
+    logs alone reconstruct a keyboard session on device."""
+    trail = {
+        "build": "b",
+        "events": [
+            {"t": 1, "ev": "vv-geom", "d": {"src": "resize", "h": 508, "top": 40,
+                                            "ih": 844, "kb": True}},
+            {"t": 2, "ev": "shell-size", "d": {"top": 40, "h": 508}},
+            {"t": 3, "ev": "kb-close", "d": {"phase": "close", "x": 0, "y": 0,
+                                             "top": 44, "snap": True, "heal": False,
+                                             "ih": 844, "base": 844}},
+        ],
+    }
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"shell-size"' in vp[0]
+    assert '"kb-close"' in vp[0] and '"snap": true' in vp[0]
+    assert '"vv-geom"' in vp[0]
+
+
 def test_relay_logs_persist_and_superseded_drop(tmp_path, monkeypatch, caplog):
     """One line per delivery decision: a live done logs persist with its seq and
     terminal flag; a superseded run's output logs drop with the reason."""

@@ -6,26 +6,37 @@
 // stale event cannot strand shell state.
 //
 // iOS facts this module encodes (each cost a bug round; pinned in tests/):
-// - iOS 26 presents the keyboard in TWO modes, apparently at random per tap
-//   (device-proven, 2026-07-25):
-//     * overlay      — the layout viewport stays full height, only the visual
-//                      viewport shrinks. The shell must track the visual
-//                      viewport or the compose bar sits under the keyboard.
-//     * window-shrink — `innerHeight` shrinks WITH the visual viewport. With
-//                      no pan the four-edge pin is then already exact; writing
-//                      our own top/height moves the shell off-screen.
-//     * shrink-AND-pan — (2026-07-30) innerHeight shrinks AND iOS slides
-//                      the page up (vv.offsetTop ~362): the pin anchors to a
-//                      page whose top is above the screen, hiding the header.
-//                      A nonzero pan therefore forces the viewport override
-//                      regardless of innerHeight.
-//   So "is there a keyboard" must NOT be derived from innerHeight - vvHeight
-//   (that reads 0 in window-shrink mode, and 10 of 14 taps landed there).
-//   It is measured against a BASELINE full-screen height captured while no
-//   editor is focused. innerHeight decides only whether we must correct the
-//   layout viewport, and that decision is LATCHED for the keyboard session —
-//   innerHeight transiently lies mid-animation, which used to flip the shell
-//   on/off/on inside 30ms (and once flipped it off for 2.3s).
+// - iOS 26 presents the keyboard in THREE modes, apparently at random per tap
+//   (device-proven, 2026-07-25 and 2026-07-30):
+//     * overlay        — the layout viewport stays full height, only the
+//                        visual viewport shrinks.
+//     * window-shrink  — `innerHeight` shrinks WITH the visual viewport.
+//     * shrink-AND-pan — innerHeight shrinks AND iOS slides the layout
+//                        viewport up (vv.offsetTop ~362), carrying a
+//                        four-edge-pinned shell's header off the screen.
+//   The old regime chose a correction per mode off an innerHeight comparison
+//   that transiently lies mid-animation, so the choice was latched per
+//   session — and the modes still fought iOS mid-typing (the kb-vv counter
+//   era, retired 2026-08). The regime NOW (the prevention architecture,
+//   research 2026-08-18; Telegram Web Z's vv-sized shell adapted to
+//   position:fixed): while the keyboard is provably up the shell box IS the
+//   visual viewport — top: vv.offsetTop, height: vv.height, rewritten from
+//   fresh numbers on EVERY vv event — and at rest the box is dropped for the
+//   measurement-free four-edge pin. One rule serves all three modes: in
+//   window-shrink the box equals the pin (top 0, height = the shrunken
+//   layout viewport), in the other two it is exactly the correction they
+//   always needed; a stale mid-animation number self-heals on the next event
+//   instead of being latched around. "Is there a keyboard" stays measured
+//   against a BASELINE full-screen height captured while no editor is
+//   focused, never innerHeight - vvHeight (that reads 0 in window-shrink
+//   mode, and 10 of 14 taps landed there).
+// - Corrections run at CLOSE only, never mid-typing (Telegram never fights
+//   the keyboard): a window.scrollTo(0,0) conditional on displacement being
+//   actually stuck — iOS 26 can leave vv.offsetTop nonzero after dismissal
+//   (Apple forums 800125) and reports late values, so the pass re-reads and
+//   retries once — plus the iOS 17/18 standalone stuck-small-viewport heal:
+//   one display-none reflow when innerHeight stays short of the baseline
+//   after the close settles (dev.to cederhook).
 // - Dismissing the picker menu only LOOKS instant: WKFileUploadPanel keeps
 //   tearing down natively for another ~0.5–2s, and a files.click() forwarded
 //   inside that window is silently DROPPED by WebKit — the dead-＋-tap bug.
@@ -41,20 +52,20 @@
 //   (or the keyboard collapses mid-presentation and the menu anchors to a
 //   stale rect); from idle it must NOT (or iOS swallows the next focus tap).
 
+import { holdDiagRecord } from "./hold";
+
 // --- pure decision core (unit-tested; no DOM, no iOS) --------------------------
 
 export interface World {
   editorFocused: boolean; // textarea or non-file input holds focus
   fileFocused: boolean; // focus parked on the picker's file input
   baseline: number; // full-screen visual-viewport height, no keyboard
-  innerHeight: number;
   vvHeight: number;
   vvTop: number;
 }
 
 export interface ShellTarget {
-  kb: boolean; // keyboard provably up: collapse the home-indicator clearance
-  trackViewport: boolean; // AND the layout viewport needs correcting (overlay mode)
+  kb: boolean; // keyboard provably up: size the shell from the visual viewport
   vvTop: number;
   vvHeight: number;
 }
@@ -69,20 +80,38 @@ export function keyboardInset(baseline: number, vvHeight: number): number {
 }
 
 export function computeShell(w: World): ShellTarget {
-  const kb = w.editorFocused && keyboardInset(w.baseline, w.vvHeight) > 0;
-  // The layout viewport needs correcting when the visible area is not where
-  // the four-edge pin thinks it is. Two device-proven triggers:
-  //   - overlay mode: innerHeight stayed tall while the viewport shrank
-  //   - shrink-AND-pan (2026-07-30): innerHeight shrank to match the
-  //     viewport — which used to read as "pin already exact" — but iOS ALSO
-  //     slid the page up (vvTop 362), leaving the app's header above the
-  //     screen for the whole keyboard session. Any nonzero pan means the pin
-  //     is wrong, no matter what innerHeight claims.
-  // True window-shrink with no pan (vvTop 0) still correctly reads false —
-  // writing top/height there was the historical off-screen bug.
-  const trackViewport =
-    kb && (keyboardInset(w.innerHeight, w.vvHeight) > 0 || w.vvTop > 0);
-  return { kb, trackViewport, vvTop: w.vvTop, vvHeight: w.vvHeight };
+  return {
+    kb: w.editorFocused && keyboardInset(w.baseline, w.vvHeight) > 0,
+    vvTop: w.vvTop,
+    vvHeight: w.vvHeight,
+  };
+}
+
+// The shell box while the keyboard is up IS the visual viewport. top =
+// vv.offsetTop translates a fixed shell into the visible region when iOS
+// slides the layout viewport; height ends it at the keyboard's top edge —
+// the Telegram Web Z height+pageTop invariant (shell bottom = keyboard top)
+// expressed for position:fixed. At rest there is no box: the four-edge pin
+// needs no measurement, so cold-start height misreports can't touch it.
+export function shellBox(t: ShellTarget): { top: number; height: number } | null {
+  return t.kb ? { top: t.vvTop, height: t.vvHeight } : null;
+}
+
+// Close-time correction: displacement still on the books once the keyboard
+// is gone. A window scroll is always displacement (nothing legitimate ever
+// scrolls the window under the fixed shell); a leftover pan past 1px is the
+// iOS 26 stuck-offsetTop regression (sub-pixel residue is measurement noise).
+export function closeCorrectionNeeded(x: number, y: number, vvTop: number): boolean {
+  return x !== 0 || y !== 0 || vvTop > 1;
+}
+
+// iOS 17/18 standalone stuck-small-viewport: after the keyboard closes the
+// window can stay shrunken for good. Past this threshold below the learned
+// full-screen baseline, one display-none reflow on the shell root heals it.
+export const HEAL_THRESHOLD_PX = 4;
+
+export function healNeeded(baseline: number, innerHeight: number): boolean {
+  return baseline - innerHeight > HEAL_THRESHOLD_PX;
 }
 
 // ＋ pointerdown: should the tap preserve existing focus? Yes while an editor
@@ -193,7 +222,9 @@ export function createPickerLifecycle(
 
 // --- DOM layer: one reader, one writer, everything converges ------------------
 // No DOM access at import time — window/document are only touched inside
-// functions, so the pure core above imports cleanly in any environment.
+// functions, so the pure core above imports cleanly in any environment
+// (hold.ts's recorder is a pure array push outside the real shell, so its
+// import at the top keeps that property).
 
 function isEditable(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && t.matches("textarea, input:not([type='file'])");
@@ -209,9 +240,14 @@ let onPick: (() => void) | null = null; // rebound with each fresh input
 // innerHeight that iOS mutates mid-animation.
 let baseline = 0;
 let baselineWidth = 0;
-// latched for the keyboard session: innerHeight lies transiently, and letting
-// it retract the shell mid-animation is what made the bar jump
-let tracking = false;
+// the shell box as applied (rounded), so an event with unchanged geometry
+// writes and records nothing; null = at rest, on the four-edge pin
+let appliedTop: number | null = null;
+let appliedHeight: number | null = null;
+// the applied keyboard state; the true->false edge is the close, and the
+// close is the ONLY moment corrections may run
+let kbUp = false;
+let closeRetry: ReturnType<typeof setTimeout> | null = null;
 
 function readWorld(): World {
   const a = document.activeElement;
@@ -231,35 +267,86 @@ function readWorld(): World {
     editorFocused,
     fileFocused: fileEl !== null && a === fileEl,
     baseline,
-    innerHeight: window.innerHeight,
     vvHeight,
     vvTop: vv?.offsetTop ?? 0,
   };
 }
 
-// THE one writer of shell presentation: three mode classes plus two
-// measurements. styles.css owns what they mean (.kb collapses --pad-b AND
-// vanishes the ＋, .kb-vv consumes the vars to override the four-edge pin,
-// .settling greys the bar for the whole picker session).
+// THE one writer of shell presentation: two mode classes plus the measured
+// box. styles.css owns what they mean (.kb collapses --pad-b, vanishes the ＋,
+// AND sizes the shell from --shell-top/--shell-h; .settling greys the bar for
+// the whole picker session). Every vv event lands here, so the box is always
+// the freshest numbers iOS has published — no latch, nothing to retract.
 function applyShell(t: ShellTarget, settling: boolean): void {
   if (!appEl) return;
-  const wasTracking = appEl.classList.contains("kb-vv");
   appEl.classList.toggle("kb", t.kb);
   appEl.classList.toggle("settling", settling);
 
-  if (t.trackViewport) {
-    appEl.style.setProperty("--vv-top", `${t.vvTop}px`);
-    appEl.style.setProperty("--vv-height", `${t.vvHeight}px`);
-    appEl.classList.add("kb-vv");
-  } else {
-    appEl.classList.remove("kb-vv");
-    appEl.style.removeProperty("--vv-top");
-    appEl.style.removeProperty("--vv-height");
-    // only the tracked mode pans the layout viewport, so only leaving IT
-    // needs the pan cleared. Firing this on every kb flip is what yanked the
-    // page mid-animation.
-    if (wasTracking) window.scrollTo(0, 0);
+  const box = shellBox(t);
+  if (box) {
+    const top = Math.round(box.top);
+    const height = Math.round(box.height);
+    if (top !== appliedTop || height !== appliedHeight) {
+      appliedTop = top;
+      appliedHeight = height;
+      appEl.style.setProperty("--shell-top", `${box.top}px`);
+      appEl.style.setProperty("--shell-h", `${box.height}px`);
+      // the device's read-back for every shell resize the keyboard causes
+      holdDiagRecord("shell-size", { top, h: height });
+    }
+  } else if (appliedTop !== null || appliedHeight !== null) {
+    appliedTop = null;
+    appliedHeight = null;
+    appEl.style.removeProperty("--shell-top");
+    appEl.style.removeProperty("--shell-h");
   }
+}
+
+// --- close-time correction + heal: the only fights, and only after close ------
+// One conditional pass on the close edge (that event's own numbers) and one
+// re-read shortly after: visual-viewport values land late after a close
+// (Martijn Hols), iOS 26 can leave offsetTop stuck nonzero (Apple forums
+// 800125), and the old unconditional exit-snap was itself a mid-animation
+// yank. The retry also carries the stuck-small-viewport heal — by then the
+// dismissal animation is over, so a small innerHeight is stuck, not settling.
+export const CLOSE_RETRY_MS = 350;
+
+function correctionPass(phase: "close" | "retry"): void {
+  const x = Math.round(window.scrollX);
+  const y = Math.round(window.scrollY);
+  const top = Math.round(window.visualViewport?.offsetTop ?? 0);
+  const snap = closeCorrectionNeeded(x, y, top);
+  // clears scroll AND pan on the unscrollable document — the same write the
+  // old regime used, now conditional and close-only
+  if (snap) window.scrollTo(0, 0);
+  const heal = phase === "retry" && appEl !== null && healNeeded(baseline, window.innerHeight);
+  if (heal && appEl) {
+    // display:none forgets descendants' scroll positions; save and restore
+    // them around the reflow so the heal can never yank the thread
+    const scrolled = Array.from(appEl.querySelectorAll<HTMLElement>("*"))
+      .filter((el) => el.scrollTop > 0)
+      .map((el) => [el, el.scrollTop] as const);
+    appEl.style.display = "none";
+    void appEl.offsetHeight; // the forced reflow IS the heal
+    appEl.style.display = "";
+    for (const [el, st] of scrolled) el.scrollTop = st;
+  }
+  // every close leaves a record; the retry only when it acted
+  if (phase === "close" || snap || heal) {
+    holdDiagRecord("kb-close", {
+      phase, x, y, top, snap, heal, ih: window.innerHeight, base: Math.round(baseline),
+    });
+  }
+}
+
+function keyboardClosed(): void {
+  if (closeRetry) clearTimeout(closeRetry);
+  correctionPass("close");
+  closeRetry = setTimeout(() => {
+    closeRetry = null;
+    if (kbUp) return; // a new keyboard session owns the geometry now
+    correctionPass("retry");
+  }, CLOSE_RETRY_MS);
 }
 
 // iOS takes the keyboard when the picker's sheet appears and never gives it
@@ -282,16 +369,15 @@ function releaseParkedEditor(): void {
 }
 
 export function reconcile(): void {
-  const w = readWorld();
-  const t = computeShell(w);
-  // latch: once this keyboard session needs the viewport override it keeps it
-  // until the keyboard actually leaves, so a transient innerHeight lie cannot
-  // retract the shell mid-animation
-  if (!t.kb) tracking = false;
-  else if (t.trackViewport) tracking = true;
+  const t = computeShell(readWorld());
+  const wasUp = kbUp;
+  kbUp = t.kb;
   // the visual off-state covers the whole session; the tap hold stays
   // teardown-only (see holdsBarTap)
-  applyShell({ ...t, trackViewport: t.kb && tracking }, picker.isOpen() || picker.isTearing());
+  applyShell(t, picker.isOpen() || picker.isTearing());
+  // corrections belong to the close edge alone — mid-typing the shell rides
+  // the viewport and never writes a scroll (the retired counter's lesson)
+  if (wasUp && !t.kb) keyboardClosed();
 }
 
 const picker = createPickerLifecycle({

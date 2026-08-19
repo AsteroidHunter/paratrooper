@@ -57,64 +57,8 @@ export function followFlipDecision(
   return "hold";
 }
 
-// Caret-shove second door — the visualViewport pan the window-scroll snap-back
-// never sees. iOS can "reveal" the caret by panning the visual viewport
-// (vv.offsetTop goes nonzero, no window scroll event fires). Two legitimate
-// owners of a pan exist and must not be fought: the kb-vv keyboard modes
-// (shell.ts tracks the pan and translates the app with it, same event), and a
-// keyboard transition in flight (the pan rides a height change). Anything
-// else — a pure pan while the composer is focused and the shell is not
-// tracking — is the shove: snap the window back to 0,0, which clears the pan
-// on the unscrollable document (the same write shell.ts uses when leaving
-// kb-vv).
-export type ShoveAction = "snap" | "none";
-
-export function shoveResponse(
-  tracking: boolean,
-  offsetTop: number,
-  heightChanged: boolean,
-): ShoveAction {
-  if (tracking) return "none"; // kb-vv owns the pan: the shell translates with it
-  if (heightChanged) return "none"; // keyboard geometry in motion, not a shove
-  return offsetTop !== 0 ? "snap" : "none";
-}
-
-// The kb-vv counter — the decision half of the typing-view creep. Device
-// evidence (deploy logs, 2026-08): with the keyboard in a kb-vv mode, every
-// composer line made iOS reveal-scroll (snapback door window, y 45-52,
-// recurring), the vv door above stood aside by design, and the view crept up
-// line by line. The counter engages UNDER kb-vv now, with two rules the logs
-// forced:
-//   - a pan is fought only off a ZERO baseline. In shrink-AND-pan mode the
-//     keyboard itself parks the page at a large offset (vvTop ~362, the
-//     2026-07-30 finding); clearing THAT pan just makes iOS re-assert it —
-//     a guaranteed loop. The session's settled pan is the baseline; only
-//     drift off a zero baseline (the overlay-mode creep) is displacement.
-//     A nonzero window scroll is displacement in every mode: nothing
-//     legitimate ever scrolls the window under the fixed shell.
-//   - never counter twice inside the re-shove window. A shove recurring that
-//     fast is iOS re-asserting; fighting it frame-for-frame is the recorded
-//     loop. The counter yields (the shell's own follow keeps the view glued),
-//     the caller arms one trailing settle attempt, and past the session cap
-//     it goes dormant — the correction must never become its own shove loop.
-export const RESHOVE_WINDOW_MS = 700;
-export const SESSION_COUNTER_CAP = 4;
-
-export type VvCounterAction = "snap" | "yield" | "dormant" | "none";
-
-export function kbvvCounterDecision(
-  focused: boolean,
-  heightChanged: boolean,
-  windowY: number,
-  pan: number,
-  panBaseline: number,
-  sinceLastCounterMs: number,
-  actsThisSession: number,
-): VvCounterAction {
-  if (!focused || heightChanged) return "none"; // keyboard geometry in motion
-  const panDrift = panBaseline === 0 ? pan : 0; // nonzero-baseline pans are iOS's keyboard math
-  if (windowY === 0 && panDrift <= 1) return "none"; // nothing to neutralize
-  if (actsThisSession >= SESSION_COUNTER_CAP) return "dormant";
-  if (sinceLastCounterMs < RESHOVE_WINDOW_MS) return "yield";
-  return "snap";
-}
+// The mid-typing shove doors and the kb-vv counter that lived below are
+// retired (2026-08): the shell is sized from the visual viewport for the
+// whole keyboard session (shell.ts), the composer's focus blink suppresses
+// the caret reveal at the source (styles.css), and displacement is corrected
+// once at keyboard close — so there is nothing left to fight mid-typing.
