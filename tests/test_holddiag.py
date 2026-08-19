@@ -119,6 +119,27 @@ def test_holddiag_digest_carries_cold_open_marks(client, caplog):
     assert "ws-apply" not in digest[0]
 
 
+def test_holddiag_viewport_digest_carries_send_motion(client, caplog):
+    """The send-window motion recorder's records and the receipt-hold marks ride
+    the viewport digest line, so deploy logs alone name which quantity moved in
+    a send window (scroll, height, seat) and whether the hold parked/applied."""
+    trail = {
+        "build": "b",
+        "events": [
+            {"t": 1, "ev": "flight", "d": {"phase": "start", "i": 0}},
+            {"t": 2, "ev": "receipt-hold", "d": {"phase": "park"}},
+            {"t": 3, "ev": "send-motion", "d": {"at": 133, "moved": "seat", "delta": -18}},
+            {"t": 4, "ev": "receipt-hold", "d": {"phase": "apply"}},
+        ],
+    }
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"send-motion"' in vp[0] and '"moved": "seat"' in vp[0]
+    assert '"receipt-hold"' in vp[0] and '"apply"' in vp[0]
+
+
 def test_relay_logs_persist_and_superseded_drop(tmp_path, monkeypatch, caplog):
     """One line per delivery decision: a live done logs persist with its seq and
     terminal flag; a superseded run's output logs drop with the reason."""

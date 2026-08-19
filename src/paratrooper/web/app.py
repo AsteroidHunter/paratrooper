@@ -633,7 +633,7 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         vp = [e for e in events if isinstance(e, dict)
               and e.get("ev") in ("autosize", "vv-geom", "snapback",
                                   "followtail", "ft-suppress", "flight",
-                                  "vv-counter")]
+                                  "vv-counter", "send-motion", "receipt-hold")]
         if vp:
             _diag.info("holddiag viewport events=%d tail=%s",
                        len(vp), json.dumps(vp[-20:]))

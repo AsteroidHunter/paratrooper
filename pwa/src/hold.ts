@@ -176,7 +176,8 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   if (
     ev === "held" || ev === "release" || ev === "pass" || ev === "reset" ||
     ev === "snapback" || ev === "followtail" || ev === "flight" ||
-    ev === "retract-sent" || ev === "retract-applied" || ev === "vv-counter"
+    ev === "retract-sent" || ev === "retract-applied" || ev === "vv-counter" ||
+    ev === "send-motion" || ev === "receipt-hold"
   ) {
     diagPost();
   }

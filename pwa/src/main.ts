@@ -32,7 +32,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.85"; // damped-spring glide deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.86"; // landing-held receipt deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -593,6 +593,8 @@ function renderChat(): void {
   setFollowTail(true, "fresh-shell");
   downBtn.bottomReached(); // fresh shell opens pinned: no chevron, no pending timer
   bootGate.reset(); // fresh shell: replay ledger re-arms, the first settle owns the pin
+  flightsUp = 0; // airborne flights died with the old shell (late settles floor at 0)
+  receiptPending = false;
   restoredOutbox = false; // a fresh shell re-reads the durable outbox
   threadObserver?.disconnect(); // the old shell's thread element is gone
   threadObserver?.observe(thread);
@@ -1284,7 +1286,15 @@ function updateReceipt(): void {
   const wrapper = r ? wrapperFor(r.seq) : null;
   const existing = document.getElementById("receipt");
   if (!r || !wrapper) {
-    existing?.remove(); // nothing to stamp, or the newest sent message sits above the loaded window
+    if (!existing) return;
+    // the bare removal shifts every row above the stamp exactly like a
+    // relocation does — a flight in progress parks it on the same slot
+    if (flightsUp > 0) {
+      receiptPending = true;
+      holdDiagRecord("receipt-hold", { phase: "park" });
+      return;
+    }
+    existing.remove(); // nothing to stamp, or the newest sent message sits above the loaded window
     return;
   }
   if (existing && existing.parentElement === wrapper) {
@@ -1300,6 +1310,19 @@ function updateReceipt(): void {
       existing.querySelector<HTMLElement>(".rc")?.classList.add("rc-hide");
     }
     if (followTail) scrollToBottom();
+    return;
+  }
+  // The anchor is moving to a new bubble. On a fast connection the send ACK
+  // lands mid-flight (real ACKs in 50-200ms against the 400ms beat), and
+  // relocating the ~18px stamp then — removed from under the previous bubble,
+  // appended under the flying one — jolts the landing seat and everything
+  // above it while the bubble is airborne: the end-of-send bounce. Park the
+  // move until the flight settles; flightSettled applies it. The gate is the
+  // live animation count, so sends with no flight (and ACKs landing after
+  // touchdown) keep the immediate path.
+  if (flightsUp > 0) {
+    receiptPending = true;
+    holdDiagRecord("receipt-hold", { phase: "park" });
     return;
   }
   existing?.remove(); // the anchor moved to a new bubble: fresh stamp, no dip
@@ -1611,6 +1634,30 @@ function applyRetract(seq: number): void {
   });
 }
 
+// --- send-flight receipt hold (the end-of-send bounce's last mover) -----------
+// While any send-flight animation is airborne, layout-mutating receipt work
+// (a relocation to a new bubble, a bare removal) parks in receiptPending — a
+// recompute flag, not a snapshot: the apply derives from the store fresh, so
+// whatever landed meanwhile wins — and lands when the LAST flight settles,
+// finish and cancel alike, so a torn-down flight still gets its stamp. The
+// apply rides the sibling-shift machinery: the relocation is height-neutral
+// (the stamp's 18px move from above the seat to below it), so no scroll write
+// fires, the seat's hop glides on the shared beat, and the fresh stamp — a
+// newborn to the walk — fades up into place.
+let flightsUp = 0; // send-flight animations still airborne
+let receiptPending = false; // updateReceipt work parked until the flights settle
+
+function flightSettled(): void {
+  if (flightsUp > 0) flightsUp--;
+  if (flightsUp > 0 || !receiptPending) return;
+  receiptPending = false;
+  if (!document.getElementById("thread")) return; // shell torn down mid-flight
+  holdDiagRecord("receipt-hold", { phase: "apply" });
+  const shift = beginSiblingShift();
+  updateReceipt();
+  shift.play();
+}
+
 // iMessage send flight: the fresh bubble lifts out of the compose field and
 // springs up into its thread seat. FLIP — the bubble is laid out in its final
 // spot, instantly translated back to the field's rect, then released on a
@@ -1639,15 +1686,90 @@ function flyFromField(wrapper: HTMLElement): void {
       [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }],
       { duration: FLIGHT_MS, easing: FLIGHT_EASE },
     );
+    flightsUp++;
     holdDiagRecord("flight", {
       phase: "start", i, dx: Math.round(dx * 10) / 10, dy: Math.round(dy * 10) / 10,
     });
     anim.finished.then(
-      () => holdDiagRecord("flight", { phase: "finish", i }),
-      () => holdDiagRecord("flight", { phase: "cancel", i }),
+      () => {
+        holdDiagRecord("flight", { phase: "finish", i });
+        flightSettled();
+      },
+      () => {
+        holdDiagRecord("flight", { phase: "cancel", i });
+        flightSettled();
+      },
     );
   });
+  recordSendMotion(msgs[msgs.length - 1]);
 }
+
+// ===================== TEMP DIAGNOSTIC (remove after the hold session) =====================
+// Send-window motion recorder, riding the same holddiag trail as the reply-hold
+// probe (hold.ts explains the ring and the POST). From flight start until
+// SEND_MOTION_WINDOW_MS after it, every animation frame compares the thread's
+// scrollTop and scrollHeight and the flying bubble's landing-seat top — its
+// rect with the running transform stripped, so the SEAT is measured, not the
+// bubble flying toward it — against the previous frame; any move past 1px
+// lands one send-motion record naming the mover, capped so a busy window
+// cannot flood the ring. If the owner still sees end-of-send movement after
+// the receipt hold, this trail names the frame and the moved quantity.
+
+const SEND_MOTION_WINDOW_MS = 600; // the 400ms beat plus a landing tail
+const SEND_MOTION_MAX = 40; // records per window, not frames
+let sendMotionRaf = 0;
+
+// the seat: the bubble's viewport top with every running translate stripped,
+// its own flight transform and any FLIP riding an ancestor row alike — layout
+// truth, not the bubble flying toward it. The strip walks to the thread so
+// the sibling-shift's row transforms cannot masquerade as seat motion.
+function seatTop(msg: HTMLElement): number {
+  let top = msg.getBoundingClientRect().top;
+  for (let el: HTMLElement | null = msg; el && el.id !== "thread"; el = el.parentElement) {
+    const t = getComputedStyle(el).transform;
+    if (t !== "none") top -= new DOMMatrixReadOnly(t).f;
+  }
+  return top;
+}
+
+function recordSendMotion(msg: HTMLElement): void {
+  if (sendMotionRaf) cancelAnimationFrame(sendMotionRaf); // a rapid second send re-arms the window
+  const t0 = performance.now();
+  let recorded = 0;
+  let prev: [number, number, number] | null = null;
+  const step = (): void => {
+    sendMotionRaf = 0;
+    const t = document.getElementById("thread");
+    if (!t || !msg.isConnected) return; // shell torn down, or a replay replaced the wrapper
+    // the flight's own translate holds the bubble below the content edge, and
+    // scrollHeight counts that transformed overflow (the send() collapse
+    // comment has the history) — subtract the part poking past the thread's
+    // own bottom padding, so the height channel reports only real layout
+    // growth, not the flight deflating frame by frame
+    const tr = getComputedStyle(msg).transform;
+    const pad = parseFloat(getComputedStyle(t).paddingBottom) || 0;
+    const overflow = tr === "none" ? 0 : Math.max(0, new DOMMatrixReadOnly(tr).f - pad);
+    const cur: [number, number, number] = [t.scrollTop, t.scrollHeight - overflow, seatTop(msg)];
+    if (prev) {
+      (["scroll", "height", "seat"] as const).forEach((name, i) => {
+        const delta = cur[i] - prev![i];
+        if (Math.abs(delta) > 1 && recorded < SEND_MOTION_MAX) {
+          recorded++;
+          holdDiagRecord("send-motion", {
+            at: Math.round(performance.now() - t0), moved: name,
+            delta: Math.round(delta * 10) / 10,
+          });
+        }
+      });
+    }
+    prev = cur;
+    if (performance.now() - t0 < SEND_MOTION_WINDOW_MS) {
+      sendMotionRaf = requestAnimationFrame(step);
+    }
+  };
+  sendMotionRaf = requestAnimationFrame(step);
+}
+// =================== END TEMP DIAGNOSTIC (remove after the hold session) ===================
 
 // --- send-time sibling shift (the white-strip fix; shift.ts holds the why) ----
 // The instant bottom pin on a send teleports the older content up by the new
