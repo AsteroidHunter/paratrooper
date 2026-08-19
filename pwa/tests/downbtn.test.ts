@@ -326,3 +326,50 @@ describe("presentation — original glass, fixed arrow, right-tangent seat", () 
     expect(main).toMatch(/"touchstart",[\s\S]{0,120}cancelGlide\(\)/);
   });
 });
+
+// Pins for the adaptive-arrow overlay (the m215 experiment): the visible
+// arrow is .jump::after, an arrow-shaped mask whose ONLY paint is a
+// backdrop-filter chain — every arrow pixel the amplified inverse of what
+// lies behind it, white over dark content, black over light, both at once
+// over a split. The fixed glyph + rim stays beneath at --jump-floor as the
+// safety floor: a dead filter leaves the ::after paintless and the floor
+// arrow standing. Headless Chromium proved the chain; iOS 26 WebKit is the
+// open question, so the whole layer is provisional until the device test.
+describe("presentation — adaptive overlay, fixed floor beneath", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const overlayRule = css.match(/\n\.jump::after \{([^}]*)\}/)?.[1] ?? "";
+
+  it("the overlay is an arrow-shaped mask: inline SVG, both spellings, same form", () => {
+    expect(overlayRule).toContain('-webkit-mask-image: url("data:image/svg+xml,');
+    expect(overlayRule).toMatch(/\n {2}mask-image: url\("data:image\/svg\+xml,/);
+    // the identical path in both spellings — measured to cover the floor
+    // glyph's ink (x 14.7–21, y 12–28) plus its 1px rim on every side, so
+    // no fixed-color fringe ever peeks around the adaptive arrow
+    const forms = overlayRule.match(/M17\.85 11\.6 V27\.2 M12\.55 22 L17\.85 27\.4 L23\.15 22/g);
+    expect(forms?.length).toBe(2);
+  });
+
+  it("its ONLY paint is the filter chain — no background, no blend anywhere", () => {
+    expect(overlayRule).toContain(
+      "-webkit-backdrop-filter: blur(6px) invert(1) grayscale(1) contrast(60)");
+    expect(overlayRule).toMatch(
+      /\n {2}backdrop-filter: blur\(6px\) invert\(1\) grayscale\(1\) contrast\(60\)/);
+    expect(overlayRule).not.toContain("background"); // paintless when the filter dies
+    expect(overlayRule).not.toContain("blend"); // the iOS 26 regression stays out
+    expect(css).not.toContain("mix-blend-mode");
+  });
+
+  it("the floor: glyph + rim beneath at 0.65 in both schemes, readable alone", () => {
+    // shown-state: face and overlay fade to 1, the glyph to the floor value
+    expect(css).toMatch(/\.jump\.show::before,\n\.jump\.show::after \{\n {2}opacity: 1;/);
+    expect(css).toMatch(/\.jump\.show \.jump-glyph \{\n {2}opacity: var\(--jump-floor\);/);
+    // capture-laddered with the filter disabled: 0.45 ghosts on the sent
+    // bubble (the rim-only case), 0.55 barely reads, 0.65 ships the margin
+    expect(css.match(/--jump-floor: 0\.65;/g)?.length).toBe(2);
+  });
+
+  it("the overlay stacks over face and floor and rides the same 0.15s fade", () => {
+    expect(overlayRule).toContain("z-index: 5"); // face and glyph sit at 4
+    expect(overlayRule).toContain("transition: opacity 0.15s");
+  });
+});
