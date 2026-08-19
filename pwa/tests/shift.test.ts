@@ -1,15 +1,17 @@
 // Pins for the send-flight polish: the overshooting spring is gone (one clean
 // decelerating ease inside the owner's 350-450ms band, shared by the flight
-// and the sibling shift), and the white-strip fix is wired in the one order
-// that works — measure before insert, cancel the old shift set, pin first,
-// transforms second. The pure half (shift.ts) is unit-tested directly; the
-// main.ts wiring is source-pinned like flight.test.ts, because main.ts boots
-// a real shell at import and cannot load under node.
+// and the sibling shift), the white-strip fix is wired in the one order that
+// works — measure before insert, cancel the old shift set, pin first,
+// transforms second — and content BORN with a send (the newborn gap stamp)
+// enters on that same beat instead of materializing. The pure half (shift.ts)
+// is unit-tested directly; the main.ts wiring is source-pinned like
+// flight.test.ts, because main.ts boots a real shell at import and cannot
+// load under node.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { FLIGHT_EASE, FLIGHT_MS, shiftParticipates } from "../src/shift";
+import { ENTER_RISE_PX, FLIGHT_EASE, FLIGHT_MS, newbornEnter, shiftParticipates } from "../src/shift";
 
 describe("flight motion constants", () => {
   it("the beat sits inside the owner's 350-450ms band", () => {
@@ -59,6 +61,26 @@ describe("shiftParticipates — which preceding elements ride the shift", () => 
   });
 });
 
+describe("newbornEnter — content born with the send rides the same beat", () => {
+  it("a newborn that does not carry the flight enters (the gap stamp case)", () => {
+    expect(newbornEnter(false, false)).toBe(true);
+  });
+
+  it("anything the measure pass saw belongs to the FLIP shift, never the enter", () => {
+    expect(newbornEnter(true, false)).toBe(false);
+  });
+
+  it("the flying bubble's own rows are the flight's — no double treatment", () => {
+    expect(newbornEnter(false, true)).toBe(false);
+    expect(newbornEnter(true, true)).toBe(false);
+  });
+
+  it("the rise stays small, inside the 8-12px family of the pop-in", () => {
+    expect(ENTER_RISE_PX).toBeGreaterThanOrEqual(8);
+    expect(ENTER_RISE_PX).toBeLessThanOrEqual(12);
+  });
+});
+
 // --- main.ts wiring pins (source-read, like flight.test.ts) -------------------
 
 const src = readFileSync(
@@ -91,7 +113,7 @@ describe("sibling shift wiring — the order that kills the white strip", () => 
     const measure = send.indexOf("beginSiblingShift()");
     const wrapper = send.indexOf('localWrapper("user")');
     const pin = send.indexOf("scrollToBottom(true)");
-    const play = send.indexOf("shift.play(w)");
+    const play = send.indexOf("shift.play()");
     const fly = send.indexOf("flyFromField(w)");
     expect(measure).toBeGreaterThan(-1);
     expect(measure).toBeLessThan(wrapper); // before-rects predate the insert
@@ -167,5 +189,61 @@ describe("sibling shift wiring — the order that kills the white strip", () => 
     expect(begin).toContain('phase: "shift-start"');
     expect(begin).toMatch(/delta:.*rows/s);
     expect(begin).toContain('phase: "shift-skip"');
+  });
+});
+
+describe("newborn enter wiring — born content never materializes mid-motion", () => {
+  const begin = fnBody("beginSiblingShift");
+  const enter = fnBody("enterNewborn");
+
+  it("the enter fades up from the rise to rest, on the shared beat and ease", () => {
+    expect(enter).toContain("opacity: 0");
+    expect(enter).toContain("translateY(${ENTER_RISE_PX}px)");
+    expect(enter).toContain('{ opacity: 1, transform: "none" }');
+    expect(enter).toContain("duration: FLIGHT_MS, easing: FLIGHT_EASE");
+  });
+
+  it("play walks the true tail, so the new wrapper's own stamp is in reach", () => {
+    // the old walk stopped above the wrapper — exactly why the stamp was
+    // never animated in any build
+    expect(begin).not.toContain("laidOutTail(w)");
+    expect(begin.match(/laidOutTail\(\)/g)).toHaveLength(2);
+  });
+
+  it("newborns take the enter branch before the FLIP can see them", () => {
+    const decide = begin.indexOf("newbornEnter(");
+    const flip = begin.indexOf("shiftParticipates(");
+    expect(decide).toBeGreaterThan(-1);
+    expect(decide).toBeLessThan(flip);
+    expect(begin).toContain("enterNewborn(el)");
+  });
+
+  it("the flying bubble is excluded by its .msg cargo", () => {
+    expect(begin).toContain('el.querySelector(".msg")');
+    expect(begin).toContain('el.classList.contains("msg")');
+  });
+
+  it("records the enter phase with the newborn count, even a zero", () => {
+    expect(begin).toContain('phase: "enter"');
+    expect(begin).toContain("n: entered");
+  });
+});
+
+describe("live-arrival stamps — the receive side of the same enter", () => {
+  const dec = fnBody("decorate");
+
+  it("a stamp born beside a live .anim row enters; replay/history stay static", () => {
+    expect(dec).toContain("enterNewborn(stamp)");
+    expect(dec).toContain("!suppressAnim");
+    expect(dec).toContain('querySelector(".msg.anim")');
+  });
+
+  it("only a freshly created stamp enters — a refreshed one never re-pops", () => {
+    expect(dec).toContain("born && !suppressAnim");
+    expect(dec).toContain("const born = stamp === null");
+  });
+
+  it("records the live enter on the trail", () => {
+    expect(dec).toContain('src: "live"');
   });
 });

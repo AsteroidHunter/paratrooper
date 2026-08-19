@@ -37,3 +37,16 @@ export function shiftParticipates(
   if (delta <= 0.5) return false; // did not move up: no gap to close
   return bottomAfter + delta > viewTop && topAfter < viewBottom;
 }
+
+// Elements BORN with the send have no before-rect for the FLIP to glide from —
+// the gap stamp decorate() creates above the new bubble is the every-send case
+// for the owner (his sends sit hours apart, so each one crosses the stamp
+// threshold), and it materialized at full size while every neighbour animated.
+// Newborns enter instead: fade up from a small rise on the shared beat, so the
+// whole send reads as one motion. The flying bubble's own rows are excluded —
+// the flight owns their entrance, and a second treatment would fight it.
+export const ENTER_RISE_PX = 10; // kin to the pop-in's 8px, inside the 8-12 band
+
+export function newbornEnter(seenAtMeasure: boolean, carriesFlight: boolean): boolean {
+  return !seenAtMeasure && !carriesFlight;
+}

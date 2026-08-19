@@ -8,7 +8,7 @@ import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { receiptFor } from "./receipts";
-import { FLIGHT_EASE, FLIGHT_MS, shiftParticipates } from "./shift";
+import { ENTER_RISE_PX, FLIGHT_EASE, FLIGHT_MS, newbornEnter, shiftParticipates } from "./shift";
 import { bindPicker, bindSendShield, currentFileInput, initShell, reconcile } from "./shell";
 import { installStartupImage } from "./splash";
 import {
@@ -25,7 +25,7 @@ import type { OutboxRecord } from "./outbox";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.80"; // jump chevron seat/rim/landing-brake polish, bumped so the build is verifiable
+const APP_VERSION = "0.1.81"; // newborn gap stamps enter on the send's beat, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -892,6 +892,7 @@ function decorate(): void {
     // gap stamp: shown when >1h since the previous stamp, owned by the wrapper
     let stamp = w.querySelector<HTMLElement>(":scope > .stamp");
     if (at - lastStampAt > STAMP_GAP_MS) {
+      const born = stamp === null;
       if (!stamp) {
         stamp = document.createElement("div");
         stamp.className = "stamp";
@@ -900,6 +901,17 @@ function decorate(): void {
       day.textContent = fmtStampDay(at);
       stamp.replaceChildren(day, ` ${fmtTime(at)}`);
       w.prepend(stamp);
+      // a stamp born on a LIVE arrival enters like the bubble it rides above
+      // (the .anim row): the same fade-up the send path gives its newborn
+      // stamp, so a reply that opens a new hour never pops. Replay, history
+      // pages, and rerenders run under suppressAnim and render no .anim rows,
+      // so they stay static — the bootgate rules hold untouched. The send
+      // path's own wrapper renders suppressed (no .anim), so its stamp is
+      // entered once, by shift play, never here.
+      if (born && !suppressAnim && w.querySelector(".msg.anim")) {
+        enterNewborn(stamp);
+        holdDiagRecord("flight", { phase: "enter", n: 1, src: "live" });
+      }
       lastStampAt = at;
     } else {
       stamp?.remove();
@@ -1542,11 +1554,11 @@ let shiftAnims: Animation[] = [];
 
 // the elements the thread actually lays out (the .evt wrappers are
 // display:contents shells): rows, stamps, receipts, failure labels, spinner,
-// dots. Walked newest-first from the tail (or from just above `stopBefore`),
-// bounded — the shift only ever concerns the last screen or two.
-function laidOutTail(stopBefore: Element | null): HTMLElement[] {
+// dots. Walked newest-first from the tail, bounded — the shift only ever
+// concerns the last screen or two.
+function laidOutTail(): HTMLElement[] {
   const out: HTMLElement[] = [];
-  let n = stopBefore ? stopBefore.previousElementSibling : threadEl().lastElementChild;
+  let n = threadEl().lastElementChild;
   for (; n && out.length < SHIFT_MAX_TARGETS; n = n.previousElementSibling) {
     if (!(n instanceof HTMLElement)) continue;
     if (n.classList.contains("evt")) {
@@ -1561,14 +1573,31 @@ function laidOutTail(stopBefore: Element | null): HTMLElement[] {
   return out;
 }
 
-function beginSiblingShift(): { play(w: HTMLElement): void } {
+// entrance for elements BORN with the motion (no before-rect to FLIP from):
+// the newborn fades up into the space the glide opened, on the flight's own
+// beat and ease, so nothing materializes at full size mid-animation. Created
+// in the same task as the insert, so the element never paints pre-animation
+// (the same WebKit-proof property flyFromField leans on). Its LAYOUT space
+// still opens in one frame — the glide above covers it while the occupant
+// fades in, so the space itself is never bare.
+function enterNewborn(el: HTMLElement): void {
+  el.animate(
+    [
+      { opacity: 0, transform: `translateY(${ENTER_RISE_PX}px)` },
+      { opacity: 1, transform: "none" },
+    ],
+    { duration: FLIGHT_MS, easing: FLIGHT_EASE },
+  );
+}
+
+function beginSiblingShift(): { play(): void } {
   // eligibility is the pre-send view: pinned (or near) the bottom. A send from
   // deep in history pins with an intentional jump cut — animating THAT would
   // turn the instant pin into a slow scroll of the whole distance.
   const eligible = followTail || nearBottom();
   const before = new Map<HTMLElement, number>();
   if (eligible) {
-    for (const el of laidOutTail(null)) before.set(el, el.getBoundingClientRect().top);
+    for (const el of laidOutTail()) before.set(el, el.getBoundingClientRect().top);
   }
   // measured first, cancelled second: the before-tops keep the mid-flight
   // visual truth, and everything from here through play() is one synchronous
@@ -1576,7 +1605,7 @@ function beginSiblingShift(): { play(w: HTMLElement): void } {
   for (const a of shiftAnims) a.cancel();
   shiftAnims = [];
   return {
-    play(w: HTMLElement): void {
+    play(): void {
       if (!eligible) {
         holdDiagRecord("flight", { phase: "shift-skip", reason: "away" });
         return;
@@ -1584,9 +1613,20 @@ function beginSiblingShift(): { play(w: HTMLElement): void } {
       const view = threadEl().getBoundingClientRect();
       let maxDelta = 0;
       let rows = 0;
-      for (const el of laidOutTail(w)) {
+      let entered = 0;
+      // the walk starts at the true tail, not above the send's wrapper: the
+      // newborn stamp decorate() just created lives INSIDE it, above the
+      // flying rows, and send() is synchronous from measure through play, so
+      // everything unseen at measure time was born with this send
+      for (const el of laidOutTail()) {
         const beforeTop = before.get(el);
-        if (beforeTop === undefined) continue; // born by this send; nothing to close
+        const carriesFlight = el.classList.contains("msg") || el.querySelector(".msg") !== null;
+        if (newbornEnter(beforeTop !== undefined, carriesFlight)) {
+          enterNewborn(el); // born with this send: it fades up on the same beat
+          entered++;
+          continue;
+        }
+        if (beforeTop === undefined) continue; // the flying rows: the flight owns them
         const r = el.getBoundingClientRect();
         const delta = beforeTop - r.top;
         if (!shiftParticipates(r.top, r.bottom, delta, view.top, view.bottom)) continue;
@@ -1600,6 +1640,7 @@ function beginSiblingShift(): { play(w: HTMLElement): void } {
       holdDiagRecord("flight", {
         phase: "shift-start", delta: Math.round(maxDelta * 10) / 10, rows,
       });
+      holdDiagRecord("flight", { phase: "enter", n: entered });
     },
   };
 }
@@ -1714,7 +1755,7 @@ async function send(): Promise<void> {
   decorate();
   setFollowTail(true, "send"); // sending snaps you to the tail
   scrollToBottom(true); // instant pin first; the transforms below play over it
-  shift.play(w); // preceding rows glide from their old spot: no white strip
+  shift.play(); // preceding rows glide, newborn stamps fade up: no white strip, no pop
   flyFromField(w);
   lastLaunchAt = performance.now();
   if (airborne) collapseBar(); // the shipped order when a flight is already up
