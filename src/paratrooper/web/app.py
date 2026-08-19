@@ -622,7 +622,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         events = payload.get("events") or []
         marks = [e for e in events if isinstance(e, dict)
                  and e.get("ev") in ("held", "release", "pass", "reset", "vis",
-                                     "retract-sent", "retract-applied")]
+                                     "retract-sent", "retract-applied", "cache-read",
+                                     "cache-applied", "batch-commit", "reconcile-drop")]
         _diag.info("holddiag client build=%s events=%d marks=%s",
                    payload.get("build"), len(events), json.dumps(marks[-10:]))
         # viewport/flight digest, its own line so the hold pin above holds: the

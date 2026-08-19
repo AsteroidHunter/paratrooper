@@ -31,6 +31,10 @@ export interface BootGate {
   claimSettlePin(): boolean;
   /** the tail probe answered: the newest seq that existed at connect (0 = none) */
   tailKnown(tail: number): void;
+  /** the probe has not answered for this socket yet (ceiling still unknown) —
+      the commit-fallback timer closes the ledger only while this holds, so a
+      timeout can never lower a ceiling the probe already established */
+  tailPending(): boolean;
   /** part of the connect-time backlog — never animate it, however late it lands */
   isReplay(seq: number): boolean;
   /** latches true ONCE per socket when the backlog is fully applied */
@@ -62,6 +66,7 @@ export function createBootGate(): BootGate {
     tailKnown(t: number): void {
       tail = t;
     },
+    tailPending: () => tail === Infinity,
     isReplay: (seq: number) => seq <= tail,
     caughtUp(applied: number): boolean {
       if (settled || applied < tail) return false;

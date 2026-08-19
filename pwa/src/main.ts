@@ -21,11 +21,18 @@ import {
 } from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
 import type { OutboxRecord } from "./outbox";
+import {
+  CACHE_FRAMES,
+  createWriteScheduler,
+  del as cacheDel,
+  get as cacheGet,
+  put as cachePut,
+} from "./threadcache";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.82"; // purposeful image reading deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.83"; // cold-open thread cache deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -65,6 +72,17 @@ let lastScrollAt = 0; // scroll events still arriving = momentum still running
 let ws: WebSocket | null = null;
 let closingOnPurpose = false; // logout: suppress the auto-reconnect
 let restoredOutbox = false; // once-per-session guard for the durable-outbox restore
+// Replay batching (one-commit catch-up): while the boot ledger says the
+// backlog is still streaming, socket replay frames buffer here instead of
+// touching the DOM, and the caughtUp edge applies the whole buffer in ONE
+// task (commitReplayBuffer) — a cold open or an away-for-days catch-up lands
+// as one discrete update, never a bubble-by-bubble movie. The fallback timer
+// closes the ledger with whatever arrived if the tail probe never answers:
+// buffered frames must not sit invisible behind a hung request.
+let replayBuffer: ServerMsg[] = [];
+let replayBufferMax = 0; // highest buffered seq; counts toward the caught-up cursor
+let probeFallback: ReturnType<typeof setTimeout> | null = null;
+const PROBE_FALLBACK_MS = 5000; // past any believable probe round trip; only a hang trips it
 
 // The client-side event store: seq → ThreadEvent, THE display truth. Apply is
 // idempotent (duplicate seqs no-op — reconnect replays and zombie-socket
@@ -77,7 +95,12 @@ const store = new Map<number, ServerMsg>();
 // a send. Release renders through the one applyEvent path below, so seq
 // ordering and idempotence hold unchanged — and nothing survives a reload
 // (the reply is in server history; that's the point).
-const replyHold = createReplyHold<ServerMsg>((m) => applyEvent(m));
+const replyHold = createReplyHold<ServerMsg>((m) => {
+  applyEvent(m);
+  // a released frame can be the last uncovered piece of a catch-up backlog:
+  // the ledger must get its chance to latch on it (a no-op once settled)
+  replaySettle();
+});
 
 // jump-chevron visibility (downbtn.ts owns the state machine): it appears only
 // after 4s of scroll stillness while away from the bottom — never because new
@@ -92,6 +115,18 @@ const downBtn = createDownButton((show) =>
 // never animate, however late it arrives; frames above it are genuinely new
 // and do. connect() re-arms it per socket and feeds it the tail probe.
 const bootGate = createBootGate();
+
+// cold-open thread cache (threadcache.ts owns the record): the newest
+// CACHE_FRAMES stored frames verbatim plus the lastSeq cursor, rewritten
+// debounced after applies and flushed when the app goes hidden. Boot reads it
+// back and paints the whole thread in one task before any network touches the
+// visible path (bootFromCache below); logout deletes it.
+function writeThreadCache(): void {
+  if (!token || store.size === 0) return; // an empty snapshot must never clobber a good one
+  const seqs = [...store.keys()].sort((a, b) => a - b).slice(-CACHE_FRAMES);
+  void cachePut({ id: THREAD_ID, lastSeq, frames: seqs.map((s) => store.get(s)!) });
+}
+const cacheWrites = createWriteScheduler(writeThreadCache);
 
 // The canonical ThreadEvent frame — one shape for live pushes, socket replay,
 // and history pages alike. Ephemeral kinds (working/typing) ride without a seq.
@@ -394,6 +429,10 @@ function renderChat(): void {
     closingOnPurpose = true;
     ws?.close();
     ws = null;
+    cacheWrites.cancel(); // a pending write must not resurrect the record deleted next
+    void cacheDel(THREAD_ID); // the cached thread is credentialed content
+    if (probeFallback) clearTimeout(probeFallback);
+    probeFallback = null;
     renderTokenGate();
   });
   const filesEl = document.getElementById("files") as HTMLInputElement;
@@ -967,6 +1006,7 @@ function applyEvent(m: ServerMsg): void {
   }
   if (m.kind === "published") flipCorrelatedPr(m);
   updateReceipt(); // any event can move the watermark (user row, job row, working)
+  cacheWrites.bump(); // the cold-open snapshot trails every applied frame, debounced
 }
 
 // re-render one event's wrapper in place (e.g. its pr button state changed)
@@ -1368,22 +1408,72 @@ async function probeReplayTail(): Promise<void> {
     // pages are oldest-first, so the newest row — the backlog's ceiling — is last
     tail = messages.length ? (messages[messages.length - 1].seq ?? 0) : 0;
   } catch {
-    tail = lastSeq;
+    tail = Math.max(lastSeq, replayBufferMax); // whatever has arrived, buffered included
   }
   bootGate.tailKnown(tail);
   replaySettle();
 }
 
-// the backlog is fully applied (the ledger's caught-up edge, once per
-// socket): animations come on, and the boot settle runs — this used to hang
-// off a 400ms quiet timer that late replay frames could outlive
+// the backlog is fully covered — applied or buffered — (the ledger's
+// caught-up edge, once per socket): the buffered catch-up commits as ONE
+// task, animations come on, and the boot settle runs — this used to hang off
+// a 400ms quiet timer that late replay frames could outlive
 function replaySettle(): void {
-  if (!bootGate.caughtUp(lastSeq)) return;
+  if (!document.getElementById("thread")) return; // the gate replaced the shell mid-flight
+  if (!bootGate.caughtUp(Math.max(lastSeq, replayBufferMax))) return;
+  commitReplayBuffer(); // the whole catch-up lands here, in this same task
   suppressAnim = false;
   // settled: probe the history bank once — a short thread never scrolls, so
   // without this the spinner would sit unresolved forever
   tryApplyOlder();
   void bootSettlePin();
+  // one cheap look back at the newest page: a reply retracted while the app
+  // was closed (or the socket was down — retract frames are ephemeral) must
+  // not survive on screen just because the cache or the store replayed it
+  void reconcileRetracts();
+}
+
+// the batching half of the cold-open fix: the buffered backlog applies in one
+// synchronous task, oldest first, through the same silent applyReplay path a
+// straggler takes — one decorate'd DOM state, one bottom pin, one paint,
+// whether it is three frames after an hour away or fifty after a reinstall
+function commitReplayBuffer(): void {
+  const frames = replayBuffer;
+  replayBuffer = [];
+  replayBufferMax = 0;
+  frames.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  for (const m of frames) applyReplay(m);
+  holdDiagRecord("batch-commit", { n: frames.length });
+}
+
+// After the settle, ask the server for its newest page ONCE and drop any
+// stored seq inside that page's span the server no longer has: a take-back
+// that happened while this client was closed or disconnected never sent us
+// its retract frame (retracts are ephemeral broadcasts), so the cached reply
+// would otherwise stand forever. Bounded to the page's own span — seqs above
+// it may be frames landing this instant, seqs below it are beyond one cheap
+// fetch — and removal rides the same applyRetract path a live take-back uses.
+async function reconcileRetracts(): Promise<void> {
+  let messages: ServerMsg[];
+  try {
+    const r = await fetch(
+      `/api/history/${THREAD_ID}?before=${Number.MAX_SAFE_INTEGER}&limit=${HISTORY_PAGE}`,
+      { headers: authHeaders() },
+    );
+    if (!r.ok) return;
+    ({ messages } = (await r.json()) as { messages: ServerMsg[] });
+  } catch {
+    return; // reconcile is best-effort; the next settle gets another look
+  }
+  if (!document.getElementById("thread")) return;
+  const present = new Set(messages.map((m) => m.seq ?? 0).filter((s) => s > 0));
+  if (!present.size) return; // an empty page bounds nothing: drop nothing
+  const lo = Math.min(...present);
+  const hi = Math.max(...present);
+  const dropped = [...store.keys()].filter((s) => s >= lo && s <= hi && !present.has(s));
+  if (!dropped.length) return;
+  holdDiagRecord("reconcile-drop", { seqs: dropped });
+  for (const s of dropped) applyRetract(s);
 }
 
 // replay frames NEVER animate and NEVER animated-scroll, however late they
@@ -1436,6 +1526,18 @@ function connect(): void {
   const url = `${proto}://${location.host}/ws?token=${encodeURIComponent(token)}&thread=${THREAD_ID}&since=${lastSeq}`;
   suppressAnim = true; // the catch-up replay must not animate or glide
   bootGate.reconnect(); // a new backlog is inbound: everything is replay again
+  replayBuffer = []; // an old socket's unfinished catch-up re-delivers via since=
+  replayBufferMax = 0;
+  if (probeFallback) clearTimeout(probeFallback);
+  // the probe can hang, not just fail: past this bound the ledger closes at
+  // whatever arrived — tailPending() keeps the timeout from ever lowering a
+  // ceiling the probe DID establish (a slow big replay must finish buffering)
+  probeFallback = setTimeout(() => {
+    probeFallback = null;
+    if (!bootGate.tailPending()) return;
+    bootGate.tailKnown(Math.max(lastSeq, replayBufferMax));
+    replaySettle();
+  }, PROBE_FALLBACK_MS);
   ws = new WebSocket(url);
   ws.onopen = () => {
     void probeReplayTail(); // the honest marker: the server's tail at connect
@@ -1467,7 +1569,15 @@ function connect(): void {
     // some other route (history page, hold release, optimistic ACK)
     holdDiagRecord("ws-apply", { seq: m.seq, kind: m.kind ?? null, role: m.role ?? null });
     if (bootGate.isReplay(m.seq)) {
-      applyReplay(m); // backlog: never an entrance pop, never an animated scroll
+      if (bootGate.settled()) {
+        applyReplay(m); // a post-settle straggler: silent, pinned, per-frame
+      } else {
+        // the streaming catch-up: buffered, committed as ONE task on the
+        // caughtUp edge (commitReplayBuffer) — the browser may paint between
+        // socket tasks, so per-frame applies are a visible movie by definition
+        replayBuffer.push(m);
+        if (m.seq > replayBufferMax) replayBufferMax = m.seq;
+      }
     } else {
       suppressAnim = false; // a genuinely new message: the boot era is over
       applyEvent(m);
@@ -1489,6 +1599,7 @@ function connect(): void {
 function applyRetract(seq: number): void {
   const wasHeld = replyHold.drop(seq);
   const hadStore = store.delete(seq);
+  if (hadStore) cacheWrites.bump(); // the deleted reply must leave the cold-open snapshot too
   const w = wrapperFor(seq);
   if (w) {
     w.remove();
@@ -1837,6 +1948,7 @@ async function transmit(
       });
       if (seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
       if (oldestSeq === 0 || seq < oldestSeq) oldestSeq = seq;
+      cacheWrites.bump(); // the ACKed send enters the cold-open snapshot like any applied frame
     }
   }
   updateReceipt(); // the server has it: the stored row now derives Delivered
@@ -2101,6 +2213,7 @@ function clearBadge(): void {
 }
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") clearBadge();
+  else cacheWrites.flush(); // hidden: the pending snapshot lands before iOS can freeze the page
 });
 clearBadge();
 
@@ -2119,9 +2232,46 @@ if ("serviceWorker" in navigator) {
 // top-bar logo centered on white, sized to the current screen. No-ops off iOS.
 installStartupImage("/splash-logo.png"); // full-res cut-out; the 140px topbar file pixelates at splash size
 
+// Cold open, the one-paint boot: the shell has rendered; now the cached
+// thread (threadcache.ts) lands BEFORE any network. Every cached frame goes
+// through the one applyEvent path in a single task with animations
+// suppressed, the bottom pins instantly, and the same scrollTop is
+// re-asserted on the next frame — Safari sometimes swallows the first
+// scrollTop write after a fresh DOM build — then the socket connects with
+// since=lastSeq. On the common open (nothing new) the replay is empty and
+// nothing on screen ever moves; anything newer buffers and lands as
+// commitReplayBuffer's one update. The ledger needs no special case: the
+// probe's tail sits at or above the cached cursor, so every cached seq
+// classifies as replay by construction. A missing, mismatched, or unreadable
+// record simply means the old cacheless boot.
+async function bootFromCache(): Promise<void> {
+  const t0 = performance.now();
+  const cached = await cacheGet<ServerMsg>(THREAD_ID).catch(() => null);
+  const readMs = Math.round(performance.now() - t0);
+  const t = document.getElementById("thread");
+  if (cached && cached.frames.length && t) {
+    holdDiagRecord("cache-read", { frames: cached.frames.length, ms: readMs });
+    const prevSuppress = suppressAnim;
+    suppressAnim = true; // cached frames are history: no pops, no glides
+    for (const m of cached.frames) applyEvent(m);
+    suppressAnim = prevSuppress;
+    if (cached.lastSeq > lastSeq) lastSeq = cached.lastSeq; // a retracted tail still advances the cursor
+    scrollToBottom(true);
+    const pinned = t.scrollTop;
+    requestAnimationFrame(() => {
+      const el = document.getElementById("thread");
+      if (el) el.scrollTop = pinned; // the swallowed-first-write re-assert
+    });
+    holdDiagRecord("cache-applied", { lastSeq, ms: Math.round(performance.now() - t0) });
+  } else {
+    holdDiagRecord("cache-read", { frames: 0, ms: readMs });
+  }
+  connect(); // ws.onopen runs the version check; see checkServerVersion
+}
+
 if (token) {
   renderChat();
-  connect(); // ws.onopen runs the version check; see checkServerVersion
+  void bootFromCache(); // the cached thread paints first, then the socket connects
 } else {
   renderTokenGate();
 }

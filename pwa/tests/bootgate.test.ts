@@ -77,6 +77,32 @@ describe("caught up — animations come on exactly once per socket", () => {
   });
 });
 
+describe("tailPending — the commit-fallback's guard on the probe", () => {
+  it("pending until the probe answers, then closed", () => {
+    const gate = createBootGate();
+    expect(gate.tailPending()).toBe(true);
+    gate.tailKnown(50);
+    expect(gate.tailPending()).toBe(false);
+    expect(gate.tailPending()).toBe(false); // stays closed: a timeout firing late is a no-op
+  });
+
+  it("an empty backlog still counts as answered (tail 0 is an answer)", () => {
+    const gate = createBootGate();
+    gate.tailKnown(0);
+    expect(gate.tailPending()).toBe(false);
+  });
+
+  it("reconnect and reset re-open it: each socket's probe stands alone", () => {
+    const gate = createBootGate();
+    gate.tailKnown(50);
+    gate.reconnect();
+    expect(gate.tailPending()).toBe(true);
+    gate.tailKnown(80);
+    gate.reset();
+    expect(gate.tailPending()).toBe(true);
+  });
+});
+
 describe("reconnect — a new socket gets a fresh backlog", () => {
   it("re-arms classification and the latch, keeps the shell's pin claim spent", () => {
     const gate = createBootGate();
@@ -123,12 +149,100 @@ describe("wiring — no veil, no quiet timer (main.ts / styles.css)", () => {
 
   it("replay applies force stillness; a genuinely new frame flips animations on", () => {
     expect(main).toMatch(/function applyReplay[\s\S]{0,700}suppressAnim = true/);
-    expect(main).toMatch(/isReplay\(m\.seq\)[\s\S]{0,400}suppressAnim = false/);
+    // the window spans the buffering branch that now sits between the two
+    expect(main).toMatch(/isReplay\(m\.seq\)[\s\S]{0,800}suppressAnim = false/);
   });
 
   it("a straggler that lost the tail inserts with the same-frame bottom pin", () => {
     expect(main).toMatch(
       /function applyReplay[\s\S]{0,900}scrollTop = prevScroll \+ \(t\.scrollHeight - prevHeight\)/,
     );
+  });
+});
+
+// The catch-up streams into a buffer and lands as ONE task on the caughtUp
+// edge — the browser may paint between socket tasks, so per-frame applies are
+// a visible movie by definition. Source pins hold the wiring the way the
+// veil/timer pins above do.
+describe("wiring — replay batching: buffer while streaming, one commit at the edge", () => {
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+
+  it("an unsettled replay frame buffers; only a post-settle straggler applies per-frame", () => {
+    expect(main).toMatch(
+      /isReplay\(m\.seq\)[\s\S]{0,200}settled\(\)[\s\S]{0,100}applyReplay\(m\)[\s\S]{0,600}replayBuffer\.push\(m\)/,
+    );
+  });
+
+  it("the caught-up cursor counts buffered frames, not just applied ones", () => {
+    expect(main).toMatch(/caughtUp\(Math\.max\(lastSeq, replayBufferMax\)\)/);
+  });
+
+  it("the edge commits the whole buffer BEFORE animations come on, then settles", () => {
+    const settle = main.indexOf("function replaySettle");
+    const body = main.slice(settle, main.indexOf("\n}", settle));
+    expect(body.indexOf("commitReplayBuffer()")).toBeGreaterThan(-1);
+    expect(body.indexOf("commitReplayBuffer()")).toBeLessThan(body.indexOf("suppressAnim = false"));
+    expect(body).toContain("bootSettlePin()");
+    expect(body).toContain("reconcileRetracts()");
+  });
+
+  it("the commit is one seq-ordered pass through the silent replay path, recorded", () => {
+    const commit = main.indexOf("function commitReplayBuffer");
+    const body = main.slice(commit, main.indexOf("\n}", commit));
+    expect(body).toMatch(/frames\.sort/);
+    expect(body).toContain("applyReplay(m)");
+    expect(body).toMatch(/holdDiagRecord\("batch-commit", \{ n: frames\.length \}\)/);
+  });
+
+  it("a hung probe cannot strand the buffer: the fallback closes the ledger", () => {
+    expect(main).toMatch(
+      /probeFallback = setTimeout[\s\S]{0,300}tailPending\(\)[\s\S]{0,200}tailKnown\(Math\.max\(lastSeq, replayBufferMax\)\)/,
+    );
+    // and a probe that answered keeps its ceiling: the guard returns first
+    expect(main).toMatch(/if \(!bootGate\.tailPending\(\)\) return/);
+  });
+
+  it("a failed probe closes at whatever arrived, buffered frames included", () => {
+    expect(main).toMatch(
+      /function probeReplayTail[\s\S]{0,900}catch[\s\S]{0,120}Math\.max\(lastSeq, replayBufferMax\)/,
+    );
+  });
+
+  it("a hold release re-checks the edge: the last uncovered frame may be parked", () => {
+    expect(main).toMatch(/createReplyHold<ServerMsg>[\s\S]{0,300}replaySettle\(\)/);
+  });
+
+  it("each socket starts with an empty buffer and a fresh fallback clock", () => {
+    const connect = main.indexOf("function connect(");
+    const body = main.slice(connect, main.indexOf("\n}", connect));
+    expect(body).toContain("replayBuffer = []");
+    expect(body).toContain("replayBufferMax = 0");
+    expect(body).toMatch(/clearTimeout\(probeFallback\)/);
+  });
+});
+
+// After the settle, one cheap look at the server's newest page drops any
+// stored seq inside that page's span the server no longer has — a take-back
+// that happened while the app was closed never sent its retract frame, and
+// the cached reply must not survive on screen.
+describe("wiring — offline-retract reconcile after the settle", () => {
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const start = main.indexOf("async function reconcileRetracts");
+  const body = main.slice(start, main.indexOf("\n}", start));
+
+  it("one newest-page fetch, bounded to the page's own seq span", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(body).toMatch(/api\/history\/\$\{THREAD_ID\}\?before=\$\{Number\.MAX_SAFE_INTEGER\}/);
+    expect(body).toMatch(/s >= lo && s <= hi && !present\.has\(s\)/);
+  });
+
+  it("drops ride the live take-back path and the trail names the seqs", () => {
+    expect(body).toMatch(/holdDiagRecord\("reconcile-drop", \{ seqs: dropped \}\)/);
+    expect(body).toContain("applyRetract(s)");
+  });
+
+  it("an empty or failed page drops nothing (reconcile is best-effort)", () => {
+    expect(body).toMatch(/catch[\s\S]{0,120}return/);
+    expect(body).toMatch(/if \(!present\.size\) return/);
   });
 });

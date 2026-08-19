@@ -96,6 +96,29 @@ def test_holddiag_roundtrip_no_auth(client, caplog):
     assert client.get("/api/debug/holddiag").json() == {"events": []}
 
 
+def test_holddiag_digest_carries_cold_open_marks(client, caplog):
+    """The cold-open trail (cache read/apply, the one batched commit, reconcile
+    drops) survives into the digest line, so deploy logs alone tell how a boot
+    landed; the per-frame ws-apply chatter stays out of it."""
+    trail = {
+        "build": "b",
+        "events": [
+            {"t": 1, "ev": "cache-read", "d": {"frames": 50, "ms": 12}},
+            {"t": 2, "ev": "cache-applied", "d": {"lastSeq": 60, "ms": 30}},
+            {"t": 3, "ev": "batch-commit", "d": {"n": 0}},
+            {"t": 4, "ev": "reconcile-drop", "d": {"seqs": [58]}},
+            {"t": 5, "ev": "ws-apply", "d": {"seq": 1}},
+        ],
+    }
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    digest = [r.message for r in caplog.records if "holddiag client" in r.message]
+    assert len(digest) == 1
+    for name in ("cache-read", "cache-applied", "batch-commit", "reconcile-drop"):
+        assert name in digest[0]
+    assert "ws-apply" not in digest[0]
+
+
 def test_relay_logs_persist_and_superseded_drop(tmp_path, monkeypatch, caplog):
     """One line per delivery decision: a live done logs persist with its seq and
     terminal flag; a superseded run's output logs drop with the reason."""
