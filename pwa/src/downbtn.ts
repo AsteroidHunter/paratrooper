@@ -74,8 +74,12 @@ export function createDownButton(
 // then caps: velocity and the frame's advance never exceed maxSpeed — the
 // capped spring, so a far jump still cruises flat at the old full speed and
 // only the approach changes. Stiffness comes from the live viewport
-// (ω = maxSpeed / (SPRING_SCREENS·height)), tuned so the settle through the
-// final screen runs a touch gentler than the retired soften ramp. Pure and
+// (ω = maxSpeed / (SPRING_SCREENS·height)), tuned to the device verdict on
+// the first spring: its whole slowdown read inside the last message, so the
+// reach is now long enough that braking is READABLE about two screens out,
+// while the damping sits just over critical so the shed spreads through
+// those screens instead of stacking into the tail — the final crawl stays
+// exactly as gentle as the settle he approved. Pure and
 // position-less as before: the wiring feeds frame times, live remaining, and
 // container height every frame, so content landing mid-glide simply grows
 // `remaining` and the spring stretches — velocity carries over, the same
@@ -84,8 +88,8 @@ export function createDownButton(
 // is the user taking the scroll back mid-flight — the run reports done and
 // the wiring stops writing.
 export const GLIDE_MAX_SPEED = 25; // px per ms of full-speed cruise
-export const GLIDE_SPRING_SCREENS = 1.7; // ω = maxSpeed / (this · viewport): the spring's reach
-export const GLIDE_DAMPING_RATIO = 1.2; // ζ, kept above 1 (critical): overshoot is impossible
+export const GLIDE_SPRING_SCREENS = 3.0; // ω = maxSpeed / (this · viewport): reach long enough to read two screens out
+export const GLIDE_DAMPING_RATIO = 1.02; // ζ, kept above 1 (critical): overshoot is impossible; near-critical keeps the tail from crawling
 export const GLIDE_DT_MAX = 48; // ms of frame time integrated at most — a stalled tab's ceiling
 export const GLIDE_SNAP_SPEED = 0.05; // px/ms; under a pixel out and this slow = landed
 

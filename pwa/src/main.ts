@@ -25,7 +25,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.87"; // prevention keyboard regime deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.88"; // smooth-rim arrow revert + two-screen glide deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -301,8 +301,9 @@ function renderChat(): void {
           placeholder="${PROMPTS[Math.floor(Math.random() * PROMPTS.length)]}"></textarea>
         <button type="submit" id="sendbtn" class="send">↑</button>
       </div>
-      <button type="button" id="jump" class="jump" title="Jump to latest"><span
-        class="jump-glyph">↓</span></button>
+      <button type="button" id="jump" class="jump" title="Jump to latest"><svg
+        class="jump-glyph" viewBox="0 0 36 36" aria-hidden="true"><path
+        d="M17.15 12h1.7v12.75l1.85-1.85 1.2 1.2L18 28l-3.9-3.9 1.2-1.2 1.85 1.85z"/></svg></button>
     </form>`;
   document.getElementById("settings")!.addEventListener("click", () => {
     document.getElementById("menu")!.classList.toggle("open");

@@ -169,10 +169,13 @@ describe("createGlide — a capped damped spring: flat cruise far out, one physi
     return { g, remaining, steps, remainingBefore };
   }
 
-  it("the tuning: 25px/ms cap, 1.7-screen spring reach, damping held above critical", () => {
+  it("the tuning: 25px/ms cap, 3-screen spring reach, damping just above critical", () => {
     expect(GLIDE_MAX_SPEED).toBe(25);
-    expect(GLIDE_SPRING_SCREENS).toBe(1.7);
-    expect(GLIDE_DAMPING_RATIO).toBe(1.2);
+    // reach 3.0 (was 1.7): the device verdict — braking must READ about two
+    // screens out, not stack into the last message; near-critical ζ spreads
+    // the shed through those screens instead of feeding a longer tail crawl
+    expect(GLIDE_SPRING_SCREENS).toBe(3.0);
+    expect(GLIDE_DAMPING_RATIO).toBe(1.02);
     expect(GLIDE_DAMPING_RATIO).toBeGreaterThanOrEqual(1); // ζ<1 would ring — never
     expect(GLIDE_SNAP_SPEED).toBeLessThanOrEqual(0.1); // the snap fires only at a crawl
   });
@@ -187,7 +190,11 @@ describe("createGlide — a capped damped spring: flat cruise far out, one physi
     const far = ride(20_000);
     const cruise = far.steps.filter((s) => s === CAP);
     expect(cruise.length).toBeGreaterThan(20); // most of the ride is exact-cap frames
-    expect(far.steps[0]).toBe(CAP); // pinned from the first frame, no wind-up hop
+    // the 3-screen spring spends its first from-rest frame ACCELERATING at
+    // this distance (~80% of the cap's advance) — an ease-in, not a hop —
+    // and is pinned from the second frame on
+    expect(far.steps[0]).toBeGreaterThan(0.75 * CAP);
+    expect(far.steps[1]).toBe(CAP);
     expect(Math.max(...far.steps)).toBe(CAP); // and nothing ever outruns it
   });
 
@@ -240,6 +247,28 @@ describe("createGlide — a capped damped spring: flat cruise far out, one physi
     }
   });
 
+  it("the slowdown READS from two screens out — not only at the last message", () => {
+    // the device verdict on the 1.7-screen spring: it shed 25 -> 15 by two
+    // viewports but stacked everything readable into the final half screen.
+    // Retuned, the crossing speeds spread the brake across the whole approach
+    // (old tuning at the same marks: 15.1 / 7.6 / 3.7 / 0.73) while the final
+    // tenth crawls exactly as gently as the settle he already approved.
+    const { steps, remaining, remainingBefore } = ride(6340);
+    expect(remaining).toBe(0);
+    const speedCrossing = (px: number) => {
+      const i = remainingBefore.findIndex((r) => r <= px);
+      return steps[i - 1] / 16; // the frame that carried the ride past the mark
+    };
+    expect(speedCrossing(2 * VH)).toBeCloseTo(12.18, 1); // under half the cap by 2 screens
+    expect(speedCrossing(VH)).toBeCloseTo(6.47, 1); // readable glide by one screen
+    expect(speedCrossing(0.5 * VH)).toBeCloseTo(3.24, 1); // clearly gliding by half
+    expect(speedCrossing(0.1 * VH)).toBeCloseTo(0.64, 1); // the approved crawl, unchanged
+    // and the spread does not turn sluggish: time inside the final two
+    // viewports stays in the 600–1100ms band (the first spring spent 656ms)
+    const inside2 = remainingBefore.filter((r) => r <= 2 * VH).length;
+    expect(inside2).toBe(49); // 784ms at 16ms frames
+  });
+
   it("velocity carries across a retarget: content growing mid-flight bends the ride", () => {
     const g = createGlide(0);
     let remaining = 2000;
@@ -286,21 +315,21 @@ describe("createGlide — a capped damped spring: flat cruise far out, one physi
     expect(g.step(ms + 16, 0, VH)).toBe(0); // and the run stays over
   });
 
-  it("the settle through the final viewport of a long ride: 592ms — 576ms before", () => {
+  it("the settle through the final viewport of a long ride: 704ms — 592ms before", () => {
     // the same fixed-frame sim the soften ramp was measured with (6340px ride):
     // frames spent under one viewport-height of remaining, at 16ms each
     const { steps, remaining, remainingBefore } = ride(6340);
     expect(remaining).toBe(0);
     const inside = remainingBefore.filter((r) => r <= VH).length;
-    expect(inside).toBe(37); // 592ms; the retired soften ramp did 36 (576ms)
+    expect(inside).toBe(44); // 704ms; the 1.7-reach spring did 37 (592ms)
     // and the touch itself is a crawl, not a slam
     expect(steps[steps.length - 1] / 16).toBeLessThan(0.1);
   });
 
-  it("from rest one viewport out the ride takes 40 frames (640ms) — 36 before", () => {
+  it("from rest one viewport out the ride takes 51 frames (816ms) — 40 before", () => {
     const { steps, remaining } = ride(VH);
     expect(remaining).toBe(0); // still an exact landing, just a softer one
-    expect(steps.length).toBe(40); // the soften ramp did 36; the single-k law 21
+    expect(steps.length).toBe(51); // the 1.7-reach spring did 40; the soften ramp 36
   });
 
   it("a user gesture cancels mid-flight: over immediately, steps stop dead", () => {
@@ -335,17 +364,16 @@ describe("presentation — original glass, fixed arrow, right-tangent seat", () 
     expect(css).not.toContain("--jump-bg"); // the butchered opaque disc is gone
   });
 
-  it("only the arrow changed: one fixed color per scheme, no blend tricks", () => {
+  it("only the arrow changed: one fixed fill per scheme, no blend tricks", () => {
     expect(css).not.toContain("mix-blend-mode");
-    expect(glyphRule).toContain("color: var(--jump-fg)");
+    expect(glyphRule).toContain("fill: var(--jump-fg)");
   });
 
-  it("the arrow carries a full hairline rim of the opposite tone; the disc does not", () => {
-    expect(glyphRule).toContain("text-shadow:");
-    expect(glyphRule.match(/var\(--jump-rim\)/g)?.length).toBe(8); // a closed ring: all eight directions
+  it("the arrow carries a thin rim of the opposite tone; the disc does not", () => {
+    expect(glyphRule).toContain("stroke: var(--jump-rim)");
     expect(css).toMatch(/--jump-rim: rgba\(255, 255, 255/); // light: white hair under the accent arrow
     expect(css).toMatch(/--jump-rim: rgba\(0, 0, 0/); // dark: dark hair under the white arrow
-    expect(faceRule).not.toContain("text-shadow"); // the glass face itself stays untouched
+    expect(faceRule).not.toContain("stroke"); // the glass face itself stays untouched
   });
 
   it("keeps the original 0.15s show/hide fade on face and glyph alike", () => {
@@ -374,49 +402,48 @@ describe("presentation — original glass, fixed arrow, right-tangent seat", () 
   });
 });
 
-// Pins for the adaptive-arrow overlay (the m215 experiment): the visible
-// arrow is .jump::after, an arrow-shaped mask whose ONLY paint is a
-// backdrop-filter chain — every arrow pixel the amplified inverse of what
-// lies behind it, white over dark content, black over light, both at once
-// over a split. The fixed glyph + rim stays beneath at --jump-floor as the
-// safety floor: a dead filter leaves the ::after paintless and the floor
-// arrow standing. Headless Chromium proved the chain; iOS 26 WebKit is the
-// open question, so the whole layer is provisional until the device test.
-describe("presentation — adaptive overlay, fixed floor beneath", () => {
+// Pins for the arrow's construction (the m215 device verdict): the adaptive
+// backdrop-invert overlay doubled the arrow on device, read too thick, and
+// flipped tone at the wrong moment — it is gone root and branch. The one
+// arrow is an inline SVG silhouette (markup in main.ts) with the scheme's
+// fixed --jump-fg as fill over a --jump-rim stroke painted UNDER the fill:
+// only the stroke's outer half shows, a thinner boundary than the retired
+// eight-direction shadow ring, and round joins keep it a smooth offset of
+// the shape — the shadow ring ran to points at every sharp glyph angle.
+describe("presentation — one SVG arrow, smooth under-stroke rim", () => {
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
-  const overlayRule = css.match(/\n\.jump::after \{([^}]*)\}/)?.[1] ?? "";
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const glyphRule = css.match(/\n\.jump-glyph \{([^}]*)\}/)?.[1] ?? "";
 
-  it("the overlay is an arrow-shaped mask: inline SVG, both spellings, same form", () => {
-    expect(overlayRule).toContain('-webkit-mask-image: url("data:image/svg+xml,');
-    expect(overlayRule).toMatch(/\n {2}mask-image: url\("data:image\/svg\+xml,/);
-    // the identical path in both spellings — measured to cover the floor
-    // glyph's ink (x 14.7–21, y 12–28) plus its 1px rim on every side, so
-    // no fixed-color fringe ever peeks around the adaptive arrow
-    const forms = overlayRule.match(/M17\.85 11\.6 V27\.2 M12\.55 22 L17\.85 27\.4 L23\.15 22/g);
-    expect(forms?.length).toBe(2);
+  it("the adaptive overlay is gone root and branch", () => {
+    expect(css).not.toContain(".jump::after"); // no second arrow layer
+    expect(css).not.toContain("--jump-floor"); // no floor split either
+    expect(css).not.toContain("mask-image");
+    expect(css).not.toContain("invert(");
   });
 
-  it("its ONLY paint is the filter chain — no background, no blend anywhere", () => {
-    expect(overlayRule).toContain(
-      "-webkit-backdrop-filter: blur(6px) invert(1) grayscale(1) contrast(60)");
-    expect(overlayRule).toMatch(
-      /\n {2}backdrop-filter: blur\(6px\) invert\(1\) grayscale\(1\) contrast\(60\)/);
-    expect(overlayRule).not.toContain("background"); // paintless when the filter dies
-    expect(overlayRule).not.toContain("blend"); // the iOS 26 regression stays out
-    expect(css).not.toContain("mix-blend-mode");
+  it("the glyph is ONE inline SVG arrow at the disc's own 1-unit-per-px scale", () => {
+    const svg = main.match(/<svg\s[\s\S]*?class="jump-glyph"[\s\S]*?<\/svg>/)?.[0] ?? "";
+    expect(svg).toContain('viewBox="0 0 36 36"');
+    expect(svg.match(/<path/g)?.length).toBe(1); // one path, one arrow — never two
+    // the silhouette: stem 1.7 wide, head 7.8 wide at 45°, ink x 14.1–21.9
+    // and y 12–28 — the footprint of the font arrow the device approved
+    expect(svg).toContain(
+      'd="M17.15 12h1.7v12.75l1.85-1.85 1.2 1.2L18 28l-3.9-3.9 1.2-1.2 1.85 1.85z"');
   });
 
-  it("the floor: glyph + rim beneath at 0.65 in both schemes, readable alone", () => {
-    // shown-state: face and overlay fade to 1, the glyph to the floor value
-    expect(css).toMatch(/\.jump\.show::before,\n\.jump\.show::after \{\n {2}opacity: 1;/);
-    expect(css).toMatch(/\.jump\.show \.jump-glyph \{\n {2}opacity: var\(--jump-floor\);/);
-    // capture-laddered with the filter disabled: 0.45 ghosts on the sent
-    // bubble (the rim-only case), 0.55 barely reads, 0.65 ships the margin
-    expect(css.match(/--jump-floor: 0\.65;/g)?.length).toBe(2);
+  it("the rim is a stroke UNDER the fill: thin, round-joined, spike-proof", () => {
+    expect(glyphRule).toContain("paint-order: stroke"); // stroke first = under the fill
+    // 2 units centered on the edge, inner half covered by the fill: a 1px
+    // visible boundary — thinner than the old ring's 1px-plus-diagonals
+    expect(glyphRule).toContain("stroke-width: 2");
+    expect(glyphRule).toContain("stroke-linejoin: round"); // corners round, never pointy
+    expect(glyphRule).toContain("stroke-linecap: round");
+    expect(glyphRule).not.toContain("text-shadow"); // the eight-direction halo is gone
   });
 
-  it("the overlay stacks over face and floor and rides the same 0.15s fade", () => {
-    expect(overlayRule).toContain("z-index: 5"); // face and glyph sit at 4
-    expect(overlayRule).toContain("transition: opacity 0.15s");
+  it("shown state: face and glyph both at full strength — no floor opacity", () => {
+    expect(css).toMatch(/\.jump\.show::before \{\n {2}opacity: 1;/);
+    expect(css).toMatch(/\.jump\.show \.jump-glyph \{\n {2}opacity: 1;/);
   });
 });
