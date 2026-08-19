@@ -483,6 +483,23 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         # activity: cancel any suspend countdown BEFORE the first await, so a
         # countdown firing mid-request can't nap the worker under this message
         _cancel_linger(state)
+        # the take-back: replies the client held unseen die before the message
+        # that outran them. Validation lives inside the delete (thread-scoped,
+        # agent-only) — nonsense seqs delete nothing, harmlessly. Deletion
+        # precedes handle_message, so store.recent — the rerun's context — can
+        # never see a retracted reply; the retract frame carries its seq in a
+        # dedicated field (no top-level ``seq``) so a stale client treats it
+        # as ephemeral and ignores it instead of rendering a ghost bubble.
+        if req.retract_seqs:
+            retracted = await asyncio.to_thread(
+                state.store.delete_agent_messages, req.thread_id, req.retract_seqs
+            )
+            for rseq in retracted:
+                _diag.info("holddiag relay retract thread=%s seq=%d", req.thread_id, rseq)
+                await _send_to_sockets(
+                    state, req.thread_id,
+                    {"thread_id": req.thread_id, "kind": "retract", "retract_seq": rseq},
+                )
         msg = ThreadEvent(
             thread_id=req.thread_id, role="user", payload=req.text,
             attachments=req.attachments, ts=_now(),
@@ -604,7 +621,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         _holddiag_latest.update(payload)
         events = payload.get("events") or []
         marks = [e for e in events if isinstance(e, dict)
-                 and e.get("ev") in ("held", "release", "pass", "reset", "vis")]
+                 and e.get("ev") in ("held", "release", "pass", "reset", "vis",
+                                     "retract-sent", "retract-applied")]
         _diag.info("holddiag client build=%s events=%d marks=%s",
                    payload.get("build"), len(events), json.dumps(marks[-10:]))
         # viewport/flight digest, its own line so the hold pin above holds: the

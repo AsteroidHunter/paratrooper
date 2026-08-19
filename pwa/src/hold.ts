@@ -27,6 +27,12 @@ export interface ReplyHold<T> {
   maybeHold(seq: number, frame: T): boolean;
   /** render everything held, in seq order, right now, and end composing (the send path) */
   flush(): void;
+  /** the take-back send path: hand over everything held UNRENDERED, seq order,
+      and end composing exactly like flush() — the caller sends the seqs so the
+      server deletes the rows, and re-renders only if that send fails */
+  take(): [number, T][];
+  /** a server retract deleted this seq: drop it unrendered if parked here */
+  drop(seq: number): boolean;
   holding(): boolean;
   /** new shell/session: drop parked frames unrendered (replay covers them) */
   reset(): void;
@@ -78,6 +84,23 @@ export function createReplyHold<T>(
     release("send");
   }
 
+  function take(): [number, T][] {
+    disarm();
+    // like release("send"): after a send he is by definition not composing
+    lastKeyAt = 0;
+    const frames = [...held.entries()].sort(([a], [b]) => a - b);
+    held.clear();
+    holdDiagRecord("release", { reason: "take", held: frames.length });
+    return frames;
+  }
+
+  function drop(seq: number): boolean {
+    if (!held.delete(seq)) return false;
+    holdDiagRecord("drop", { seq, held: held.size });
+    if (held.size === 0) disarm(); // nothing left to release; no stray timer fire
+    return true;
+  }
+
   function typed(): void {
     holdDiagRecord("typed", { held: held.size, sinceKey: sinceKey() });
     lastKeyAt = now();
@@ -104,7 +127,7 @@ export function createReplyHold<T>(
     lastKeyAt = 0;
   }
 
-  return { typed, maybeHold, flush, holding: () => held.size > 0, reset };
+  return { typed, maybeHold, flush, take, drop, holding: () => held.size > 0, reset };
 }
 
 // ===================== TEMP DIAGNOSTIC (remove after the hold session) =====================
@@ -152,7 +175,8 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // session posts even when the hold itself never engages
   if (
     ev === "held" || ev === "release" || ev === "pass" || ev === "reset" ||
-    ev === "snapback" || ev === "followtail" || ev === "flight"
+    ev === "snapback" || ev === "followtail" || ev === "flight" ||
+    ev === "retract-sent" || ev === "retract-applied"
   ) {
     diagPost();
   }

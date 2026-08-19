@@ -22,7 +22,7 @@ import type { OutboxRecord } from "./outbox";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.72"; // jump-glass/left-seat/replay-marker/one-glide deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.73"; // reply take-back deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1326,7 +1326,14 @@ function connect(): void {
   };
   ws.onmessage = (e) => {
     if (!document.getElementById("thread")) return; // gate is showing; don't consume
-    const m = JSON.parse(e.data) as ServerMsg;
+    const m = JSON.parse(e.data) as ServerMsg & { retract_seq?: number };
+    // a take-back frame: the server deleted this reply on the owner's send.
+    // Checked before the seq gate — the frame carries no top-level seq on
+    // purpose (a stale bundle drops it as ephemeral instead of rendering it).
+    if (m.kind === "retract" && typeof m.retract_seq === "number") {
+      applyRetract(m.retract_seq);
+      return;
+    }
     if (!m.seq) {
       // ephemeral kinds bypass the store: they are presence, not history.
       // (working is keyed now — the stored row drives the Read receipt)
@@ -1352,6 +1359,26 @@ function connect(): void {
     if (closingOnPurpose || !token) return; // logout: stay closed
     setTimeout(connect, 2000); // dropped: reconnect; catch-up via ?since=
   };
+}
+
+// A retract frame landed: the server deleted this reply at the owner's send
+// (another client's take-back — or our own echoing back, already clean).
+// Remove every trace wherever it lives: a still-parked hold entry, the store
+// row, the rendered bubble. All three misses is the clean-echo case and a
+// no-op; the trail records what was actually found so the round-trip reads
+// back from the deploy logs.
+function applyRetract(seq: number): void {
+  const wasHeld = replyHold.drop(seq);
+  const hadStore = store.delete(seq);
+  const w = wrapperFor(seq);
+  if (w) {
+    w.remove();
+    decorate();
+    updateReceipt();
+  }
+  holdDiagRecord("retract-applied", {
+    seq, bubble: w !== null, stored: hadStore, held: wasHeld,
+  });
 }
 
 // iMessage send flight: the fresh bubble lifts out of the compose field and
@@ -1420,12 +1447,16 @@ async function send(): Promise<void> {
   const files = [...pendingFiles];
   if (!text && files.length === 0) return;
 
-  // a held reply renders FIRST, so the live view shows reply-then-your-message
-  // — the same order the store (reply's seq is older) replays after a reload.
-  // flush() also zeroes the composing clock: the textarea clear below fires no
-  // input event, and after a send he is not composing — a reply arriving
-  // moments later must render immediately, not park on pre-send keystrokes
-  replyHold.flush();
+  // the take-back: a reply still held unseen when he sends must vanish for
+  // good — the send outran it, and the rerun's next reply answers everything.
+  // take() hands the parked frames over UNRENDERED and zeroes the composing
+  // clock exactly as flush() did (the textarea clear below fires no input
+  // event; a reply arriving moments later must render immediately). The taken
+  // seqs ride the send body so the server deletes the rows; they re-render
+  // only if the send fails (below), because then the server never took them.
+  const taken = replyHold.take();
+  const retractSeqs = taken.map(([seq]) => seq);
+  if (retractSeqs.length) holdDiagRecord("retract-sent", { seqs: retractSeqs });
 
   // INSTANT feedback on tap: one optimistic wrapper appears immediately; the
   // uploads/POST happen behind it. On ACK the wrapper adopts the server seq,
@@ -1456,9 +1487,24 @@ async function send(): Promise<void> {
 
   sendBtn.disabled = true; // no double-fire while the network work runs
   try {
-    await transmit(w, text, files);
+    await transmit(w, text, files, retractSeqs);
   } finally {
     sendBtn.disabled = false;
+  }
+  // the send FAILED (every transmit failure path lands in markFailed, which
+  // registers the wrapper): the server never took the held replies back, so
+  // they render after all — ABOVE the failed bubble, the same reply-then-
+  // failure order a reload rebuilds (history replays the reply; the failed
+  // send restores below it). applyEvent appends the keyed reply at the tail,
+  // so the unkeyed failed wrapper is re-appended after it to restore order.
+  if (taken.length && failedSends.has(w)) {
+    for (const [seq, frame] of taken) {
+      holdDiagRecord("render", { seq, route: "send-fail" });
+      applyEvent(frame);
+    }
+    threadEl().appendChild(w);
+    decorate();
+    if (followTail) scrollToBottom();
   }
 }
 
@@ -1466,8 +1512,12 @@ async function send(): Promise<void> {
 // first attempt and every Try Again, so a retry takes the exact same path,
 // ACK/seq adoption included. Any failure marks the wrapper failed (iMessage
 // treatment below) instead of raising a separate error bubble; the typed text
-// and File objects stay held for the next retry.
-async function transmit(w: HTMLElement, text: string, files: File[]): Promise<void> {
+// and File objects stay held for the next retry. retractSeqs ride the FIRST
+// attempt only: a retry follows a failure, and the failure path already
+// rendered the held replies (the server still has their rows).
+async function transmit(
+  w: HTMLElement, text: string, files: File[], retractSeqs: number[] = [],
+): Promise<void> {
   const keys: string[] = [];
   for (const file of files) {
     const fd = new FormData();
@@ -1486,7 +1536,9 @@ async function transmit(w: HTMLElement, text: string, files: File[]): Promise<vo
     resp = await fetch("/api/send", {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: THREAD_ID, text, attachments: keys }),
+      body: JSON.stringify({
+        thread_id: THREAD_ID, text, attachments: keys, retract_seqs: retractSeqs,
+      }),
     });
   } catch {
     return markFailed(w, text, files);

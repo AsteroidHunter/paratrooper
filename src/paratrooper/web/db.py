@@ -129,6 +129,31 @@ class ThreadStore:
             self._conn.commit()
             return int(cur.lastrowid)
 
+    def delete_agent_messages(self, thread_id: str, seqs: list[int]) -> list[int]:
+        """Delete agent-role events by seq within one thread — the send-time
+        take-back of a reply the client held unseen. Validation IS the WHERE
+        clause: a seq that is missing, lives in another thread, or is not
+        agent-role deletes nothing and raises nothing. Returns the seqs
+        actually deleted, ascending. AUTOINCREMENT never reuses a deleted
+        seq, so client catch-up cursors stay truthful after a take-back."""
+        if not seqs:
+            return []
+        marks = ",".join("?" for _ in seqs)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT seq FROM messages WHERE thread_id=? AND role='agent' "
+                f"AND seq IN ({marks}) ORDER BY seq",
+                (thread_id, *seqs),
+            ).fetchall()
+            deleted = [int(r["seq"]) for r in rows]
+            if deleted:
+                hitmarks = ",".join("?" for _ in deleted)
+                self._conn.execute(
+                    f"DELETE FROM messages WHERE seq IN ({hitmarks})", tuple(deleted)
+                )
+                self._conn.commit()
+        return deleted
+
     def _rows(self, sql: str, params: tuple) -> list[ThreadEvent]:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()

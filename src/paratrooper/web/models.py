@@ -95,11 +95,15 @@ class UploadResponse(BaseModel):
 
 
 class SendRequest(BaseModel):
-    """PWA -> web: a chat message (text + optional already-uploaded attachments)."""
+    """PWA -> web: a chat message (text + optional already-uploaded attachments).
+    ``retract_seqs`` are agent replies the client held unseen when this send
+    outran them — the server deletes those rows (the take-back) before the
+    message is handled, so the rerun answers everything with one reply."""
 
     thread_id: str
     text: str = ""
     attachments: list[str] = Field(default_factory=list)
+    retract_seqs: list[int] = Field(default_factory=list)
 
 
 class PublishRequest(BaseModel):
