@@ -738,15 +738,13 @@ html, body {
    lives inside the .compose anchor box, its right edge tangent to the field
    pill's outer right edge: one vertical line grazes both (the device-test
    spec). The glass face lives on ::before — the original disc's exact
-   background/blur/shadow stack and geometry — and both layers carry the
-   0.15s show/hide fade. The arrow is ONE inline SVG silhouette (markup in
-   main.ts), filled with the scheme's fixed --jump-fg over a --jump-rim
-   stroke painted UNDER the fill (paint-order): only the outer half of the
-   stroke shows, a boundary thinner than the retired 1px eight-direction
-   text-shadow ring, and round joins keep it a smooth offset of the arrow —
-   the shadow ring ran to points wherever the glyph formed a sharp angle
-   (device verdict; the adaptive backdrop-invert overlay that briefly sat
-   above this glyph doubled the arrow on device and is gone). */
+   background/blur/shadow stack and geometry — and the face and glyph each
+   carry the level-4 stacking and the 0.15s show/hide fade. The arrow itself
+   is one fixed color per scheme (--jump-fg): no blending against the
+   backdrop, just a hairline rim of the opposite tone (--jump-rim) so it
+   never sinks into a same-colored bubble under the glass. (The inline-SVG
+   redraw that briefly replaced the font arrow is gone: the ask was a
+   smoother ring, never a different arrow.) */
 .jump {
   position: absolute;
   /* the bar's 0.75rem side padding puts the pill's outer right edge exactly
@@ -763,6 +761,7 @@ html, body {
   border: none;
   border-radius: 50%;
   background: none;
+  font-size: 1.1rem;
   cursor: pointer;
   pointer-events: none;
 }
@@ -780,31 +779,34 @@ html, body {
   transition: opacity 0.15s;
 }
 .jump-glyph {
-  /* the button's padding box is its full 36px circle, so inset 0 + 100%
-     renders the SVG's 36-unit viewBox at exactly 1 unit = 1px */
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  position: relative;
   z-index: 4;
-  fill: var(--jump-fg);
-  stroke: var(--jump-rim);
-  /* 2 units centered on the silhouette edge: the fill covers the inner
-     half (paint-order below), leaving a 1px rim everywhere — thinner than
-     the old ring, and stroke geometry cannot spike past round joins */
-  stroke-width: 2;
-  paint-order: stroke;
-  stroke-linejoin: round;
-  stroke-linecap: round;
+  color: var(--jump-fg);
+  /* the rim: sixteen glyph copies on one 0.7px circle, painted UNDER the
+     fill — the glyph is a font character, so text-shadow is the only
+     under-the-fill layer its markup has (a centered text-stroke would eat
+     the arrow's thin strokes at this size). The retired eight-direction 1px
+     ring reached 1.4px on its diagonal copies, so every sharp glyph angle
+     ran to a point; one shared sub-pixel radius keeps the boundary a round
+     offset of the arrow, and thinner. Zero blur: at this radius even 0.3px
+     of blur reads muddy over a sent bubble (dpr3 capture) — density of
+     directions does the softening instead. The disc itself is untouched. */
+  text-shadow:
+    0.7px 0 var(--jump-rim), -0.7px 0 var(--jump-rim),
+    0 0.7px var(--jump-rim), 0 -0.7px var(--jump-rim),
+    0.65px 0.27px var(--jump-rim), 0.65px -0.27px var(--jump-rim),
+    -0.65px 0.27px var(--jump-rim), -0.65px -0.27px var(--jump-rim),
+    0.27px 0.65px var(--jump-rim), 0.27px -0.65px var(--jump-rim),
+    -0.27px 0.65px var(--jump-rim), -0.27px -0.65px var(--jump-rim),
+    0.49px 0.49px var(--jump-rim), 0.49px -0.49px var(--jump-rim),
+    -0.49px 0.49px var(--jump-rim), -0.49px -0.49px var(--jump-rim);
   opacity: 0;
   transition: opacity 0.15s;
 }
 .jump.show {
   pointer-events: auto;
 }
-.jump.show::before {
-  opacity: 1;
-}
+.jump.show::before,
 .jump.show .jump-glyph {
   opacity: 1;
 }

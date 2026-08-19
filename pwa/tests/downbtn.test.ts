@@ -364,16 +364,16 @@ describe("presentation — original glass, fixed arrow, right-tangent seat", () 
     expect(css).not.toContain("--jump-bg"); // the butchered opaque disc is gone
   });
 
-  it("only the arrow changed: one fixed fill per scheme, no blend tricks", () => {
+  it("only the arrow changed: one fixed color per scheme, no blend tricks", () => {
     expect(css).not.toContain("mix-blend-mode");
-    expect(glyphRule).toContain("fill: var(--jump-fg)");
+    expect(glyphRule).toContain("color: var(--jump-fg)");
   });
 
-  it("the arrow carries a thin rim of the opposite tone; the disc does not", () => {
-    expect(glyphRule).toContain("stroke: var(--jump-rim)");
+  it("the arrow carries a full hairline rim of the opposite tone; the disc does not", () => {
+    expect(glyphRule).toContain("text-shadow:");
     expect(css).toMatch(/--jump-rim: rgba\(255, 255, 255/); // light: white hair under the accent arrow
     expect(css).toMatch(/--jump-rim: rgba\(0, 0, 0/); // dark: dark hair under the white arrow
-    expect(faceRule).not.toContain("stroke"); // the glass face itself stays untouched
+    expect(faceRule).not.toContain("text-shadow"); // the glass face itself stays untouched
   });
 
   it("keeps the original 0.15s show/hide fade on face and glyph alike", () => {
@@ -402,18 +402,21 @@ describe("presentation — original glass, fixed arrow, right-tangent seat", () 
   });
 });
 
-// Pins for the arrow's construction (the m215 device verdict): the adaptive
-// backdrop-invert overlay doubled the arrow on device, read too thick, and
-// flipped tone at the wrong moment — it is gone root and branch. The one
-// arrow is an inline SVG silhouette (markup in main.ts) with the scheme's
-// fixed --jump-fg as fill over a --jump-rim stroke painted UNDER the fill:
-// only the stroke's outer half shows, a thinner boundary than the retired
-// eight-direction shadow ring, and round joins keep it a smooth offset of
-// the shape — the shadow ring ran to points at every sharp glyph angle.
-describe("presentation — one SVG arrow, smooth under-stroke rim", () => {
+// Pins for the arrow's construction (the m215 device verdicts, in order):
+// the adaptive backdrop-invert overlay doubled the arrow on device — gone
+// root and branch. The inline-SVG silhouette that then replaced the glyph is
+// gone too: the ask was a smoother ring, never a different arrow. The arrow
+// is the original ↓ font character again, exactly as approved; only the rim
+// changed construction — sixteen text-shadow copies on one 0.7px circle,
+// zero blur, so the boundary is a uniform round offset of the glyph instead
+// of the old eight-direction ring whose 1.4px diagonal copies ran to points.
+describe("presentation — the original font arrow, one layered soft ring", () => {
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   const glyphRule = css.match(/\n\.jump-glyph \{([^}]*)\}/)?.[1] ?? "";
+  // the absence pins below read declarations only — comment prose narrating
+  // the retired constructions ("text-stroke", "1px ring") must not trip them
+  const glyphDecl = glyphRule.replace(/\/\*[\s\S]*?\*\//g, "");
 
   it("the adaptive overlay is gone root and branch", () => {
     expect(css).not.toContain(".jump::after"); // no second arrow layer
@@ -422,28 +425,24 @@ describe("presentation — one SVG arrow, smooth under-stroke rim", () => {
     expect(css).not.toContain("invert(");
   });
 
-  it("the glyph is ONE inline SVG arrow at the disc's own 1-unit-per-px scale", () => {
-    const svg = main.match(/<svg\s[\s\S]*?class="jump-glyph"[\s\S]*?<\/svg>/)?.[0] ?? "";
-    expect(svg).toContain('viewBox="0 0 36 36"');
-    expect(svg.match(/<path/g)?.length).toBe(1); // one path, one arrow — never two
-    // the silhouette: stem 1.7 wide, head 7.8 wide at 45°, ink x 14.1–21.9
-    // and y 12–28 — the footprint of the font arrow the device approved
-    expect(svg).toContain(
-      'd="M17.15 12h1.7v12.75l1.85-1.85 1.2 1.2L18 28l-3.9-3.9 1.2-1.2 1.85 1.85z"');
+  it("the glyph is the original ↓ font character; the SVG redraw is gone", () => {
+    expect(main).toMatch(/<span\s+class="jump-glyph">↓<\/span>/); // the approved arrow, byte for byte
+    expect(main).not.toContain("<svg"); // no redrawn silhouette anywhere in the markup
+    expect(glyphRule).toContain("color: var(--jump-fg)"); // font glyphs paint with color...
+    expect(glyphDecl).not.toContain("stroke"); // ...and rim with shadows, never strokes
+    expect(glyphDecl).not.toContain("paint-order");
   });
 
-  it("the rim is a stroke UNDER the fill: thin, round-joined, spike-proof", () => {
-    expect(glyphRule).toContain("paint-order: stroke"); // stroke first = under the fill
-    // 2 units centered on the edge, inner half covered by the fill: a 1px
-    // visible boundary — thinner than the old ring's 1px-plus-diagonals
-    expect(glyphRule).toContain("stroke-width: 2");
-    expect(glyphRule).toContain("stroke-linejoin: round"); // corners round, never pointy
-    expect(glyphRule).toContain("stroke-linecap: round");
-    expect(glyphRule).not.toContain("text-shadow"); // the eight-direction halo is gone
+  it("the ring: sixteen copies on one sub-pixel circle, zero blur", () => {
+    expect(glyphRule).toContain("text-shadow:");
+    expect(glyphDecl.match(/var\(--jump-rim\)/g)?.length).toBe(16); // a closed ring: sixteen directions
+    expect(glyphDecl).toContain("0.7px 0 var(--jump-rim)"); // the radius on a cardinal...
+    expect(glyphDecl).toContain("0.49px 0.49px var(--jump-rim)"); // ...held on the diagonal, not 1.4x it
+    expect(glyphDecl).not.toContain("1px"); // the old full-pixel ring is gone
+    expect(glyphDecl).not.toMatch(/px [\d.]+px [\d.]+px/); // no blur length on any copy
   });
 
   it("shown state: face and glyph both at full strength — no floor opacity", () => {
-    expect(css).toMatch(/\.jump\.show::before \{\n {2}opacity: 1;/);
-    expect(css).toMatch(/\.jump\.show \.jump-glyph \{\n {2}opacity: 1;/);
+    expect(css).toMatch(/\.jump\.show::before,\n\.jump\.show \.jump-glyph \{\n {2}opacity: 1;/);
   });
 });
