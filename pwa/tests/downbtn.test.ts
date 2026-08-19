@@ -10,6 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   GLIDE_BRAKE_SCREENS,
   GLIDE_MAX_SPEED,
+  GLIDE_SOFT_FLOOR,
+  GLIDE_SOFT_SCREENS,
   PAUSE_MS,
   createDownButton,
   createGlide,
@@ -151,9 +153,11 @@ describe("createGlide — flat cruise while far, distance-proportional brake nea
   const ZONE = GLIDE_BRAKE_SCREENS * VH; // the slowdown may only show inside this
   const CAP = GLIDE_MAX_SPEED * 16; // full-speed px per 60fps frame
 
-  it("the tuning: 25px/ms cruise, braking within two screens of the bottom", () => {
+  it("the tuning: 25px/ms cruise, two-screen brake, half-strength landing ramp", () => {
     expect(GLIDE_MAX_SPEED).toBe(25);
     expect(GLIDE_BRAKE_SCREENS).toBe(2);
+    expect(GLIDE_SOFT_SCREENS).toBe(0.5); // the extra softening spans the final half screen
+    expect(GLIDE_SOFT_FLOOR).toBe(0.5); // ...easing the brake constant to half at the sill
   });
 
   it("far away the speed is capped flat — the step is distance-blind", () => {
@@ -168,7 +172,37 @@ describe("createGlide — flat cruise while far, distance-proportional brake nea
   it("braking onset sits exactly two viewport heights out", () => {
     expect(createGlide(0).step(16, ZONE, VH)).toBe(CAP); // the crossover: both rules agree
     expect(createGlide(0).step(16, ZONE - 1, VH)).toBeLessThan(CAP); // one px inside: braking
-    expect(createGlide(0).step(16, ZONE / 2, VH)).toBeCloseTo(CAP / 2, 8); // speed ∝ remaining
+    // ZONE/2 is a full viewport out — above the landing ramp, still plain ∝ remaining
+    expect(createGlide(0).step(16, ZONE / 2, VH)).toBeCloseTo(CAP / 2, 8);
+  });
+
+  describe("the landing ramp — the final half screen brakes down to half strength", () => {
+    const SOFT = GLIDE_SOFT_SCREENS * VH; // 350: where the extra softening begins
+    const plain = (r: number) => ((GLIDE_MAX_SPEED * r) / ZONE) * 16; // the old one-k step
+
+    it("joins the plain rule continuously at the ramp's edge — no felt hitch", () => {
+      expect(createGlide(0).step(16, SOFT, VH)).toBeCloseTo(plain(SOFT), 8);
+      expect(createGlide(0).step(16, SOFT + 1, VH)).toBeCloseTo(plain(SOFT + 1), 8);
+    });
+
+    it("inside, the constant eases linearly: 3/4 strength mid-ramp, ~half at the sill", () => {
+      expect(createGlide(0).step(16, SOFT / 2, VH)).toBeCloseTo(plain(SOFT / 2) * 0.75, 8);
+      const nearSill = createGlide(0).step(16, 10, VH);
+      expect(nearSill).toBeCloseTo(plain(10) * (0.5 + 0.5 * (10 / SOFT)), 8);
+      expect(nearSill / plain(10)).toBeLessThan(0.52); // the approach speed halved vs the old law
+    });
+
+    it("the last viewport-height now takes 36 frames (576ms) — 21 (336ms) before", () => {
+      const g = createGlide(0);
+      let r = VH;
+      let frames = 0;
+      for (let ms = 16; !g.done() && frames < 1000; ms += 16) {
+        r -= g.step(ms, r, VH);
+        frames++;
+      }
+      expect(r).toBe(0); // still an exact landing, just a softer one
+      expect(frames).toBe(36); // the old single-k law did the same stretch in 21
+    });
   });
 
   it("inside the zone every frame is slower than the last — monotonic brake", () => {
@@ -259,6 +293,14 @@ describe("presentation — original glass, fixed arrow, right-tangent seat", () 
     expect(glyphRule).toContain("color: var(--jump-fg)");
   });
 
+  it("the arrow carries a full hairline rim of the opposite tone; the disc does not", () => {
+    expect(glyphRule).toContain("text-shadow:");
+    expect(glyphRule.match(/var\(--jump-rim\)/g)?.length).toBe(8); // a closed ring: all eight directions
+    expect(css).toMatch(/--jump-rim: rgba\(255, 255, 255/); // light: white hair under the accent arrow
+    expect(css).toMatch(/--jump-rim: rgba\(0, 0, 0/); // dark: dark hair under the white arrow
+    expect(faceRule).not.toContain("text-shadow"); // the glass face itself stays untouched
+  });
+
   it("keeps the original 0.15s show/hide fade on face and glyph alike", () => {
     expect(faceRule).toContain("transition: opacity 0.15s");
     expect(glyphRule).toContain("transition: opacity 0.15s");
@@ -269,7 +311,9 @@ describe("presentation — original glass, fixed arrow, right-tangent seat", () 
     expect(composeRule).toContain("padding: 0.5rem 0.75rem var(--pad-b)"); // the pill's right edge: 0.75rem in
     expect(jumpRule).toContain("right: 0.75rem"); // the same inset = the two right edges tangent
     expect(jumpRule).not.toContain("left:"); // off the ＋'s column for good
-    expect(jumpRule).toContain("bottom: calc(var(--pad-b) + 36.5px + 0.5rem)"); // vertical seat unchanged
+    // raised seat: the pill's 39px + one 0.75rem gap of air (~12.5px clear of
+    // the pill, roughly double the old 36.5px + 0.5rem carry-over's ~6px)
+    expect(jumpRule).toContain("bottom: calc(var(--pad-b) + 39px + 0.75rem)");
     // and the button actually lives inside the compose bar's anchor box
     expect(main).toMatch(/<form id="compose"[\s\S]*id="jump"[\s\S]*<\/form>/);
   });

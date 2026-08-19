@@ -68,14 +68,21 @@ export function createDownButton(
 // velocity is min(maxSpeed, k·remaining) with k = maxSpeed / (BRAKE_SCREENS
 // viewports): beyond that crossover the cap wins (flat cruise, distance-blind),
 // inside it speed falls in proportion to what's left — the exponential-feeling
-// approach that eases to a stop. Pure and position-less: the wiring feeds it
-// frame times, the live remaining distance, and the container height every
-// frame, so content landing mid-glide simply grows `remaining` and the plan
-// re-opens the throttle, still ending exactly at the true bottom. cancel() is
-// the user taking the scroll back mid-flight — the run reports done and the
-// wiring stops writing.
+// approach that eases to a stop. The final approach brakes harder still
+// (device test: the single-k landing still arrived a bit hot): inside the
+// last SOFT_SCREENS of a viewport the constant itself eases linearly from
+// full strength at the ramp's edge down to SOFT_FLOOR of it at the sill, so
+// the near-bottom speed is half the plain rule's — continuous where the ramp
+// begins, monotone all the way in, cruise and brake onset untouched. Pure and
+// position-less: the wiring feeds it frame times, the live remaining
+// distance, and the container height every frame, so content landing
+// mid-glide simply grows `remaining` and the plan re-opens the throttle,
+// still ending exactly at the true bottom. cancel() is the user taking the
+// scroll back mid-flight — the run reports done and the wiring stops writing.
 export const GLIDE_MAX_SPEED = 25; // px per ms of full-speed cruise
 export const GLIDE_BRAKE_SCREENS = 2; // slowdown shows within this many viewports
+export const GLIDE_SOFT_SCREENS = 0.5; // the landing ramp spans this last fraction of a viewport
+export const GLIDE_SOFT_FLOOR = 0.5; // the brake constant's strength at the sill itself
 
 export interface Glide {
   /** px to advance toward the landing this frame; 0 once landed or cancelled */
@@ -102,9 +109,14 @@ export function createGlide(startMs: number, maxSpeed: number = GLIDE_MAX_SPEED)
         landed = true;
         return remaining;
       }
+      const softZone = GLIDE_SOFT_SCREENS * viewportHeight;
+      const soften =
+        remaining >= softZone
+          ? 1
+          : GLIDE_SOFT_FLOOR + (1 - GLIDE_SOFT_FLOOR) * (remaining / softZone);
       const speed = Math.min(
         maxSpeed,
-        (maxSpeed * remaining) / (GLIDE_BRAKE_SCREENS * viewportHeight),
+        (maxSpeed * remaining * soften) / (GLIDE_BRAKE_SCREENS * viewportHeight),
       );
       const step = Math.min(remaining, speed * dt); // a stalled tab's huge dt must not overshoot
       if (step === remaining) landed = true;

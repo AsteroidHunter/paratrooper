@@ -45,6 +45,10 @@
   /* jump chevron arrow: ONE fixed color per scheme, drawn over the disc's
      translucent glass face (--glass-bg) — never blended with the backdrop */
   --jump-fg: var(--accent);
+  /* the arrow's hairline rim, always the OPPOSITE tone of --jump-fg: one of
+     the pair contrasts with whatever shows through the glass (device test:
+     the accent arrow parked over a sent bubble read blue-on-blue) */
+  --jump-rim: rgba(255, 255, 255, 0.95);
   color-scheme: light;
 }
 
@@ -79,6 +83,8 @@
     --pill-veil: rgba(255, 255, 255, 0.12); /* faint lift on dark glass — any
       stronger and the veil reads as a grey slab, not light */
     --jump-fg: #ffffff; /* the accent sinks into dark glass; white stays legible */
+    --jump-rim: rgba(0, 0, 0, 0.7); /* dark hair under the white arrow — saves
+      it over a pale photo showing through the glass */
     color-scheme: dark;
   }
 }
@@ -684,16 +690,19 @@ html, body {
    background/blur/shadow stack and geometry — and the face and glyph each
    carry the level-4 stacking and the 0.15s show/hide fade. The arrow itself
    is one fixed color per scheme (--jump-fg): no blending against the
-   backdrop. */
+   backdrop, just a hairline rim of the opposite tone (--jump-rim) so it
+   never sinks into a same-colored bubble under the glass. */
 .jump {
   position: absolute;
   /* the bar's 0.75rem side padding puts the pill's outer right edge exactly
      0.75rem in from the box; the same inset seats the disc's right edge flush
      on that line (offsets resolve against .compose's padding box) */
   right: 0.75rem;
-  /* height carried over from the old above-the-＋ seat (its 2.5px centering
-     lift + 34px circle + one 0.5rem bar gap), keeping the gap rhythm */
-  bottom: calc(var(--pad-b) + 36.5px + 0.5rem);
+  /* seated off the pill it is tangent to: its 39px single-line height plus
+     one 0.75rem breathing gap (the bar's own padding unit). The old
+     36.5px + 0.5rem carry-over from the ＋ column left only ~6px of air
+     above the bar — the device test wanted roughly double. */
+  bottom: calc(var(--pad-b) + 39px + 0.75rem);
   width: 36px;
   height: 36px;
   border: none;
@@ -720,6 +729,15 @@ html, body {
   position: relative;
   z-index: 4;
   color: var(--jump-fg);
+  /* the rim: a 1px shadow ring in all eight directions, painted UNDER the
+     fill — the glyph is a font character, so text-shadow is the only
+     under-the-fill layer its markup has (a centered text-stroke would eat
+     the arrow's thin strokes at this size). The disc itself is untouched. */
+  text-shadow:
+    1px 0 var(--jump-rim), -1px 0 var(--jump-rim),
+    0 1px var(--jump-rim), 0 -1px var(--jump-rim),
+    1px 1px var(--jump-rim), 1px -1px var(--jump-rim),
+    -1px 1px var(--jump-rim), -1px -1px var(--jump-rim);
   opacity: 0;
   transition: opacity 0.15s;
 }
