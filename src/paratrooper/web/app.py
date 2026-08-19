@@ -634,10 +634,18 @@ def create_app(injected: AppState | None = None) -> FastAPI:
               and e.get("ev") in ("autosize", "vv-geom", "snapback",
                                   "followtail", "ft-suppress", "flight",
                                   "shell-size", "kb-close", "send-motion",
-                                  "receipt-hold")]
+                                  "receipt-hold", "boot-motion", "boot-repin")]
         if vp:
             _diag.info("holddiag viewport events=%d tail=%s",
                        len(vp), json.dumps(vp[-20:]))
+        # boot-window digest, its own line and HEAD-first: the cold-open
+        # recorder's earliest records are the verdict (the frame settles right
+        # after first paint), and the viewport tail above would clip them the
+        # moment a session gets busy
+        bm = [e for e in events if isinstance(e, dict)
+              and e.get("ev") in ("boot-motion", "boot-repin")]
+        if bm:
+            _diag.info("holddiag boot events=%d head=%s", len(bm), json.dumps(bm[:30]))
         return {"ok": True}
 
     @app.get("/api/debug/holddiag")

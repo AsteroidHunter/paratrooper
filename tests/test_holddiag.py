@@ -165,6 +165,33 @@ def test_holddiag_viewport_digest_carries_keyboard_regime_marks(client, caplog):
     assert '"vv-geom"' in vp[0]
 
 
+def test_holddiag_boot_digest_carries_boot_motion_head_first(client, caplog):
+    """The boot-window motion recorder's records ride their own digest line,
+    HEAD-first: the frame settles right after first paint, so the earliest
+    movers are the verdict and must survive however busy the session gets.
+    The same names also ride the viewport tuple like every motion record."""
+    trail = {
+        "build": "b",
+        "events": [
+            {"t": 1, "ev": "boot-motion", "d": {"at": 180, "moved": "vv-top",
+                                                "delta": -59, "v": 0}},
+            {"t": 2, "ev": "boot-motion", "d": {"at": 180, "moved": "shell-h",
+                                                "delta": 34, "v": 852}},
+            {"t": 3, "ev": "boot-repin", "d": {"src": "vv-scroll", "x": 0, "y": 0,
+                                               "top": 0, "snap": False, "repin": True}},
+        ],
+    }
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    boot = [r.message for r in caplog.records if "holddiag boot" in r.message]
+    assert len(boot) == 1
+    assert '"boot-motion"' in boot[0] and '"moved": "vv-top"' in boot[0]
+    assert '"boot-repin"' in boot[0] and '"repin": true' in boot[0]
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"boot-motion"' in vp[0]
+
+
 def test_relay_logs_persist_and_superseded_drop(tmp_path, monkeypatch, caplog):
     """One line per delivery decision: a live done logs persist with its seq and
     terminal flag; a superseded run's output logs drop with the reason."""

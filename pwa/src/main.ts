@@ -9,7 +9,13 @@ import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { receiptFor } from "./receipts";
 import { ENTER_RISE_PX, FLIGHT_EASE, FLIGHT_MS, newbornEnter, shiftParticipates } from "./shift";
-import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell";
+import {
+  bindPicker,
+  bindSendShield,
+  closeCorrectionNeeded,
+  currentFileInput,
+  initShell,
+} from "./shell";
 import { installStartupImage } from "./splash";
 import { USER_SCROLL_INTENT_MS, compensationFor, followFlipDecision } from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
@@ -25,7 +31,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.88"; // smooth-rim arrow revert + two-screen glide deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.89"; // cold-open frame-settle re-pin + boot-window motion recorder, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1661,6 +1667,83 @@ function recordSendMotion(msg: HTMLElement): void {
 }
 // =================== END TEMP DIAGNOSTIC (remove after the hold session) ===================
 
+// ===================== TEMP DIAGNOSTIC (remove after the cold-open session) =====================
+// Boot-window motion recorder, riding the holddiag trail like the send-window
+// one above. The 4-of-5 cold-open drop is the app frame settling after the
+// cached paint, and only the device knows WHICH quantity settles late: from
+// module init until BOOT_MOTION_TAIL_MS past the first content paint, every
+// animation frame reads the shell box, the safe-area paddings as consumed
+// (computed style on the header and compose bar, where env() actually lands),
+// the document and thread scroll positions, the thread's scrollHeight, the
+// first message's viewport top, and the visual viewport's offset and height.
+// Any channel that moved past 1px lands one boot-motion record naming the
+// mover and the distance, capped so a busy boot cannot flood the ring — the
+// next device session's deploy logs then name the culprit precisely.
+
+const BOOT_MOTION_TAIL_MS = 2000; // sampling continues this long past first content
+const BOOT_MOTION_LEAD_MAX_MS = 15000; // content never painted (token gate): stop
+const BOOT_MOTION_MAX = 60; // records for the whole window, not frames
+
+function bootMotionChannels(): Record<string, number | null> {
+  const shell = document.getElementById("app");
+  const box = shell ? shell.getBoundingClientRect() : null;
+  const bar = document.querySelector(".bar");
+  const compose = document.getElementById("compose");
+  const thread = document.getElementById("thread");
+  // .evt wrappers are display:contents (no box of their own): the first
+  // LAID-OUT descendant — the stamp or row the first message paints — is the
+  // honest "where does content start" reading
+  const first = thread?.querySelector(".evt > *");
+  const vv = window.visualViewport;
+  return {
+    "shell-top": box ? box.top : null,
+    "shell-h": box ? box.height : null,
+    "inset-top": bar ? parseFloat(getComputedStyle(bar).paddingTop) : null,
+    "inset-bottom": compose ? parseFloat(getComputedStyle(compose).paddingBottom) : null,
+    "doc-scroll": window.scrollY,
+    "thread-scroll": thread ? thread.scrollTop : null,
+    "thread-sh": thread ? thread.scrollHeight : null,
+    "first-msg-top": first ? first.getBoundingClientRect().top : null,
+    "vv-top": vv ? vv.offsetTop : null,
+    "vv-h": vv ? vv.height : null,
+  };
+}
+
+function startBootMotion(): void {
+  if (typeof document === "undefined" || document.getElementById("app") === null) return;
+  const t0 = performance.now();
+  let contentAt = 0;
+  let recorded = 0;
+  let prev: Record<string, number | null> | null = null;
+  const step = (): void => {
+    const nowMs = performance.now();
+    if (!contentAt && document.querySelector("#thread .evt")) contentAt = nowMs;
+    const cur = bootMotionChannels();
+    if (prev) {
+      for (const [name, v] of Object.entries(cur)) {
+        const was = prev[name];
+        if (v === null || was === null || was === undefined) continue; // channel absent: not motion
+        const delta = v - was;
+        if (Math.abs(delta) > 1 && recorded < BOOT_MOTION_MAX) {
+          recorded++;
+          holdDiagRecord("boot-motion", {
+            at: Math.round(nowMs - t0), moved: name,
+            delta: Math.round(delta * 10) / 10, v: Math.round(v * 10) / 10,
+          });
+        }
+      }
+    }
+    prev = cur;
+    const done = contentAt
+      ? nowMs - contentAt > BOOT_MOTION_TAIL_MS
+      : nowMs - t0 > BOOT_MOTION_LEAD_MAX_MS;
+    if (!done) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+startBootMotion();
+// =================== END TEMP DIAGNOSTIC (remove after the cold-open session) ===================
+
 // --- send-time sibling shift (the white-strip fix; shift.ts holds the why) ----
 // The instant bottom pin on a send teleports the older content up by the new
 // bubble's height while the bubble is still down at the field — a bare strip
@@ -2244,19 +2327,70 @@ if ("serviceWorker" in navigator) {
 // top-bar logo centered on white, sized to the current screen. No-ops off iOS.
 installStartupImage("/splash-logo.png"); // full-res cut-out; the 140px topbar file pixelates at splash size
 
+// Launch frame settle (the 4-of-5 cold-open drop): iOS standalone can publish
+// its final frame AFTER the cached paint — the layout viewport growing into
+// its real height, or the splash handoff leaving the visual viewport panned —
+// and the only boot-time coverage was thread-box resizes (threadObserver) and
+// a window snap-back gated on composer focus (the module-level scroll
+// listener), so a launch settle moved the whole pinned thread in plain sight.
+// For this window after boot, every window/visual-viewport geometry event
+// clears launch displacement (the keyboard close pass's own conditional
+// write, shell.ts closeCorrectionNeeded) and re-pins the thread bottom, in
+// the event's own task so the settle and the correction paint together.
+// Keyboard sessions are excluded: once the composer holds focus the shell
+// owns vv events (shell.ts) and the close-time pass owns displacement — this
+// guard must never become a second mid-typing fighter.
+const FRAME_SETTLE_MS = 2000;
+
+function armBootFrameGuard(): void {
+  const onGeometry = (src: string): void => {
+    if (document.activeElement?.id === "text") return; // shell.ts owns focus geometry
+    if (app.classList.contains("kb")) return;
+    const x = Math.round(window.scrollX);
+    const y = Math.round(window.scrollY);
+    const top = Math.round(window.visualViewport?.offsetTop ?? 0);
+    const snap = closeCorrectionNeeded(x, y, top);
+    // clears scroll AND pan on the unscrollable document (cannot loop: the
+    // write refires scroll once with everything already 0)
+    if (snap) window.scrollTo(0, 0);
+    const t = document.getElementById("thread");
+    let repin = false;
+    if (t && followTail) {
+      repin = t.scrollHeight - t.scrollTop - t.clientHeight >= 1;
+      if (repin) t.scrollTop = t.scrollHeight; // instant: a settle must not glide
+    }
+    if (snap || repin) holdDiagRecord("boot-repin", { src, x, y, top, snap, repin });
+  };
+  const vv = window.visualViewport;
+  const subs: Array<[EventTarget, string, EventListener]> = [
+    [window, "resize", () => onGeometry("resize")],
+    [window, "scroll", () => onGeometry("scroll")],
+  ];
+  if (vv) {
+    subs.push([vv, "resize", () => onGeometry("vv-resize")]);
+    subs.push([vv, "scroll", () => onGeometry("vv-scroll")]);
+  }
+  for (const [target, ev, fn] of subs) target.addEventListener(ev, fn);
+  setTimeout(() => {
+    for (const [target, ev, fn] of subs) target.removeEventListener(ev, fn);
+  }, FRAME_SETTLE_MS);
+}
+
 // Cold open, the one-paint boot: the shell has rendered; now the cached
 // thread (threadcache.ts) lands BEFORE any network. Every cached frame goes
 // through the one applyEvent path in a single task with animations
-// suppressed, the bottom pins instantly, and the same scrollTop is
-// re-asserted on the next frame — Safari sometimes swallows the first
-// scrollTop write after a fresh DOM build — then the socket connects with
-// since=lastSeq. On the common open (nothing new) the replay is empty and
-// nothing on screen ever moves; anything newer buffers and lands as
-// commitReplayBuffer's one update. The ledger needs no special case: the
-// probe's tail sits at or above the cached cursor, so every cached seq
-// classifies as replay by construction. A missing, mismatched, or unreadable
-// record simply means the old cacheless boot.
+// suppressed, the bottom pins instantly, and the bottom is re-pinned from
+// FRESH geometry on the next frame — Safari sometimes swallows the first
+// scrollTop write after a fresh DOM build, and a frame settling between the
+// pin and that paint must not be re-asserted stale — then the socket
+// connects with since=lastSeq. On the common open (nothing new) the replay
+// is empty and nothing on screen ever moves; anything newer buffers and
+// lands as commitReplayBuffer's one update. The ledger needs no special
+// case: the probe's tail sits at or above the cached cursor, so every
+// cached seq classifies as replay by construction. A missing, mismatched,
+// or unreadable record simply means the old cacheless boot.
 async function bootFromCache(): Promise<void> {
+  armBootFrameGuard(); // the settle window opens with the boot, cache or not
   const t0 = performance.now();
   const cached = await cacheGet<ServerMsg>(THREAD_ID).catch(() => null);
   const readMs = Math.round(performance.now() - t0);
@@ -2269,10 +2403,11 @@ async function bootFromCache(): Promise<void> {
     suppressAnim = prevSuppress;
     if (cached.lastSeq > lastSeq) lastSeq = cached.lastSeq; // a retracted tail still advances the cursor
     scrollToBottom(true);
-    const pinned = t.scrollTop;
     requestAnimationFrame(() => {
       const el = document.getElementById("thread");
-      if (el) el.scrollTop = pinned; // the swallowed-first-write re-assert
+      // the swallowed-first-write re-assert, from live geometry: writing the
+      // captured value back re-pinned a frame iOS had already re-sized under it
+      if (el) el.scrollTop = el.scrollHeight;
     });
     holdDiagRecord("cache-applied", { lastSeq, ms: Math.round(performance.now() - t0) });
   } else {

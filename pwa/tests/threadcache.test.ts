@@ -216,9 +216,11 @@ describe("boot order — shell, cached frames in one task, pin, THEN the socket"
     expect(apply).toBeLessThan(pin);
     expect(pin).toBeLessThan(reassert);
     expect(reassert).toBeLessThan(socket);
-    // the re-assert writes the SAME scrollTop again — the Safari
-    // swallowed-first-write quirk — never a fresh smooth scroll
-    expect(boot).toMatch(/requestAnimationFrame[\s\S]{0,200}scrollTop = pinned/);
+    // the re-assert re-pins from LIVE geometry (the Safari swallowed-first-
+    // write quirk, minus the stale captured value that re-pinned a frame iOS
+    // had already re-sized) — never a fresh smooth scroll
+    expect(boot).toMatch(/requestAnimationFrame[\s\S]{0,300}scrollTop = el\.scrollHeight/);
+    expect(boot).not.toContain("scrollTop = pinned");
   });
 
   it("the cached cursor advances lastSeq so connect() asks since=cachedLastSeq", () => {
@@ -231,6 +233,97 @@ describe("boot order — shell, cached frames in one task, pin, THEN the socket"
     expect(boot).toContain('holdDiagRecord("cache-applied"');
     // a cacheless boot still records the read, so the trail tells (a) from (b)
     expect(boot).toMatch(/holdDiagRecord\("cache-read", \{ frames: 0/);
+  });
+});
+
+describe("boot frame-settle guard — the launch settle re-pins in its own task", () => {
+  const guard = fnBody("armBootFrameGuard");
+  const boot = fnBody("bootFromCache");
+
+  it("armed at the top of the boot, before the cache read", () => {
+    expect(boot.indexOf("armBootFrameGuard()")).toBeGreaterThan(-1);
+    expect(boot.indexOf("armBootFrameGuard()")).toBeLessThan(boot.indexOf("cacheGet"));
+  });
+
+  it("covers window and visual-viewport geometry, and expires with its window", () => {
+    for (const src of ['"resize"', '"scroll"', '"vv-resize"', '"vv-scroll"']) {
+      expect(guard).toContain(src);
+    }
+    expect(guard).toContain("removeEventListener");
+    expect(src).toContain("const FRAME_SETTLE_MS = 2000");
+  });
+
+  it("clears launch displacement through the close pass's own conditional write", () => {
+    // closeCorrectionNeeded is the shipped displacement verdict (shell.ts);
+    // the guard must never invent a second rule
+    expect(guard).toContain("closeCorrectionNeeded(x, y, top)");
+    expect(guard).toMatch(/if \(snap\) window\.scrollTo\(0, 0\)/);
+  });
+
+  it("re-pins instantly, followTail-gated, never a glide", () => {
+    expect(guard).toContain("t && followTail");
+    expect(guard).toContain("t.scrollTop = t.scrollHeight");
+    expect(guard).not.toContain("smooth");
+  });
+
+  it("keyboard sessions are excluded: the shell owns focus geometry", () => {
+    expect(guard).toContain('activeElement?.id === "text"');
+    expect(guard).toContain('classList.contains("kb")');
+  });
+
+  it("every correction lands on the trail as boot-repin", () => {
+    expect(guard).toContain('holdDiagRecord("boot-repin"');
+  });
+});
+
+describe("boot-window motion recorder (TEMP, rides the holddiag trail)", () => {
+  const channels = fnBody("bootMotionChannels");
+  const rec = fnBody("startBootMotion");
+  const holdSrc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../src/hold.ts"),
+    "utf8",
+  );
+
+  it("starts at module init, before the boot lines", () => {
+    const start = src.indexOf("startBootMotion();");
+    expect(start).toBeGreaterThan(-1);
+    expect(start).toBeLessThan(src.lastIndexOf("if (token) {"));
+  });
+
+  it("samples the frame quantities the drop could hide in", () => {
+    for (const name of [
+      '"shell-top"', '"shell-h"', '"inset-top"', '"inset-bottom"',
+      '"doc-scroll"', '"thread-scroll"', '"thread-sh"', '"first-msg-top"',
+      '"vv-top"', '"vv-h"',
+    ]) {
+      expect(channels).toContain(name);
+    }
+    // the insets are read as CONSUMED (computed style on header and compose),
+    // not as raw env() text
+    expect(channels).toContain("getComputedStyle(bar).paddingTop");
+    expect(channels).toContain("getComputedStyle(compose).paddingBottom");
+    // .evt is display:contents (no box): the first laid-out descendant speaks
+    expect(channels).toContain('querySelector(".evt > *")');
+  });
+
+  it("names the mover past a 1px threshold and caps the ring", () => {
+    expect(rec).toContain("Math.abs(delta) > 1");
+    expect(rec).toContain("recorded < BOOT_MOTION_MAX");
+    expect(rec).toContain('holdDiagRecord("boot-motion"');
+    expect(rec).toMatch(/moved: name/);
+    expect(src).toContain("const BOOT_MOTION_MAX = 60");
+  });
+
+  it("the window runs from init until the tail past first content, bounded", () => {
+    expect(src).toContain("const BOOT_MOTION_TAIL_MS = 2000");
+    expect(src).toContain("const BOOT_MOTION_LEAD_MAX_MS = 15000");
+    expect(rec).toContain("nowMs - contentAt > BOOT_MOTION_TAIL_MS");
+    expect(rec).toContain("nowMs - t0 > BOOT_MOTION_LEAD_MAX_MS");
+  });
+
+  it("the new record names trigger the diag post", () => {
+    expect(holdSrc).toContain('ev === "boot-motion"');
+    expect(holdSrc).toContain('ev === "boot-repin"');
   });
 });
 
