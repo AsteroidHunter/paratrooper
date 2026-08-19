@@ -4,10 +4,11 @@ The fixture fakes the *built* site: a handwritten ``dist/index.html`` (served
 with ``build=False``, so no npm) that mirrors the markup of the real board
 (``src/pages/index.astro`` in the site repo): a square ``.cloth`` holding
 clickable ``.board-pin`` divs keyed by ``data-pin-id``, and the
-``.polaroid-overlay`` lightbox whose ``.polaroid-card`` zooms in on open and
-gets its artwork injected at that moment. Solid marker colors make each layer
-pixel-checkable: grey cloth, blue pins, red overlay backdrop, green card,
-purple injected artwork.
+``.polaroid-overlay`` lightbox (a flex column: the ``.polaroid-title``
+floating on the backdrop, collapsed while empty, above the ``.polaroid-card``
+that zooms in on open and gets its artwork injected at that moment). Solid
+marker colors make each layer pixel-checkable: grey cloth, blue pins, red
+overlay backdrop, yellow floating title, green card, purple injected artwork.
 """
 
 from __future__ import annotations
@@ -34,10 +35,15 @@ FIXTURE_HTML = """<!DOCTYPE html>
     transform: translate(-50%, -50%);
   }
   .polaroid-overlay {
-    position: fixed; inset: 0; display: none; align-items: center;
-    justify-content: center; background: rgb(255,0,0);
+    position: fixed; inset: 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; background: rgb(255,0,0);
   }
   .polaroid-overlay.open { display: flex; }
+  .polaroid-title {
+    display: none; width: 200px; height: 40px; margin-bottom: 20px;
+    background: rgb(255,255,0);
+  }
+  .polaroid-title:not(:empty) { display: block; }
   .polaroid-card { position: relative; width: 400px; height: 400px; background: rgb(0,255,0); }
   .polaroid-card.zooming-in { animation: polaroid-zoom-in 0.35s ease-out forwards; }
   @keyframes polaroid-zoom-in {
@@ -50,20 +56,25 @@ FIXTURE_HTML = """<!DOCTYPE html>
 <body>
 <div class="cloth">
   <div class="board-pin" data-pin-id="twen" style="left: 25%; top: 25%;"></div>
-  <div class="board-pin" data-pin-id="desert-not-barren" style="left: 75%; top: 75%;"></div>
+  <div class="board-pin" data-pin-id="desert-not-barren" data-pin-title="Desert, Not Barren"
+    style="left: 75%; top: 75%;"></div>
 </div>
 <div class="polaroid-overlay" id="polaroid-overlay">
+  <div class="polaroid-title" id="polaroid-title"></div>
   <div class="polaroid-card" id="polaroid-card">
     <div class="polaroid-content" id="polaroid-content"></div>
   </div>
 </div>
 <script>
   // mirrors the real openPolaroid: artwork injected on open, overlay shown,
-  // card zoomed in, pin id mirrored onto the card
+  // card zoomed in, pin id mirrored onto the card, title filled only for
+  // pins that carry one (empty keeps it display:none, like multi-song-less
+  // pins on the real board)
   document.querySelectorAll('.board-pin').forEach(pin => {
     pin.addEventListener('click', () => {
       const card = document.getElementById('polaroid-card');
       card.setAttribute('data-pin-id', pin.dataset.pinId);
+      document.getElementById('polaroid-title').textContent = pin.dataset.pinTitle || '';
       document.getElementById('polaroid-content').innerHTML =
         '<img src="opened.png" alt="" />';
       document.getElementById('polaroid-overlay').classList.add('open');
@@ -99,21 +110,36 @@ def test_screenshot_without_pin_id_captures_cloth(tmp_path):
 
 
 def test_screenshot_with_pin_id_captures_opened_view(tmp_path):
-    """pin_id -> click the matching .board-pin and shoot the viewport once the
-    lightbox card has finished zooming and its injected artwork has loaded."""
+    """pin_id -> click the matching .board-pin and, once the lightbox card has
+    finished zooming and its injected artwork has loaded, shoot a close-up
+    clip of the card plus CLIP_PAD of backdrop — not the tiny-card viewport."""
     img = _shot(_fixture_site(tmp_path), tmp_path / "open.png", pin_id="twen")
-    assert img.size == screenshot.DEFAULT_VIEWPORT  # the overlay is full-viewport
-    assert img.getpixel((10, 10)) == (255, 0, 0)  # overlay backdrop
+    pad = screenshot.CLIP_PAD
+    assert img.size == (400 + 2 * pad, 400 + 2 * pad)  # the card union, padded
+    assert img.getpixel((10, 10)) == (255, 0, 0)  # backdrop ring inside the pad
     # pure green only at animation end (opacity ramps 0 -> 1): an early shot
     # would blend the card into the red backdrop
-    assert img.getpixel((720, 720)) == (0, 255, 0)
-    assert img.getpixel((555, 555)) == (128, 0, 128)  # injected artwork loaded
+    assert img.getpixel((pad + 200, pad + 200)) == (0, 255, 0)  # card center
+    assert img.getpixel((pad + 40, pad + 40)) == (128, 0, 128)  # injected artwork
+
+
+def test_screenshot_opened_clip_includes_floating_title(tmp_path):
+    """A pin with a floating title clips to the card+title UNION: the title
+    band (40px + its 20px gap) rides above the card instead of being cropped."""
+    img = _shot(_fixture_site(tmp_path), tmp_path / "open.png", pin_id="desert-not-barren")
+    pad = screenshot.CLIP_PAD
+    assert img.size == (400 + 2 * pad, 460 + 2 * pad)  # union is 60px taller
+    assert img.getpixel((10, 10)) == (255, 0, 0)  # backdrop ring survives
+    assert img.getpixel((pad + 200, pad + 20)) == (255, 255, 0)  # the title band
+    assert img.getpixel((pad + 200, pad + 260)) == (0, 255, 0)  # card center below it
+    assert img.getpixel((pad + 40, pad + 100)) == (128, 0, 128)  # artwork still inside
 
 
 def test_screenshot_pin_id_match_is_normalized(tmp_path):
     """A humanized name resolves to its slug when the match is unambiguous."""
     img = _shot(_fixture_site(tmp_path), tmp_path / "open.png", pin_id="Desert Not Barren")
-    assert img.getpixel((720, 720)) == (0, 255, 0)
+    pad = screenshot.CLIP_PAD
+    assert img.getpixel((pad + 200, pad + 260)) == (0, 255, 0)
 
 
 def test_screenshot_unknown_pin_id_lists_available(tmp_path):

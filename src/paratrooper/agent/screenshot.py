@@ -33,6 +33,10 @@ DEFAULT_BUILD_CMD = ("npm", "run", "build")
 # fixed full-viewport backdrop) with the ``.polaroid-card`` zooming in.
 PIN_SELECTOR = ".board-pin"
 CARD_SELECTOR = ".polaroid-card"
+TITLE_SELECTOR = ".polaroid-title"
+# breathing room around the opened card + title union: enough backdrop to read
+# as a lightbox close-up without shrinking the card back into a corner
+CLIP_PAD = 32
 
 
 class ScreenshotError(RuntimeError):
@@ -79,9 +83,12 @@ def _match_pin(requested: str, ids: list[str]) -> str | None:
 
 async def _shoot_opened(page, pin_id: str, out_path: Path) -> None:
     """Click open the polaroid whose ``data-pin-id`` matches ``pin_id`` and
-    capture the viewport. The lightbox is a fixed full-viewport overlay (dim
-    backdrop + centered card + the floating title on multi-song pins), so the
-    viewport IS the opened view; shooting only the card would crop those out."""
+    capture it close up. The lightbox is a fixed full-viewport overlay, but
+    the card fills only its middle — a viewport shot arrives mostly dim
+    backdrop with a tiny card. Clip to the union box of the card and its
+    floating title (a sibling on the backdrop, shown only on multi-song pins;
+    empty means display:none, a zero rect), padded by ``CLIP_PAD`` of backdrop
+    so it still reads as a lightbox, clamped to the viewport."""
     ids = await page.locator(PIN_SELECTOR).evaluate_all(
         "els => els.map(e => e.dataset.pinId ?? '')"
     )
@@ -101,7 +108,21 @@ async def _shoot_opened(page, pin_id: str, out_path: Path) -> None:
         arg=CARD_SELECTOR,
         timeout=15_000,
     )
-    await page.screenshot(path=str(out_path))
+    # measured only after the settle wait above: the zoom animation scales the
+    # card's rect, so an earlier read would clip the mid-zoom size
+    clip = await page.evaluate(
+        "([sels, pad]) => {"
+        " const rects = sels.map(s => document.querySelector(s))"
+        "   .filter(el => el).map(el => el.getBoundingClientRect())"
+        "   .filter(r => r.width > 0 && r.height > 0);"
+        " const x = Math.max(0, Math.min(...rects.map(r => r.left)) - pad);"
+        " const y = Math.max(0, Math.min(...rects.map(r => r.top)) - pad);"
+        " const right = Math.min(innerWidth, Math.max(...rects.map(r => r.right)) + pad);"
+        " const bottom = Math.min(innerHeight, Math.max(...rects.map(r => r.bottom)) + pad);"
+        " return { x, y, width: right - x, height: bottom - y }; }",
+        [[CARD_SELECTOR, TITLE_SELECTOR], CLIP_PAD],
+    )
+    await page.screenshot(path=str(out_path), clip=clip)
 
 
 async def screenshot_board(
@@ -117,9 +138,9 @@ async def screenshot_board(
 ) -> Path:
     """Build the site (unless ``build=False``) and screenshot the ``.cloth``
     element to ``out_path`` (PNG). With ``pin_id``, click that polaroid open
-    once the board is visible and capture the opened view (full viewport)
-    instead; an unknown id raises :class:`ScreenshotError` naming the ids
-    that exist. Returns the path."""
+    once the board is visible and capture a close-up of the opened view (the
+    card and its floating title, padded) instead; an unknown id raises
+    :class:`ScreenshotError` naming the ids that exist. Returns the path."""
     from playwright.async_api import async_playwright  # lazy: browser dep is heavy
 
     site_root = Path(site_root)
