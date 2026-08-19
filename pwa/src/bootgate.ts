@@ -1,63 +1,73 @@
-// First-paint gate for a fresh shell — the reveal half of the deterministic
-// bottom landing.
+// Boot-replay ledger — the honest half of the deterministic bottom landing.
 //
-// The boot replay is a stream: frames land across many tasks, the browser
-// paints between them, and each tail append shifts everything above it. A
-// frame straggling past the settle window is worse still — it renders as if
-// live, entrance pop and glide included. So the shell builds the thread
-// behind an opacity veil (.thread.booting) and this gate owns the two
-// decisions the wiring must not improvise:
+// A fresh socket's first delivery is the connect-time backlog: every event
+// that already existed when the socket opened, replayed in seq order. Those
+// frames are history — they must never play entrance animations or animated
+// scrolls, however late the network hands them over. The old 400ms quiet
+// timer only guessed at that boundary, and a replay frame straggling past
+// the guess rendered as if live, entrance pop and glide included. The marker
+// here does not guess: the newest seq that existed at connect (learned by
+// main.ts from the same history endpoint the client already pages with) is
+// the backlog's ceiling — at or below it is replay, above it is genuinely
+// new. Until the probe answers, every frame counts as replay: stillness is
+// the safe default.
+//
+// Same shape as hold.ts/downbtn.ts: a pure ledger (unit-tested, no DOM)
+// beneath a thin wiring in main.ts — connect() re-arms it per socket, the
+// probe feeds tailKnown, and ws.onmessage asks isReplay per frame.
 //
 //   claimSettlePin() — whether THIS settle owns the boot pin (decode every
 //     pending image, then one unconditional bottom pin). True exactly once
 //     per shell, so reconnect settles can never yank a reader.
-//   the reveal — the veil lifts only AFTER that pin lands (pinLanded), so
-//     the first visible frame is already the settled bottom state; or
-//     immediately when the socket dies first (socketClosed): with no server
-//     there is no replay, and restored-outbox bubbles must not sit behind a
-//     veil that would otherwise never lift.
-//
-// Same shape as hold.ts/downbtn.ts: a pure latch (unit-tested, no DOM)
-// beneath a thin wiring in main.ts that routes the one reveal callback at
-// the thread's .booting class. reset() re-arms both halves when renderChat
-// rebuilds the shell — the fresh markup raises the veil again itself.
+//   caughtUp(applied) — latches true once per socket, the moment the applied
+//     cursor covers the whole backlog: animations may come on.
 
 export interface BootGate {
-  /** fresh shell rebuilt: settle pin re-armed, reveal re-armed */
+  /** fresh shell rebuilt: the settle pin and the replay ledger both re-arm */
   reset(): void;
+  /** a socket (re)opened: a new backlog is inbound, everything is replay again */
+  reconnect(): void;
   /** true exactly once per shell: the caller owns the decode-then-pin */
   claimSettlePin(): boolean;
-  /** the boot pin has landed: lift the veil */
-  pinLanded(): void;
-  /** the socket died (possibly before any settle): lift the veil regardless */
-  socketClosed(): void;
-  revealed(): boolean;
+  /** the tail probe answered: the newest seq that existed at connect (0 = none) */
+  tailKnown(tail: number): void;
+  /** part of the connect-time backlog — never animate it, however late it lands */
+  isReplay(seq: number): boolean;
+  /** latches true ONCE per socket when the backlog is fully applied */
+  caughtUp(applied: number): boolean;
+  settled(): boolean;
 }
 
-export function createBootGate(reveal: () => void): BootGate {
+export function createBootGate(): BootGate {
   let pinClaimed = false;
-  let shown = false;
+  let tail = Infinity; // backlog ceiling; Infinity = probe pending (all replay)
+  let settled = false;
 
-  // edge-triggered like the chevron: the callback fires once per shell,
-  // however many paths race to lift the veil
-  function lift(): void {
-    if (shown) return;
-    shown = true;
-    reveal();
+  function rearm(): void {
+    tail = Infinity;
+    settled = false;
   }
 
   return {
     reset(): void {
       pinClaimed = false;
-      shown = false;
+      rearm();
     },
+    reconnect: rearm,
     claimSettlePin(): boolean {
       if (pinClaimed) return false;
       pinClaimed = true;
       return true;
     },
-    pinLanded: lift,
-    socketClosed: lift,
-    revealed: () => shown,
+    tailKnown(t: number): void {
+      tail = t;
+    },
+    isReplay: (seq: number) => seq <= tail,
+    caughtUp(applied: number): boolean {
+      if (settled || applied < tail) return false;
+      settled = true;
+      return true;
+    },
+    settled: () => settled,
   };
 }

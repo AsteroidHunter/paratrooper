@@ -42,13 +42,9 @@
   --accent: #432bff; /* sent bubbles, compose caret, and the ↑ send button */
   /* hold-brighten: the flat white veil that evens up the whole pill face */
   --pill-veil: rgba(255, 255, 255, 0.55);
-  /* jump chevron: a NEAR-OPAQUE glass disc with a fixed-color arrow. A
-     see-through face lets the backdrop decide the arrow's color (grey over
-     photos, pale over sent bubbles); at ~15% bleed the arrow's contrast is
-     constant over anything. The extra drop shadow lifts the disc off photos. */
-  --jump-bg: rgba(249, 249, 249, 0.85);
+  /* jump chevron arrow: ONE fixed color per scheme, drawn over the disc's
+     translucent glass face (--glass-bg) — never blended with the backdrop */
   --jump-fg: var(--accent);
-  --jump-shadow: var(--glass-stack-sm), 0 3px 10px rgba(0, 0, 0, 0.16);
   color-scheme: light;
 }
 
@@ -82,9 +78,7 @@
     --menu-bg: #2c2c2e;
     --pill-veil: rgba(255, 255, 255, 0.12); /* faint lift on dark glass — any
       stronger and the veil reads as a grey slab, not light */
-    --jump-bg: rgba(44, 44, 46, 0.85);
-    --jump-fg: #ffffff; /* the accent sinks into a dark disc; white stays legible */
-    --jump-shadow: var(--glass-stack-sm); /* dark stack already carries depth */
+    --jump-fg: #ffffff; /* the accent sinks into dark glass; white stays legible */
     color-scheme: dark;
   }
 }
@@ -352,13 +346,7 @@ html, body {
   flex-direction: column;
   gap: 2px;
   touch-action: pan-y; /* leftward drags belong to the time-peek gesture */
-  transition: opacity 0.18s ease; /* the boot reveal: a static fade, no motion */
 }
-/* fresh-shell first-paint gate: the thread builds invisibly while the boot
-   replay streams and settles (bootgate.ts); the veil lifts only once the
-   settle pin has landed, so the first frame anyone sees is already the
-   final bottom-pinned state */
-.thread.booting { opacity: 0; }
 
 /* each chat event renders inside one .evt wrapper; display:contents keeps its
    rows/stamps direct flex items of the thread (layout-invisible grouping) */
@@ -688,40 +676,57 @@ html, body {
 
 .buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }
 
-/* jump-to-latest chevron: the ＋'s mirror twin on the compose bar's other
-   side — same 34px circle, same 0.75rem edge inset, riding just above the
-   field. It lives inside the .compose anchor box, so the bar's own growth
-   (multiline pill, keyboard pad) carries it and the pairing holds by
-   construction. The disc is the near-opaque glass (--jump-bg) with a
-   fixed-color arrow (--jump-fg): readability comes from the disc's own face,
-   never from blending against the backdrop. */
+/* jump-to-latest chevron: seated in the ＋'s own column, floating just above
+   it — same liquid-glass material as the rest, lifted clear of the bar. It
+   lives inside the .compose anchor box and is bottom-anchored past the ＋'s
+   circle, so the ＋ (itself bottom-aligned) and the disc hold their pairing
+   while the pill grows. The glass face lives on ::before — the original
+   disc's exact background/blur/shadow stack and geometry — and the face and
+   glyph each carry the level-4 stacking and the 0.15s show/hide fade. The
+   arrow itself is one fixed color per scheme (--jump-fg): no blending
+   against the backdrop. */
 .jump {
   position: absolute;
-  right: 0.75rem;
-  bottom: calc(100% + 6px);
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  padding: 0;
+  /* the ＋ is a 34px circle inset 0.75rem; this disc is 36px, so a 1px
+     outdent centers the two on the same column axis */
+  left: calc(0.75rem - 1px);
+  /* one bar gap (0.5rem) above the ＋'s top: its 2.5px centering lift + 34px */
+  bottom: calc(var(--pad-b) + 36.5px + 0.5rem);
+  width: 36px;
+  height: 36px;
   border: none;
   border-radius: 50%;
-  background-color: var(--jump-bg);
+  background: none;
+  font-size: 1.1rem;
+  cursor: pointer;
+  pointer-events: none;
+}
+.jump::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  z-index: 4;
+  background-color: var(--glass-bg);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
-  box-shadow: var(--jump-shadow);
-  color: var(--jump-fg);
-  font-size: 1.2rem;
-  font-weight: 300;
-  cursor: pointer;
+  box-shadow: var(--glass-stack-sm);
   opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s ease; /* leaving: the quick original feel */
+  transition: opacity 0.15s;
+}
+.jump-glyph {
+  position: relative;
+  z-index: 4;
+  color: var(--jump-fg);
+  opacity: 0;
+  transition: opacity 0.15s;
 }
 .jump.show {
-  opacity: 1;
   pointer-events: auto;
-  transition: opacity 0.35s ease; /* arriving: a real fade-in, not a pop */
+}
+.jump.show::before,
+.jump.show .jump-glyph {
+  opacity: 1;
 }
 
 /* pending attachment thumbnails (picked, not yet sent) — float on the canvas

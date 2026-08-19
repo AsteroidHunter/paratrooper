@@ -1,13 +1,13 @@
 // Pins for the jump-chevron behavior (src/downbtn.ts) — the state machine
 // that surfaces the scroll-down button ONLY after a scroll pause while away
-// from the bottom, plus the tap's capped-glide plan. Pure with an injectable
-// pause window, so every scenario runs on fake timers: show on 4s of
-// stillness while away, every scroll restarting that window, staying up until
-// the bottom takes it down, and never appearing at the bottom — a fresh open
-// pinned there shows nothing.
+// from the bottom, plus the tap's one-swoosh glide plan. Pure with an
+// injectable pause window, so every scenario runs on fake timers: show on 4s
+// of stillness while away, every scroll restarting that window, staying up
+// until the bottom takes it down, and never appearing at the bottom — a
+// fresh open pinned there shows nothing.
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PAUSE_MS, createDownButton, glideHop } from "../src/downbtn";
+import { GLIDE_MS, PAUSE_MS, createDownButton, createGlide } from "../src/downbtn";
 
 function harness() {
   const calls: boolean[] = []; // every setVisible edge, in order
@@ -140,60 +140,105 @@ describe("at the bottom it never appears", () => {
   });
 });
 
-describe("glideHop — the tap's capped glide (teleport far, glide the last stretch)", () => {
-  // geometry: viewport 700, content 5000 -> the landing scrollTop is 4300
-
-  it("from far up: teleport to exactly one viewport above the bottom", () => {
-    expect(glideHop(0, 5000, 700)).toBe(3600); // 4300 - 700
-    expect(glideHop(2000, 5000, 700)).toBe(3600); // same landing prep from anywhere far
+describe("createGlide — one continuous decelerating swoosh, whole distance, fixed beat", () => {
+  it("the beat is 400ms regardless of distance — a long jump just moves faster", () => {
+    expect(GLIDE_MS).toBe(400);
+    const short = createGlide(4000, 0); // 300 from the landing
+    const long = createGlide(0, 0); // 4300 from the landing
+    expect(short.done(399)).toBe(false);
+    expect(short.done(400)).toBe(true);
+    expect(long.done(399)).toBe(false);
+    expect(long.done(400)).toBe(true); // same beat either way
   });
 
-  it("within one viewport of the bottom: no teleport, glide the real distance", () => {
-    expect(glideHop(3600, 5000, 700)).toBe(null); // exactly the cap away
-    expect(glideHop(4000, 5000, 700)).toBe(null);
-    expect(glideHop(4300, 5000, 700)).toBe(null); // already at the bottom
+  it("starts at the start and lands exactly on the target — no teleport step", () => {
+    const g = createGlide(0, 1000);
+    expect(g.at(1000, 4300)).toBe(0); // frame zero: still where the tap found it
+    expect(g.at(1016, 4300)).toBeLessThan(600); // one frame in: moving, not hopping
+    expect(g.at(1400, 4300)).toBe(4300); // the beat ends exactly on the landing
+    expect(g.at(1500, 4300)).toBe(4300); // past the beat it stays put
   });
 
-  it("just past the cap teleports; the hop always lands ahead of the reader", () => {
-    const hop = glideHop(3599, 5000, 700);
-    expect(hop).toBe(3600);
-    expect(hop! > 3599).toBe(true); // never a backward hop
+  it("decelerates: the front half covers far more ground than the back half", () => {
+    const g = createGlide(0, 0);
+    const mid = g.at(GLIDE_MS / 2, 1000);
+    expect(mid).toBeGreaterThan(800); // ease-out cubic: 87.5% done at half-beat
+    expect(1000 - mid).toBeLessThan(200); // the rest is the soft landing
   });
 
-  it("a short thread that cannot scroll never teleports", () => {
-    expect(glideHop(0, 500, 700)).toBe(null);
+  it("moves monotonically toward the landing, never past it", () => {
+    const g = createGlide(500, 0);
+    let prev = 500;
+    for (let ms = 0; ms <= GLIDE_MS; ms += 16) {
+      const pos = g.at(ms, 9000);
+      expect(pos).toBeGreaterThanOrEqual(prev);
+      expect(pos).toBeLessThanOrEqual(9000);
+      prev = pos;
+    }
+  });
+
+  it("the target is re-read live: content landing mid-glide still ends exactly", () => {
+    const g = createGlide(0, 0);
+    g.at(200, 4300); // half-flight against the old bottom
+    expect(g.at(400, 4550)).toBe(4550); // a message grew the thread; the beat ends at the NEW bottom
+  });
+
+  it("a user gesture cancels mid-flight: the run is over immediately and stays over", () => {
+    const g = createGlide(0, 0);
+    expect(g.done(200)).toBe(false);
+    g.cancel();
+    expect(g.cancelled()).toBe(true);
+    expect(g.done(200)).toBe(true); // done mid-beat: the wiring stops writing
+    expect(g.done(400)).toBe(true);
   });
 });
 
 // Presentation pins: the chevron's disc and seat live in styles.css/markup,
-// so these read the source directly — cheap tripwires for the properties the
-// device test actually complained about.
-describe("presentation — disc, seat, and fade (styles.css / main.ts)", () => {
+// so these read the source directly — cheap tripwires for exactly what the
+// device test ruled on: the original glass back, the arrow a fixed color,
+// the disc seated in the ＋'s column directly above it.
+describe("presentation — original glass, fixed arrow, above-the-＋ seat", () => {
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   const jumpRule = css.match(/\n\.jump \{([^}]*)\}/)?.[1] ?? "";
-  const showRule = css.match(/\n\.jump\.show \{([^}]*)\}/)?.[1] ?? "";
+  const faceRule = css.match(/\n\.jump::before \{([^}]*)\}/)?.[1] ?? "";
+  const glyphRule = css.match(/\n\.jump-glyph \{([^}]*)\}/)?.[1] ?? "";
 
-  it("no blend-mode tricks anywhere: the arrow is a fixed color on its own disc", () => {
-    expect(css).not.toContain("mix-blend-mode");
-    expect(jumpRule).toContain("color: var(--jump-fg)");
-    expect(jumpRule).toContain("background-color: var(--jump-bg)");
+  it("the original glass disc: translucent face, blur, ring stack, 36px", () => {
+    expect(faceRule).toContain("background-color: var(--glass-bg)"); // not a near-opaque slab
+    expect(faceRule).toContain("backdrop-filter: blur(16px) saturate(180%)");
+    expect(faceRule).toContain("box-shadow: var(--glass-stack-sm)");
+    expect(jumpRule).toContain("width: 36px");
+    expect(jumpRule).toContain("height: 36px");
+    expect(jumpRule).toContain("background: none"); // the face lives on ::before
+    expect(css).not.toContain("--jump-bg"); // the butchered opaque disc is gone
   });
 
-  it("mirrors the ＋: same 34px circle, same 0.75rem edge inset, seated above the bar", () => {
+  it("only the arrow changed: one fixed color per scheme, no blend tricks", () => {
+    expect(css).not.toContain("mix-blend-mode");
+    expect(glyphRule).toContain("color: var(--jump-fg)");
+  });
+
+  it("keeps the original 0.15s show/hide fade on face and glyph alike", () => {
+    expect(faceRule).toContain("transition: opacity 0.15s");
+    expect(glyphRule).toContain("transition: opacity 0.15s");
+  });
+
+  it("seated in the ＋'s column, directly above it", () => {
     const attachRule = css.match(/\n\.attach \{([^}]*)\}/)?.[1] ?? "";
-    expect(attachRule).toContain("width: 34px"); // the twin it mirrors
-    expect(jumpRule).toContain("width: 34px");
-    expect(jumpRule).toContain("height: 34px");
-    expect(jumpRule).toContain("right: 0.75rem"); // = the compose bar's own edge padding
-    expect(jumpRule).toContain("bottom: calc(100% +"); // anchored to the bar, rides its growth
+    expect(attachRule).toContain("width: 34px"); // the ＋'s circle
+    expect(jumpRule).toContain("left: calc(0.75rem - 1px)"); // 36px disc centered on the 34px column
+    expect(jumpRule).not.toContain("right:"); // off the right edge for good
+    expect(jumpRule).toContain("bottom: calc(var(--pad-b) + 36.5px + 0.5rem)"); // one bar gap above the ＋
     // and the button actually lives inside the compose bar's anchor box
     expect(main).toMatch(/<form id="compose"[\s\S]*id="jump"[\s\S]*<\/form>/);
   });
 
-  it("arrives on a fade slower than it leaves", () => {
-    const dur = (rule: string) => Number(rule.match(/transition: opacity ([\d.]+)s/)?.[1]);
-    expect(dur(showRule)).toBeGreaterThan(dur(jumpRule));
-    expect(dur(showRule)).toBeGreaterThanOrEqual(0.3); // a real fade-in, not a pop
+  it("the tap runs the one-swoosh glide, cancelled by any real gesture", () => {
+    expect(main).not.toContain("glideHop"); // the teleport hop is gone
+    expect(main).toMatch(/Id\("jump"\)!\.addEventListener\("click",[\s\S]{0,700}startGlide\(\)/);
+    expect(main).toMatch(/"wheel",[\s\S]{0,80}cancelGlide\(\)/);
+    expect(main).toMatch(/"pointerdown",[\s\S]{0,80}cancelGlide\(\)/);
+    expect(main).toMatch(/"touchstart",[\s\S]{0,120}cancelGlide\(\)/);
   });
 });

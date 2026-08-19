@@ -62,18 +62,36 @@ export function createDownButton(
   return { scrolled, bottomReached, visible: () => shown };
 }
 
-// Tap-to-bottom glide plan — the capped-distance pattern polished messaging
-// apps use. behavior:"smooth" over a whole long thread sails for seconds, so
-// the animated stretch is capped at one viewport: from farther up, first
-// teleport to exactly one viewport above the bottom and glide only that final
-// stretch — always short, always decelerating into the same landing. Returns
-// the scrollTop to teleport to before the smooth scroll, or null when the
-// remaining distance already fits inside the cap.
-export function glideHop(
-  scrollTop: number,
-  scrollHeight: number,
-  clientHeight: number,
-): number | null {
-  const bottom = scrollHeight - clientHeight; // the landing scrollTop
-  return bottom - scrollTop > clientHeight ? bottom - clientHeight : null;
+// Tap-to-bottom glide plan — ONE continuous decelerating scroll over the
+// whole distance in a fixed beat, so a long jump simply moves faster: no
+// teleport step anywhere (the hop-then-glide version read as a jump cut from
+// far up). Pure: the wiring drives it from rAF timestamps and re-reads the
+// live bottom every frame, so content landing mid-glide still ends the run
+// exactly at the true bottom. cancel() is the user taking the scroll back
+// mid-flight — the run reports done and the wiring stops writing.
+export const GLIDE_MS = 400;
+
+export interface Glide {
+  /** eased scrollTop for this frame; target is the CURRENT landing scrollTop */
+  at(nowMs: number, target: number): number;
+  /** the run is over: the beat has elapsed, or a gesture cancelled it */
+  done(nowMs: number): boolean;
+  cancel(): void;
+  cancelled(): boolean;
+}
+
+export function createGlide(from: number, startMs: number, beatMs: number = GLIDE_MS): Glide {
+  let cancelled = false;
+  return {
+    at(nowMs: number, target: number): number {
+      const t = Math.min(Math.max((nowMs - startMs) / beatMs, 0), 1);
+      const eased = 1 - (1 - t) ** 3; // ease-out cubic: fast launch, soft landing
+      return from + (target - from) * eased;
+    },
+    done: (nowMs: number) => cancelled || nowMs - startMs >= beatMs,
+    cancel(): void {
+      cancelled = true;
+    },
+    cancelled: () => cancelled,
+  };
 }

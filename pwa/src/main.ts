@@ -4,7 +4,8 @@ import "./styles.css";
 import { createBootGate } from "./bootgate";
 import { caretCountsAsComposing } from "./caret";
 import { moveTypingAfter, placeTyping } from "./dots";
-import { createDownButton, glideHop } from "./downbtn";
+import { createDownButton, createGlide } from "./downbtn";
+import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { receiptFor } from "./receipts";
 import { bindPicker, bindSendShield, currentFileInput, initShell } from "./shell";
@@ -21,7 +22,7 @@ import type { OutboxRecord } from "./outbox";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.71"; // viewport-glue/send-flight/dots-order deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.72"; // jump-glass/left-seat/replay-marker/one-glide deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -83,12 +84,11 @@ const downBtn = createDownButton((show) =>
   document.getElementById("jump")?.classList.toggle("show", show),
 );
 
-// fresh-open first-paint gate (bootgate.ts owns the latch): the thread builds
-// behind the .booting veil and shows only once the boot settle pin has landed
-// (or the socket died first — see bootSettlePin/connect). Live lookup again.
-const bootGate = createBootGate(() =>
-  document.getElementById("thread")?.classList.remove("booting"),
-);
+// boot-replay ledger (bootgate.ts owns it): the honest replay marker. Every
+// socket frame at or below the server's tail-at-connect is backlog and must
+// never animate, however late it arrives; frames above it are genuinely new
+// and do. connect() re-arms it per socket and feeds it the tail probe.
+const bootGate = createBootGate();
 
 // The canonical ThreadEvent frame — one shape for live pushes, socket replay,
 // and history pages alike. Ephemeral kinds (working/typing) ride without a seq.
@@ -266,7 +266,7 @@ function renderChat(): void {
         </div>
       </div>
     </div>
-    <main id="thread" class="thread booting">
+    <main id="thread" class="thread">
       <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
     </main>
     <div id="pending" class="pending"></div>
@@ -355,10 +355,16 @@ function renderChat(): void {
   let restTimer: ReturnType<typeof setTimeout> | null = null;
   // gesture evidence feeding userScrollIntent(): wheel and pointer cover the
   // desktop paths (scrollbar drags land pointerdown on the thread), touch is
-  // marked in the peek handlers below
-  thread.addEventListener("wheel", () => { lastGestureAt = performance.now(); },
-    { passive: true });
-  thread.addEventListener("pointerdown", () => { lastGestureAt = performance.now(); });
+  // marked in the peek handlers below. Every real gesture also takes the
+  // scroll back from a running tap glide — the user always wins mid-flight.
+  thread.addEventListener("wheel", () => {
+    cancelGlide();
+    lastGestureAt = performance.now();
+  }, { passive: true });
+  thread.addEventListener("pointerdown", () => {
+    cancelGlide();
+    lastGestureAt = performance.now();
+  });
   thread.addEventListener("scroll", () => {
     // the ONE place following flips: away from the bottom = reading history,
     // back at the bottom = following again (programmatic pins land here too).
@@ -390,17 +396,14 @@ function renderChat(): void {
     });
   }
   document.getElementById("jump")!.addEventListener("click", () => {
-    downBtn.bottomReached(); // hides now; the pin's own scroll event agrees
+    downBtn.bottomReached(); // hides now; the landing's own scroll event agrees
     setFollowTail(true, "jump");
-    // capped glide (downbtn.ts): from far up, teleport to one viewport above
-    // the bottom first, then glide only that short decelerating stretch.
-    // Mid-glide scroll events read !nearBottom and flip followTail off, so
-    // the followTail-gated instant pins cannot cut the glide short; the
-    // landing's own scroll event re-derives followTail=true as usual.
-    const t = threadEl();
-    const hop = glideHop(t.scrollTop, t.scrollHeight, t.clientHeight);
-    if (hop !== null) t.scrollTop = hop;
-    t.scrollTo({ top: t.scrollHeight, behavior: "smooth" });
+    // one continuous decelerating swoosh over the WHOLE distance (downbtn.ts):
+    // a long jump just moves faster, never a teleport step. Mid-glide scroll
+    // events read !nearBottom and flip followTail off, so the followTail-gated
+    // instant pins cannot cut the glide short; the landing's own scroll event
+    // re-derives followTail=true as usual.
+    startGlide();
   });
   // swipe-left to peek per-message times (iMessage): a decisively LEFTWARD
   // hold-and-drag pulls the thread with tanh resistance, revealing the time
@@ -411,6 +414,7 @@ function renderChat(): void {
   thread.addEventListener(
     "touchstart",
     (e) => {
+      cancelGlide(); // a finger down owns the scroll; the tap glide yields
       startX = e.touches[0].clientX;
       startY = e.touches[0].clientY;
       peeking = null;
@@ -460,7 +464,7 @@ function renderChat(): void {
   historyDone = false;
   setFollowTail(true, "fresh-shell");
   downBtn.bottomReached(); // fresh shell opens pinned: no chevron, no pending timer
-  bootGate.reset(); // the fresh markup raised the veil; re-arm the settle pin
+  bootGate.reset(); // fresh shell: replay ledger re-arms, the first settle owns the pin
   restoredOutbox = false; // a fresh shell re-reads the durable outbox
   threadObserver?.disconnect(); // the old shell's thread element is gone
   threadObserver?.observe(thread);
@@ -634,6 +638,40 @@ function scrollToBottom(force = false): void {
   const t = threadEl();
   // replay bursts (suppressAnim) jump instantly; live messages glide
   t.scrollTo({ top: t.scrollHeight, behavior: suppressAnim || force ? "auto" : "smooth" });
+}
+
+// the jump tap's glide: one rAF-driven decelerating swoosh (downbtn.ts owns
+// the curve) — never behavior:"smooth", whose duration scales with distance
+// and sails for seconds over a long thread, and never a teleport hop. The
+// live bottom is re-read every frame, so content landing mid-glide still
+// ends the run exactly at the true bottom; any real gesture on the thread
+// (wheel, pointer, touch — the handlers in renderChat) cancels it mid-flight.
+let glide: Glide | null = null;
+let glideRaf = 0;
+
+function cancelGlide(): void {
+  glide?.cancel();
+  glide = null;
+  if (glideRaf) cancelAnimationFrame(glideRaf);
+  glideRaf = 0;
+}
+
+function startGlide(): void {
+  cancelGlide();
+  const run = createGlide(threadEl().scrollTop, performance.now());
+  glide = run;
+  const step = (now: number): void => {
+    const t = document.getElementById("thread");
+    if (!t || run.cancelled()) return; // shell torn down, or a gesture took over
+    t.scrollTop = run.at(now, t.scrollHeight - t.clientHeight);
+    if (run.done(now)) {
+      glide = null;
+      glideRaf = 0;
+      return;
+    }
+    glideRaf = requestAnimationFrame(step);
+  };
+  glideRaf = requestAnimationFrame(step);
 }
 
 // compose grows with content like iMessage (1 -> ~5 lines, then inner scroll)
@@ -1190,55 +1228,87 @@ async function checkServerVersion(): Promise<void> {
   }
 }
 
-// The socket never announces "replay finished", and the old fixed 600ms guess
-// let slow replays leak animated glides onto the opening screen. Instead:
-// quiet means settled — every replay frame pushes the deadline back, so
-// however long the backlog takes, the thread builds with instant pins and
-// only starts animating once it is genuinely done. The quiet window comes in
-// two sizes: while the boot veil is still up nothing is on screen, so the
-// window is generous — a replay frame straggling in on network jitter must
-// land under the veil, not pop in animated right after a hasty reveal. Once
-// revealed (reconnect catch-ups), the tight window keeps live feel intact.
-let settleTimer: ReturnType<typeof setTimeout> | null = null;
-function settleAnim(): void {
-  if (settleTimer) clearTimeout(settleTimer);
-  settleTimer = setTimeout(() => {
-    suppressAnim = false;
-    // boot settled: probe the history bank once — a short thread never
-    // scrolls, so without this the spinner would sit unresolved forever
-    tryApplyOlder();
-    void bootSettlePin();
-  }, bootGate.revealed() ? 400 : 800);
+// The socket never announces "replay finished", and replay re-sends the
+// exact live frame shape — but the backlog is by definition everything at or
+// below the server's newest seq at connect. One tiny history query (newest
+// row only, the same endpoint the client already pages with) learns that seq
+// the moment the socket opens; bootgate.ts holds it as the per-frame replay
+// marker. Until the probe answers, every frame counts as replay — stillness
+// is the safe default. On failure the ledger closes at whatever has arrived:
+// a socket that can't reach the server is dying anyway, and its reconnect
+// re-probes.
+async function probeReplayTail(): Promise<void> {
+  let tail: number;
+  try {
+    const r = await fetch(
+      `/api/history/${THREAD_ID}?before=${Number.MAX_SAFE_INTEGER}&limit=1`,
+      { headers: authHeaders() },
+    );
+    if (!r.ok) throw new Error(String(r.status));
+    const { messages } = (await r.json()) as { messages: ServerMsg[] };
+    // pages are oldest-first, so the newest row — the backlog's ceiling — is last
+    tail = messages.length ? (messages[messages.length - 1].seq ?? 0) : 0;
+  } catch {
+    tail = lastSeq;
+  }
+  bootGate.tailKnown(tail);
+  replaySettle();
+}
+
+// the backlog is fully applied (the ledger's caught-up edge, once per
+// socket): animations come on, and the boot settle runs — this used to hang
+// off a 400ms quiet timer that late replay frames could outlive
+function replaySettle(): void {
+  if (!bootGate.caughtUp(lastSeq)) return;
+  suppressAnim = false;
+  // settled: probe the history bank once — a short thread never scrolls, so
+  // without this the spinner would sit unresolved forever
+  tryApplyOlder();
+  void bootSettlePin();
+}
+
+// replay frames NEVER animate and NEVER animated-scroll, however late they
+// arrive. A straggler that a live frame overtook is no longer the tail: it
+// inserts above the fold with the bottom pin compensating in the same frame
+// (drainOlder's own pattern), so the settled view just gains content out of
+// sight with zero visible motion. Tail frames pin instantly via the usual
+// followTail path (suppressAnim makes that pin behavior:"auto").
+function applyReplay(m: ServerMsg): void {
+  const prevSuppress = suppressAnim;
+  suppressAnim = true;
+  const t = threadEl();
+  const prevScroll = t.scrollTop;
+  const prevHeight = t.scrollHeight;
+  const isTail = (m.seq ?? 0) > lastSeq;
+  applyEvent(m);
+  if (!isTail) t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
+  suppressAnim = prevSuppress;
 }
 
 // A truly fresh open must LAND at the very bottom with zero visible motion.
-// Two halves. The PIN: the replay's per-frame pins can die early — an unsized
-// image (a non-PNG screenshot, a restored-outbox blob) growing the thread
-// between one pin and that pin's own scroll event makes the event read "away
-// from the bottom" and flip followTail off, and every later re-pin hook is
-// followTail-gated — so the first settle of each shell (and only the first:
-// reconnect settles must never yank a reader; bootgate.ts keeps that ledger)
-// forces every still-pending thread image to decode (decode() resolves after
-// load+decode, so all late height is in), then pins one final time without
-// any gate. The pin's own scroll event re-derives followTail=true through
-// the one usual place. The REVEAL: the thread built behind the .booting
-// veil, and the veil lifts only here, after that pin — the first painted
-// frame anyone sees is the settled bottom state, not the replay streaming in.
+// The replay's per-frame pins can die early — an unsized image (a non-PNG
+// screenshot, a restored-outbox blob) growing the thread between one pin and
+// that pin's own scroll event makes the event read "away from the bottom"
+// and flip followTail off, and every later re-pin hook is followTail-gated —
+// so the first settle of each shell (and only the first: reconnect settles
+// must never yank a reader; bootgate.ts keeps that ledger) forces every
+// still-pending thread image to decode (decode() resolves after load+decode,
+// so all late height is in), then pins one final time without any gate. The
+// pin's own scroll event re-derives followTail=true through the one usual
+// place.
 async function bootSettlePin(): Promise<void> {
   if (!document.getElementById("thread")) return;
-  if (bootGate.claimSettlePin()) {
-    const pending = Array.from(threadEl().querySelectorAll<HTMLImageElement>("img"))
-      .filter((img) => !img.complete);
-    // bounded wait: a slow thumb fetch must not hold the whole open hostage
-    // behind the veil — anything landing later re-pins through the usual
-    // followTail onload hooks (and sized images shift nothing anyway)
-    await Promise.race([
-      Promise.allSettled(pending.map((img) => img.decode())),
-      new Promise((r) => setTimeout(r, 1200)),
-    ]);
-    scrollToBottom(true); // a settled layout must not glide
-  }
-  bootGate.pinLanded();
+  if (!bootGate.claimSettlePin()) return;
+  const pending = Array.from(threadEl().querySelectorAll<HTMLImageElement>("img"))
+    .filter((img) => !img.complete);
+  // bounded wait: a slow thumb fetch must not stall the settle — anything
+  // landing later re-pins through the usual followTail onload hooks (and
+  // sized images shift nothing anyway)
+  await Promise.race([
+    Promise.allSettled(pending.map((img) => img.decode())),
+    new Promise((r) => setTimeout(r, 1200)),
+  ]);
+  scrollToBottom(true); // a settled layout must not glide
 }
 
 function connect(): void {
@@ -1246,9 +1316,10 @@ function connect(): void {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/ws?token=${encodeURIComponent(token)}&thread=${THREAD_ID}&since=${lastSeq}`;
   suppressAnim = true; // the catch-up replay must not animate or glide
+  bootGate.reconnect(); // a new backlog is inbound: everything is replay again
   ws = new WebSocket(url);
   ws.onopen = () => {
-    settleAnim(); // covers the empty-thread case where no frames arrive
+    void probeReplayTail(); // the honest marker: the server's tail at connect
     // every (re)connect re-checks version: a deploy drops the socket, so the
     // reconnect is exactly when a live page may have gone stale
     void checkServerVersion();
@@ -1256,7 +1327,6 @@ function connect(): void {
   ws.onmessage = (e) => {
     if (!document.getElementById("thread")) return; // gate is showing; don't consume
     const m = JSON.parse(e.data) as ServerMsg;
-    if (m.seq && suppressAnim) settleAnim(); // replay still pouring: hold the pins instant
     if (!m.seq) {
       // ephemeral kinds bypass the store: they are presence, not history.
       // (working is keyed now — the stored row drives the Read receipt)
@@ -1270,12 +1340,15 @@ function connect(): void {
     // trail with its kind — a rendered seq with no ws-apply record came from
     // some other route (history page, hold release, optimistic ACK)
     holdDiagRecord("ws-apply", { seq: m.seq, kind: m.kind ?? null, role: m.role ?? null });
-    applyEvent(m); // live, replayed, and paged frames all take the same path
+    if (bootGate.isReplay(m.seq)) {
+      applyReplay(m); // backlog: never an entrance pop, never an animated scroll
+    } else {
+      suppressAnim = false; // a genuinely new message: the boot era is over
+      applyEvent(m);
+    }
+    replaySettle();
   };
   ws.onclose = () => {
-    // no server, no replay: the veil must not sit over an offline open's
-    // restored-outbox bubbles (no-op once lifted)
-    bootGate.socketClosed();
     if (closingOnPurpose || !token) return; // logout: stay closed
     setTimeout(connect, 2000); // dropped: reconnect; catch-up via ?since=
   };
