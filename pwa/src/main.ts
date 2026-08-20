@@ -7,6 +7,7 @@ import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
+import { composeMirror, fitComposeBox } from "./mirror";
 import { photoBox } from "./photobox";
 import { createPhotoQueue, nearMargin } from "./photolazy";
 import { receiptFor } from "./receipts";
@@ -53,7 +54,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.3"; // inlined splash logo, bumped so the build is verifiable
+const APP_VERSION = "0.3.4"; // compose box measured on a twin, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -773,21 +774,30 @@ function autosize(typed = false): void {
   const textEl = document.getElementById("text") as HTMLTextAreaElement | null;
   if (!textEl) return;
   const t = threadEl();
-  const oldHeight = textEl.offsetHeight;
   const nb = nearBottom();
   const atBottom = followTail || nb;
-  const stBefore = t.scrollTop;
-  textEl.style.height = "auto";
-  // exact fit = nothing to scroll-bounce. The textarea is borderless now
-  // (the .field wrapper carries the glass), so scrollHeight IS the full
-  // border-box need — the old +2 border compensation would reopen the gap
-  textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
-  const newHeight = textEl.offsetHeight;
+  // The height is measured on an off-screen twin (mirror.ts), never by
+  // collapsing the live box. The bar and the thread split one fixed column, so
+  // collapsing the box hands the thread those pixels for the length of one
+  // forced layout, and the engine clamps the thread's offset into the smaller
+  // range that leaves. A keystroke that changes no height takes no repair
+  // branch below, so that clamp used to stand: the reported jump, one
+  // keystroke after every new line. The twin means the live box's height never
+  // dips, so there is nothing to clamp. The save and restore inside the fit
+  // (shell.ts guards its own forced reflow the same way) is the second guard
+  // behind that, and it also keeps the give-up branch below honest: it used to
+  // compensate from an already-clamped position and so landed low by the clamp.
+  // 120px is the five-line cap, the same one styles.css puts on the element.
+  const fit = fitComposeBox(textEl, composeMirror(textEl), t, 120);
+  const oldHeight = fit.oldHeight;
+  const newHeight = fit.newHeight;
   // publish the pill's live height: the jump chevron seats itself off it
   // (styles.css .jump), so it clears the box at one line and at the five-line
   // cap alike instead of off a written-down single-line constant. The pill is
   // the textarea's parent and carries no padding or border of its own, so this
-  // read costs nothing beyond the reflow the line above already forced.
+  // read costs nothing beyond the reflow the fit above already forced. The
+  // twin hangs in that same pill but is out of its flex flow, so it adds
+  // nothing to this number.
   const pill = textEl.parentElement;
   if (pill) app.style.setProperty("--field-h", `${pill.offsetHeight}px`);
   // EVERY keystroke hands iOS a caret to reveal, and it scrolls the whole page
@@ -816,9 +826,15 @@ function autosize(typed = false): void {
     // on that edge (the message he just sent) is clipped away under the bar
     t.scrollTop = giveUpTarget(t.scrollTop, oldHeight, newHeight, t.scrollHeight - t.clientHeight);
   }
+  // TEMP DIAGNOSTIC field stM: the thread's position read the instant the
+  // height landed, before the fit put it back. Measured on the twin it must
+  // equal stB on every record, so a device session proves the jump is gone
+  // instead of leaving us to argue about it; an stM below stB means the twin
+  // was not there and the collapse path ran.
   holdDiagRecord("autosize", {
     oldH: oldHeight, newH: newHeight, ft: followTail, nb, atB: atBottom,
-    dec: decision, stB: Math.round(stBefore), stA: Math.round(t.scrollTop),
+    dec: decision, stB: Math.round(fit.scrollBefore), stM: Math.round(fit.scrollMid),
+    stA: Math.round(t.scrollTop),
   });
   // no shell work here: the bar and the thread split a shell box that only
   // the visual viewport sizes (shell.ts), so composer growth is pure
