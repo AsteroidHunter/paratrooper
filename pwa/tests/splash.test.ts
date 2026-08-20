@@ -15,8 +15,16 @@ import {
   type CoverLift,
   type DrawTarget,
   SPLASH_BG,
+  SPLASH_FONT_FAMILY,
+  SPLASH_FONT_LADDER,
+  SPLASH_HANDLE,
+  SPLASH_HANDLE_BOTTOM_FRACTION,
+  SPLASH_HANDLE_COLOR,
+  SPLASH_HANDLE_FRACTION,
   SPLASH_LOGO_FRACTION,
   type SplashLayout,
+  applySplashFont,
+  coverHandleBox,
   coverLogoRect,
   createSplashCover,
   paintSplash,
@@ -80,6 +88,68 @@ describe("splashLayout — the logo, centered and aspect-preserving", () => {
   });
 });
 
+// every iPhone shape the app is opened on, smallest first: the credit line has
+// to read the same way on all of them, which is what pins the two fractions
+const PHONES: Array<[string, number, number, number]> = [
+  ["SE (no home indicator)", 375, 667, 2],
+  ["13 mini", 375, 812, 3],
+  ["13/14", 390, 844, 3],
+  ["14 Pro Max", 430, 932, 3],
+  ["16 Pro Max", 440, 956, 3],
+];
+
+describe("splashLayout — the credit line, off the same numbers as the logo", () => {
+  it("sizes the type off the shorter edge, on a 3x and on a 2x device", () => {
+    const tall = splashLayout({ screenW: 390, screenH: 844, dpr: 3, logoAspect: LOGO_ASPECT });
+    const short = splashLayout({ screenW: 375, screenH: 667, dpr: 2, logoAspect: LOGO_ASPECT });
+    expect(tall.handleFont).toBe(Math.round(1170 * SPLASH_HANDLE_FRACTION)); // 41 device px
+    expect(short.handleFont).toBe(Math.round(750 * SPLASH_HANDLE_FRACTION)); // 26 device px
+  });
+
+  it("sits dead center horizontally, whatever the screen", () => {
+    for (const [name, w, h, dpr] of PHONES) {
+      const g = splashLayout({ screenW: w, screenH: h, dpr, logoAspect: LOGO_ASPECT });
+      expect([name, g.handleCenterX]).toEqual([name, g.canvasW / 2]);
+    }
+  });
+
+  it("keeps the same gap off the bottom on a tall phone and a short one", () => {
+    // measured against the shorter edge, so a taller screen does not push the
+    // credit further down: in CSS px the two land within a couple of px
+    const gaps = PHONES.map(([, w, h, dpr]) => {
+      const g = splashLayout({ screenW: w, screenH: h, dpr, logoAspect: LOGO_ASPECT });
+      const shortEdge = Math.min(g.canvasW, g.canvasH);
+      expect(g.canvasH - g.handleCenterY).toBeCloseTo(shortEdge * SPLASH_HANDLE_BOTTOM_FRACTION, 6);
+      return (g.canvasH - g.handleCenterY) / dpr; // CSS px up from the bottom edge
+    });
+    expect(Math.max(...gaps) - Math.min(...gaps)).toBeLessThan(8);
+  });
+
+  it("clears the home indicator's 34px inset on every one of them", () => {
+    for (const [name, w, h, dpr] of PHONES) {
+      const g = splashLayout({ screenW: w, screenH: h, dpr, logoAspect: LOGO_ASPECT });
+      const bottomOfText = (g.canvasH - (g.handleCenterY + g.handleFont / 2)) / dpr;
+      expect([name, bottomOfText > 34]).toEqual([name, true]);
+    }
+  });
+
+  it("reads a bit smaller than the chat's 17px, and never turns tiny", () => {
+    for (const [name, w, h, dpr] of PHONES) {
+      const g = splashLayout({ screenW: w, screenH: h, dpr, logoAspect: LOGO_ASPECT });
+      const cssPx = g.handleFont / dpr;
+      expect([name, cssPx < 17 && cssPx > 12]).toEqual([name, true]);
+    }
+  });
+
+  it("stays clear of the logo above it", () => {
+    for (const [name, w, h, dpr] of PHONES) {
+      const g = splashLayout({ screenW: w, screenH: h, dpr, logoAspect: LOGO_ASPECT });
+      const topOfText = g.handleCenterY - g.handleFont / 2;
+      expect([name, topOfText > g.logoY + g.logoH]).toEqual([name, true]);
+    }
+  });
+});
+
 describe("splashLayout — the device-matching media query", () => {
   it("portrait device names its width, height, dpr, and orientation", () => {
     const g = splashLayout({ screenW: 390, screenH: 844, dpr: 3, logoAspect: LOGO_ASPECT });
@@ -95,29 +165,54 @@ describe("splashLayout — the device-matching media query", () => {
   });
 });
 
-describe("paintSplash — white first, then the logo at its rect", () => {
-  function recordingCtx() {
-    const calls: Array<[string, ...unknown[]]> = [];
-    let fillAtRect: DrawTarget["fillStyle"] | null = null;
-    let fill: DrawTarget["fillStyle"] = "";
-    const ctx: DrawTarget = {
-      get fillStyle() {
-        return fill;
-      },
-      set fillStyle(v) {
-        fill = v;
-      },
-      fillRect(x, y, w, h) {
-        fillAtRect = fill; // capture the color in force at fill time
-        calls.push(["fillRect", x, y, w, h]);
-      },
-      drawImage(_img, x, y, w, h) {
-        calls.push(["drawImage", x, y, w, h]);
-      },
-    };
-    return { ctx, calls, fillAt: () => fillAtRect };
-  }
+// A stand-in 2D context that records what was drawn and, like the real thing,
+// keeps its previous font when handed a shorthand it cannot parse — `rejects`
+// says which strings this particular context refuses.
+function recordingCtx(rejects: (v: string) => boolean = () => false) {
+  const calls: Array<[string, ...unknown[]]> = [];
+  let fillAtRect: DrawTarget["fillStyle"] | null = null;
+  let fillAtText: DrawTarget["fillStyle"] | null = null;
+  let fontAtText = "";
+  let fill: DrawTarget["fillStyle"] = "";
+  let font = "10px sans-serif"; // what a fresh canvas context starts on
+  const ctx: DrawTarget = {
+    get fillStyle() {
+      return fill;
+    },
+    set fillStyle(v) {
+      fill = v;
+    },
+    get font() {
+      return font;
+    },
+    set font(v) {
+      if (!rejects(v)) font = v;
+    },
+    textAlign: "start",
+    textBaseline: "alphabetic",
+    fillRect(x, y, w, h) {
+      fillAtRect = fill; // capture the color in force at fill time
+      calls.push(["fillRect", x, y, w, h]);
+    },
+    drawImage(_img, x, y, w, h) {
+      calls.push(["drawImage", x, y, w, h]);
+    },
+    fillText(text, x, y) {
+      fillAtText = fill; // same for the credit line: colour and font as drawn
+      fontAtText = font;
+      calls.push(["fillText", text, x, y]);
+    },
+  };
+  return {
+    ctx,
+    calls,
+    fillAt: () => fillAtRect,
+    fillAtText: () => fillAtText,
+    fontAtText: () => fontAtText,
+  };
+}
 
+describe("paintSplash — white first, then the logo at its rect", () => {
   const g: SplashLayout = splashLayout({
     screenW: 390,
     screenH: 844,
@@ -139,6 +234,44 @@ describe("paintSplash — white first, then the logo at its rect", () => {
     const logo = {} as CanvasImageSource;
     paintSplash(r.ctx, logo, g);
     expect(r.calls[1]).toEqual(["drawImage", g.logoX, g.logoY, g.logoW, g.logoH]);
+  });
+});
+
+describe("paintSplash — the credit line, last and off the layout", () => {
+  const g: SplashLayout = splashLayout({
+    screenW: 390,
+    screenH: 844,
+    dpr: 3,
+    logoAspect: LOGO_ASPECT,
+  });
+
+  function painted() {
+    const r = recordingCtx();
+    paintSplash(r.ctx, {} as CanvasImageSource, g);
+    return r;
+  }
+
+  it("draws the handle on the layout's anchor, after the logo", () => {
+    const r = painted();
+    expect(r.calls[2]).toEqual(["fillText", SPLASH_HANDLE, g.handleCenterX, g.handleCenterY]);
+    expect(SPLASH_HANDLE).toBe("@theonetrueakash");
+  });
+
+  it("anchors it by its middle on both axes, so the cover can match it", () => {
+    const r = painted();
+    expect(r.ctx.textAlign).toBe("center");
+    expect(r.ctx.textBaseline).toBe("middle");
+  });
+
+  it("is faint grey, and leaves the white fill it stands on alone", () => {
+    const r = painted();
+    expect(r.fillAtText()).toBe(SPLASH_HANDLE_COLOR);
+    expect(r.fillAt()).toBe(SPLASH_BG); // the background was still white when filled
+  });
+
+  it("is set in the layout's size, in the chat's own font", () => {
+    const r = painted();
+    expect(r.fontAtText()).toBe(`${g.handleFont}px ${SPLASH_FONT_FAMILY}`);
   });
 });
 
@@ -251,6 +384,85 @@ describe("coverLogoRect — the same rect, restated in the cover's CSS pixels", 
   });
 });
 
+describe("coverHandleBox — the same credit line, in the cover's CSS pixels", () => {
+  it("is the device-pixel anchor divided by the dpr when the canvas divides evenly", () => {
+    const g = splashLayout({ screenW: 390, screenH: 844, dpr: 3, logoAspect: LOGO_ASPECT });
+    const b = coverHandleBox(g, 844);
+    expect(b.fontPx).toBeCloseTo(g.handleFont / 3, 6);
+    expect(b.top + b.height / 2).toBeCloseTo(g.handleCenterY / 3, 6);
+  });
+
+  it("hands back a line box whose middle IS the canvas's middle baseline", () => {
+    // the caller sets top AND height (as line-height): a line box's middle sits
+    // where canvas "middle" sits, so the pair of them is the whole match
+    for (const [name, w, h, dpr] of PHONES) {
+      const g = splashLayout({ screenW: w, screenH: h, dpr, logoAspect: LOGO_ASPECT });
+      const b = coverHandleBox(g, h);
+      const middleInCss = (g.handleCenterY * h) / g.canvasH;
+      expect([name, Math.abs(b.top + b.height / 2 - middleInCss) < 1e-9]).toEqual([name, true]);
+      expect([name, b.height]).toEqual([name, b.fontPx]);
+    }
+  });
+
+  it("follows the canvas splashLayout actually rounded to, not a bare 1/dpr", () => {
+    // same fractional-dpr device the logo's rect is pinned on: the credit line
+    // has to track the rounded canvas or it drifts off the launch image's row
+    const g = splashLayout({ screenW: 393, screenH: 851, dpr: 2.75, logoAspect: LOGO_ASPECT });
+    const b = coverHandleBox(g, 851);
+    expect(g.canvasH).not.toBeCloseTo(851 * 2.75, 6); // rounding really happened
+    expect(b.fontPx).toBeCloseTo((g.handleFont * 851) / g.canvasH, 6);
+    expect(b.fontPx).not.toBeCloseTo(g.handleFont / 2.75, 6);
+  });
+
+  it("puts the text as far off the bottom as the canvas does, in its own units", () => {
+    const g = splashLayout({ screenW: 430, screenH: 932, dpr: 3, logoAspect: LOGO_ASPECT });
+    const b = coverHandleBox(g, 932);
+    const canvasGap = (g.canvasH - g.handleCenterY) / 3; // device px gap, in CSS px
+    expect(932 - (b.top + b.height / 2)).toBeCloseTo(canvasGap, 6);
+  });
+});
+
+describe("the splash font: the chat's own stack, and what a canvas does with it", () => {
+  it("names exactly the family list styles.css sets on the body", () => {
+    // the stack is restated in JS because the canvas needs it as a string; this
+    // is the guard against the two copies drifting apart
+    const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+    const flat = css.replace(/\s+/g, " ");
+    expect(flat).toContain(SPLASH_FONT_FAMILY);
+    expect(SPLASH_FONT_LADDER[0]).toBe(SPLASH_FONT_FAMILY);
+  });
+
+  it("asks for less than the size the chat sets its messages in", () => {
+    const flat = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8").replace(
+      /\s+/g,
+      " ",
+    );
+    const chatPx = Number(/font:\s*(\d+(?:\.\d+)?)px\//.exec(flat)?.[1]);
+    expect(chatPx).toBe(17);
+    for (const [name, w, h, dpr] of PHONES) {
+      const g = splashLayout({ screenW: w, screenH: h, dpr, logoAspect: LOGO_ASPECT });
+      expect([name, coverHandleBox(g, h).fontPx < chatPx]).toEqual([name, true]);
+    }
+  });
+
+  it("takes the whole stack on a context that parses it", () => {
+    const r = recordingCtx();
+    expect(applySplashFont(r.ctx, 41)).toBe(`41px ${SPLASH_FONT_FAMILY}`);
+  });
+
+  it("steps down to the closest thing that parses when the stack is refused", () => {
+    // a context drops a shorthand it dislikes WHOLE and keeps its old font, so
+    // the readback is the only way to know; system-ui names the same face
+    const r = recordingCtx((v) => v.includes("-apple-system"));
+    expect(applySplashFont(r.ctx, 41)).toBe("41px system-ui");
+  });
+
+  it("ends on a plain generic rather than on the canvas default", () => {
+    const r = recordingCtx((v) => v.includes("-apple-system") || v.includes("system-ui"));
+    expect(applySplashFont(r.ctx, 41)).toBe("41px sans-serif");
+  });
+});
+
 describe("the inlined logo art (src/splashlogo.ts)", () => {
   it("is a data URI, so there is nothing for the cover to go and fetch", () => {
     expect(SPLASH_LOGO_INLINE.startsWith("data:image/webp;base64,")).toBe(true);
@@ -285,7 +497,7 @@ describe("the inlined logo art (src/splashlogo.ts)", () => {
   });
 });
 
-describe("installSplashCover: the logo is in the cover the frame the cover appears", () => {
+describe("installSplashCover: both marks are in the cover the frame it appears", () => {
   // A recording stand-in for the handful of DOM calls the mount makes, in the
   // spirit of the recording 2D context above: enough surface to be driven, and
   // it remembers WHEN each child arrived, which is the whole question here.
@@ -295,6 +507,7 @@ describe("installSplashCover: the logo is in the cover the frame the cover appea
     alt: string;
     src: string;
     decoding: string;
+    textContent: string;
     style: Record<string, string>;
     children: FakeEl[];
     appendChild(c: FakeEl): void;
@@ -308,6 +521,7 @@ describe("installSplashCover: the logo is in the cover the frame the cover appea
       alt: "",
       src: "",
       decoding: "",
+      textContent: "",
       style: { cssText: "" },
       children: [],
       appendChild(c) {
@@ -375,14 +589,25 @@ describe("installSplashCover: the logo is in the cover the frame the cover appea
   it("enters the document already carrying its logo: no frame shows it empty", async () => {
     const { el } = await mount();
     expect(el.id).toBe("splashcover");
-    expect(attachedWith).toBe(1); // the cover was NEVER attached without its logo
+    // the cover was NEVER attached without BOTH of the things it shows
+    expect(attachedWith).toBe(2);
     expect(el.children[0].tag).toBe("img");
+    expect(el.children[1].tag).toBe("div");
   });
 
   it("that logo needs no fetch: it carries the inlined art itself", async () => {
     const { el } = await mount();
     expect(el.children[0].src).toBe(SPLASH_LOGO_INLINE);
     expect(el.children[0].src.startsWith("data:")).toBe(true);
+  });
+
+  it("the credit line is there at mount, as text in a font the device has", async () => {
+    const { el } = await mount();
+    const handle = el.children[1];
+    expect(handle.textContent).toBe(SPLASH_HANDLE);
+    expect(handle.src).toBe(""); // nothing to go and get, in the same frame
+    expect(handle.style.cssText).toContain(SPLASH_FONT_FAMILY);
+    expect(handle.style.cssText).toContain(`color:${SPLASH_HANDLE_COLOR}`);
   });
 
   it("nothing is left pending: no Image is constructed and no canvas is drawn", async () => {
@@ -408,6 +633,29 @@ describe("installSplashCover: the logo is in the cover the frame the cover appea
     expect(css).toContain(`top:${r.top}px`);
     expect(css).toContain(`width:${r.width}px`);
     expect(css).toContain(`height:${r.height}px`);
+  });
+
+  it("puts the credit line on the exact row the launch image drew it on", async () => {
+    // the canvas draws it at handleCenterY in device px; the cover has to land
+    // the middle of its line box on that same row, converted
+    for (const [w, h, dpr] of [
+      [390, 844, 3],
+      [375, 667, 2],
+    ]) {
+      const { el } = await mount(w, h, dpr);
+      const g = splashLayout({
+        screenW: w,
+        screenH: h,
+        dpr,
+        logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
+      });
+      const b = coverHandleBox(g, h);
+      const css = el.children[1].style.cssText;
+      expect(css).toContain(`top:${b.top}px`);
+      expect(css).toContain(`font:${b.fontPx}px/${b.height}px `);
+      expect(css).toContain("left:0;right:0;text-align:center"); // the canvas's canvasW/2
+      expect(b.top + b.height / 2).toBeCloseTo((g.handleCenterY * h) / g.canvasH, 9);
+    }
   });
 
   it("still stands on the launch image's own white, and still lifts on the cap", async () => {
