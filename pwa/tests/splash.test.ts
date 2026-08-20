@@ -3,8 +3,11 @@
 // encoded as plain inputs: canvas size, centered logo rect, and the
 // device-matching media query come out as data, and the paint step is checked
 // against a recording 2D-context stand-in; the lift rule is pure too and runs
-// entirely on fake timers. No DOM and no real canvas needed, so this runs in
-// the same node env as the other suites.
+// entirely on fake timers. No real DOM and no real canvas needed, so this runs
+// in the same node env as the other suites: the one case that has to watch the
+// cover actually mount drives it against a recording element stand-in, the same
+// way the paint step is driven against a recording context.
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   COVER_CAP_MS,
@@ -14,10 +17,12 @@ import {
   SPLASH_BG,
   SPLASH_LOGO_FRACTION,
   type SplashLayout,
+  coverLogoRect,
   createSplashCover,
   paintSplash,
   splashLayout,
 } from "../src/splash";
+import { SPLASH_LOGO_H, SPLASH_LOGO_INLINE, SPLASH_LOGO_W } from "../src/splashlogo";
 
 // the real top-bar logo is 140x160 (portrait); most tests use its aspect ratio
 const LOGO_ASPECT = 140 / 160;
@@ -214,5 +219,203 @@ describe("createSplashCover: when the in-app copy lifts", () => {
     expect(cover.lifted()).toBe(false);
     vi.advanceTimersByTime(1);
     expect(lifts).toEqual(["settled"]);
+  });
+});
+
+describe("coverLogoRect — the same rect, restated in the cover's CSS pixels", () => {
+  it("is the device-pixel rect divided by the dpr when the canvas divides evenly", () => {
+    const g = splashLayout({ screenW: 390, screenH: 844, dpr: 3, logoAspect: LOGO_ASPECT });
+    const r = coverLogoRect(g, 390, 844);
+    expect(r.left).toBeCloseTo(g.logoX / 3, 6);
+    expect(r.top).toBeCloseTo(g.logoY / 3, 6);
+    expect(r.width).toBeCloseTo(g.logoW / 3, 6);
+    expect(r.height).toBeCloseTo(g.logoH / 3, 6);
+  });
+
+  it("stays centered on the screen it is laid over", () => {
+    const g = splashLayout({ screenW: 430, screenH: 932, dpr: 3, logoAspect: LOGO_ASPECT });
+    const r = coverLogoRect(g, 430, 932);
+    expect(r.left + r.width / 2).toBeCloseTo(430 / 2, 6);
+    expect(r.top + r.height / 2).toBeCloseTo(932 / 2, 6);
+  });
+
+  it("follows the canvas splashLayout actually rounded to, not a bare 1/dpr", () => {
+    // a fractional dpr rounds the canvas, so the two are genuinely different
+    // numbers here: the rect has to track the canvas or the cover's logo drifts
+    // off the spot the phone's launch image put it
+    const g = splashLayout({ screenW: 393, screenH: 851, dpr: 2.75, logoAspect: LOGO_ASPECT });
+    const r = coverLogoRect(g, 393, 851);
+    expect(g.canvasW).not.toBeCloseTo(393 * 2.75, 6); // rounding really happened
+    expect(r.left + r.width / 2).toBeCloseTo(393 / 2, 6);
+    expect(r.top + r.height / 2).toBeCloseTo(851 / 2, 6);
+  });
+});
+
+describe("the inlined logo art (src/splashlogo.ts)", () => {
+  it("is a data URI, so there is nothing for the cover to go and fetch", () => {
+    expect(SPLASH_LOGO_INLINE.startsWith("data:image/webp;base64,")).toBe(true);
+  });
+
+  it("keeps the full-res file's aspect, so the geometry is unchanged by inlining", () => {
+    // PNG header: 8-byte signature, then the IHDR length and tag, then width
+    // and height as big-endian 32-bit ints at offsets 16 and 20
+    const png = readFileSync(new URL("../public/splash-logo.png", import.meta.url));
+    const fullW = png.readUInt32BE(16);
+    const fullH = png.readUInt32BE(20);
+    expect(SPLASH_LOGO_W / SPLASH_LOGO_H).toBeCloseTo(fullW / fullH, 10);
+  });
+
+  it("is big enough for the largest rect any iPhone shows the logo at", () => {
+    // the widest iPhone screen in CSS px at dpr 3; the logo's own device-pixel
+    // size there is what the inlined art has to stand up to
+    const g = splashLayout({
+      screenW: 440,
+      screenH: 956,
+      dpr: 3,
+      logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
+    });
+    expect(SPLASH_LOGO_H).toBeGreaterThan(g.logoH * 0.6);
+  });
+
+  it("stays small enough that inlining it cannot slow the first paint", () => {
+    // the whole point of a small inline copy: a full-res raster as base64 would
+    // trade the flash for a heavier bundle, which is the worse bug. The bundle
+    // this lands in is tens of kB, so a few kB is the ceiling.
+    expect(SPLASH_LOGO_INLINE.length).toBeLessThan(8 * 1024);
+  });
+});
+
+describe("installSplashCover: the logo is in the cover the frame the cover appears", () => {
+  // A recording stand-in for the handful of DOM calls the mount makes, in the
+  // spirit of the recording 2D context above: enough surface to be driven, and
+  // it remembers WHEN each child arrived, which is the whole question here.
+  interface FakeEl {
+    tag: string;
+    id: string;
+    alt: string;
+    src: string;
+    decoding: string;
+    style: Record<string, string>;
+    children: FakeEl[];
+    appendChild(c: FakeEl): void;
+    remove(): void;
+  }
+
+  function fakeEl(tag: string): FakeEl {
+    const el: FakeEl = {
+      tag,
+      id: "",
+      alt: "",
+      src: "",
+      decoding: "",
+      style: { cssText: "" },
+      children: [],
+      appendChild(c) {
+        el.children.push(c);
+      },
+      remove() {},
+    };
+    return el;
+  }
+
+  // every Image the module constructs is a thing the cover would have to wait
+  // for; the mount must construct none
+  class RecordingImage {
+    static made = 0;
+    onload: (() => void) | null = null;
+    naturalWidth = 0;
+    naturalHeight = 0;
+    src = "";
+    constructor() {
+      RecordingImage.made += 1;
+    }
+  }
+
+  // the cover's children AT THE MOMENT it entered the document: an empty cover
+  // here is a frame the user sees as bare white
+  let attachedWith: number | null = null;
+  let created: FakeEl[] = [];
+
+  async function mount(screenW = 390, screenH = 844, dpr = 3) {
+    attachedWith = null;
+    created = [];
+    RecordingImage.made = 0;
+    const body = fakeEl("body");
+    body.appendChild = (c) => {
+      attachedWith = c.children.length;
+      body.children.push(c);
+    };
+    vi.stubGlobal("document", {
+      body,
+      createElement(tag: string) {
+        const e = fakeEl(tag);
+        created.push(e);
+        return e;
+      },
+    });
+    vi.stubGlobal("navigator", { standalone: true, userAgent: "iPhone" });
+    vi.stubGlobal("screen", { width: screenW, height: screenH });
+    vi.stubGlobal("window", { devicePixelRatio: dpr });
+    vi.stubGlobal("Image", RecordingImage);
+    vi.resetModules(); // the mount runs once per module load, so reload it per case
+    const mod = await import("../src/splash");
+    const cover = mod.installSplashCover("/splash-logo.png");
+    return { cover, el: body.children[0] };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers(); // the lift timers start with the mount
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("enters the document already carrying its logo: no frame shows it empty", async () => {
+    const { el } = await mount();
+    expect(el.id).toBe("splashcover");
+    expect(attachedWith).toBe(1); // the cover was NEVER attached without its logo
+    expect(el.children[0].tag).toBe("img");
+  });
+
+  it("that logo needs no fetch: it carries the inlined art itself", async () => {
+    const { el } = await mount();
+    expect(el.children[0].src).toBe(SPLASH_LOGO_INLINE);
+    expect(el.children[0].src.startsWith("data:")).toBe(true);
+  });
+
+  it("nothing is left pending: no Image is constructed and no canvas is drawn", async () => {
+    const { el } = await mount();
+    expect(RecordingImage.made).toBe(0);
+    expect(created.map((e) => e.tag)).not.toContain("canvas");
+    // and the browser is told not to defer the decode either, so the frame
+    // that carries the element carries the picture
+    expect(el.children[0].decoding).toBe("sync");
+  });
+
+  it("puts the logo on the exact rect the phone's launch image put it", async () => {
+    const { el } = await mount(390, 844, 3);
+    const g = splashLayout({
+      screenW: 390,
+      screenH: 844,
+      dpr: 3,
+      logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
+    });
+    const r = coverLogoRect(g, 390, 844);
+    const css = el.children[0].style.cssText;
+    expect(css).toContain(`left:${r.left}px`);
+    expect(css).toContain(`top:${r.top}px`);
+    expect(css).toContain(`width:${r.width}px`);
+    expect(css).toContain(`height:${r.height}px`);
+  });
+
+  it("still stands on the launch image's own white, and still lifts on the cap", async () => {
+    const { cover, el } = await mount();
+    expect(el.style.cssText).toContain(`background:${SPLASH_BG}`);
+    expect(cover.lifted()).toBe(false);
+    vi.advanceTimersByTime(COVER_CAP_MS);
+    expect(cover.lifted()).toBe(true);
+    expect(el.style.opacity).toBe("0"); // the fade is unchanged by the inlining
   });
 });
