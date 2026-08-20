@@ -68,3 +68,38 @@ export function zoomReturn(
   const up = origin.top + origin.height <= 0;
   return { mode: "edge", box: shrunk(current, ZOOM_EDGE_SCALE, cx, up ? 0 : viewH) };
 }
+
+// --- what hides the copy while it is airborne ---------------------------------
+// The thread is its own scrolling box and paints nothing outside it, so a photo
+// sitting partly behind the top bar or the compose bar is simply cut off at
+// that box's edge (the bars do not paint over it — the compose bar has no panel
+// at all, and the top bar's lower half is see-through). The flying copy is a
+// sheet above everything, so unless it is cut the same way it paints straight
+// across whichever bar it overlaps. main.ts cuts it with a rect that starts on
+// the thread's box and opens to the whole screen over the flight — the resting
+// zoom must cover both bars — and closes back onto the thread's box coming
+// home, so the frame that lands is cut exactly like the photo it hands back to.
+// Edges come back as the four css inset() lengths, measured inward from the
+// flying box and never negative: an image paints nothing past its own box, so a
+// negative edge would be the same picture as no cut at all.
+
+export interface ZoomInset {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+export function zoomClipInset(box: MorphBox, clip: MorphBox): ZoomInset {
+  const over = (v: number): number => (v > 0 ? v : 0);
+  return {
+    top: over(clip.top - box.top),
+    right: over(box.left + box.width - (clip.left + clip.width)),
+    bottom: over(box.top + box.height - (clip.top + clip.height)),
+    left: over(clip.left - box.left),
+  };
+}
+
+export function zoomClipCuts(i: ZoomInset): boolean {
+  return i.top > 0 || i.right > 0 || i.bottom > 0 || i.left > 0;
+}

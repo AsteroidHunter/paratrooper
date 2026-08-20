@@ -5,16 +5,20 @@
 // the tapped photo's measured rect, dismissal re-reads the photo's rect at
 // that moment (never the open-time memory), the off-screen and gone-row
 // fallbacks exist, the thread photo hides under the copy and is handed back
-// byte-clean, and both legs leave rect-delta records on the flight channel.
+// byte-clean, the airborne copy is cut by the thread's box exactly as the real
+// photo is, and both legs leave rect-delta records on the flight channel.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { flightEase, morphBox } from "../src/shift";
 import {
   ZOOM_EDGE_SCALE,
   ZOOM_FADE_SCALE,
   ZOOM_MAX_VH,
   ZOOM_MAX_VW,
+  zoomClipCuts,
+  zoomClipInset,
   zoomFit,
   zoomReturn,
 } from "../src/zoom";
@@ -82,6 +86,96 @@ describe("zoomReturn — where the close leg lands", () => {
   });
 });
 
+// --- the cut that keeps the copy off the bars ---------------------------------
+// A 390x844 phone: the top bar ends at 103, the compose bar starts at 745, and
+// the thread is the box between them — exactly what cuts a photo sitting partly
+// behind either bar.
+describe("zoomClipInset — the airborne copy is cut where the real photo is", () => {
+  const thread = { left: 0, top: 103, width: 390, height: 642 };
+  const screen = { left: 0, top: 0, width: 390, height: 844 };
+
+  it("cuts a photo running up under the top bar by exactly the hidden part", () => {
+    const photo = { left: 20, top: 60, width: 280, height: 210 }; // 43px behind the bar
+    const i = zoomClipInset(photo, thread);
+    expect(i.top).toBeCloseTo(43, 5);
+    expect(i.bottom).toBe(0);
+    expect(i.left).toBe(0);
+    expect(i.right).toBe(0);
+    expect(zoomClipCuts(i)).toBe(true);
+  });
+
+  it("cuts a photo running down under the compose bar the same way", () => {
+    const photo = { left: 20, top: 640, width: 280, height: 210 }; // ends 105 past the thread
+    const i = zoomClipInset(photo, thread);
+    expect(i.bottom).toBeCloseTo(105, 5);
+    expect(i.top).toBe(0);
+  });
+
+  it("a photo wholly inside the thread is not cut at all", () => {
+    const i = zoomClipInset({ left: 20, top: 300, width: 280, height: 210 }, thread);
+    expect(i).toEqual({ top: 0, right: 0, bottom: 0, left: 0 });
+    expect(zoomClipCuts(i)).toBe(false);
+  });
+
+  it("edges never go negative: past the box is the same picture as no cut", () => {
+    const i = zoomClipInset({ left: 20, top: 300, width: 280, height: 210 }, screen);
+    expect(i).toEqual({ top: 0, right: 0, bottom: 0, left: 0 });
+  });
+
+  it("the resting zoom is uncut, so the open photo still covers both bars", () => {
+    const fit = zoomFit(1280, 960, 390, 844);
+    expect(zoomClipCuts(zoomClipInset(fit, screen))).toBe(false);
+  });
+});
+
+describe("the cut over a whole flight (same beat and ease as the box)", () => {
+  const thread = { left: 0, top: 103, width: 390, height: 642 };
+  const screen = { left: 0, top: 0, width: 390, height: 844 };
+  const photo = { left: 20, top: 60, width: 280, height: 210 }; // 43px behind the top bar
+  const fit = zoomFit(1280, 960, 390, 844);
+  const frame = (a: typeof photo, b: typeof photo, cA: typeof thread, cB: typeof thread, f: number) => {
+    const p = flightEase(f);
+    const box = morphBox(a, b, p);
+    return { box, inset: zoomClipInset(box, morphBox(cA, cB, p)) };
+  };
+
+  it("the launch frame is cut exactly as the photo behind the bar is", () => {
+    const first = frame(photo, fit, thread, screen, 0);
+    expect(first.box).toEqual(photo);
+    expect(first.inset.top).toBeCloseTo(43, 5);
+  });
+
+  it("the open landing is the fitted box, uncut, covering both bars", () => {
+    const last = frame(photo, fit, thread, screen, 1);
+    expect(last.box.left).toBeCloseTo(fit.left, 2);
+    expect(last.box.top).toBeCloseTo(fit.top, 2);
+    expect(last.box.width).toBeCloseTo(fit.width, 2);
+    expect(last.box.height).toBeCloseTo(fit.height, 2);
+    expect(zoomClipCuts(last.inset)).toBe(false);
+  });
+
+  it("the cut only ever shrinks on the way out: no frame gains bar", () => {
+    let prev = Infinity;
+    for (let f = 0; f <= 1.0001; f += 0.05) {
+      const top = frame(photo, fit, thread, screen, Math.min(f, 1)).inset.top;
+      expect(top).toBeLessThanOrEqual(prev + 1e-9);
+      prev = top;
+    }
+    expect(prev).toBe(0);
+  });
+
+  it("the close landing is the photo's rect, cut exactly as the photo is", () => {
+    const ret = zoomReturn(photo, fit, 390, 844);
+    expect(ret.mode).toBe("exact");
+    const last = frame(fit, ret.box, screen, thread, 1);
+    expect(last.box.left).toBeCloseTo(photo.left, 2);
+    expect(last.box.top).toBeCloseTo(photo.top, 2);
+    expect(last.box.width).toBeCloseTo(photo.width, 2);
+    expect(last.box.height).toBeCloseTo(photo.height, 2);
+    expect(last.inset.top).toBeCloseTo(43, 5); // the handover moves no pixel
+  });
+});
+
 // --- source pins on the main.ts wiring ----------------------------------------
 
 const src = readFileSync(
@@ -141,6 +235,45 @@ describe("photo zoom wiring (openLightbox)", () => {
 
   it("the landed frame paints before the settle swap (the morph's guard)", () => {
     expect(body).toContain("requestAnimationFrame(settle)");
+  });
+
+  it("the copy is cut by the thread's own box, the photo's own cutter", () => {
+    expect(body).toContain('from.closest(".thread")');
+    expect(body).toContain("clipper.getBoundingClientRect()");
+    expect(body).toContain("zoomClipInset(");
+    expect(body).toMatch(/img\.style\.clipPath = `inset\(/);
+  });
+
+  it("the launch frame carries its cut: freeze writes it before the first frame", () => {
+    expect(body).toMatch(/const freeze = \(b: MorphBox, radius: number, clip: MorphBox\)/);
+    expect(body).toMatch(/writeClip\(b, clip\);/);
+    const freeze = body.indexOf("freeze(fromBox, fromRadius, openFrom)");
+    const launch = body.indexOf("fly(fromBox, to");
+    expect(freeze).toBeGreaterThan(-1);
+    expect(freeze).toBeLessThan(launch);
+  });
+
+  it("the cut rides the flight's own beat and ease, frame by frame", () => {
+    expect(body).toMatch(/writeClip\(box, morphBox\(cA, cB, p\)\)/);
+  });
+
+  it("the open leg starts on the thread's box and opens to the whole screen", () => {
+    expect(body).toContain("fly(fromBox, to, fromRadius, restRadius, openFrom, screenBox()");
+  });
+
+  it("the close leg lands back on the thread's box only when a photo is there", () => {
+    expect(body).toContain('const clipTo = ret.mode === "exact" ? threadBox() : screenBox();');
+    expect(body).toContain("fly(cur, ret.box, curRadius, endRadius, clipFrom, clipTo");
+  });
+
+  it("a mid-flight turn keeps the cut it has, like the box it has", () => {
+    expect(body).toContain("const clipFrom = clipNow;");
+    expect(body).toContain("freeze(cur, curRadius, clipFrom);");
+  });
+
+  it("only the copy is ever cut: the backdrop still covers both bars", () => {
+    expect(body).not.toContain("back.style.clipPath");
+    expect(body).not.toContain("overlay.style.clipPath");
   });
 
   it("both legs leave rect-delta records on the flight channel", () => {

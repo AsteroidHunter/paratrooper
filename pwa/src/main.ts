@@ -23,7 +23,7 @@ import {
   shiftParticipates,
 } from "./shift";
 import type { MorphBox } from "./shift";
-import { zoomFit, zoomReturn } from "./zoom";
+import { zoomClipCuts, zoomClipInset, zoomFit, zoomReturn } from "./zoom";
 import {
   bindPicker,
   bindSendShield,
@@ -46,7 +46,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.98"; // splash linger deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.99"; // zoom clip deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -971,7 +971,11 @@ function thumbUrl(key: string): string {
 // the send morph (morphBox/flightEase — never transform scale, which would
 // squash the corner circles). The thread photo hides beneath the copy for the
 // whole zoom — two identical images a frame apart read as a doubling — and is
-// handed back byte-clean as the copy lands home. Dismissal re-reads the
+// handed back byte-clean as the copy lands home. The copy also inherits the
+// photo's own cut: the thread paints nothing outside its scrolling box, so a
+// photo half behind the top bar or the compose bar ends at that edge, and the
+// copy is clipped to the same box (opening to the whole screen over the flight,
+// since the resting zoom covers both bars). Dismissal re-reads the
 // photo's rect at that moment: the thread may have scrolled or gained rows
 // while zoomed, and the copy must land where the photo IS. A spot scrolled
 // off-screen gets the edge return (shrink toward its direction while fading);
@@ -1003,23 +1007,50 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
     img.style.width = `${b.width}px`;
     img.style.height = `${b.height}px`;
   };
+  // The copy is cut where the real photo is cut (zoom.ts explains the rule):
+  // the thread is its own scrolling box, so a photo half behind the top bar or
+  // the compose bar ends at that box's edge, while the copy is a sheet over the
+  // whole screen and would paint across the bar unless it is cut to match. The
+  // cut travels with the flight — thread box at the thread end, whole screen at
+  // the open end — and only the copy is ever cut: the backdrop and the resting
+  // photo still cover both bars.
+  const clipper = from.closest(".thread"); // where the photo's own cut comes from
+  const screenBox = (): MorphBox => ({
+    left: 0, top: 0, width: window.innerWidth, height: window.innerHeight,
+  });
+  const threadBox = (): MorphBox =>
+    clipper ? boxOf(clipper.getBoundingClientRect()) : screenBox();
+  // the cut last written, so a mid-flight turn home keeps it (freeze writes the
+  // launch one below, before any frame paints)
+  let clipNow = screenBox();
+  const writeClip = (b: MorphBox, clip: MorphBox): void => {
+    clipNow = clip;
+    const i = zoomClipInset(b, clip);
+    if (!zoomClipCuts(i)) {
+      img.style.removeProperty("clip-path"); // nothing to cut: no cut at all
+      return;
+    }
+    img.style.clipPath = `inset(${i.top.toFixed(1)}px ${i.right.toFixed(1)}px ` +
+      `${i.bottom.toFixed(1)}px ${i.left.toFixed(1)}px)`;
+  };
   // the copy owns its geometry while airborne: absolute in the overlay's
   // fixed box (viewport coordinates), the resting max-* fit released so the
   // interpolated box is never clamped mid-flight (a tall screenshot's height
   // crosses 92vh on the way in)
-  const freeze = (b: MorphBox, radius: number): void => {
+  const freeze = (b: MorphBox, radius: number, clip: MorphBox): void => {
     img.style.position = "absolute";
     img.style.maxWidth = "none";
     img.style.maxHeight = "none";
     writeBox(b);
     img.style.borderRadius = `${radius.toFixed(1)}px`;
+    writeClip(b, clip); // the launch frame is cut before it ever paints
   };
   let raf = 0;
   // the send morph's driver shape (armFieldMorph): eased box and corner
   // writes per frame, fades riding the clock, and the landed frame painting
   // once BEFORE the settle so the swap can never read as a snap
   const fly = (
-    a: MorphBox, b: MorphBox, rA: number, rB: number,
+    a: MorphBox, b: MorphBox, rA: number, rB: number, cA: MorphBox, cB: MorphBox,
     fade: (f: number) => void, settle: () => void,
   ): void => {
     if (raf) cancelAnimationFrame(raf);
@@ -1028,8 +1059,10 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
       raf = 0;
       const f = Math.min((now - t0) / FLIGHT_MS, 1);
       const p = flightEase(f);
-      writeBox(morphBox(a, b, p));
+      const box = morphBox(a, b, p);
+      writeBox(box);
       img.style.borderRadius = `${morphCorners(rA, [rB], p)[0].toFixed(1)}px`;
+      writeClip(box, morphBox(cA, cB, p)); // the cut rides the same beat and ease
       fade(f);
       if (f < 1) raf = requestAnimationFrame(step);
       else raf = requestAnimationFrame(settle);
@@ -1040,7 +1073,8 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
   const fromRadius = parseFloat(getComputedStyle(from).borderTopLeftRadius) || 0;
   const restRadius = parseFloat(getComputedStyle(img).borderTopLeftRadius) || 0;
   const to = zoomFit(from.naturalWidth, from.naturalHeight, window.innerWidth, window.innerHeight);
-  freeze(fromBox, fromRadius);
+  const openFrom = threadBox(); // measured with the box reads above, before any write
+  freeze(fromBox, fromRadius, openFrom);
   back.style.opacity = "0";
   from.style.opacity = "0"; // the copy IS the photo until it lands back home
   holdDiagRecord("flight", {
@@ -1050,7 +1084,7 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
     dw: Math.round(to.width - fromBox.width),
     dh: Math.round(to.height - fromBox.height),
   });
-  fly(fromBox, to, fromRadius, restRadius, (f) => {
+  fly(fromBox, to, fromRadius, restRadius, openFrom, screenBox(), (f) => {
     back.style.opacity = String(f);
   }, () => {
     // the grid layout takes the resting geometry over (zoomFit mirrors its
@@ -1072,7 +1106,13 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
       ? parseFloat(getComputedStyle(from).borderTopLeftRadius) || 0
       : curRadius;
     const back0 = back.style.opacity ? parseFloat(back.style.opacity) : 1;
-    freeze(cur, curRadius); // a mid-open tap turns home from wherever the copy is
+    const clipFrom = clipNow; // a mid-open tap turns home from the cut it has now
+    // the cut closes back onto the thread's box, so the landed frame is cut
+    // exactly like the photo it uncovers and the handover moves no pixel. The
+    // other two modes have no photo to land on and dissolve on their way out of
+    // the screen, so their cut stays open and the exit is the one it always was.
+    const clipTo = ret.mode === "exact" ? threadBox() : screenBox();
+    freeze(cur, curRadius, clipFrom); // a mid-open tap turns home from wherever the copy is
     holdDiagRecord("flight", {
       phase: "zoom-close",
       mode: ret.mode,
@@ -1081,7 +1121,7 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
       dw: Math.round(ret.box.width - cur.width),
       dh: Math.round(ret.box.height - cur.height),
     });
-    fly(cur, ret.box, curRadius, endRadius, (f) => {
+    fly(cur, ret.box, curRadius, endRadius, clipFrom, clipTo, (f) => {
       back.style.opacity = String(back0 * (1 - f));
       if (ret.mode !== "exact") img.style.opacity = String(1 - f); // no spot to land on: dissolve
     }, () => {
