@@ -464,6 +464,37 @@ html, body {
    reserved before decode, so a landing photo can never shove the scroll */
 .msg.shot img { max-width: 100%; height: auto; border-radius: 14px; display: block; cursor: zoom-in; }
 
+/* the photo that has not arrived yet (main.ts + photolazy.ts put .waiting on it
+   from the frame its row is built until its first pixels paint, whether it is
+   still parked far from the screen or fetching right now). The box is already
+   reserved by the width/height attributes above, so these two layers just fill
+   it: a grey face over the whole box, and the history spinner's own ring
+   centred on it. Both are positioned pseudo-elements, so they paint OVER the
+   empty img (an image with no source would otherwise show its alt text) and
+   cost the layout nothing: the box does not move, resize, or reflow when they
+   go. :has() carries the state up from the img, the same way the history
+   spinner's own visibility rule reads the thread. */
+.msg.shot:has(img.waiting) { position: relative; }
+.msg.shot:has(img.waiting)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--received);
+  border-radius: 14px; /* the photo's own corner, so nothing changes shape on arrival */
+}
+.msg.shot:has(img.waiting)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto; /* dead centre of the reserved box, whatever its size */
+  width: 22px;
+  height: 22px;
+  border: 2.5px solid var(--hairline);
+  border-top-color: var(--muted);
+  border-radius: 50%;
+  animation: oldspin 0.8s linear infinite; /* the history spinner's ring, one vocabulary */
+}
+
 /* tap-to-zoom overlay: the backdrop is its own sheet so it can fade while the
    photo copy flies (opacity on .lightbox itself would drag the copy with it).
    The max-* fit below sizes ONE case: a copy with nothing decoded to grow from,

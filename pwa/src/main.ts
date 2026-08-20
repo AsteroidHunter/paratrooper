@@ -8,6 +8,7 @@ import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { photoBox } from "./photobox";
+import { createPhotoQueue, nearMargin } from "./photolazy";
 import { receiptFor } from "./receipts";
 import {
   ENTER_RISE_PX,
@@ -52,7 +53,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.0"; // jump button seat deploy, bumped so the build is verifiable
+const APP_VERSION = "0.3.1"; // lazy photo deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -531,6 +532,7 @@ function renderChat(): void {
   restoredOutbox = false; // a fresh shell re-reads the durable outbox
   threadObserver?.disconnect(); // the old shell's thread element is gone
   threadObserver?.observe(thread);
+  watchPhotos(thread); // history photos load off THIS thread box's proximity
   // rebuild any failed sends persisted from a prior session; async and marked
   // .restored so the server replay (kicked off right after) stays above them
   void restoreOutbox();
@@ -1005,6 +1007,43 @@ function thumbUrl(key: string): string {
   return `/api/thumb/${encodeURIComponent(key)}?token=${encodeURIComponent(token)}`;
 }
 
+// --- history photos load when the reader nears them (photolazy.ts) ------------
+// The ledger parks each history photo's url; this is the proximity signal that
+// releases it. The root is the THREAD, not the window: the thread is the only
+// thing that scrolls here, so a window-rooted observer (or the browser's own
+// loading="lazy" heuristic, which reads the viewport) would answer about the
+// wrong box. The reach is named and explicit: one screen of the thread's own
+// height, applied above and below, so a photo starts loading about a screen
+// before it reaches the eye whichever way the reader is going. Horizontal
+// margin stays 0; nothing scrolls sideways.
+//
+// One observer per shell, rebuilt in renderChat because the root element is
+// rebuilt there and the margin is measured from the fresh box. Each photo is
+// released exactly once and then dropped from the observer: a photo that has
+// its pixels can never need them again.
+let photoObserver: IntersectionObserver | null = null;
+
+const photoQueue = createPhotoQueue<HTMLImageElement>(
+  "IntersectionObserver" in window ? (img) => photoObserver?.observe(img) : null,
+);
+
+function watchPhotos(thread: HTMLElement): void {
+  photoObserver?.disconnect(); // the old shell's photos died with its DOM
+  photoQueue.reset();
+  if (!("IntersectionObserver" in window)) return; // every photo loads eagerly instead
+  const margin = nearMargin(thread.clientHeight || window.innerHeight);
+  photoObserver = new IntersectionObserver(
+    (entries, obs) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        obs.unobserve(e.target);
+        photoQueue.release(e.target as HTMLImageElement);
+      }
+    },
+    { root: thread, rootMargin: `${margin}px 0px` },
+  );
+}
+
 // --- tap-to-zoom: the photo grows out of its spot and shrinks back into it ----
 // The lightbox copy launches from the tapped photo's exact box and corner
 // radius and flies to the fitted centered box zoom.ts computes, which it then
@@ -1300,19 +1339,24 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
       img.style.aspectRatio = "4 / 3"; // lock the box even after decode
       img.style.objectFit = "cover";
     }
-    img.src = thumbUrl(key);
     img.alt = "photo";
     img.onload = () => {
+      photoQueue.arrived(img); // the grey box comes off with the first pixels
       // decoded height lands late; re-pin INSTANTLY — a layout completion must
       // never glide (the opening-scroll motion he flagged came from these)
       if (followTail) scrollToBottom(true);
     };
     img.onerror = () => {
+      photoQueue.arrived(img); // no pixels are coming; the chip replaces the box
       div.classList.replace("shot", "text");
       div.appendChild(chip("📎 photo"));
       img.remove();
     };
     img.addEventListener("click", () => openLightbox(img.src, img));
+    // the url is PARKED, not fetched (photolazy.ts): a photo far from the
+    // screen never opens a connection, and the box reserved above sits grey
+    // with a ring in it until the reader comes within a screen of it
+    photoQueue.hold(img, thumbUrl(key));
     div.appendChild(img);
   });
   if (value) rowEl(wrapper, "user", "text", at).textContent = value;
