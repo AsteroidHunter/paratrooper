@@ -8,10 +8,16 @@
 
 import type { MorphBox } from "./shift";
 
-// the resting fit, mirrored from styles.css (.lightbox img): max-width 96vw,
-// max-height 92vh, intrinsic ratio kept, never upscaled past natural size.
-// Computed here so the open leg can land on the exact box the grid layout
-// takes over afterward — the handover moves nothing.
+// The resting fit: 96% of the viewport's width, 92% of its height, intrinsic
+// ratio kept, never upscaled past natural size. This is the ONLY source of the
+// resting size: the open leg lands on the box it returns and main.ts keeps
+// that box written, rather than dropping the inline geometry onto the css
+// max-width 96vw / max-height 92vh rule and letting a second measurement of the
+// screen decide. The two agree across the width and need not across the height
+// (innerHeight follows the keyboard and iOS misreports it; vh does not), and a
+// portrait photo is exactly the one whose fit flips from the width term to the
+// height term when they part, so it alone changed size on the landing frame
+// while landscape never did.
 export const ZOOM_MAX_VW = 0.96;
 export const ZOOM_MAX_VH = 0.92;
 

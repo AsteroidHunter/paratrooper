@@ -466,10 +466,14 @@ html, body {
 
 /* tap-to-zoom overlay: the backdrop is its own sheet so it can fade while the
    photo copy flies (opacity on .lightbox itself would drag the copy with it).
-   The copy rests grid-centered under the max-* fit; while airborne main.ts
-   overrides it to an absolute box it writes frame by frame (openLightbox) —
-   zoom.ts mirrors this fit exactly so the handover between the two moves
-   nothing. */
+   The max-* fit below sizes ONE case: a copy with nothing decoded to grow from,
+   which opens as a plain grid-centered overlay and never flies. A copy that
+   flies is given an absolute box main.ts writes frame by frame and then KEEPS
+   at rest (openLightbox), so this rule stays overridden for its whole life.
+   That is deliberate: 96vw/92vh and the flight's own window.innerWidth/
+   innerHeight are two measurements of the screen, they part on the height, and
+   handing a landed copy from one to the other resized every portrait photo on
+   that frame. Do not re-point the resting size at this rule. */
 .lightbox {
   position: fixed;
   inset: 0;

@@ -6,7 +6,9 @@
 // that moment (never the open-time memory), the off-screen and gone-row
 // fallbacks exist, the thread photo hides under the copy and is handed back
 // byte-clean, the airborne copy is cut by the thread's box exactly as the real
-// photo is, and both legs leave rect-delta records on the flight channel.
+// photo is, the landed box STANDS as the one source of the resting size (with a
+// resize re-running that same source), and both legs leave rect-delta records on
+// the flight channel.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,7 +25,7 @@ import {
   zoomReturn,
 } from "../src/zoom";
 
-describe("zoomFit — the fitted centered box the grid layout will take over", () => {
+describe("zoomFit: the fitted centered box the copy lands on and keeps", () => {
   it("fits a wide photo to 96vw and centers both axes", () => {
     const b = zoomFit(1280, 960, 390, 844);
     expect(b.width).toBeCloseTo(390 * ZOOM_MAX_VW, 5);
@@ -44,6 +46,64 @@ describe("zoomFit — the fitted centered box the grid layout will take over", (
     expect(b.height).toBe(80);
     expect(b.left).toBe(450);
     expect(b.top).toBe(460);
+  });
+});
+
+// --- one source for the resting size ------------------------------------------
+// The resting zoom used to be decided TWICE: this fit, off the innerWidth and
+// innerHeight main.ts hands in, and the css max-width 96vw / max-height 92vh the
+// copy fell back to when the landing frame dropped its inline style. Two
+// measurements of one screen, and on this phone they part on the height:
+// innerHeight shrinks with the keyboard in two of iOS 26's three modes and can
+// stay stuck short after it (shell.ts), while vh keeps reporting the full
+// screen. These pin WHY only portrait showed it, and that one source now
+// answers every viewport the photo can be resting in.
+describe("the resting size, when the two measurements disagree", () => {
+  const VIEW_W = 390; // the width halves agree, so this is shared
+  const INNER_H = 508; // what the flight reads with the keyboard up
+  const CSS_H = 844; // what 100vh keeps reporting through the same moment
+
+  it("a portrait photo flips to the height term, so the two part", () => {
+    const flown = zoomFit(960, 1280, VIEW_W, INNER_H);
+    const cssRefit = zoomFit(960, 1280, VIEW_W, CSS_H);
+    expect(flown.height).toBeCloseTo(1280 * ((INNER_H * ZOOM_MAX_VH) / 1280), 5);
+    expect(cssRefit.width).toBeCloseTo(VIEW_W * ZOOM_MAX_VW, 5); // still width-bound
+    expect(cssRefit.height).toBeGreaterThan(flown.height); // the resize on the landing frame
+    expect(cssRefit.height / flown.height).toBeCloseTo(1.068, 3);
+  });
+
+  it("a landscape photo stays width-bound in both, so it never resized", () => {
+    const flown = zoomFit(1280, 960, VIEW_W, INNER_H);
+    const cssRefit = zoomFit(1280, 960, VIEW_W, CSS_H);
+    expect(flown.width).toBeCloseTo(cssRefit.width, 5);
+    expect(flown.height).toBeCloseTo(cssRefit.height, 5);
+    // the centering still parts, which is the same one-source argument for the
+    // axis the owner did not happen to notice
+    expect(flown.top).not.toBeCloseTo(cssRefit.top, 1);
+  });
+
+  it("a 9:16 capture parts on a far milder shortfall than the keyboard's", () => {
+    const flown = zoomFit(720, 1280, VIEW_W, 700);
+    const cssRefit = zoomFit(720, 1280, VIEW_W, CSS_H);
+    expect(cssRefit.height).toBeGreaterThan(flown.height);
+    expect(zoomFit(720, 1280, VIEW_W, 740).height).toBeCloseTo(cssRefit.height, 5); // above it, agree
+  });
+
+  it("one source re-run on the rotated screen is the rotated fit, centered", () => {
+    const b = zoomFit(960, 1280, CSS_H, VIEW_W); // the same photo, phone turned
+    expect(b.height).toBeCloseTo(VIEW_W * ZOOM_MAX_VH, 5); // now the height binds
+    expect(b.width).toBeCloseTo((VIEW_W * ZOOM_MAX_VH * 960) / 1280, 5);
+    expect(b.left).toBeCloseTo((CSS_H - b.width) / 2, 5);
+    expect(b.top).toBeCloseTo((VIEW_W - b.height) / 2, 5);
+  });
+
+  it("the fit is a pure function of the viewport it is given, every time", () => {
+    for (const [w, h] of [[390, 844], [390, 508], [844, 390], [430, 932]]) {
+      const a = zoomFit(960, 1280, w, h);
+      expect(zoomFit(960, 1280, w, h)).toEqual(a); // no memory, so a re-run cannot drift
+      expect(a.width).toBeLessThanOrEqual(w * ZOOM_MAX_VW + 1e-9);
+      expect(a.height).toBeLessThanOrEqual(h * ZOOM_MAX_VH + 1e-9);
+    }
   });
 });
 
@@ -284,6 +344,50 @@ describe("photo zoom wiring (openLightbox)", () => {
     const close = body.indexOf('phase: "zoom-close"');
     expect(body.slice(open, close)).toMatch(/dx:.*dy:.*dw:.*dh:/s);
     expect(body.slice(close)).toMatch(/dx:.*dy:.*dw:.*dh:/s);
+  });
+
+  it("the landed box stands: the resting size is never handed to the css rule", () => {
+    expect(body).toContain("const restBox = ()");
+    expect(body).toContain("const to = restBox();");
+    expect(body).not.toContain('img.removeAttribute("style")'); // the second source, gone
+    expect(body).toContain('back.removeAttribute("style")'); // the backdrop still hands back
+  });
+
+  it("a resize while the photo is open re-runs that same one source", () => {
+    expect(body).toMatch(/const refit = \(\): void => \{[\s\S]*?restBox\(\)/);
+    const arm = body.indexOf('window.addEventListener("resize", refit)');
+    const rest = body.indexOf("atRest = true;");
+    expect(arm).toBeGreaterThan(-1);
+    expect(rest).toBeGreaterThan(arm); // armed before the copy can ever be resting
+    expect(body).toContain('window.removeEventListener("resize", refit)');
+  });
+
+  // the FIRST click listener is the undecoded copy's plain overlay; the real
+  // dismissal is the last one
+  const closeAt = body.lastIndexOf('overlay.addEventListener("click"');
+
+  it("the refit re-aims a RESTING copy only: a flight owns its own frames", () => {
+    expect(body).toContain("if (!atRest) return;");
+    expect(body).toContain("let atRest = false;"); // the copy starts life not resting
+    expect(body.slice(closeAt)).toContain("atRest = false;"); // the close takes it back
+  });
+
+  it("the resting cut is re-measured with the resting box, and cuts nothing", () => {
+    expect(body).toMatch(/const refit[\s\S]*?writeClip\(b, screenBox\(\)\)/);
+  });
+
+  it("the close leg reads the landed box, never a second fit of the screen", () => {
+    expect(closeAt).toBeGreaterThan(-1);
+    const cur = body.indexOf("const cur = boxOf(img.getBoundingClientRect())");
+    expect(cur).toBeGreaterThan(closeAt);
+    expect(body.slice(closeAt)).not.toContain("zoomFit("); // only zoomReturn decides down there
+  });
+
+  it("the landing frame records BOTH resting sizes on the flight channel", () => {
+    expect(body).toMatch(/phase: "zoom-rest",[\s\S]*?ih:[\s\S]*?vh:[\s\S]*?cssH:/);
+    const settle = body.indexOf("atRest = true;");
+    expect(settle).toBeGreaterThan(-1);
+    expect(body.indexOf("restDiag(restBox())")).toBeGreaterThan(settle);
   });
 
   it("every photo tap hands the tapped element to the zoom", () => {

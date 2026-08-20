@@ -51,7 +51,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.101"; // receipt move fade deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.102"; // zoom rest size deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -993,9 +993,11 @@ function thumbUrl(key: string): string {
 
 // --- tap-to-zoom: the photo grows out of its spot and shrinks back into it ----
 // The lightbox copy launches from the tapped photo's exact box and corner
-// radius and flies to the fitted centered box the resting CSS would give
-// (zoom.ts mirrors that fit, so the landing handover to the grid layout moves
-// nothing), the backdrop fading in alongside. The geometry is real box
+// radius and flies to the fitted centered box zoom.ts computes, which it then
+// KEEPS: the resting size has exactly one source, and a resize while the photo
+// is open re-runs that same source rather than letting a second one in (the
+// copy's own note at restBox below has the whole story), the backdrop fading in
+// alongside. The geometry is real box
 // interpolation on the send-flight's beat and ease, driven per rAF frame like
 // the send morph (morphBox/flightEase — never transform scale, which would
 // squash the corner circles). The thread photo hides beneath the copy for the
@@ -1101,7 +1103,54 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
   const fromBox = boxOf(from.getBoundingClientRect());
   const fromRadius = parseFloat(getComputedStyle(from).borderTopLeftRadius) || 0;
   const restRadius = parseFloat(getComputedStyle(img).borderTopLeftRadius) || 0;
-  const to = zoomFit(from.naturalWidth, from.naturalHeight, window.innerWidth, window.innerHeight);
+  // THE one source of the resting size. It used to be two: this fit, off
+  // window.innerWidth/innerHeight, and the css max-width 96vw / max-height 92vh
+  // the copy fell back to when the landing frame dropped its inline style. The
+  // width halves agree; the height halves need not, because innerHeight shrinks
+  // with the keyboard in two of iOS 26's three modes and can stay stuck short
+  // after it (shell.ts) while vh keeps measuring the full screen. A portrait
+  // photo is the one whose fit flips from the width term to the height term
+  // when they part, which is why portrait alone resized on that frame and
+  // landscape never did. The flight's landed box now simply STANDS: the inline
+  // geometry is never dropped, so the css rule (still the sizing for an
+  // undecoded copy, which never flies) can never re-fit a flown one, and the
+  // close leg's rect read is that same landed box.
+  const restBox = (): MorphBox =>
+    zoomFit(from.naturalWidth, from.naturalHeight, window.innerWidth, window.innerHeight);
+  const to = restBox();
+  // A box that stands has to be re-aimed by hand when the viewport moves, so a
+  // rotation or any other resize re-runs that same one source while the copy is
+  // at rest. Never mid-flight: a flight owns its own frames.
+  let atRest = false;
+  const refit = (): void => {
+    if (!atRest) return;
+    const b = restBox();
+    writeBox(b);
+    writeClip(b, screenBox()); // the resting cut is re-measured with it, and cuts nothing
+  };
+  window.addEventListener("resize", refit);
+  // TEMP DIAGNOSTIC (hold.ts trail, flight channel): the two resting sizes side
+  // by side on the landing frame. One is what the flight stands on, off
+  // innerWidth/innerHeight; the other is what the css max-* rule would have
+  // re-fitted to, off a live measurement of the 100vw/100vh those percentages
+  // resolve against. A device session shows in the deploy log whether the pair
+  // ever parts and by how much, instead of the question being argued.
+  const restDiag = (b: MorphBox): void => {
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:fixed;left:0;top:0;width:100vw;height:100vh;" +
+      "visibility:hidden;pointer-events:none";
+    document.body.appendChild(probe);
+    const unit = probe.getBoundingClientRect();
+    probe.remove();
+    const css = zoomFit(from.naturalWidth, from.naturalHeight, unit.width, unit.height);
+    holdDiagRecord("flight", {
+      phase: "zoom-rest",
+      iw: Math.round(window.innerWidth), ih: Math.round(window.innerHeight),
+      vw: Math.round(unit.width), vh: Math.round(unit.height),
+      w: Math.round(b.width), h: Math.round(b.height),
+      cssW: Math.round(css.width), cssH: Math.round(css.height),
+    });
+  };
   const openFrom = threadBox(); // measured with the box reads above, before any write
   freeze(fromBox, fromRadius, openFrom);
   back.style.opacity = "0";
@@ -1116,16 +1165,20 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
   fly(fromBox, to, fromRadius, restRadius, openFrom, screenBox(), (f) => {
     back.style.opacity = String(f);
   }, () => {
-    // the grid layout takes the resting geometry over (zoomFit mirrors its
-    // fit, so nothing moves) — kept only if the copy's pixels are somehow
-    // still inbound, where an intrinsic-size layout would have no size at all
+    // The landed geometry stands. Only the backdrop hands itself back to css;
+    // the copy keeps the box the flight wrote, so nothing gets a second say on
+    // this frame. The refit answers a viewport that moved DURING the flight,
+    // out of that same one source, and is a no-op when it did not.
     back.removeAttribute("style");
-    if (img.naturalWidth) img.removeAttribute("style");
+    atRest = true;
+    refit();
+    restDiag(restBox()); // the box that now stands, re-read from the one source
   });
   let closing = false;
   overlay.addEventListener("click", () => {
     if (closing) return;
     closing = true;
+    atRest = false; // the close flight owns the geometry from here, not the refit
     // the spot is re-read NOW, not remembered from the open
     const origin = from.isConnected ? boxOf(from.getBoundingClientRect()) : null;
     const cur = boxOf(img.getBoundingClientRect());
@@ -1156,6 +1209,7 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
     }, () => {
       // the landed copy painted exactly over the photo once; now, one task:
       // the photo back, the copy gone — no frame holds both, none holds neither
+      window.removeEventListener("resize", refit); // nothing left to re-aim
       from.style.removeProperty("opacity");
       if (!from.getAttribute("style")) from.removeAttribute("style");
       overlay.remove();
