@@ -88,10 +88,11 @@ describe("flightSettled — the parked stamp lands when the last flight ends", (
     expect(body).toContain("if (flightsUp > 0 || !receiptPending) return");
   });
 
-  it("applies through the sibling-shift machinery, so the stamp newborn-enters", () => {
-    // measure, swap, play: the relocation is height-neutral, the seat's hop
-    // glides on the shared beat, and the fresh stamp (a newborn to the walk)
-    // fades up into place — the same enter every send-born element gets
+  it("applies through the sibling-shift machinery, so the seat's hop glides", () => {
+    // measure, swap, play: the relocation is height-neutral, so the seat's hop
+    // is the only position that changes and it glides on the shared beat. A
+    // moving stamp is the same element re-parented, so the walk reads it as a
+    // row that went down, not a newborn; only a first-ever stamp fades up.
     const measure = body.indexOf("beginSiblingShift()");
     const apply = body.indexOf("updateReceipt()");
     const play = body.indexOf("shift.play()");
@@ -109,6 +110,210 @@ describe("flightSettled — the parked stamp lands when the last flight ends", (
     const shell = fnBody("renderChat");
     expect(shell).toContain("flightsUp = 0");
     expect(shell).toContain("receiptPending = false");
+  });
+});
+
+// --- the stamp's move to a newer bubble: fade out, cross dark, fade in --------
+// The device report: sending a few messages in a row made the Delivered tag
+// look like it slid down the newly sent bubble. It was not a slide. The stamp
+// was destroyed under the previous message and a fresh one built under the new
+// one, and the eye read the two spots as travel. The move now takes the same
+// two-phase fade the Delivered -> Read word flip already uses, with the
+// crossing in the middle, while the label is at opacity 0.
+
+describe("updateReceipt: a move to a newer bubble fades out, crosses, fades in", () => {
+  const body = fnBody("updateReceipt");
+  const travelStart = body.indexOf('existing.dataset.travel === "dark"');
+  const travel = body.slice(travelStart, body.indexOf("existing?.remove()", travelStart));
+
+  it("beat one fades the stamp out where it stands, before anything moves", () => {
+    const fade = body.indexOf('existing.dataset.travel = "fade"');
+    expect(fade).toBeGreaterThan(-1);
+    expect(body.slice(fade)).toContain('classList.add("rc-hide")');
+    expect(fade).toBeLessThan(travelStart); // the fade is armed before the crossing
+  });
+
+  it("beat one is opacity only, so it starts even mid-flight", () => {
+    // no layout is touched by a fade, so the flight hold has nothing to protect:
+    // arming it at ACK time is what leaves the label already dark at touchdown
+    const fade = body.indexOf('existing.dataset.travel = "fade"');
+    expect(fade).toBeLessThan(body.lastIndexOf("if (flightsUp > 0)"));
+  });
+
+  it("beat two crosses the SAME element: no remove, no rebuild", () => {
+    // the height ledger below is the reason: one appendChild of an attached node
+    // is a single DOM move, so the stamp's box is never absent from the thread
+    expect(travel).toContain("wrapper.appendChild(existing)");
+    expect(travel).not.toContain("existing.remove()");
+    expect(travel).not.toContain("buildReceipt(");
+  });
+
+  it("beat three fades back in only after the crossing", () => {
+    const cross = travel.indexOf("wrapper.appendChild(existing)");
+    const fadeIn = travel.indexOf('classList.remove("rc-hide")');
+    expect(cross).toBeGreaterThan(-1);
+    expect(fadeIn).toBeGreaterThan(cross);
+    // a re-parented element resolves its style fresh, and a first resolve never
+    // transitions: the read-back at opacity 0 gives the fade a value to start from
+    expect(travel.indexOf("void layer.offsetHeight")).toBeGreaterThan(cross);
+    expect(travel.indexOf("void layer.offsetHeight")).toBeLessThan(fadeIn);
+  });
+
+  it("the crossing waits for opacity 0: only receiptTravel can reach beat two", () => {
+    // dark is set by the layer's transitionend, never by a timer
+    expect(fnBody("receiptTravel")).toContain('el.dataset.travel = "dark"');
+    expect(src).not.toContain("setTimeout(() => receiptTravel");
+    const handler = src.slice(src.indexOf("function buildReceipt("));
+    const route = handler.indexOf("return receiptTravel(el)");
+    expect(route).toBeGreaterThan(-1);
+    // it must divert BEFORE the plain word-flip fade-in, or the label would
+    // come back up at the old spot and then jump
+    expect(route).toBeLessThan(handler.indexOf('layer.classList.remove("rc-hide")'));
+  });
+
+  it("replay bursts never fade: suppressAnim keeps the immediate rebuild", () => {
+    // a transition that never runs never ends, so a fade armed under suppressAnim
+    // would strand the stamp invisible at the old spot
+    const fade = body.indexOf('existing.dataset.travel = "fade"');
+    expect(body.slice(0, fade)).toContain("!suppressAnim");
+  });
+
+  it("a move that evaporates releases the label where it already is", () => {
+    // the newer wrapper can be replayed away mid-fade; the stamp must not sit
+    // dark forever waiting for a crossing that no longer applies
+    const same = body.indexOf("existing.parentElement === wrapper");
+    const release = body.indexOf("delete existing.dataset.travel", same);
+    expect(release).toBeGreaterThan(same);
+    expect(release).toBeLessThan(travelStart);
+  });
+});
+
+describe("receiptTravel: the invisible beat never fights the flight's glide", () => {
+  const body = fnBody("receiptTravel");
+
+  it("marks the stamp dark before handing back to updateReceipt", () => {
+    expect(body.indexOf('el.dataset.travel = "dark"')).toBeLessThan(body.indexOf("updateReceipt()"));
+  });
+
+  it("a flight still up parks instead of opening its own shift", () => {
+    // beginSiblingShift cancels every running shift animation, so opening one
+    // here would kill the flight's own glide mid-air
+    const gate = body.indexOf("if (flightsUp > 0)");
+    expect(gate).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(body.indexOf("beginSiblingShift()"));
+    expect(body.slice(gate)).toContain("return updateReceipt()");
+  });
+
+  it("with no flight it opens its own measure, swap, play", () => {
+    // the crossing lands outside any send, so the seat's hop needs a shift of
+    // its own or it would jump under a label that is not there to explain it
+    const measure = body.indexOf("beginSiblingShift()");
+    const apply = body.lastIndexOf("updateReceipt();"); // the parked path returns one earlier
+    const play = body.indexOf("shift.play()");
+    expect(measure).toBeGreaterThan(-1);
+    expect(measure).toBeLessThan(apply);
+    expect(apply).toBeLessThan(play);
+  });
+});
+
+// --- the height ledger --------------------------------------------------------
+// The property beat two rests on: re-appending an ALREADY-ATTACHED node is one
+// DOM move, never a detach followed by an insert, so the thread is never short
+// the stamp's box for even a frame. Pinned against a minimal node fake with the
+// DOM's own appendChild semantics (the same approach dots.test.ts takes), the
+// thread's height sampled around every mutation. The shape this replaced
+// (remove the old stamp, build a fresh one) runs through the same ledger to
+// show the ledger has teeth. Tops are content offsets; the thread is pinned to
+// its bottom and the total height is unchanged, so they are screen offsets too.
+
+class Box {
+  parent: Box | null = null;
+  kids: Box[] = [];
+  constructor(readonly name: string, readonly h = 0) {}
+  appendChild(n: Box): void {
+    if (n.parent) n.parent.kids.splice(n.parent.kids.indexOf(n), 1); // one move
+    n.parent = this;
+    this.kids.push(n);
+  }
+  remove(): void {
+    if (!this.parent) return;
+    this.parent.kids.splice(this.parent.kids.indexOf(this), 1);
+    this.parent = null;
+  }
+  height(): number {
+    return this.h + this.kids.reduce((sum, k) => sum + k.height(), 0);
+  }
+  holds(n: Box): boolean {
+    return this === n || this.kids.some((k) => k.holds(n));
+  }
+}
+
+const STAMP_H = 18;
+
+// the owner's case: two sends in a row. The stamp sits under the previous
+// bubble, the new bubble has landed below it, and the stamp must end up under
+// the new one. The .evt wrappers are display:contents, so only rows and the
+// stamp carry height.
+function threadWithStamp(): { thread: Box; newWrapper: Box; stamp: Box } {
+  const thread = new Box("thread");
+  const older = new Box("evt-older");
+  const prev = new Box("evt-prev");
+  const fresh = new Box("evt-new");
+  thread.appendChild(older);
+  older.appendChild(new Box("row-older", 40));
+  thread.appendChild(prev);
+  prev.appendChild(new Box("row-prev", 40));
+  const stamp = new Box("receipt", STAMP_H);
+  prev.appendChild(stamp);
+  thread.appendChild(fresh);
+  fresh.appendChild(new Box("row-new", 40));
+  return { thread, newWrapper: fresh, stamp };
+}
+
+function tops(thread: Box): Map<string, number> {
+  const out = new Map<string, number>();
+  let y = 0;
+  const walk = (b: Box): void => {
+    if (b.kids.length === 0) {
+      out.set(b.name, y);
+      y += b.h;
+      return;
+    }
+    for (const k of b.kids) walk(k);
+  };
+  walk(thread);
+  return out;
+}
+
+describe("the crossing's height ledger: no space is lost while the label is dark", () => {
+  it("the crossing is ONE mutation, so there is no in-between state to lose", () => {
+    const { thread, newWrapper, stamp } = threadWithStamp();
+    const before = thread.height();
+    newWrapper.appendChild(stamp); // exactly what beat two runs
+    expect(thread.height()).toBe(before);
+    expect(thread.holds(stamp)).toBe(true);
+    expect(stamp.parent).toBe(newWrapper);
+  });
+
+  it("only the newer bubble's seat changes position, by exactly the stamp's height", () => {
+    const { thread, newWrapper, stamp } = threadWithStamp();
+    const before = tops(thread);
+    newWrapper.appendChild(stamp);
+    const after = tops(thread);
+    const moved = [...after].filter(([name, top]) => before.get(name) !== top).map(([n]) => n);
+    expect(moved).toEqual(["row-new", "receipt"]); // nothing above the stamp stirs
+    expect(before.get("row-new")! - after.get("row-new")!).toBe(STAMP_H); // the seat's hop
+  });
+
+  it("the ledger has teeth: remove-then-rebuild leaves the thread short", () => {
+    const { thread, newWrapper, stamp } = threadWithStamp();
+    const before = thread.height();
+    const samples: number[] = [];
+    stamp.remove();
+    samples.push(thread.height()); // the gap: rows drop with no label to explain it
+    newWrapper.appendChild(new Box("receipt", STAMP_H));
+    samples.push(thread.height());
+    expect(samples).toEqual([before - STAMP_H, before]);
   });
 });
 

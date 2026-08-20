@@ -51,7 +51,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.100"; // keystroke protection deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.101"; // receipt move fade deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1375,10 +1375,20 @@ function chip(label: string): HTMLSpanElement {
 // caret-safe) so the receipt's own transform transition for swipe-peek (the
 // :where rule in styles.css) is left untouched.
 
+// A MOVE to a newer sent message is that same fade with the travel in the
+// middle: the stamp fades out where it stands, crosses while it is invisible,
+// and fades back in under the newer bubble. It never snaps to the new seat,
+// which is the one thing the real messages app never does. data-travel says
+// which beat a move is on: "fade" while the label is still on its way to
+// opacity 0, "dark" once it is there and the crossing is owed. The crossing
+// itself must cost the thread no height (receiptTravel below).
+
 // build a fresh receipt: an .rc text layer inside the #receipt box, plus the
 // one persistent handler that drives every later flip. Reaching opacity 0 (the
 // rc-hide fade-out just finished) swaps the now-invisible text to the newest
-// target and releases the fade back in; reaching opacity 1 is the end, no work.
+// target and releases the fade back in. If a move is owed, the crossing runs
+// first instead and releases the fade itself. Reaching opacity 1 is the end,
+// no work.
 function buildReceipt(state: string): HTMLElement {
   const el = document.createElement("div");
   el.id = "receipt";
@@ -1390,10 +1400,33 @@ function buildReceipt(state: string): HTMLElement {
   layer.addEventListener("transitionend", (e) => {
     if (e.propertyName !== "opacity" || !layer.classList.contains("rc-hide")) return;
     layer.textContent = el.dataset.state ?? ""; // swapped while fully invisible
+    if (el.dataset.travel) return receiptTravel(el); // a move is owed: cross still dark
     layer.classList.remove("rc-hide"); // fade the new word in
   });
   el.appendChild(layer);
   return el;
+}
+
+// The invisible beat of a move. The label has just reached opacity 0, so the
+// stamp can cross to the newer bubble with none of it showing, provided the
+// crossing moves nothing else. It does not: updateReceipt re-parents the SAME
+// element, and re-appending an already-attached node is one DOM move, never a
+// detach followed by an insert, so the stamp's box is never absent from the
+// thread and the thread's height is identical before and after. The only
+// element whose position genuinely differs between the two layouts is the
+// newer bubble's seat, one stamp-height higher once the stamp sits below it
+// rather than above it; the sibling shift glides that hop on the shared beat
+// instead of letting it jump under an invisible label. While a flight is still
+// airborne the move parks instead, because opening a shift here would cancel
+// the flight's own glide, and flightSettled applies the move inside the shift
+// it already opens.
+function receiptTravel(el: HTMLElement): void {
+  el.dataset.travel = "dark";
+  holdDiagRecord("receipt-hold", { phase: "dark", flights: flightsUp });
+  if (flightsUp > 0) return updateReceipt(); // parks on the gate; flightSettled lands it
+  const shift = beginSiblingShift();
+  updateReceipt();
+  shift.play();
 }
 
 function updateReceipt(): void {
@@ -1412,35 +1445,75 @@ function updateReceipt(): void {
     existing.remove(); // nothing to stamp, or the newest sent message sits above the loaded window
     return;
   }
+  const layer = existing?.querySelector<HTMLElement>(".rc") ?? null;
   if (existing && existing.parentElement === wrapper) {
     // Same bubble, so only the LABEL can have changed: fade it, don't snap it.
     // dataset.state holds the newest TARGET label. A repeat call with the same
     // target no-ops (no stacked fades), and the transitionend swap reads it so
     // the latest state always wins even if it changes mid-fade.
-    if (existing.dataset.state !== r.state) {
+    if (existing.dataset.travel) {
+      // a move was owed and the anchor came back under this bubble (a replay
+      // took the newer wrapper away): drop it, show the label where it is
+      delete existing.dataset.travel;
+      existing.dataset.state = r.state;
+      layer?.classList.remove("rc-hide");
+    } else if (existing.dataset.state !== r.state) {
       existing.dataset.state = r.state;
       // fade fully out; the persistent handler swaps the text and fades it back
       // in once the layer is invisible. Re-adding rc-hide mid-fade is a harmless
       // no-op, so repeat flips never stack.
-      existing.querySelector<HTMLElement>(".rc")?.classList.add("rc-hide");
+      layer?.classList.add("rc-hide");
     }
     if (followTail) scrollToBottom();
     return;
   }
-  // The anchor is moving to a new bubble. On a fast connection the send ACK
-  // lands mid-flight (real ACKs in 50-200ms against the 400ms beat), and
-  // relocating the ~18px stamp then — removed from under the previous bubble,
-  // appended under the flying one — jolts the landing seat and everything
-  // above it while the bubble is airborne: the end-of-send bounce. Park the
-  // move until the flight settles; flightSettled applies it. The gate is the
-  // live animation count, so sends with no flight (and ACKs landing after
-  // touchdown) keep the immediate path.
+  // The anchor is moving to a newer bubble. Beat one: fade out where it stands.
+  // Opacity only, nothing in the layout touched, so this starts the moment the
+  // move is known, mid-flight included, which is what leaves the label already
+  // dark by the time the bubble lands. Beats two and three (cross, fade in) run
+  // off the layer's transitionend at opacity 0, through receiptTravel. A repeat
+  // call re-arms the same beat: rc-hide is already on, the running fade owns it.
+  // Replay bursts (suppressAnim) never fade, since no transition would run to
+  // end one, so they fall through to the immediate rebuild below.
+  if (existing && layer && existing.dataset.travel !== "dark" && !suppressAnim) {
+    existing.dataset.state = r.state; // the newest target word, swapped while dark
+    existing.dataset.travel = "fade";
+    layer.classList.add("rc-hide");
+    holdDiagRecord("receipt-hold", { phase: "fade" });
+    return;
+  }
+  // On a fast connection the send ACK lands mid-flight (real ACKs in 50-200ms
+  // against the 400ms beat), and crossing the ~18px stamp then, out from under
+  // the previous bubble and in under the flying one, jolts the landing seat and
+  // everything above it while the bubble is airborne: the end-of-send bounce.
+  // Park the move until the flight settles; flightSettled applies it. The gate
+  // is the live animation count, so sends with no flight (and ACKs landing
+  // after touchdown) keep the immediate path.
   if (flightsUp > 0) {
     receiptPending = true;
     holdDiagRecord("receipt-hold", { phase: "park" });
     return;
   }
-  existing?.remove(); // the anchor moved to a new bubble: fresh stamp, no dip
+  if (existing && layer && existing.dataset.travel === "dark") {
+    // Beat two: cross while invisible. appendChild on an ALREADY-ATTACHED node
+    // is a single DOM move, so the stamp's box never leaves the thread and no
+    // height is lost in between. No row can drop into a gap the label is not
+    // there to explain. Beat three releases the fade in the same task, so the
+    // label comes back up under the newer bubble.
+    delete existing.dataset.travel;
+    existing.dataset.state = r.state;
+    layer.textContent = r.state;
+    wrapper.appendChild(existing);
+    // re-parenting rebuilds the layer's resolved style, and a style resolved
+    // for the first time never transitions. Read it back at opacity 0 first so
+    // the browser has a value to start FROM, then release the class.
+    void layer.offsetHeight;
+    layer.classList.remove("rc-hide");
+    holdDiagRecord("receipt-hold", { phase: "travel" });
+    if (followTail) scrollToBottom();
+    return;
+  }
+  existing?.remove(); // nothing to carry across: the first stamp, or a replay snap
   wrapper.appendChild(buildReceipt(r.state));
   if (followTail) scrollToBottom();
 }
@@ -1758,8 +1831,10 @@ function applyRetract(seq: number): void {
 // finish and cancel alike, so a torn-down flight still gets its stamp. The
 // apply rides the sibling-shift machinery: the relocation is height-neutral
 // (the stamp's 18px move from above the seat to below it), so no scroll write
-// fires, the seat's hop glides on the shared beat, and the fresh stamp — a
-// newborn to the walk — fades up into place.
+// fires, and the seat's hop glides on the shared beat. A moving stamp is the
+// SAME element re-parented, so the walk reads it as an existing row that went
+// down, not a newborn: its own fade owns its entrance. Only a first-ever stamp
+// is a newborn here, and that one fades up into place.
 let flightsUp = 0; // send-flight animations still airborne
 let receiptPending = false; // updateReceipt work parked until the flights settle
 
