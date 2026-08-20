@@ -8,11 +8,21 @@
 // everything; at or near the bottom it never appears. New content landing at
 // the tail no longer shows it — that trigger is gone on purpose.
 //
+// One more gate, on top of all that: while the keyboard is up the chevron is
+// never visible. It goes down as the keyboard comes up and it stays down
+// however still the view gets, because typing is not scroll activity: the
+// stillness window simply runs to its end behind the keys and used to surface
+// the chevron on top of the typing box, where only reaching the bottom could
+// take it away again. The close is ONE nudge back through scrolled(), the same
+// call the scroll handler makes, so the ordinary three second rule decides all
+// over again from scratch. Nothing is remembered and nothing is restored.
+//
 // Same shape as hold.ts: a pure state machine (unit-tested, driven entirely
 // through the injectable pause window and the environment's timers — the
 // window always restarts whole on a scroll, so no now() reading is needed)
 // beneath a thin wiring in main.ts: the scroll handler feeds it at-bottom
-// facts, and it drives the .show class through the one callback.
+// facts, shell.ts's keyboard edge feeds the gate, and it drives the .show
+// class through the one callback.
 
 export const PAUSE_MS = 3000;
 
@@ -21,6 +31,11 @@ export interface DownButton {
   scrolled(atBottom: boolean): void;
   /** the bottom was reached outside a scroll event (jump tap, fresh shell) */
   bottomReached(): void;
+  /**
+   * the keyboard's up/down edge (shell.ts), carrying the view's own at-bottom
+   * verdict: up hides and holds hidden, down is one ordinary nudge
+   */
+  keyboard(up: boolean, atBottom: boolean): void;
   visible(): boolean;
 }
 
@@ -30,6 +45,9 @@ export function createDownButton(
 ): DownButton {
   let shown = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  // the keyboard gate: while this is true nothing may arm the window, so no
+  // amount of typing stillness can surface the chevron over the typing box
+  let kbUp = false;
 
   function disarm(): void {
     if (timer) clearTimeout(timer);
@@ -51,6 +69,11 @@ export function createDownButton(
 
   function scrolled(atBottom: boolean): void {
     if (atBottom) return bottomReached();
+    // behind a keyboard there is nothing to surface onto: the caret reveals
+    // and the composer's own growth compensation fire scroll events while he
+    // types, and every one of them used to restart a window that then closed
+    // on top of the typing box
+    if (kbUp) return;
     if (shown) return; // stays up while away; only the bottom takes it down
     disarm(); // still moving: the stillness window restarts from zero
     timer = setTimeout(() => {
@@ -59,7 +82,22 @@ export function createDownButton(
     }, pauseMs);
   }
 
-  return { scrolled, bottomReached, visible: () => shown };
+  function keyboard(up: boolean, atBottom: boolean): void {
+    if (up === kbUp) return; // edges only: a repeated verdict is not an event
+    kbUp = up;
+    if (up) {
+      // coming up: down it goes, pending window and all
+      disarm();
+      apply(false);
+      return;
+    }
+    // gone: ONE nudge down the ordinary path. If the view is still away from
+    // the bottom the usual stillness window runs and brings it back; if the
+    // view is at the bottom this is the plain hide it always was.
+    scrolled(atBottom);
+  }
+
+  return { scrolled, bottomReached, keyboard, visible: () => shown };
 }
 
 // Tap-to-bottom glide plan — a weight on a damped spring (device verdict on

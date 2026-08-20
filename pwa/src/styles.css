@@ -812,11 +812,16 @@ html, body {
      0.75rem in from the box; the same inset seats the disc's right edge flush
      on that line (offsets resolve against .compose's padding box) */
   right: 0.75rem;
-  /* seated off the pill it is tangent to: its 39px single-line height plus
-     one 0.75rem breathing gap (the bar's own padding unit). The old
-     36.5px + 0.5rem carry-over from the ＋ column left only ~6px of air
-     above the bar — the device test wanted roughly double. */
-  bottom: calc(var(--pad-b) + 39px + 0.75rem);
+  /* seated off the pill it is tangent to: the pill's LIVE height plus one
+     0.75rem breathing gap (the bar's own padding unit). --field-h is measured
+     and republished by autosize() every time the box resizes, so the same one
+     unit of air sits above the pill at one line and at the five-line cap
+     alike; the 39px fallback is the single-line height, which is what the
+     rule read before the first measurement lands and what it used to be
+     nailed to. Nailed to it, the button vanished inside a box that had grown
+     past one line. The old 36.5px + 0.5rem carry-over from the ＋ column left
+     only ~6px of air above the bar — the device test wanted roughly double. */
+  bottom: calc(var(--pad-b) + var(--field-h, 39px) + 0.75rem);
   width: 36px;
   height: 36px;
   border: none;

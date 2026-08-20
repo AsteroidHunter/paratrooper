@@ -30,6 +30,7 @@ import {
   closeCorrectionNeeded,
   currentFileInput,
   initShell,
+  watchKeyboard,
 } from "./shell";
 import { installSplashCover, installStartupImage } from "./splash";
 import {
@@ -51,7 +52,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.102"; // zoom rest size deploy, bumped so the build is verifiable
+const APP_VERSION = "0.3.0"; // jump button seat deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -128,6 +129,12 @@ const replyHold = createReplyHold<ServerMsg>((m) => {
 const downBtn = createDownButton((show) =>
   document.getElementById("jump")?.classList.toggle("show", show),
 );
+
+// the keyboard gate (shell.ts owns the edge, downbtn.ts the rule): up takes
+// the chevron down, and the down edge is one nudge with the same followTail
+// verdict the scroll handler feeds it, so the ordinary stillness window
+// decides whether it comes back
+watchKeyboard((up) => downBtn.keyboard(up, followTail));
 
 // boot-replay ledger (bootgate.ts owns it): the honest replay marker. Every
 // socket frame at or below the server's tail-at-connect is backlog and must
@@ -774,6 +781,13 @@ function autosize(typed = false): void {
   // border-box need — the old +2 border compensation would reopen the gap
   textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
   const newHeight = textEl.offsetHeight;
+  // publish the pill's live height: the jump chevron seats itself off it
+  // (styles.css .jump), so it clears the box at one line and at the five-line
+  // cap alike instead of off a written-down single-line constant. The pill is
+  // the textarea's parent and carries no padding or border of its own, so this
+  // read costs nothing beyond the reflow the line above already forced.
+  const pill = textEl.parentElement;
+  if (pill) app.style.setProperty("--field-h", `${pill.offsetHeight}px`);
   // EVERY keystroke hands iOS a caret to reveal, and it scrolls the whole page
   // one step to do it (the typing-test shove: vv.offsetTop 362 -> 412, 412px
   // piled up by close). Blinking only on GROWTH protected the first character

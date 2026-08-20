@@ -333,6 +333,18 @@ let appliedKb = false;
 // box writes animate until this deadline — the kb-edge settle window
 let glideUntil = 0;
 let glideTimer: ReturnType<typeof setTimeout> | null = null;
+// "the keyboard is on its way up or already up", as applied: the focus tap's
+// own signal ORed with the proven keyboard, so the up edge lands with the tap
+// and the down edge only once the screen is really clear again. Watchers hear
+// edges only (applyShell runs on every viewport event).
+let appliedKeyboard = false;
+let onKeyboard: ((up: boolean) => void) | null = null;
+
+// Register the one listener for that edge. The jump chevron uses it: it must
+// never be visible while the keyboard is up (downbtn.ts owns the rule).
+export function watchKeyboard(cb: (up: boolean) => void): void {
+  onKeyboard = cb;
+}
 
 function readWorld(): World {
   const a = document.activeElement;
@@ -442,6 +454,14 @@ function applyShell(t: ShellTarget, settling: boolean): void {
       appEl.style.removeProperty("--shell-top");
       appEl.style.removeProperty("--shell-h");
     }
+  }
+
+  // last, so a watcher reading geometry sees this frame's box and not the
+  // previous one
+  const keyboard = t.kb || focusing;
+  if (keyboard !== appliedKeyboard) {
+    appliedKeyboard = keyboard;
+    onKeyboard?.(keyboard);
   }
 }
 

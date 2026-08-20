@@ -4,7 +4,9 @@
 // injectable pause window, so every scenario runs on fake timers: show on 4s
 // of stillness while away, every scroll restarting that window, staying up
 // until the bottom takes it down, and never appearing at the bottom — a
-// fresh open pinned there shows nothing.
+// fresh open pinned there shows nothing. Plus the keyboard gate: nothing may
+// surface while the keyboard is up, and the close is one ordinary nudge, so
+// coming back is the same stillness rule as ever and never a restore.
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -146,6 +148,93 @@ describe("at the bottom it never appears", () => {
     vi.advanceTimersByTime(PAUSE_MS * 10);
     expect(btn.visible()).toBe(false);
     expect(calls).toEqual([]); // the chevron plays no part in a fresh landing
+  });
+});
+
+describe("the keyboard — never visible behind it, ordinary rules after it", () => {
+  it("coming up takes a shown chevron down at once", () => {
+    const { calls, btn } = harness();
+    btn.scrolled(false); // drifted up into history
+    vi.advanceTimersByTime(PAUSE_MS);
+    expect(btn.visible()).toBe(true);
+    btn.keyboard(true, false); // he taps the box
+    expect(btn.visible()).toBe(false);
+    expect(calls).toEqual([true, false]);
+  });
+
+  it("coming up cancels a window that has not closed yet", () => {
+    const { calls, btn } = harness();
+    btn.scrolled(false);
+    vi.advanceTimersByTime(PAUSE_MS - 1); // a hair short of surfacing
+    btn.keyboard(true, false);
+    vi.advanceTimersByTime(PAUSE_MS * 4);
+    expect(btn.visible()).toBe(false);
+    expect(calls).toEqual([]); // the pending timer never surfaced anything
+  });
+
+  it("HIS BUG: typing behind the keyboard cannot surface it, however still", () => {
+    // the reported sequence: scroll up, open the keyboard, type. Typing is not
+    // scroll activity, so the window used to run to its end behind the keys;
+    // and the caret reveals and the composer's growth compensation DO fire
+    // scroll events, so a gate that only hid once would not have held either.
+    const { calls, btn } = harness();
+    btn.scrolled(false);
+    btn.keyboard(true, false);
+    for (let i = 0; i < 20; i++) {
+      btn.scrolled(false); // a keystroke's caret reveal / growth compensation
+      vi.advanceTimersByTime(PAUSE_MS * 2); // and plenty of stillness between
+    }
+    expect(btn.visible()).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it("the close is ONE nudge: the full window again, never an instant restore", () => {
+    const { calls, btn } = harness();
+    btn.scrolled(false);
+    vi.advanceTimersByTime(PAUSE_MS);
+    btn.keyboard(true, false); // it was up; the keyboard takes it down
+    expect(calls).toEqual([true, false]);
+    btn.keyboard(false, false); // keyboard gone, view still away from the bottom
+    expect(btn.visible()).toBe(false); // nothing remembered, nothing restored
+    vi.advanceTimersByTime(PAUSE_MS - 1);
+    expect(btn.visible()).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(btn.visible()).toBe(true); // the ordinary stillness rule brought it back
+    expect(calls).toEqual([true, false, true]);
+  });
+
+  it("a close at the bottom shows nothing, however long things stay still", () => {
+    const { calls, btn } = harness();
+    btn.scrolled(false);
+    btn.keyboard(true, false);
+    btn.keyboard(false, true); // he sent; the view is pinned at the tail again
+    vi.advanceTimersByTime(PAUSE_MS * 5);
+    expect(btn.visible()).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it("only edges count: a repeated verdict is not an event", () => {
+    const { calls, btn } = harness();
+    btn.keyboard(false, false); // no keyboard was ever up: no nudge, no window
+    vi.advanceTimersByTime(PAUSE_MS * 2);
+    expect(btn.visible()).toBe(false);
+    expect(calls).toEqual([]);
+    btn.scrolled(false);
+    btn.keyboard(true, false);
+    btn.keyboard(true, false); // a second "up" changes nothing
+    btn.keyboard(false, false); // the one real close edge: the one nudge
+    vi.advanceTimersByTime(PAUSE_MS);
+    expect(btn.visible()).toBe(true);
+    expect(calls).toEqual([true]);
+  });
+
+  it("after the close the gate is truly open: ordinary scrolls arm again", () => {
+    const { btn } = harness();
+    btn.keyboard(true, false);
+    btn.keyboard(false, true); // closed at the bottom, so the nudge hid it
+    btn.scrolled(false); // and now he scrolls up again
+    vi.advanceTimersByTime(PAUSE_MS);
+    expect(btn.visible()).toBe(true);
   });
 });
 
@@ -386,9 +475,11 @@ describe("presentation — original glass, fixed arrow, right-tangent seat", () 
     expect(composeRule).toContain("padding: 0.5rem 0.75rem var(--pad-b)"); // the pill's right edge: 0.75rem in
     expect(jumpRule).toContain("right: 0.75rem"); // the same inset = the two right edges tangent
     expect(jumpRule).not.toContain("left:"); // off the ＋'s column for good
-    // raised seat: the pill's 39px + one 0.75rem gap of air (~12.5px clear of
-    // the pill, roughly double the old 36.5px + 0.5rem carry-over's ~6px)
-    expect(jumpRule).toContain("bottom: calc(var(--pad-b) + 39px + 0.75rem)");
+    // raised seat: the pill's live height + one 0.75rem gap of air (~12.5px
+    // clear of the pill, roughly double the old 36.5px + 0.5rem carry-over's
+    // ~6px). The fallback is the single-line height the rule used to be nailed
+    // to, so nothing about the one-line seat moved. Arithmetic below.
+    expect(jumpRule).toContain("bottom: calc(var(--pad-b) + var(--field-h, 39px) + 0.75rem)");
     // and the button actually lives inside the compose bar's anchor box
     expect(main).toMatch(/<form id="compose"[\s\S]*id="jump"[\s\S]*<\/form>/);
   });
@@ -444,5 +535,73 @@ describe("presentation — the original font arrow, one layered soft ring", () =
 
   it("shown state: face and glyph both at full strength — no floor opacity", () => {
     expect(css).toMatch(/\.jump\.show::before,\n\.jump\.show \.jump-glyph \{\n {2}opacity: 1;/);
+  });
+});
+
+// The seat, evaluated instead of string-matched. The rule is a plain sum of
+// lengths, so substituting the two variables and the rem unit and adding the
+// terms is exactly what the browser does with it. These run under node with no
+// DOM and no layout: what they prove is the RULE, never a rendering.
+describe("presentation — the seat rides the pill's live height", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+  const jumpRule = css.match(/\n\.jump \{([^}]*)\}/)?.[1] ?? "";
+  const seat = jumpRule.match(/bottom: calc\((.*)\);/)?.[1] ?? "";
+  const ROOT_FONT = 16; // browser default; nothing in the app moves it
+  const GAP = 0.75 * ROOT_FONT; // one compose-bar padding unit, in px
+  const CAP = 120; // the textarea's max-height: about five lines
+  const ONE_LINE = 39; // the borderless single-line pill
+
+  // the px the disc's BOTTOM edge sits above the bar's bottom, for a given
+  // home-indicator clearance and a given live pill height
+  function seatPx(padB: number, fieldH: number): number {
+    const expr = seat
+      .replace("var(--pad-b)", `${padB}px`)
+      .replace(/var\(--field-h,\s*\d+px\)/, `${fieldH}px`)
+      .replace(/([\d.]+)rem/g, (_m, n: string) => `${Number(n) * ROOT_FONT}px`);
+    expect(expr).toMatch(/^[\d.px +]+$/); // a plain sum: adding the terms IS the calc
+    return expr.split("+").reduce((a, t) => a + Number.parseFloat(t), 0);
+  }
+
+  it("one line and the five-line cap alike leave exactly one padding unit of air", () => {
+    // the pill's TOP edge sits its own height above the bar's bottom padding
+    for (const padB of [8, 34]) { // the .kb collapse, and a home-indicator inset
+      for (const pill of [ONE_LINE, 60, 82, CAP]) {
+        expect(seatPx(padB, pill) - (padB + pill)).toBe(GAP);
+      }
+    }
+  });
+
+  it("the box can no longer swallow it — the old constant sat INSIDE a grown pill", () => {
+    // the bug in numbers: nailed to the single-line height, a five-line pill
+    // rose 69px past the disc's own bottom edge, so the disc was in the box
+    const nailed = 8 + ONE_LINE + GAP;
+    expect(8 + CAP - nailed).toBe(69);
+    expect(seatPx(8, CAP)).toBeGreaterThan(8 + CAP); // the live seat clears it
+  });
+
+  it("the fallback IS the single-line height: the one-line seat never moved", () => {
+    expect(seat).toContain("var(--field-h, 39px)");
+    expect(seatPx(8, ONE_LINE)).toBe(8 + ONE_LINE + GAP); // the old rule's own number
+  });
+
+  it("the right edge never moved: still tangent to the pill's outer right edge", () => {
+    expect(jumpRule).toContain("right: 0.75rem");
+    expect(jumpRule).not.toContain("left:");
+    const composeRule = css.match(/\n\.compose \{([^}]*)\}/)?.[1] ?? "";
+    expect(composeRule).toContain("padding: 0.5rem 0.75rem var(--pad-b)");
+  });
+
+  it("autosize publishes the pill's MEASURED height on every resize", () => {
+    const autosizeBody = main.match(/function autosize\([\s\S]*?\n\}\n/)?.[0] ?? "";
+    expect(autosizeBody).toContain('setProperty("--field-h"');
+    expect(autosizeBody).toContain("pill.offsetHeight"); // measured, never written down
+  });
+
+  it("the keyboard edge feeds the gate: shell.ts's edge, downbtn.ts's rule", () => {
+    expect(main).toContain("watchKeyboard((up) => downBtn.keyboard(up, followTail))");
+    expect(shell).toContain("const keyboard = t.kb || focusing;"); // the tap AND the proven keyboard
+    expect(shell).toContain("if (keyboard !== appliedKeyboard)"); // edges only, never per event
   });
 });
