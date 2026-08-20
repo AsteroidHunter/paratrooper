@@ -645,7 +645,7 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         # after first paint), and the viewport tail above would clip them the
         # moment a session gets busy
         bm = [e for e in events if isinstance(e, dict)
-              and e.get("ev") in ("boot-motion", "boot-repin")]
+              and e.get("ev") in ("boot-motion", "boot-repin", "boot-blank")]
         if bm:
             _diag.info("holddiag boot events=%d head=%s", len(bm), json.dumps(bm[:30]))
         return {"ok": True}

@@ -15,6 +15,64 @@
 // beneath a thin canvas/DOM layer.
 import { SPLASH_LOGO_H, SPLASH_LOGO_INLINE, SPLASH_LOGO_W } from "./splashlogo";
 
+// ===================== TEMP DIAGNOSTIC (remove after the cold-open session) =====================
+// The white gap, measured instead of reasoned about. On a cold open the phone
+// paints its own saved launch image instantly, then hands the web view a page
+// with nothing drawn on it at all, and that bare page is the white flash a
+// standalone open shows until the cover further down goes up. Both ends of
+// that stretch are read here off performance.now(), which counts from the
+// moment the page began loading:
+//
+//   codeStartMs: the bundle is running. Read as this module's first statement,
+//     so it carries the fetch and the parse and none of the work the app does
+//     afterwards. Nothing earlier is reachable from here: no timing API says
+//     when a script BEGINS executing, only when its bytes finished arriving.
+//   coverUpMs: the cover is in the document, read the instant the append that
+//     puts it there returns. codeStartMs to coverUpMs is the app's own startup;
+//     zero to codeStartMs is everything that happened before the app had a say.
+//   htmlDoneMs: the navigation entry's responseEnd, the last byte of the HTML
+//     document. Splits that first stretch again, into waiting for the page and
+//     then fetching plus parsing the bundle the page asks for.
+//
+// main.ts lands all three on the holddiag boot channel as one boot-blank
+// record. TO REMOVE: delete this block, the one assignment inside
+// installSplashCover below, the boot-blank record in main.ts, the matching
+// block at the end of tests/splash.test.ts, and the "boot-blank" names in
+// hold.ts and web/app.py.
+const CODE_START_MS = performance.now();
+
+// set once, when the cover enters the document, and left null wherever no
+// cover mounts at all: a browser tab had no launch image to hand over from,
+// so there is no blank stretch of this kind to report on one
+let coverUpMs: number | null = null;
+
+// A type alias rather than an interface, which is what lets the result hand
+// straight to the trail's Record<string, unknown> field bag with nothing
+// restated and nothing copied: only aliases carry the implicit index
+// signature that assignment needs.
+export type BootBlankGap = {
+  codeStartMs: number;
+  coverUpMs: number | null;
+  htmlDoneMs: number | null;
+};
+
+// The two marks, plus the split of the first one, as whole milliseconds for
+// the caller to record. The navigation entry is read here rather than at
+// module time on purpose: it is complete long before either of the other two
+// marks, so reading it late costs nothing and keeps the module's first
+// statement to the one thing it has to be.
+export function bootBlankGap(): BootBlankGap {
+  const nav = performance.getEntriesByType("navigation")[0] as
+    | PerformanceNavigationTiming
+    | undefined;
+  return {
+    codeStartMs: Math.round(CODE_START_MS),
+    coverUpMs: coverUpMs === null ? null : Math.round(coverUpMs),
+    htmlDoneMs: nav ? Math.round(nav.responseEnd) : null,
+  };
+}
+// =================== END TEMP DIAGNOSTIC (remove after the cold-open session) ===================
+
 // The logo's longer side spans this fraction of the screen's SHORTER edge; the
 // logo's other side and its centered position are then derived from the logo's
 // own aspect ratio and the device's pixel size. This is the only tuned number
@@ -428,6 +486,10 @@ export function installSplashCover(
       `color:${SPLASH_HANDLE_COLOR};`;
     el.appendChild(handle);
     document.body.appendChild(el);
+    // TEMP DIAGNOSTIC (the block at the top of this file owns the why): the
+    // cover is on screen from this instant, so this is the far end of the
+    // stretch the page spent with nothing drawn on it
+    coverUpMs = performance.now();
     const cover = createSplashCover((why) => {
       el.style.pointerEvents = "none"; // the fade must not eat the first tap
       el.style.opacity = "0";

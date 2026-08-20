@@ -667,3 +667,103 @@ describe("installSplashCover: both marks are in the cover the frame it appears",
     expect(el.style.opacity).toBe("0"); // the fade is unchanged by the inlining
   });
 });
+
+// ===================== TEMP DIAGNOSTIC (remove after the cold-open session) =====================
+// Pins for the blank-stretch probe (src/splash.ts, the block at the top of it):
+// the record main.ts posts is the only thing a deploy log will have, so both
+// marks have to be in it and they have to be in the right order. A fresh module
+// load stands in for a page load, since the code mark is read as the module
+// evaluates; the cover mark is read when the mount attaches, so the two are
+// separated here by a timer step the way real startup work would separate them.
+describe("bootBlankGap: the two ends of the blank stretch, in one record", () => {
+  // the same recording stand-in idea as the mount suite above, pared to the
+  // handful of properties the cover writes
+  interface FakeEl {
+    id: string;
+    alt: string;
+    src: string;
+    decoding: string;
+    textContent: string;
+    style: Record<string, string>;
+    children: FakeEl[];
+    appendChild(c: FakeEl): void;
+    remove(): void;
+  }
+
+  function fakeEl(): FakeEl {
+    const el: FakeEl = {
+      id: "",
+      alt: "",
+      src: "",
+      decoding: "",
+      textContent: "",
+      style: { cssText: "" },
+      children: [],
+      appendChild(c) {
+        el.children.push(c);
+      },
+      remove() {},
+    };
+    return el;
+  }
+
+  async function loadFresh(standalone: boolean) {
+    vi.stubGlobal("document", { body: fakeEl(), createElement: () => fakeEl() });
+    vi.stubGlobal("navigator", { standalone, userAgent: "iPhone" });
+    vi.stubGlobal("screen", { width: 390, height: 844 });
+    vi.stubGlobal("window", { devicePixelRatio: 3 });
+    vi.resetModules(); // a fresh evaluation is a fresh page load: the code mark is re-read
+    return await import("../src/splash");
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers(); // the cover's lift timers arm on mount
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("carries both marks, and the cover's is never earlier than the code's", async () => {
+    const beforeLoad = performance.now();
+    const mod = await loadFresh(true);
+    vi.advanceTimersByTime(50); // stands in for whatever the app does before it covers
+    const beforeMount = performance.now();
+    mod.installSplashCover("/splash-logo.png");
+    const afterMount = performance.now();
+    const gap = mod.bootBlankGap();
+    expect(typeof gap.codeStartMs).toBe("number");
+    expect(typeof gap.coverUpMs).toBe("number");
+    // each mark has to sit inside the window it claims to have been taken in:
+    // the code one while the module evaluated, the cover one while the cover
+    // attached. Bracketing them rather than pinning exact numbers keeps this
+    // honest whether or not the runner's clock is the faked one.
+    expect(gap.codeStartMs).toBeGreaterThanOrEqual(Math.round(beforeLoad));
+    expect(gap.codeStartMs).toBeLessThanOrEqual(Math.round(beforeMount));
+    expect(gap.coverUpMs as number).toBeGreaterThanOrEqual(Math.round(beforeMount));
+    expect(gap.coverUpMs as number).toBeLessThanOrEqual(Math.round(afterMount));
+    expect(gap.coverUpMs as number).toBeGreaterThanOrEqual(gap.codeStartMs);
+  });
+
+  it("reports no cover mark until a cover has actually gone up", async () => {
+    const mod = await loadFresh(true);
+    expect(mod.bootBlankGap().coverUpMs).toBeNull(); // nothing mounted yet: nothing to claim
+    mod.installSplashCover("/splash-logo.png");
+    expect(mod.bootBlankGap().coverUpMs).not.toBeNull();
+  });
+
+  it("leaves the cover mark null where no cover mounts at all", async () => {
+    const mod = await loadFresh(false); // a browser tab: no launch image to hand over from
+    mod.installSplashCover("/splash-logo.png");
+    const gap = mod.bootBlankGap();
+    expect(gap.coverUpMs).toBeNull();
+    expect(typeof gap.codeStartMs).toBe("number"); // the code mark still stands on its own
+  });
+
+  it("degrades the html mark to null where there is no navigation entry", async () => {
+    const mod = await loadFresh(true);
+    expect(mod.bootBlankGap().htmlDoneMs).toBeNull(); // node reports no navigation timing
+  });
+});
+// =================== END TEMP DIAGNOSTIC (remove after the cold-open session) ===================

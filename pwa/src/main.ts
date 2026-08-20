@@ -34,7 +34,7 @@ import {
   initShell,
   watchKeyboard,
 } from "./shell";
-import { installSplashCover, installStartupImage } from "./splash";
+import { bootBlankGap, installSplashCover, installStartupImage } from "./splash";
 import {
   USER_SCROLL_INTENT_MS,
   compensationFor,
@@ -54,7 +54,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.5"; // handle on both splashes, bumped so the build is verifiable
+const APP_VERSION = "0.3.6"; // cold-open blank gap recorded, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -3007,6 +3007,19 @@ installStartupImage("/splash-logo.png"); // full-res cut-out; the 140px topbar f
 const splashCover = installSplashCover("/splash-logo.png", (why) =>
   holdDiagRecord("splash-cover", { lift: why }),
 );
+
+// ===================== TEMP DIAGNOSTIC (remove after the cold-open session) =====================
+// The white gap, on the boot channel. The cover has just mounted, so both ends
+// of the stretch the page spent with nothing drawn on it are readable now:
+// codeStartMs when this bundle began running, coverUpMs when the cover entered
+// the document, htmlDoneMs when the HTML itself finished arriving, all counted
+// from the moment the page began loading (splash.ts holds what each mark is
+// and why it is read where it is). One record, recorded here rather than in
+// splash.ts so the cover module keeps its single job and the trail keeps its
+// single writer, so a cold open puts a real number in the deploy logs instead
+// of leaving the gap to be inferred from the code.
+holdDiagRecord("boot-blank", bootBlankGap());
+// =================== END TEMP DIAGNOSTIC (remove after the cold-open session) ===================
 
 // The cover's settle signal: the boot's messages have been laid out for a frame
 // and every image the thread painted has finished loading. Called from the
