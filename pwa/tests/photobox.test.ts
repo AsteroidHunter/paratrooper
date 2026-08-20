@@ -13,8 +13,16 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
-import { SHOT_MAX_WIDTH, photoBox } from "../src/photobox";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  SHOT_DRAW_MS,
+  SHOT_MAX_WIDTH,
+  THUMB_SLIDE_PX,
+  photoBox,
+  thumbSlide,
+  whenDrawn,
+} from "../src/photobox";
+import type { Drawable, DrawWhy } from "../src/photobox";
 
 // what CSS `height: auto` gives a replaced element once its own size is known
 function renderedHeight(natW: number, natH: number, usedW: number): number {
@@ -76,6 +84,186 @@ describe("photoBox: the seat reserved before the pixels land", () => {
   });
 });
 
+// --- the wait: read is not drawn ----------------------------------------------
+// The blank both bugs showed. A real image reports load as soon as the file is
+// READ and only paints once its pixels are DRAWN, and on a camera photo those
+// are a beat apart; the fake below can be told to do each one separately, so
+// "the app went on the read" and "the app went on the draw" are distinguishable
+// outcomes rather than a restatement of whichever call the code happens to make.
+
+class FakeImg implements Drawable {
+  listeners = new Map<string, (() => void)[]>();
+  decodes = 0;
+  private finishDecode: (() => void) | null = null;
+  private failDecode: (() => void) | null = null;
+
+  decode(): Promise<unknown> {
+    this.decodes++;
+    return new Promise<void>((res, rej) => {
+      this.finishDecode = () => res();
+      this.failDecode = () => rej(new Error("EncodingError"));
+    });
+  }
+
+  addEventListener(type: string, cb: () => void): void {
+    const list = this.listeners.get(type) ?? [];
+    list.push(cb);
+    this.listeners.set(type, list);
+  }
+
+  /** the file is in: every byte read, size known, NOT yet painted */
+  read(): void {
+    for (const cb of this.listeners.get("load") ?? []) cb();
+  }
+
+  /** the pixels are ready to paint: safe to put on screen */
+  drawn(): void {
+    this.finishDecode?.();
+  }
+
+  /** the phone gave up on the pixels */
+  broke(): void {
+    this.failDecode?.();
+  }
+}
+
+// an image element from a browser too old to have decode() at all
+class ReadOnlyImg extends FakeImg {
+  // @ts-expect-error deliberately absent, which is the case under test
+  decode = undefined;
+}
+
+// what the caller has actually learned so far, so "has not settled yet" is a
+// thing a test can assert instead of a thing it waits for
+function watch(p: Promise<DrawWhy>): { why: DrawWhy | null } {
+  const seen: { why: DrawWhy | null } = { why: null };
+  void p.then((w) => {
+    seen.why = w;
+  });
+  return seen;
+}
+
+// drains the promise jobs a settle travels through, without letting the clock move
+async function microtasks(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+}
+
+describe("whenDrawn: nothing shows a photo until the pixels are there", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("does not settle when the file is merely READ", async () => {
+    const img = new FakeImg();
+    const seen = watch(whenDrawn(img, SHOT_DRAW_MS));
+    img.read(); // load has fired: the old wait ended HERE, and the frame was blank
+    await microtasks();
+    vi.advanceTimersByTime(SHOT_DRAW_MS - 1); // still inside the deadline
+    await microtasks();
+    expect(seen.why).toBeNull();
+  });
+
+  it("settles once the pixels are drawn, which is later than the read", async () => {
+    const img = new FakeImg();
+    const seen = watch(whenDrawn(img, SHOT_DRAW_MS));
+    img.read();
+    vi.advanceTimersByTime(120); // the beat between reading and drawing
+    await microtasks();
+    expect(seen.why).toBeNull();
+    img.drawn();
+    await microtasks();
+    expect(seen.why).toBe("drawn");
+  });
+
+  it("a photo that never draws still goes, at the deadline", async () => {
+    const img = new FakeImg();
+    const seen = watch(whenDrawn(img, SHOT_DRAW_MS));
+    img.read();
+    vi.advanceTimersByTime(SHOT_DRAW_MS);
+    await microtasks();
+    expect(seen.why).toBe("late"); // the send is not held, exactly as before
+  });
+
+  it("a photo that never even reads still goes, at the same deadline", async () => {
+    const img = new FakeImg();
+    const seen = watch(whenDrawn(img, SHOT_DRAW_MS));
+    vi.advanceTimersByTime(SHOT_DRAW_MS);
+    await microtasks();
+    expect(seen.why).toBe("late");
+  });
+
+  it("a decode that fails settles instead of hanging until the deadline", async () => {
+    const img = new FakeImg();
+    const seen = watch(whenDrawn(img, SHOT_DRAW_MS));
+    img.broke();
+    await microtasks();
+    expect(seen.why).toBe("error");
+    expect(vi.getTimerCount()).toBe(0); // and the deadline is disarmed behind it
+  });
+
+  it("a decode refused outright falls back to the read rather than throwing", async () => {
+    const img = new FakeImg();
+    img.decode = () => {
+      throw new Error("refused");
+    };
+    const seen = watch(whenDrawn(img, SHOT_DRAW_MS));
+    img.read();
+    await microtasks();
+    expect(seen.why).toBe("load");
+  });
+
+  it("a browser with no decode() settles on the read, the old behaviour", async () => {
+    const img = new ReadOnlyImg();
+    const seen = watch(whenDrawn(img, SHOT_DRAW_MS));
+    img.read();
+    await microtasks();
+    expect(seen.why).toBe("load"); // not "late": it must not wait out the deadline
+  });
+
+  it("settles exactly once: a late deadline cannot overwrite a drawn photo", async () => {
+    const img = new FakeImg();
+    const seen = watch(whenDrawn(img, SHOT_DRAW_MS));
+    img.drawn();
+    await microtasks();
+    expect(seen.why).toBe("drawn");
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(SHOT_DRAW_MS * 10);
+    await microtasks();
+    expect(seen.why).toBe("drawn");
+  });
+
+  it("asks the image to decode once, not once per waiter", async () => {
+    const img = new FakeImg();
+    watch(whenDrawn(img, SHOT_DRAW_MS));
+    img.drawn();
+    await microtasks();
+    expect(img.decodes).toBe(1);
+  });
+});
+
+// --- the picked photo's entrance ----------------------------------------------
+
+describe("thumbSlide: the preview comes in from the left and settles", () => {
+  it("starts displaced to the LEFT and ends home", () => {
+    const [from, to] = thumbSlide();
+    expect(String(from.transform)).toMatch(/^translateX\(-\d/); // negative x: left of its seat
+    expect(to.transform).toBe("none");
+  });
+
+  it("travels a short way, with no origin to read as the ＋ button", () => {
+    expect(THUMB_SLIDE_PX).toBeGreaterThan(0);
+    expect(THUMB_SLIDE_PX).toBeLessThanOrEqual(24); // under half the 64px thumbnail
+  });
+
+  it("moves and fades only: nothing here grows the photo out of nothing", () => {
+    const frames = thumbSlide();
+    expect(frames.map((f) => f.opacity)).toEqual([0, 1]);
+    for (const f of frames) {
+      expect(Object.keys(f).sort()).toEqual(["opacity", "transform"]);
+      expect(String(f.transform)).not.toMatch(/scale/);
+    }
+  });
+});
+
 // --- source pins on the main.ts wiring ----------------------------------------
 
 const src = readFileSync(
@@ -83,6 +271,8 @@ const src = readFileSync(
   "utf8",
 );
 
+// read inside each test, never at describe level: a pin for a function that does
+// not exist yet must fail as its own test, not take the whole file down with it
 function fnBody(name: string): string {
   const start = src.indexOf(`function ${name}(`);
   expect(start).toBeGreaterThan(-1);
@@ -91,45 +281,111 @@ function fnBody(name: string): string {
 }
 
 describe("photo send wiring: the seat is taken before the thread pins", () => {
-  const send = fnBody("send");
+  const send = (): string => fnBody("send");
+  const prepare = (): string => fnBody("prepareShot");
 
-  it("the file's own pixels are read before the row is built", () => {
-    const read = send.indexOf("files.map(prepareShot)");
-    const insert = send.indexOf('rowEl(w, "user", "shot"');
-    expect(read).toBeGreaterThan(-1);
-    expect(read).toBeLessThan(insert);
-    expect(fnBody("prepareShot")).toContain("img.naturalWidth > 0 && img.naturalHeight > 0");
+  it("the photo is DRAWN, not merely read, before the row is built", () => {
+    expect(prepare()).toContain("whenDrawn(img, SHOT_DRAW_MS)");
+    // the old wait: a load listener settling the promise. Its absence is the fix.
+    expect(prepare()).not.toContain('addEventListener("load"');
   });
 
-  it("the read is awaited before anything measures, inserts, pins or flies", () => {
+  it("the drawn photo is taken from the tray, prepared when it was picked", () => {
+    const take = send().indexOf("files.map(takeShot)");
+    const insert = send().indexOf('rowEl(w, "user", "shot"');
+    expect(take).toBeGreaterThan(-1);
+    expect(take).toBeLessThan(insert);
+    expect(fnBody("stagePick")).toContain("prepareShot(url)"); // at pick time, not send time
+  });
+
+  it("the wait is awaited before anything measures, inserts, pins or flies", () => {
+    const send = fnBody("send");
     const wait = send.indexOf("await Promise.all(shots)");
     expect(wait).toBeGreaterThan(-1);
     expect(wait).toBeLessThan(send.indexOf("beginSiblingShift()"));
     expect(wait).toBeLessThan(send.indexOf("localWrapper(\"user\")"));
+    expect(wait).toBeLessThan(send.indexOf("div.appendChild(img)"));
     expect(wait).toBeLessThan(send.indexOf("scrollToBottom(true)"));
     expect(wait).toBeLessThan(send.indexOf("flyFromField(w, morph)"));
   });
 
   it("the box is written onto the row before the pin, from ratio and row width", () => {
-    const reserve = send.indexOf("photoBox(shot.nat[0], shot.nat[1], rowW)");
+    const send = fnBody("send");
+    const reserve = send.indexOf("photoBox(nat[0], nat[1], rowW)");
     expect(reserve).toBeGreaterThan(-1);
     expect(reserve).toBeLessThan(send.indexOf("scrollToBottom(true)"));
-    expect(send).toContain("img.width = shot.nat[0]"); // the ratio height:auto reads
-    expect(send).toContain("img.height = shot.nat[1]");
+    expect(send).toContain("img.width = nat[0]"); // the ratio height:auto reads
+    expect(send).toContain("img.height = nat[1]");
     expect(send).toContain("img.style.width = `${box.width}px`"); // the bubble's share
     expect(send).toContain("threadContentWidth()");
+    // read at insert time, so a photo that outran its deadline and has since
+    // drawn still gets its exact seat
+    expect(send).toContain("naturalSize(img)");
+    expect(fnBody("naturalSize")).toContain("img.naturalWidth > 0 && img.naturalHeight > 0");
   });
 
   it("a size that never arrives falls back to a re-pin on load", () => {
+    const send = fnBody("send");
     const fallback = send.indexOf("img.onload");
     expect(fallback).toBeGreaterThan(-1);
     expect(send.slice(fallback)).toContain("if (followTail) scrollToBottom(true)");
-    expect(fnBody("prepareShot")).toContain("SHOT_DIMS_MS"); // the read is deadlined
+    expect(prepare()).toContain("SHOT_DRAW_MS"); // the wait is deadlined
+  });
+
+  it("the send never revokes a url the thread has started reading from", () => {
+    expect(fnBody("takeShot")).toContain('pick.url = ""');
+    expect(fnBody("renderPending")).toContain("if (pick.url) URL.revokeObjectURL(pick.url)");
   });
 
   it("both outcomes ride the existing flight trail, no new channel", () => {
-    expect(send).toContain('phase: "shot-reserve"');
-    expect(fnBody("prepareShot")).toContain('phase: "shot-dims"');
+    expect(send()).toContain('phase: "shot-reserve"');
+    expect(prepare()).toContain('phase: "shot-dims"');
     expect(src).not.toMatch(/holdDiagRecord\("shot/); // the flight channel, not a new one
+  });
+});
+
+describe("picked-photo preview wiring: it carries its pixels before it is seen", () => {
+  it("the thumbnail is built holding no seat at all", () => {
+    const stage = fnBody("stagePick");
+    expect(stage).toContain('wrap.className = "pthumb undrawn"');
+    // and the stylesheet is what makes that mean "not on screen"
+    const css = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../src/styles.css"),
+      "utf8",
+    );
+    expect(css).toMatch(/\.pthumb\.undrawn\s*\{\s*display:\s*none;\s*\}/);
+  });
+
+  it("the reveal is the drawn wait's own continuation, not a step beside it", () => {
+    const stage = fnBody("stagePick");
+    const wait = stage.indexOf("whenDrawn(img, SHOT_DRAW_MS).then");
+    const reveal = stage.indexOf('wrap.classList.remove("undrawn")');
+    expect(wait).toBeGreaterThan(-1);
+    expect(wait).toBeLessThan(reveal);
+    // nothing before the wait puts it on screen: the tray is opened by showPending,
+    // and the only call to it inside stagePick sits inside that continuation
+    expect(stage.indexOf("showPending()")).toBeGreaterThan(wait);
+  });
+
+  it("the slide starts from a drawn thumbnail, never an empty frame", () => {
+    const stage = fnBody("stagePick");
+    const reveal = stage.indexOf('wrap.classList.remove("undrawn")');
+    const slide = stage.indexOf("wrap.animate(thumbSlide()");
+    expect(slide).toBeGreaterThan(-1);
+    expect(reveal).toBeLessThan(slide);
+    expect(stage).toContain("{ duration: FLIGHT_MS, easing: FLIGHT_EASE }"); // the app's own beat
+  });
+
+  it("the tray opens only for thumbnails that have their pixels", () => {
+    expect(fnBody("showPending")).toContain(
+      'pendingFiles.some((f) => picks.get(f)?.shown) ? "flex" : "none"',
+    );
+    // the old tray rebuilt itself blank on every change
+    expect(fnBody("renderPending")).not.toContain('box.innerHTML = ""');
+  });
+
+  it("a thumbnail that never draws still appears, on the send's own deadline", () => {
+    expect(fnBody("stagePick")).toContain("whenDrawn(img, SHOT_DRAW_MS)");
+    expect(src).toContain("import { SHOT_DRAW_MS, photoBox, thumbSlide, whenDrawn }");
   });
 });

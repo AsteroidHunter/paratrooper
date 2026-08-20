@@ -920,6 +920,10 @@ html, body {
   padding: 0.4rem 0.75rem 0;
 }
 .pthumb { position: relative; }
+/* a thumbnail whose pixels are not drawn yet holds no seat: it is already in the
+   tray so its slide has something to move, but an empty frame that fills a beat
+   later is the thing this tray is not allowed to show (main.ts stagePick) */
+.pthumb.undrawn { display: none; }
 .pthumb img {
   width: 64px;
   height: 64px;
