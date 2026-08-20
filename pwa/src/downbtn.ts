@@ -14,7 +14,7 @@
 // beneath a thin wiring in main.ts: the scroll handler feeds it at-bottom
 // facts, and it drives the .show class through the one callback.
 
-export const PAUSE_MS = 4000;
+export const PAUSE_MS = 3000;
 
 export interface DownButton {
   /** every thread scroll event, with the handler's own nearBottom() verdict */

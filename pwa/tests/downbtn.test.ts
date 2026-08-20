@@ -33,8 +33,8 @@ afterEach(() => {
 });
 
 describe("showing — only a settled pause while away from the bottom", () => {
-  it("the stillness window is 4 seconds", () => {
-    expect(PAUSE_MS).toBe(4000);
+  it("the stillness window is 3 seconds", () => {
+    expect(PAUSE_MS).toBe(3000);
   });
 
   it("shows after the full pause of stillness while away, not before", () => {
