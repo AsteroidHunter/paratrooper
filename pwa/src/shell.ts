@@ -38,7 +38,7 @@
 //   one display-none reflow when innerHeight stays short of the baseline
 //   after the close settles (dev.to cederhook). ONE narrow exception exists
 //   mid-typing, and it is not a correction of tracked state but a refusal to
-//   track: the growth-time shove clear (shoveVerdict below) — the deploy-log
+//   track: the typing-time shove clear (shoveVerdict below) — the deploy-log
 //   proof that "track everything" faithfully turned iOS's caret-reveal scroll
 //   into a visible step per grown line, 412px piled up by close (2026-08-18).
 // - Dismissing the picker menu only LOOKS instant: WKFileUploadPanel keeps
@@ -119,11 +119,20 @@ export function closeCorrectionNeeded(x: number, y: number, vvTop: number): bool
 // (window.scrollTo(0,0), same frame) and leave the shell box unwritten.
 // Geometry the keyboard actually changed (vv.height moved: the rise, the
 // close, an accessory bar) keeps being tracked, and the open/close edges
-// never reach this decision. The yield arm is the re-shove guard the retired
-// kb-vv counter lacked — it re-fought the same scroll after every clear,
-// forever: a shove re-landing inside RESHOVE_YIELD_MS of a clear is tracked
-// once and left to the close-time correction instead.
-export const RESHOVE_YIELD_MS = 500;
+// never reach this decision.
+//
+// The guard on the fight is a BUDGET PER KEYSTROKE, not a delay. The retired
+// kb-vv counter had no bound at all and re-fought the same scroll forever; the
+// 500ms re-shove window that replaced it bounded the loop by time, which meant
+// a second shove arriving while he was still typing the same line was let
+// through on purpose, so roughly every other shove stuck and the error piled up
+// line by line (his report: "after three to five lines the protection stops
+// working"). Now every keystroke re-opens the budget (keystrokeStarted below),
+// so the ordinary one-shove-per-key case is ALWAYS corrected on its own frame,
+// and only a phone that re-shoves MAX_SHOVE_CLEARS times inside a single
+// keystroke is yielded to (tracked, then cleaned up at close) so the two sides
+// cannot loop.
+export const MAX_SHOVE_CLEARS = 3;
 
 export type ShoveVerdict = "track" | "clear" | "yield";
 
@@ -133,12 +142,12 @@ export function shoveVerdict(
   scrollX: number,
   scrollY: number,
   heightChanged: boolean,
-  sinceClearMs: number,
+  clearsThisKeystroke: number,
 ): ShoveVerdict {
   if (!kbWasUp || !kbStillUp) return "track"; // the edges are the shell's own business
   if (heightChanged) return "track"; // the keyboard/viewport truly moved
   if (scrollX === 0 && scrollY === 0) return "track"; // no scroll source: a pan is truth
-  return sinceClearMs < RESHOVE_YIELD_MS ? "yield" : "clear";
+  return clearsThisKeystroke < MAX_SHOVE_CLEARS ? "clear" : "yield";
 }
 
 // iOS 17/18 standalone stuck-small-viewport: after the keyboard closes the
@@ -311,9 +320,10 @@ let appliedHeight: number | null = null;
 // close is the ONLY moment corrections may run
 let kbUp = false;
 let closeRetry: ReturnType<typeof setTimeout> | null = null;
-// the re-shove guard's clock (shoveVerdict's yield arm): when the last
-// growth-time shove clear ran; -Infinity = armed to clear
-let lastShoveClearAt = -Infinity;
+// the correction budget (shoveVerdict's guard): how many shove clears this
+// keystroke has already spent. Every keystroke resets it, so a keystroke that
+// shoves once is always corrected.
+let shoveClears = 0;
 // when an editor last gained focus — the focusing signal's clock
 let focusStartAt = -Infinity;
 // the focusing class as applied, so its edges record to the trail once each
@@ -474,7 +484,7 @@ function correctionPass(phase: "close" | "retry"): void {
 
 function keyboardClosed(): void {
   if (closeRetry) clearTimeout(closeRetry);
-  lastShoveClearAt = -Infinity; // a new session must not inherit the yield state
+  shoveClears = 0; // a new session must not inherit a spent budget
   correctionPass("close");
   closeRetry = setTimeout(() => {
     closeRetry = null;
@@ -502,34 +512,41 @@ function releaseParkedEditor(): void {
   (active as HTMLElement).blur();
 }
 
+// A keystroke re-opens the shove correction budget. Called from the capture
+// phase in initShell so a re-rendered composer needs no rebinding, and from
+// both beforeinput and keydown so keys that change no text (arrows, delete on
+// an empty box) still count: iOS reveals the caret for those too.
+function keystrokeStarted(): void {
+  shoveClears = 0;
+}
+
 export function reconcile(): void {
   const t = computeShell(readWorld());
   const wasUp = kbUp;
   kbUp = t.kb;
-  // Growth-time shove backstop: while the keyboard is up and steady, a vv
+  // Typing-time shove backstop: while the keyboard is up and steady, a vv
   // move sourced from a window scroll (this same batch's scrollX/Y) is
   // cleared in this same frame and the box is NOT rewritten — the stable
   // target hands applyShell the applied numbers, so the write guard sees no
-  // change and nothing moves. scrollTo(0,0) refires scroll once with
-  // everything already zero, so a clear cannot loop; a re-shove inside the
-  // yield window is tracked once and left to the close-time correction
-  // (shoveVerdict owns the whole decision).
+  // change and nothing moves. Every shove is corrected on the frame it lands,
+  // never seen and undone later; scrollTo(0,0) refires scroll once with
+  // everything already zero, so a clear cannot loop, and the per-keystroke
+  // budget bounds a phone that keeps re-shoving (shoveVerdict owns the whole
+  // decision). The record carries the budget spent, so the trail says whether
+  // any keystroke needed more than one correction.
   let target = t;
   if (appEl) {
     const x = Math.round(window.scrollX);
     const y = Math.round(window.scrollY);
     const heightChanged = appliedHeight === null || Math.round(t.vvHeight) !== appliedHeight;
-    const verdict = shoveVerdict(
-      wasUp, t.kb, x, y, heightChanged, performance.now() - lastShoveClearAt,
-    );
+    const verdict = shoveVerdict(wasUp, t.kb, x, y, heightChanged, shoveClears);
     if (verdict === "clear" && appliedTop !== null && appliedHeight !== null) {
-      lastShoveClearAt = performance.now();
+      shoveClears += 1;
       window.scrollTo(0, 0);
       target = { kb: t.kb, vvTop: appliedTop, vvHeight: appliedHeight };
-      holdDiagRecord("kb-shove", { act: "clear", x, y, top: Math.round(t.vvTop) });
+      holdDiagRecord("kb-shove", { act: "clear", n: shoveClears, x, y, top: Math.round(t.vvTop) });
     } else if (verdict === "yield") {
-      lastShoveClearAt = -Infinity; // yielded once; the next distinct shove clears again
-      holdDiagRecord("kb-shove", { act: "yield", x, y, top: Math.round(t.vvTop) });
+      holdDiagRecord("kb-shove", { act: "yield", n: shoveClears, x, y, top: Math.round(t.vvTop) });
     }
   }
   // the visual off-state covers the whole session; the tap hold stays
@@ -612,6 +629,16 @@ export function initShell(el: HTMLElement): void {
   });
   // one frame's grace on focusout: focus may be hopping between editables
   document.addEventListener("focusout", () => requestAnimationFrame(reconcile));
+  // every keystroke in an editable re-opens the shove correction budget
+  for (const type of ["beforeinput", "keydown"]) {
+    document.addEventListener(
+      type,
+      (e) => {
+        if (isEditable(e.target)) keystrokeStarted();
+      },
+      true,
+    );
+  }
   window.visualViewport?.addEventListener("resize", reconcile);
   window.visualViewport?.addEventListener("scroll", reconcile);
   window.addEventListener("orientationchange", () => {

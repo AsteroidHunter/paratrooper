@@ -13,15 +13,23 @@
 //   resized at the tail   -> pin-bottom: re-anchor the bottom edge so the
 //                            last reply stays exactly in view (grow AND
 //                            shrink — the send collapse rides this too)
-//   resized mid-history   -> keep-position: a bottom-edge resize never moves
-//                            content coordinates, so an untouched scrollTop
-//                            IS the stable reading position — write nothing
+//   GREW mid-history      -> give-up: the thread hands back exactly the pixels
+//                            the bar just took (scrollTop += the growth), so
+//                            the bottom-most line keeps its place on screen
+//                            instead of being clipped away under the bar.
+//                            This is the "the box eats the last message" fix:
+//                            an untouched scrollTop leaves whatever sat at the
+//                            bottom edge outside the shrunken box, and with
+//                            following off nothing ever pins it back.
+//   shrank mid-history    -> keep-position: the box grew back, nothing was
+//                            covered, and an untouched scrollTop IS the stable
+//                            reading position, so write nothing
 //   height unchanged      -> none
 //
 // Same shape as the hold/splash modules: a pure decision (unit-tested, no
 // DOM) beneath a few-line wiring in main.ts.
 
-export type Compensation = "pin-bottom" | "keep-position" | "none";
+export type Compensation = "pin-bottom" | "give-up" | "keep-position" | "none";
 
 export function compensationFor(
   oldHeight: number,
@@ -29,7 +37,21 @@ export function compensationFor(
   atBottom: boolean,
 ): Compensation {
   if (newHeight === oldHeight) return "none";
-  return atBottom ? "pin-bottom" : "keep-position";
+  if (atBottom) return "pin-bottom";
+  return newHeight > oldHeight ? "give-up" : "keep-position";
+}
+
+// The give-up write, as a number: exactly the height the bar gained, clamped
+// to the thread's own range. At the tail this lands on the same value the
+// bottom pin does (a shrinking box raises maxScrollTop by the same delta), so
+// both arms keep the newest message fully visible and neither one overshoots.
+export function giveUpTarget(
+  scrollTop: number,
+  oldHeight: number,
+  newHeight: number,
+  maxScrollTop: number,
+): number {
+  return Math.max(0, Math.min(maxScrollTop, scrollTop + (newHeight - oldHeight)));
 }
 
 // followTail protection while composing — the decision half of the device bug
@@ -60,8 +82,8 @@ export function followFlipDecision(
 // The mid-typing shove doors and the kb-vv counter that lived below are
 // retired (2026-08): the shell is sized from the visual viewport for the
 // whole keyboard session (shell.ts), the composer's focus blink suppresses
-// the caret reveal at the source (styles.css) and is re-armed per grown line
-// (autosize's growth blink, main.ts), displacement is corrected once at
-// keyboard close, and the one mid-typing decision left — a scroll-sourced
-// shove refused rather than tracked, with a yield guard against the old
-// counter's loop — lives in shell.ts (shoveVerdict), not here.
+// the caret reveal at the source (styles.css) and is re-armed on EVERY
+// keystroke while the keyboard is up (autosize, main.ts), displacement is
+// corrected once at keyboard close, and the one mid-typing decision left, a
+// scroll-sourced shove refused rather than tracked under a per-keystroke
+// correction budget, lives in shell.ts (shoveVerdict), not here.

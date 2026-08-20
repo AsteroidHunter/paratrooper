@@ -112,10 +112,11 @@ html, body {
      .thread declares its own pan (scroll containers re-open touch-action for
      themselves, so the thread and the textarea's inner scroll still work).
      iOS's programmatic caret-reveal is suppressed at the source by the
-     composer's focus blink (see .compose textarea:focus) and its per-grown-
-     line re-arm (autosize, main.ts); a reveal that lands anyway is refused
-     mid-session by the shell's shove clear (shell.ts shoveVerdict), and
-     outside a keyboard session main.ts keeps one same-frame snap-back.
+     composer's focus blink (see .compose textarea:focus) and its re-arm on
+     every keystroke while the keyboard is up (autosize, main.ts); a reveal
+     that lands anyway is refused mid-session by the shell's shove clear
+     (shell.ts shoveVerdict), and outside a keyboard session main.ts keeps one
+     same-frame snap-back.
      (#app deliberately keeps overflow:visible: a visible box is not a scroll
      container, so a reveal has nothing there to grab — overflow:hidden would
      CREATE a programmatic scroller.) */
@@ -571,7 +572,9 @@ html, body {
    may move. Two narrow carve-outs, both load-bearing iOS fixes and both a
    single frame the eye cannot catch: the 0.02s focus blink below, over
    before the keyboard even starts to rise, and the same blink re-armed via
-   WAAPI around each GROWN line's height write (autosize, main.ts). */
+   WAAPI on every keystroke while the keyboard is up (autosize, main.ts),
+   which is what stops the caret reveal from shoving the view on the second
+   word of a line and past the box's height cap. */
 .field::before {
   content: "";
   position: absolute;
@@ -624,10 +627,10 @@ html, body {
    hands iOS a reason to scroll the page. This is a narrow one-shot exception
    to the hold-brighten HARD RULE above: that rule's caret drift came from
    effects that ride the layer while typing; this one is finished before the
-   keyboard begins to rise. The reveal fires again each time the box GROWS a
-   line, so autosize (main.ts) re-arms this same suppression around every
-   growth height write, via WAAPI so the re-trigger never touches this
-   :focus animation. */
+   keyboard begins to rise. The reveal fires again on every later keystroke,
+   not only on the ones that grow a line, so autosize (main.ts) re-arms this
+   same suppression per keystroke while the keyboard is up, via WAAPI so the
+   re-trigger never touches this :focus animation. */
 .compose textarea:focus {
   animation: focus-blink 0.02s;
 }

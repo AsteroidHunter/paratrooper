@@ -7,8 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   FOCUSING_MAX_MS,
   HEAL_THRESHOLD_PX,
+  MAX_SHOVE_CLEARS,
   MIN_KEYBOARD_PX,
-  RESHOVE_YIELD_MS,
   SETTLE_GUARD_MS,
   TEARDOWN_MAX_MS,
   closeCorrectionNeeded,
@@ -306,38 +306,56 @@ describe("picker lifecycle — the WebKit teardown window", () => {
   });
 });
 
-describe("shoveVerdict — growth-time shove vs layout truth (typing test 2026-08-18)", () => {
+describe("shoveVerdict — typing-time shove vs layout truth (typing test 2026-08-18)", () => {
   it("the observed shove: kb steady, height steady, a window scroll in the batch -> clear (362 -> 412 stays unwritten)", () => {
-    expect(shoveVerdict(true, true, 0, 50, false, Infinity)).toBe("clear");
+    expect(shoveVerdict(true, true, 0, 50, false, 0)).toBe("clear");
   });
 
   it("horizontal displacement is a shove too", () => {
-    expect(shoveVerdict(true, true, 3, 0, false, Infinity)).toBe("clear");
+    expect(shoveVerdict(true, true, 3, 0, false, 0)).toBe("clear");
   });
 
   it("a genuine keyboard move (vv.height changed) is tracked even with a scroll in the same batch", () => {
-    expect(shoveVerdict(true, true, 0, 50, true, Infinity)).toBe("track");
+    expect(shoveVerdict(true, true, 0, 50, true, 0)).toBe("track");
   });
 
   it("no window scroll: a pan is layout truth, tracked as today", () => {
-    expect(shoveVerdict(true, true, 0, 0, false, Infinity)).toBe("track");
+    expect(shoveVerdict(true, true, 0, 0, false, 0)).toBe("track");
   });
 
   it("the open and close edges never reach the decision — the shell owns them", () => {
-    expect(shoveVerdict(false, true, 0, 50, false, Infinity)).toBe("track");
-    expect(shoveVerdict(true, false, 0, 50, false, Infinity)).toBe("track");
+    expect(shoveVerdict(false, true, 0, 50, false, 0)).toBe("track");
+    expect(shoveVerdict(true, false, 0, 50, false, 0)).toBe("track");
   });
 
-  it("the re-shove guard: a shove re-landing inside the window yields to the close-time correction (the retired counter's loop)", () => {
-    expect(shoveVerdict(true, true, 0, 50, false, RESHOVE_YIELD_MS - 1)).toBe("yield");
-    expect(shoveVerdict(true, true, 0, 50, false, RESHOVE_YIELD_MS)).toBe("clear");
+  // The 500ms re-shove window this replaced let a second shove through on
+  // purpose while he was still typing the same line, so about every other
+  // shove stuck and the error piled up line by line. The budget is per
+  // keystroke instead: correct on the same frame every time, and only a phone
+  // that re-shoves MAX_SHOVE_CLEARS times inside ONE keystroke is yielded to.
+  it("a shove is corrected on its own frame for the whole budget, never seen and undone later", () => {
+    for (let spent = 0; spent < MAX_SHOVE_CLEARS; spent += 1) {
+      expect(shoveVerdict(true, true, 0, 50, false, spent)).toBe("clear");
+    }
+  });
+
+  it("past the budget the fight stops: the shove is yielded to, so the two sides cannot loop", () => {
+    expect(shoveVerdict(true, true, 0, 50, false, MAX_SHOVE_CLEARS)).toBe("yield");
+    expect(shoveVerdict(true, true, 0, 50, false, MAX_SHOVE_CLEARS + 5)).toBe("yield");
+  });
+
+  it("a fresh keystroke's budget always clears the first shove, with no delay able to withhold it", () => {
+    // the wiring resets the count on every keystroke (keystrokeStarted), so
+    // the common one-shove-per-key case never reaches the yield arm
+    expect(shoveVerdict(true, true, 0, 50, false, 0)).toBe("clear");
   });
 });
 
-// Set 1 wiring pins: the clear must keep the shell box stable (the whole
-// point — tracking the shove WAS the visible step) and the growth blink must
-// ride autosize's own height write. Source-read tripwires, downbtn-style.
-describe("wiring — shove clear keeps the box, growth re-arms the blink", () => {
+// Wiring pins: the clear must keep the shell box stable (tracking the shove
+// WAS the visible step), the budget must be spent and re-opened where it says
+// it is, the blink must ride every keystroke, and the growth give-up must hand
+// back exactly the gained height. Source-read tripwires, downbtn-style.
+describe("wiring: same-frame clear, per-keystroke budget, per-keystroke blink", () => {
   const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 
@@ -345,20 +363,47 @@ describe("wiring — shove clear keeps the box, growth re-arms the blink", () =>
     expect(shell).toMatch(
       /verdict === "clear"[\s\S]{0,200}window\.scrollTo\(0, 0\);\n\s*target = \{ kb: t\.kb, vvTop: appliedTop, vvHeight: appliedHeight \};/,
     );
-    expect(shell).toMatch(/holdDiagRecord\("kb-shove", \{ act: "clear"/);
-    expect(shell).toMatch(/holdDiagRecord\("kb-shove", \{ act: "yield"/);
+    expect(shell).toMatch(/holdDiagRecord\("kb-shove", \{ act: "clear", n: shoveClears/);
+    expect(shell).toMatch(/holdDiagRecord\("kb-shove", \{ act: "yield", n: shoveClears/);
   });
 
-  it("a yield re-arms the guard and a close resets it — no yield state leaks across sessions", () => {
-    expect(shell).toMatch(/verdict === "yield"[\s\S]{0,120}lastShoveClearAt = -Infinity/);
-    expect(shell).toMatch(/function keyboardClosed[\s\S]{0,200}lastShoveClearAt = -Infinity/);
+  it("the correction is same-frame and the guard is a count, not a clock", () => {
+    // no delayed correction anywhere in the shove path: the clear is the
+    // scrollTo on the event's own frame, and nothing waits for typing to stop
+    expect(shell).toMatch(/verdict === "clear"[\s\S]{0,120}shoveClears \+= 1;/);
+    expect(shell).not.toMatch(/RESHOVE_YIELD_MS|lastShoveClearAt|sinceClearMs/);
   });
 
-  it("autosize re-arms the one-frame blink on GROWTH only, while the composer holds focus", () => {
-    expect(main).toMatch(
-      /if \(newHeight > oldHeight && document\.activeElement === textEl\) \{\n\s*textEl\.animate\(\[\{ opacity: 0 \}, \{ opacity: 1 \}\], \{ duration: 20 \}\);/,
+  it("every keystroke re-opens the budget, and a close resets it, so no state leaks across sessions", () => {
+    expect(shell).toMatch(/function keystrokeStarted\(\): void \{\n\s*shoveClears = 0;/);
+    expect(shell).toMatch(
+      /for \(const type of \["beforeinput", "keydown"\]\)[\s\S]{0,240}keystrokeStarted\(\);/,
     );
-    expect(main).toMatch(/holdDiagRecord\("grow-blink", \{ oldH: oldHeight, newH: newHeight \}\)/);
+    expect(shell).toMatch(/function keyboardClosed[\s\S]{0,200}shoveClears = 0;/);
+  });
+
+  it("autosize blinks on EVERY keystroke with the keyboard up, and still on any growth", () => {
+    expect(main).toMatch(
+      /if \(document\.activeElement === textEl && \(grew \|\| \(typed && kbUp\)\)\) \{\n\s*blinkComposer\(textEl\);/,
+    );
+    expect(main).toMatch(/const kbUp = app\.classList\.contains\("kb"\);/);
+    expect(main).toMatch(/holdDiagRecord\("grow-blink", \{\n\s*why: grew \? "grow" : "key"/);
+  });
+
+  it("the keystroke path is the one that marks itself typed", () => {
+    expect(main).toMatch(/textEl\.addEventListener\("input", \(\) => \{\n\s*autosize\(true\);/);
+  });
+
+  it("a blink cancels the one before it, so fast typing stacks no animations", () => {
+    expect(main).toMatch(
+      /composerBlink\?\.cancel\(\);\n\s*composerBlink = el\.animate\(\[\{ opacity: 0 \}, \{ opacity: 1 \}\], \{ duration: 20 \}\);/,
+    );
+  });
+
+  it("a mid-history growth hands the thread's scroll back the exact gained height", () => {
+    expect(main).toMatch(
+      /decision === "give-up"[\s\S]{0,400}t\.scrollTop = giveUpTarget\(t\.scrollTop, oldHeight, newHeight, t\.scrollHeight - t\.clientHeight\);/,
+    );
   });
 });
 

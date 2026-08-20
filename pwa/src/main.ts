@@ -32,7 +32,12 @@ import {
   initShell,
 } from "./shell";
 import { installSplashCover, installStartupImage } from "./splash";
-import { USER_SCROLL_INTENT_MS, compensationFor, followFlipDecision } from "./viewport";
+import {
+  USER_SCROLL_INTENT_MS,
+  compensationFor,
+  followFlipDecision,
+  giveUpTarget,
+} from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
 import type { OutboxRecord } from "./outbox";
 import {
@@ -46,7 +51,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.99"; // zoom clip deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.100"; // keystroke protection deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -379,7 +384,7 @@ function renderChat(): void {
   // same frame, so send() can route its bar collapse through the same path
   const textEl = document.getElementById("text") as HTMLTextAreaElement;
   textEl.addEventListener("input", () => {
-    autosize();
+    autosize(true); // typed: the blink protects this keystroke whether or not it grew a line
     refreshSend();
     replyHold.typed(); // composing = keystroke freshness; content is irrelevant
   });
@@ -731,6 +736,18 @@ function startGlide(): void {
   glideRaf = requestAnimationFrame(step);
 }
 
+// The one-frame opacity blink that makes iOS skip its caret-reveal scroll (the
+// verified ios-chat/kiding mechanism; styles.css focus-blink runs the same
+// thing off :focus). Driven through WAAPI so re-triggering it never touches
+// that :focus animation (flyFromField leans on the same WebKit property), and
+// the previous blink is cancelled first so fast typing stacks nothing.
+let composerBlink: Animation | null = null;
+
+function blinkComposer(el: HTMLElement): void {
+  composerBlink?.cancel();
+  composerBlink = el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 20 });
+}
+
 // compose grows with content like iMessage (1 -> ~5 lines, then inner scroll)
 // and collapses on send. Every such resize moves the thread's bottom edge, so
 // the compensation happens HERE, synchronously between the height write and
@@ -738,10 +755,12 @@ function startGlide(): void {
 // alone painted the slipped frame first (the visible bounce), and mid-history
 // nothing compensated at all. At the tail this pins instantly, so the
 // observer's later scrollToBottom(true) hits an already-correct scrollTop and
-// moves nothing; keep-position is deliberately no write (viewport.ts explains
-// the geometry); atBottom is read BEFORE the resize, while the distance to
-// the bottom still means what the user last saw.
-function autosize(): void {
+// moves nothing; a mid-history GROWTH hands back exactly the pixels the bar
+// took, so the newest message is never left under it; atBottom is read BEFORE
+// the resize, while the distance to the bottom still means what the user last
+// saw. `typed` marks the keystroke path (the input handler) apart from the
+// re-derives that share this function (a width change, the send collapse).
+function autosize(typed = false): void {
   const textEl = document.getElementById("text") as HTMLTextAreaElement | null;
   if (!textEl) return;
   const t = threadEl();
@@ -755,21 +774,31 @@ function autosize(): void {
   // border-box need — the old +2 border compensation would reopen the gap
   textEl.style.height = `${Math.min(textEl.scrollHeight, 120)}px`;
   const newHeight = textEl.offsetHeight;
-  // A GROWN line hands iOS a caret to reveal, and it scrolls the whole page
-  // one step to do it (the typing-test shove: vv.offsetTop 362 -> 412 per
-  // line, 412px piled up by close). The same one-frame opacity blink that
-  // suppresses the reveal on focus (styles.css focus-blink) runs here around
-  // the height write — via WAAPI, so each growth re-triggers cleanly without
-  // touching the :focus animation (flyFromField leans on the same WebKit
-  // property). Growth only, and only while the composer holds focus: shrink
-  // reveals nothing, and the reveal is a focus behavior.
-  if (newHeight > oldHeight && document.activeElement === textEl) {
-    textEl.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 20 });
-    holdDiagRecord("grow-blink", { oldH: oldHeight, newH: newHeight });
+  // EVERY keystroke hands iOS a caret to reveal, and it scrolls the whole page
+  // one step to do it (the typing-test shove: vv.offsetTop 362 -> 412, 412px
+  // piled up by close). Blinking only on GROWTH protected the first character
+  // of each line and nothing after it, and stopped protecting anything at all
+  // once the box hit its 120px cap around the fifth line, where the height
+  // never changes again: exactly his report. So while the keyboard is up every
+  // keystroke blinks, and a growth still blinks even before .kb has latched
+  // (the focusing window's first line). Composer focus is required either way:
+  // the reveal is a focus behavior.
+  const grew = newHeight > oldHeight;
+  const kbUp = app.classList.contains("kb");
+  if (document.activeElement === textEl && (grew || (typed && kbUp))) {
+    blinkComposer(textEl);
+    holdDiagRecord("grow-blink", {
+      why: grew ? "grow" : "key", oldH: oldHeight, newH: newHeight, kb: kbUp,
+    });
   }
   const decision = compensationFor(oldHeight, newHeight, atBottom);
   if (decision === "pin-bottom") {
     scrollToBottom(true); // instant: the resize and the re-pin paint as one
+  } else if (decision === "give-up") {
+    // the thread yields exactly the height the bar gained, in the same frame:
+    // its box just shrank from the bottom, so without this the line that sat
+    // on that edge (the message he just sent) is clipped away under the bar
+    t.scrollTop = giveUpTarget(t.scrollTop, oldHeight, newHeight, t.scrollHeight - t.clientHeight);
   }
   holdDiagRecord("autosize", {
     oldH: oldHeight, newH: newHeight, ft: followTail, nb, atB: atBottom,
@@ -777,7 +806,7 @@ function autosize(): void {
   });
   // no shell work here: the bar and the thread split a shell box that only
   // the visual viewport sizes (shell.ts), so composer growth is pure
-  // shell-internal layout — the pin above is the whole compensation
+  // shell-internal layout: the scroll write above is the whole compensation
 }
 
 // --- rendering ---------------------------------------------------------------
