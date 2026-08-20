@@ -33,3 +33,16 @@ def make_thumbnail(data: bytes) -> tuple[bytes, int, int] | None:
         return out.getvalue(), im.width, im.height
     except Exception:
         return None
+
+
+def image_dims(data: bytes) -> tuple[int, int] | None:
+    """Pixel size of already-encoded image bytes, or None when they won't
+    decode. Pillow only reads the header here, so this is cheap enough to run
+    over every stored preview at once. No EXIF transpose, unlike
+    ``make_thumbnail``: the bytes handed to this are previews we encoded
+    ourselves, with any phone rotation already baked into the pixels."""
+    try:
+        with Image.open(BytesIO(data)) as im:
+            return im.width, im.height
+    except Exception:
+        return None

@@ -10,11 +10,15 @@ it via ``asyncio.to_thread``.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from pathlib import Path
 
 from .models import ThreadEvent
+from .thumbs import image_dims
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -67,6 +71,7 @@ class ThreadStore:
             self._conn.commit()
             self._migrate_body_to_payload()
             self._migrate_attachment_dims()
+            self._migrate_backfill_thumb_dims()  # needs the columns above to exist
 
     def _migrate_attachment_dims(self) -> None:
         """Additive columns for thumbnail dimensions on DBs created before them.
@@ -77,6 +82,52 @@ class ThreadStore:
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE attachments ADD COLUMN {col} INTEGER")
         self._conn.commit()
+
+    def _migrate_backfill_thumb_dims(self) -> None:
+        """One-time fill of width/height for previews stored before those
+        columns existed, measured from each row's own thumb bytes. Without it
+        those photos ship no dims, the client reserves them a fixed 4:3 box,
+        and a portrait shot opens out of a landscape crop looking squished.
+
+        Idempotent: a filled row can never match the WHERE again, so the second
+        boot costs one empty query. Atomic (one explicit transaction), so a
+        crash mid-way leaves every NULL in place and the next boot retries. A
+        row whose bytes won't decode is skipped and keeps its NULLs: the
+        client's fixed-ratio fallback exists for exactly that row, and one
+        unreadable blob must never cost the service its startup. Those rows are
+        re-tried on every later boot, which is one header read each."""
+        keys = [
+            r["key"] for r in self._conn.execute(
+                "SELECT key FROM attachments WHERE width IS NULL OR height IS NULL"
+            )
+        ]
+        if not keys:
+            return  # fresh DB, or an earlier boot already filled them
+        self._conn.execute("BEGIN")
+        try:
+            filled = 0
+            for key in keys:
+                # one blob at a time: previews run to hundreds of KB each and a
+                # long photo history would otherwise all sit in memory at once
+                row = self._conn.execute(
+                    "SELECT thumb FROM attachments WHERE key=?", (key,)
+                ).fetchone()
+                dims = image_dims(row["thumb"]) if row else None
+                if dims is None:
+                    continue
+                self._conn.execute(
+                    "UPDATE attachments SET width=?, height=? WHERE key=?", (*dims, key)
+                )
+                filled += 1
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        if filled:  # silent on the boots after, where there is nothing to say
+            logger.info(
+                "filled thumbnail dimensions on %d of %d legacy attachment row(s)",
+                filled, len(keys),
+            )
 
     def _migrate_body_to_payload(self) -> None:
         """One-time cut from the legacy ``body`` TEXT column to JSON ``payload``:

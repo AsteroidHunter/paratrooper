@@ -1150,6 +1150,70 @@ def test_migration_backfills_payload_and_drops_body(tmp_path):
     assert [m.payload for _, m in again.messages("d")] == got
 
 
+def _dims_row(store, key):
+    row = store._conn.execute(
+        "SELECT width, height FROM attachments WHERE key=?", (key,)
+    ).fetchone()
+    return (row["width"], row["height"])
+
+
+def test_migration_fills_thumb_dims_from_stored_bytes(tmp_path):
+    """A preview stored before the dims columns existed must come out of the
+    next boot carrying its real pixel size, measured from its own bytes. Until
+    it does, thumb_dims skips the row, the client reserves a fixed 4:3 box, and
+    a portrait photo opens out of a landscape crop looking squished."""
+    from paratrooper.web.thumbs import make_thumbnail
+
+    path = tmp_path / "legacy-dims.sqlite"
+    portrait, _, _ = make_thumbnail(_png_bytes(size=(480, 640)))
+    landscape, _, _ = make_thumbnail(_png_bytes(size=(800, 500)))
+
+    store = ThreadStore(path)
+    store.add_thumbnail("tall.webp", portrait, ts="t")  # pre-dims rows: no sizes
+    store.add_thumbnail("wide.webp", landscape, ts="t")
+    store.add_thumbnail("known.webp", landscape, ts="t", width=1, height=1)
+    assert store.thumb_dims(["tall.webp", "wide.webp"]) == {}  # nothing to reserve from
+    store.close()
+
+    migrated = ThreadStore(path)  # boot runs the migration
+    assert _dims_row(migrated, "tall.webp") == (480, 640)  # portrait stays portrait
+    assert _dims_row(migrated, "wide.webp") == (800, 500)
+    assert _dims_row(migrated, "known.webp") == (1, 1)  # a row with dims is never touched
+    # and now the client gets a box for both, so the 4:3 fallback stops firing
+    assert migrated.thumb_dims(["tall.webp", "wide.webp"]) == {
+        "tall.webp": (480, 640), "wide.webp": (800, 500),
+    }
+    migrated.close()
+
+    # idempotent: the second boot finds no NULL rows and changes nothing
+    again = ThreadStore(path)
+    assert _dims_row(again, "tall.webp") == (480, 640)
+    assert _dims_row(again, "wide.webp") == (800, 500)
+
+
+def test_migration_leaves_unmeasurable_thumb_null_and_still_boots(tmp_path):
+    """One preview whose bytes won't decode must not take the service down or
+    block its neighbours: it keeps its NULLs (the client's fixed-ratio fallback
+    covers exactly that row) while every readable row still gets filled."""
+    from paratrooper.web.thumbs import make_thumbnail
+
+    path = tmp_path / "junk-dims.sqlite"
+    good, _, _ = make_thumbnail(_png_bytes(size=(300, 200)))
+
+    store = ThreadStore(path)
+    store.add_thumbnail("junk.webp", b"not an image at all", ts="t")
+    store.add_thumbnail("good.webp", good, ts="t")
+    store.close()
+
+    migrated = ThreadStore(path)  # must not raise
+    assert _dims_row(migrated, "junk.webp") == (None, None)
+    assert _dims_row(migrated, "good.webp") == (300, 200)
+    assert migrated.thumb_dims(["junk.webp", "good.webp"]) == {"good.webp": (300, 200)}
+    migrated.close()
+
+    ThreadStore(path)  # the unreadable row is re-tried forever, still harmlessly
+
+
 # --- pr ref must survive persistence + empty-ref publish (the replay bug) ------
 
 
