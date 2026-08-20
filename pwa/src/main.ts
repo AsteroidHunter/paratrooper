@@ -7,6 +7,7 @@ import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
+import { photoBox } from "./photobox";
 import { receiptFor } from "./receipts";
 import {
   ENTER_RISE_PX,
@@ -45,7 +46,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.1.95"; // photo zoom flight deploy, bumped so the build is verifiable
+const APP_VERSION = "0.1.96"; // photo send reserve deploy, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -2178,6 +2179,62 @@ function localBubble(role: string, cls: string, text: string): void {
   if (followTail) scrollToBottom();
 }
 
+// --- the sent photo's seat, reserved before the row lands ---------------------
+// A photo row inserted with no size is zero tall until its pixels decode, and
+// send() pins the thread to the bottom immediately after the insert, so that pin
+// used to land on a bubble that had not grown yet; the decode then grew the row
+// downward and the photo came to rest as a thin top sliver under the compose
+// bar. The file's own pixels are therefore read FIRST: the element and its blob
+// URL are made here and its load awaited, so the row can be laid out at full
+// height before anything measures, pins, or flies.
+//
+// The read is deadlined. A file that never reports a size must not hold the
+// optimistic bubble back, because instant feedback on tap outranks a perfect
+// seat; a read that fails or runs late yields no size and the row falls back to
+// the old unsized behaviour, re-pinning when the pixels land like every other
+// photo kind. Every outcome lands on the flight trail, so a device session says
+// whether the seat was reserved and at what size.
+
+const SHOT_DIMS_MS = 350; // a local blob reports its size in a few ms; this is the safety valve
+
+interface Shot {
+  img: HTMLImageElement;
+  nat: [number, number] | null; // the file's own pixels, null when unknown
+}
+
+function prepareShot(file: File): Promise<Shot> {
+  const img = document.createElement("img");
+  img.src = URL.createObjectURL(file);
+  return new Promise<Shot>((resolve) => {
+    let timer = 0;
+    let settled = false;
+    const settle = (why: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const nat: [number, number] | null =
+        img.naturalWidth > 0 && img.naturalHeight > 0
+          ? [img.naturalWidth, img.naturalHeight]
+          : null;
+      holdDiagRecord("flight", {
+        phase: "shot-dims", why, w: nat ? nat[0] : 0, h: nat ? nat[1] : 0,
+      });
+      resolve({ img, nat });
+    };
+    timer = window.setTimeout(() => settle("late"), SHOT_DIMS_MS);
+    img.addEventListener("load", () => settle("load"), { once: true });
+    img.addEventListener("error", () => settle("error"), { once: true });
+  });
+}
+
+// the width one .row spans: the thread's content box, since rows are its direct
+// flex children (the .evt wrappers are display:contents and have no box)
+function threadContentWidth(): number {
+  const t = threadEl();
+  const cs = getComputedStyle(t);
+  return t.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+}
+
 // when the last send's flight left the field: a send composing onto a still-
 // airborne flight must stay one synchronous composition (see send()), while a
 // fresh send may wait out the composer collapse first
@@ -2189,6 +2246,11 @@ async function send(): Promise<void> {
   const text = textEl.value.trim();
   const files = [...pendingFiles];
   if (!text && files.length === 0) return;
+
+  // the photos' own pixels (prepareShot explains the seat they buy), started
+  // here so the read overlaps the composer collapse below instead of adding to
+  // it; awaited further down, before anything is measured or inserted
+  const shots = files.map(prepareShot);
 
   // the take-back: a reply still held unseen when he sends must vanish for
   // good — the send outran it, and the rerun's next reply answers everything.
@@ -2248,6 +2310,12 @@ async function send(): Promise<void> {
     }
   }
 
+  // the last wait: from here down send() is one synchronous task (measure,
+  // insert, pin, launch), so every photo's size and the width its bubble gets
+  // to share must be in hand NOW. A size arriving after the pin is the sliver.
+  const ready = files.length ? await Promise.all(shots) : [];
+  const rowW = files.length ? threadContentWidth() : 0;
+
   // the white-strip fix measures the older content BEFORE anything is
   // inserted; the pin below fires first, then play() starts the transforms
   const shift = beginSiblingShift();
@@ -2260,10 +2328,29 @@ async function send(): Promise<void> {
   const prevSuppress = suppressAnim;
   suppressAnim = true;
   const w = localWrapper("user");
-  for (const file of files) {
+  for (const shot of ready) {
     const div = rowEl(w, "user", "shot", Date.now());
-    const img = document.createElement("img");
-    img.src = URL.createObjectURL(file);
+    const img = shot.img;
+    if (shot.nat) {
+      // the seat: the aspect ratio through the width/height attributes (the
+      // stylesheet's height:auto reads it) and the used width from the bubble's
+      // share of the row. That is the box the photo still occupies once it
+      // paints, so the pin below has nothing left to grow past.
+      const box = photoBox(shot.nat[0], shot.nat[1], rowW);
+      img.width = shot.nat[0];
+      img.height = shot.nat[1];
+      img.style.width = `${box.width}px`;
+      holdDiagRecord("flight", {
+        phase: "shot-reserve",
+        w: Math.round(box.width * 10) / 10, h: Math.round(box.height * 10) / 10,
+      });
+    } else {
+      // nothing to reserve: the old unsized row, whose late growth re-pins the
+      // bottom the way every other photo kind does
+      img.onload = () => {
+        if (followTail) scrollToBottom(true);
+      };
+    }
     img.addEventListener("click", () => openLightbox(img.src, img));
     div.appendChild(img);
   }
