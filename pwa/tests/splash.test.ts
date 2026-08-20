@@ -1,13 +1,20 @@
-// Pins for the iOS launch-image generator (src/splash.ts). The geometry and the
-// drawing are pure, so every device is encoded as plain inputs — canvas size,
-// centered logo rect, and the device-matching media query come out as data, and
-// the paint step is checked against a recording 2D-context stand-in. No DOM and
-// no real canvas needed, so this runs in the same node env as the other suites.
-import { describe, expect, it } from "vitest";
+// Pins for the iOS launch-image generator (src/splash.ts) and for the in-app
+// copy's lift rule. The geometry and the drawing are pure, so every device is
+// encoded as plain inputs: canvas size, centered logo rect, and the
+// device-matching media query come out as data, and the paint step is checked
+// against a recording 2D-context stand-in; the lift rule is pure too and runs
+// entirely on fake timers. No DOM and no real canvas needed, so this runs in
+// the same node env as the other suites.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  SPLASH_LOGO_FRACTION,
+  COVER_CAP_MS,
+  COVER_MIN_HOLD_MS,
+  type CoverLift,
   type DrawTarget,
+  SPLASH_BG,
+  SPLASH_LOGO_FRACTION,
   type SplashLayout,
+  createSplashCover,
   paintSplash,
   splashLayout,
 } from "../src/splash";
@@ -117,7 +124,8 @@ describe("paintSplash — white first, then the logo at its rect", () => {
     const r = recordingCtx();
     const logo = {} as CanvasImageSource;
     paintSplash(r.ctx, logo, g);
-    expect(r.fillAt()).toBe("#ffffff");
+    expect(SPLASH_BG).toBe("#ffffff"); // the cover stands on this same white
+    expect(r.fillAt()).toBe(SPLASH_BG);
     expect(r.calls[0]).toEqual(["fillRect", 0, 0, g.canvasW, g.canvasH]);
   });
 
@@ -126,5 +134,85 @@ describe("paintSplash — white first, then the logo at its rect", () => {
     const logo = {} as CanvasImageSource;
     paintSplash(r.ctx, logo, g);
     expect(r.calls[1]).toEqual(["drawImage", g.logoX, g.logoY, g.logoW, g.logoH]);
+  });
+});
+
+describe("createSplashCover: when the in-app copy lifts", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // every lift, with the reason it happened: one entry means one fade
+  function harness() {
+    const lifts: CoverLift[] = [];
+    const cover = createSplashCover((why) => lifts.push(why));
+    return { lifts, cover };
+  }
+
+  it("the hold is a second and the cap two", () => {
+    expect(COVER_MIN_HOLD_MS).toBe(1000);
+    expect(COVER_CAP_MS).toBe(2000);
+    expect(COVER_CAP_MS).toBeGreaterThan(COVER_MIN_HOLD_MS);
+  });
+
+  it("stays up through the whole minimum hold, however early the thread settles", () => {
+    const { lifts, cover } = harness();
+    cover.settled(); // cached thread, images and all, before the first frame
+    vi.advanceTimersByTime(COVER_MIN_HOLD_MS - 1);
+    expect(cover.lifted()).toBe(false);
+    expect(lifts).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(cover.lifted()).toBe(true);
+    expect(lifts).toEqual(["settled"]);
+  });
+
+  it("waits for the settle when the hold passes first, then lifts on it", () => {
+    const { lifts, cover } = harness();
+    vi.advanceTimersByTime(COVER_MIN_HOLD_MS + 200); // hold done, thread still working
+    expect(cover.lifted()).toBe(false);
+    expect(lifts).toEqual([]);
+    cover.settled();
+    expect(cover.lifted()).toBe(true);
+    expect(lifts).toEqual(["settled"]);
+  });
+
+  it("lifts at the cap when nothing ever settles", () => {
+    const { lifts, cover } = harness();
+    vi.advanceTimersByTime(COVER_CAP_MS - 1);
+    expect(cover.lifted()).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(cover.lifted()).toBe(true);
+    expect(lifts).toEqual(["cap"]); // a dead network can never strand it
+  });
+
+  it("lifts once: a settle arriving after the cap changes nothing", () => {
+    const { lifts, cover } = harness();
+    vi.advanceTimersByTime(COVER_CAP_MS + 5000);
+    cover.settled();
+    vi.advanceTimersByTime(10000);
+    expect(lifts).toEqual(["cap"]);
+  });
+
+  it("a settle before the cap wins the reason, and the cap adds nothing after", () => {
+    const { lifts, cover } = harness();
+    vi.advanceTimersByTime(COVER_MIN_HOLD_MS);
+    cover.settled();
+    expect(lifts).toEqual(["settled"]);
+    vi.advanceTimersByTime(COVER_CAP_MS * 2); // the cap timer is spent, not pending
+    expect(lifts).toEqual(["settled"]);
+  });
+
+  it("the windows are injectable, so the rule is not tied to its own constants", () => {
+    const lifts: CoverLift[] = [];
+    const cover = createSplashCover((why) => lifts.push(why), 40, 90);
+    cover.settled();
+    vi.advanceTimersByTime(39);
+    expect(cover.lifted()).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(lifts).toEqual(["settled"]);
   });
 });
