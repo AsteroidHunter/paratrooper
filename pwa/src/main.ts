@@ -32,6 +32,7 @@ import {
   closeCorrectionNeeded,
   currentFileInput,
   initShell,
+  watchFollowTail,
   watchKeyboard,
 } from "./shell";
 import { bootBlankGap, installSplashCover, installStartupImage } from "./splash";
@@ -54,7 +55,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.8"; // zoom cut starts tight, bumped so the build is verifiable
+const APP_VERSION = "0.3.9"; // three diagnostic recorders, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -748,6 +749,15 @@ function setFollowTail(next: boolean, trigger: string): void {
   if (next !== followTail) holdDiagRecord("followtail", { to: next, trigger });
   followTail = next;
 }
+
+// ===================== TEMP DIAGNOSTIC (remove after the keyboard-fall session) =====================
+// The keyboard-close frame probe (shell.ts, block at the bottom) stamps each
+// frame with whether the thread was following its tail, because the close
+// jitter he sees at the bottom and the yank he sees away from it are the two
+// halves of one bug and only this flag tells the runs apart. Read-only, and
+// registered the same way the keyboard edge is. TO REMOVE: delete this call.
+watchFollowTail(() => followTail);
+// =================== END TEMP DIAGNOSTIC (remove after the keyboard-fall session) ===================
 
 // genuine-gesture evidence for the scroll handler: a finger currently on the
 // thread, or wheel/pointer/touch activity inside the intent window. Starts

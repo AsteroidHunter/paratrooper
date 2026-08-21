@@ -143,7 +143,8 @@ export function createReplyHold<T>(
 // carry event/inputType names only, never typed characters, because the debug
 // route is unauthenticated. TO REMOVE: delete this block and
 // the holdDiagRecord calls above, plus the matching TEMP DIAGNOSTIC block and
-// holddiag log lines in web/app.py and web/batching.py.
+// holddiag log lines in web/app.py and web/batching.py, and the keyboard and
+// picker probe block at the bottom of shell.ts, which rides this same trail.
 
 declare const __BUILT_AT__: string;
 
@@ -172,7 +173,10 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // the moments worth a snapshot: a park, any release path, a bypass render —
   // and the viewport/flight marks (main.ts records them onto this same trail:
   // a snap-back fired, following flipped, a send flight ran), so a slip
-  // session posts even when the hold itself never engages
+  // session posts even when the hold itself never engages.
+  // "kb-fall" is deliberately absent: one close writes about twenty of them,
+  // and the kb-close that opens the same close already arms the post, so the
+  // whole run rides it without churning a timer per frame.
   if (
     ev === "held" || ev === "release" || ev === "pass" || ev === "reset" ||
     ev === "snapback" || ev === "followtail" || ev === "flight" ||
@@ -180,7 +184,7 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "kb-close" || ev === "send-motion" || ev === "receipt-hold" ||
     ev === "boot-motion" || ev === "boot-repin" || ev === "boot-blank" ||
     ev === "grow-blink" || ev === "kb-shove" ||
-    ev === "kb-focusing" || ev === "kb-glide"
+    ev === "kb-focusing" || ev === "kb-glide" || ev === "pick-anchor"
   ) {
     diagPost();
   }

@@ -636,7 +636,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                                   "shell-size", "kb-close", "send-motion",
                                   "receipt-hold", "boot-motion", "boot-repin",
                                   "grow-blink", "kb-shove",
-                                  "kb-focusing", "kb-glide")]
+                                  "kb-focusing", "kb-glide",
+                                  "dom-census", "pick-anchor")]
         if vp:
             _diag.info("holddiag viewport events=%d tail=%s",
                        len(vp), json.dumps(vp[-20:]))
@@ -645,9 +646,16 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         # after first paint), and the viewport tail above would clip them the
         # moment a session gets busy
         bm = [e for e in events if isinstance(e, dict)
-              and e.get("ev") in ("boot-motion", "boot-repin", "boot-blank")]
+              and e.get("ev") in ("boot-motion", "boot-repin", "boot-blank",
+                                  "safe-area")]
         if bm:
             _diag.info("holddiag boot events=%d head=%s", len(bm), json.dumps(bm[:30]))
+        # keyboard-close frame trail, its own line and a long tail: ONE close
+        # writes about twenty kb-fall records, which would flush every other
+        # mark out of the viewport tail above if they rode it
+        kf = [e for e in events if isinstance(e, dict) and e.get("ev") == "kb-fall"]
+        if kf:
+            _diag.info("holddiag fall events=%d tail=%s", len(kf), json.dumps(kf[-40:]))
         return {"ok": True}
 
     @app.get("/api/debug/holddiag")

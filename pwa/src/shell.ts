@@ -394,6 +394,10 @@ function armGlide(edge: "open" | "close"): void {
 // numbers iOS has published — no latch, nothing to retract.
 function applyShell(t: ShellTarget, settling: boolean): void {
   if (!appEl) return;
+  // TEMP DIAGNOSTIC (kb-fall, block at the bottom): the last frame with the
+  // keyboard still up, sampled on the close edge and BEFORE the class toggle
+  // below collapses --pad-b — after it, the comparison the bug turns on is gone
+  if (!t.kb && appliedKb) fallEdge();
   if (t.kb !== appliedKb) {
     appliedKb = t.kb;
     armGlide(t.kb ? "open" : "close");
@@ -494,6 +498,9 @@ function correctionPass(phase: "close" | "retry"): void {
     appEl.style.display = "";
     for (const [el, st] of scrolled) el.scrollTop = st;
   }
+  // TEMP DIAGNOSTIC (dom-census, block at the bottom): what the document really
+  // holds at a close, alongside the kb-close record and once per close
+  if (phase === "close") censusRecord();
   // every close leaves a record; the retry only when it acted
   if (phase === "close" || snap || heal) {
     holdDiagRecord("kb-close", {
@@ -506,6 +513,7 @@ function keyboardClosed(): void {
   if (closeRetry) clearTimeout(closeRetry);
   shoveClears = 0; // a new session must not inherit a spent budget
   correctionPass("close");
+  startFallProbe(); // TEMP DIAGNOSTIC (kb-fall, block at the bottom): the close, frame by frame
   closeRetry = setTimeout(() => {
     closeRetry = null;
     if (kbUp) return; // a new keyboard session owns the geometry now
@@ -582,6 +590,9 @@ const picker = createPickerLifecycle({
   present: (fresh: boolean) => {
     if (fresh) swapFileInput();
     fileEl?.click();
+    // TEMP DIAGNOSTIC (pick-anchor, block at the bottom): the two rects, read
+    // after the click that presented so the read cannot alter what iOS anchored to
+    pickAnchorRecord(fresh);
     reconcile(); // the settling visual starts NOW, inside the opening tap
   },
   dismiss: () => {
@@ -703,6 +714,9 @@ export function initShell(el: HTMLElement): void {
     },
     true,
   );
+  // TEMP DIAGNOSTIC (safe-area, block at the bottom): the device's own bottom
+  // inset, once, so the --pad-b step the fall probe measures has a fact to sit against
+  recordSafeArea();
 }
 
 // wire the compose ＋ button and file input; called per renderChat because the
@@ -743,3 +757,271 @@ export function bindSendShield(button: HTMLElement): void {
 export function currentFileInput(): HTMLInputElement | null {
   return fileEl;
 }
+
+// ===================== TEMP DIAGNOSTIC (remove after the keyboard-fall session) =====================
+// Three recorders for three open device bugs, riding the same trail as the
+// rest of the probe (hold.ts's ring buffer, POSTed to /api/debug/holddiag and
+// digested into the deploy logs by web/app.py). Every one of them READS: no
+// class, style, scroll position or lasting node is written anywhere below, so
+// the app behaves exactly as it did without them.
+//
+//   kb-fall     — the close, frame by frame. The suspicion is that --pad-b
+//                 steps from its keyboard value (0.5rem) to its full
+//                 safe-area value in the SAME frame the shell starts its
+//                 0.2s glide, so the pill hops up by the inset while
+//                 everything around it slides. shell-size samples once per
+//                 viewport event, which is far too slow to catch one frame.
+//   pick-anchor — the file input's rect against the ＋ button's at the instant
+//                 the picker presents. iOS anchors WKFileUploadPanel to the
+//                 INPUT's rendered rect, and .filepick is parked invisibly on
+//                 top of the ＋ precisely so the two agree; a panel opening
+//                 off to the right means on that tap they did not.
+//   dom-census  — how many #app / .compose / .bar / .thread / mirror twins the
+//                 document holds at each close. A screenshot showed what
+//                 looked like two compose bars; a census that always reads 1
+//                 turns "the phone composited a stale paint" from an
+//                 inference into a measurement, and a 2 falsifies it outright.
+//
+// Plus one boot record, safe-area, carrying env(safe-area-inset-bottom) in
+// pixels: the step size the fall probe is looking for is then a device fact
+// rather than arithmetic over two records.
+//
+// The frame loop is the one part with a way to disturb what it measures, so it
+// is read-only by construction: element lookups and the live computed style
+// are resolved ONCE at the close edge, the per-frame body only reads, and
+// kb-fall is deliberately left out of hold.ts's post-now list so eighteen
+// frames cannot churn eighteen POST timers. A read pass inside rAF with no
+// interleaved write forces at most the one style/layout the glide's animated
+// top/height was going to need on that frame anyway.
+//
+// TO REMOVE: delete this block plus the five call sites above marked TEMP
+// DIAGNOSTIC (the pre-close sample in applyShell, the census in
+// correctionPass, the probe start in keyboardClosed, the anchor record in the
+// picker's present effect, the safe-area probe at the end of initShell), the
+// watchFollowTail wiring in main.ts, "pick-anchor" in hold.ts's post-now list,
+// and the kb-fall/dom-census/pick-anchor/safe-area names in web/app.py's
+// digest filters.
+
+/** frames the fall probe samples after the close edge — about 0.3s at 60fps */
+export const FALL_FRAMES = 18;
+
+/** what the census counts, and the label each count carries in the record */
+export const CENSUS_SELECTORS: Record<string, string> = {
+  app: "#app",
+  compose: ".compose",
+  bar: ".bar",
+  thread: ".thread",
+  mirror: "textarea[data-mirror='compose']",
+};
+
+// One frame of the fall, as the trail carries it. An alias rather than an
+// interface so it hands straight to holdDiagRecord's Record<string, unknown>
+// without a cast — only object literal types carry the implicit index
+// signature that assignment needs.
+export type FallFrame = {
+  ms: number;
+  padB: number | null;
+  shellH: number | null;
+  pillBot: number | null;
+  thBot: number | null;
+  st: number | null;
+  ft?: boolean;
+};
+
+/** the five geometry reads a frame needs, injectable so the shape can be pinned */
+export interface FallReader {
+  padB(): number; // the RESOLVED --pad-b, in px
+  shellH(): number;
+  pillBot(): number;
+  thBot(): number;
+  st(): number;
+  ft(): boolean | undefined; // absent when nothing registered a follow reader
+}
+
+/** a rect, narrowed to what the anchor record needs */
+export interface AnchorRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+// one decimal of a pixel: enough to see a sub-pixel glide step, short enough
+// that a whole close still reads as one log line. A missing element reads null
+// rather than a sentinel number no one could tell from a coordinate.
+function px(n: number): number | null {
+  return Number.isFinite(n) ? Math.round(n * 10) / 10 : null;
+}
+
+/** assemble one frame's record; pure, so a test pins the field names */
+export function fallFrame(ms: number, r: FallReader): FallFrame {
+  const frame: FallFrame = {
+    ms: Math.round(ms),
+    padB: px(r.padB()),
+    shellH: px(r.shellH()),
+    pillBot: px(r.pillBot()),
+    thBot: px(r.thBot()),
+    st: px(r.st()),
+  };
+  const ft = r.ft();
+  if (ft !== undefined) frame.ft = ft;
+  return frame;
+}
+
+/**
+ * The anchor record's fields, spelled so a deploy log names which rect is
+ * which without the code in front of the reader: file* is the invisible input
+ * iOS actually anchors to, plus* is the ＋ the user aimed at, and dx/dy is the
+ * gap between them — the whole question, already subtracted.
+ */
+export function anchorFrame(
+  file: AnchorRect,
+  plus: AnchorRect,
+  fresh: boolean,
+  upMs: number,
+): Record<string, unknown> {
+  return {
+    fileLeft: px(file.left), fileTop: px(file.top),
+    fileW: px(file.width), fileH: px(file.height),
+    plusLeft: px(plus.left), plusTop: px(plus.top),
+    plusW: px(plus.width), plusH: px(plus.height),
+    dx: px(file.left - plus.left), dy: px(file.top - plus.top),
+    fresh, upMs: Math.round(upMs),
+  };
+}
+
+/** count each census selector in a document; pure, so a test can hand it one */
+export function domCensus(
+  root: { querySelectorAll(sel: string): { length: number } },
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const name of Object.keys(CENSUS_SELECTORS)) {
+    counts[name] = root.querySelectorAll(CENSUS_SELECTORS[name]).length;
+  }
+  return counts;
+}
+
+/**
+ * Run exactly `budget` frames through `raf`, then stop. Split out from the DOM
+ * reader so a test can pump it on a fake clock and prove the loop ends on its
+ * budget instead of rescheduling itself for the life of the session.
+ */
+export function pumpFrames(
+  budget: number,
+  onFrame: (i: number) => void,
+  raf: (cb: () => void) => void,
+): void {
+  if (budget <= 0) return;
+  let i = 0;
+  const step = (): void => {
+    onFrame(i);
+    i += 1;
+    if (i < budget) raf(step);
+  };
+  raf(step);
+}
+
+// main.ts owns followTail; this side only reads it, registered the same way
+// the keyboard edge is (watchKeyboard above). Unregistered, the ft field is
+// simply left off the record and the trail's own followtail marks carry it.
+let readFollowTail: (() => boolean) | null = null;
+
+export function watchFollowTail(read: () => boolean): void {
+  readFollowTail = read;
+}
+
+// resolved once at the close edge and reused for the whole run: a querySelector
+// per frame would be work the probe does not need, and the elements cannot be
+// replaced mid-close (only a re-render swaps them, and a close never renders)
+let fallStyle: CSSStyleDeclaration | null = null; // .compose's live computed style
+let fallPill: Element | null = null;
+let fallThread: HTMLElement | null = null;
+let fallT0 = 0;
+let fallRun = 0; // a second close inside the window owns the frames from there on
+
+function fallSample(ms: number): void {
+  if (!appEl) return;
+  const pill = fallPill?.getBoundingClientRect();
+  const thread = fallThread?.getBoundingClientRect();
+  holdDiagRecord("kb-fall", fallFrame(ms, {
+    // .compose's padding-bottom IS var(--pad-b), and it is the only reachable
+    // form of that value in pixels: an unregistered custom property computes
+    // to its own token stream (the max()/env() text), so only a property the
+    // engine has actually used reports a resolved length
+    padB: () => (fallStyle ? parseFloat(fallStyle.paddingBottom) : NaN),
+    shellH: () => appEl?.getBoundingClientRect().height ?? NaN,
+    pillBot: () => pill?.bottom ?? NaN,
+    thBot: () => thread?.bottom ?? NaN,
+    st: () => fallThread?.scrollTop ?? NaN,
+    ft: () => readFollowTail?.(),
+  }));
+}
+
+// The last frame with the keyboard still up. Called from applyShell on the .kb
+// false edge BEFORE the class comes off, because that class is what collapses
+// --pad-b: once it is toggled a computed read already reports the stepped
+// value, and the before/against/after comparison the bug turns on is gone.
+// This is the frame the first rAF sample is measured against.
+function fallEdge(): void {
+  if (!appEl || typeof document === "undefined") return;
+  const compose = document.querySelector(".compose");
+  fallStyle = compose ? getComputedStyle(compose) : null;
+  fallPill = document.querySelector(".compose .field");
+  fallThread = document.getElementById("thread");
+  fallT0 = performance.now();
+  fallRun += 1;
+  fallSample(0); // ms 0 is always the pre-close frame; every later one is the fall
+}
+
+function startFallProbe(): void {
+  if (!appEl || typeof requestAnimationFrame !== "function") return;
+  const run = fallRun;
+  pumpFrames(
+    FALL_FRAMES,
+    () => {
+      if (run !== fallRun) return; // a newer close is recording; leave its trail clean
+      fallSample(performance.now() - fallT0);
+    },
+    (cb) => {
+      requestAnimationFrame(() => cb());
+    },
+  );
+}
+
+function pickAnchorRecord(fresh: boolean): void {
+  if (!fileEl || !plusEl) return;
+  holdDiagRecord(
+    "pick-anchor",
+    anchorFrame(
+      fileEl.getBoundingClientRect(),
+      plusEl.getBoundingClientRect(),
+      fresh,
+      performance.now(), // ms since the page began loading = how long the app has run
+    ),
+  );
+}
+
+function censusRecord(): void {
+  if (typeof document === "undefined") return;
+  holdDiagRecord("dom-census", domCensus(document));
+}
+
+// The device's own env(safe-area-inset-bottom), in pixels. There is no way to
+// read an inset except to let the engine use it, so a throwaway box sized by
+// the inset alone is measured and dropped in the same run: absolutely
+// positioned inside the fixed shell and parked far off-screen, so it joins no
+// flow, overlaps nothing, and is gone before anything can paint it. Runs at
+// the end of initShell, when the shell is still empty and a forced layout
+// costs nothing.
+function recordSafeArea(): void {
+  if (!appEl || typeof document === "undefined") return;
+  const probe = document.createElement("div");
+  probe.style.cssText =
+    "position:absolute;top:-9999px;left:-9999px;width:0;visibility:hidden;" +
+    "pointer-events:none;height:env(safe-area-inset-bottom, 0px)";
+  appEl.appendChild(probe);
+  const insetB = probe.getBoundingClientRect().height;
+  probe.remove();
+  holdDiagRecord("safe-area", { insetB: px(insetB) });
+}
+// =================== END TEMP DIAGNOSTIC (remove after the keyboard-fall session) ===================
