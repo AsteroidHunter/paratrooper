@@ -47,21 +47,31 @@ export function photoBox(natW: number, natH: number, rowW: number): PhotoBox {
 //
 // decode() resolves only once the pixels are ready to paint, so it covers the
 // read AND the draw, and an element it has resolved for is safe to put on
-// screen. That is the one wait both places ride now.
+// screen. That is the one wait both places ride now — ONE wait, on ONE element.
+// The tray's thumbnail and the photo the send hands the thread used to be two
+// img elements over the same blob url, each running its own decode() at the same
+// moment. On a 12MP camera photo that is real work and the two copies slowed
+// each other down: a device session drew one of them in 3654ms while its twin,
+// decoding the identical bytes alongside it, ran out of patience and gave up.
+// There is a single element per picked file now (main.ts prepareShot). It stands
+// in the tray while the photo is staged and the send carries that very element
+// into the bubble, so the thread paints pixels the tray already has and no
+// second decode is ever asked for.
 //
-// The deadline belongs to whatever the wait is HOLDING BACK, and that is only
-// ever the send. A tap must produce a bubble, so send() waits this long for the
-// pixels and then goes without them, taking whatever size the file has managed
-// to report: instant feedback outranks a perfect first frame.
-//
-// The picked-photo tray holds nothing back. Its seat and the tray's own opening
-// land on the tap (main.ts stagePick), and only the picture inside is still to
-// come, so that one waits with no deadline at all. Uncovering an empty square on
-// a timer would put on screen exactly the frame this whole section exists to
-// prevent, and would buy nothing, because the preview is already there.
-
-/** how long a SEND waits on a photo's own pixels before going ahead without them */
-export const SHOT_DRAW_MS = 350;
+// Nothing holds a deadline any more, which is why the default below is to wait
+// as long as the pixels take. A deadline belongs to whatever the wait is HOLDING
+// BACK, and neither place holds anything back:
+//   - the tray's seat and the tray's own opening land on the tap (stagePick),
+//     and only the picture inside is still to come;
+//   - the sent row is built, pinned and flown the moment ↑ is pressed, wearing
+//     the same placeholder the tray's square wears until the pixels turn up.
+// The send used to wait 350ms and go on without them, which is exactly the lag
+// the owner reported between the tray vanishing and the bubble arriving: his
+// camera photos missed that deadline every time, so the tap bought a blank frame
+// and a beat of nothing. Giving up on a timer can only ever swap a mark that
+// plainly says "coming" for an empty frame that says nothing, which is the one
+// frame this whole section exists to prevent. The deadline stays on the helper
+// for a caller that genuinely cannot wait; there is no such caller today.
 
 /** a wait with nothing held back behind it: no timer, the pixels take what they take */
 export const DRAW_NO_DEADLINE = Number.POSITIVE_INFINITY;
@@ -75,7 +85,7 @@ export interface Drawable {
   addEventListener(type: string, listener: () => void, opts?: { once: boolean }): void;
 }
 
-export function whenDrawn(img: Drawable, deadlineMs: number = SHOT_DRAW_MS): Promise<DrawWhy> {
+export function whenDrawn(img: Drawable, deadlineMs: number = DRAW_NO_DEADLINE): Promise<DrawWhy> {
   return new Promise<DrawWhy>((resolve) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
@@ -128,5 +138,43 @@ export function thumbSlide(): Keyframe[] {
   return [
     { opacity: 0, transform: `translateX(-${THUMB_SLIDE_PX}px)` },
     { opacity: 1, transform: "none" },
+  ];
+}
+
+// --- the picked photo's exit ---------------------------------------------------
+// The ✕ used to delete the thumbnail and switch the tray off in the same frame,
+// which is the snap the owner reported: it disappears, but it is sudden. A
+// removal leaves the way the pick arrived now, on the send flight's own beat and
+// ease (shift.ts) — the same clock the entrance above rides, so a square that
+// slid in does not answer some other curve on the way out.
+//
+// Two motions, started together and finishing together, so the removal reads as
+// one. The SQUARE shrinks and fades where it stands; the STRIP eases its own
+// height down underneath it, so the compose bar rides the closing edge instead
+// of jumping to meet it. The strip's half plays only when the square leaving is
+// the last one in the tray: with others still staged the strip's height does not
+// change and there is nothing to ease.
+//
+// The height is MEASURED and passed in, never written down here, because the
+// strip wraps — more thumbnails than fit on a line make it two lines tall, and a
+// number in this file could only ever be right about one of those. The top
+// padding travels with it: everything in this app is border-box, so `height: 0`
+// on its own still leaves the strip its padding tall, and those last few pixels
+// would then vanish in one frame after all the rest had eased away, which is the
+// snap in miniature.
+
+export const THUMB_DROP_SCALE = 0.8; // ~13px off the 64px square: a shrink, not a collapse
+
+export function thumbDrop(): Keyframe[] {
+  return [
+    { opacity: 1, transform: "none" },
+    { opacity: 0, transform: `scale(${THUMB_DROP_SCALE})` },
+  ];
+}
+
+export function trayClose(heightPx: number, padTopPx: number): Keyframe[] {
+  return [
+    { height: `${heightPx}px`, paddingTop: `${padTopPx}px` },
+    { height: "0px", paddingTop: "0px" },
   ];
 }

@@ -957,6 +957,14 @@ html, body {
   flex-wrap: wrap;
   padding: 0.4rem 0.75rem 0;
 }
+/* The strip on its way out (main.ts dismissPick eases its height and its top
+   padding down over the send flight's beat, while the square inside shrinks and
+   fades). The square keeps its full 64px the whole way, so without this it would
+   spill out over the compose bar as the box closes past it. The clip is on for
+   exactly as long as the motion is, and cannot live on .pending itself:
+   .pthumb-x hangs 6px outside its square, and a strip clipped at rest would
+   shave the corner off every ✕. */
+.pending.closing { overflow: hidden; }
 .pthumb { position: relative; }
 /* The seat: a hard 64px square that stands whether or not the img has anything
    to show yet, so the tray's height lands on the tap and the picture is the

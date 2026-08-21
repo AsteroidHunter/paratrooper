@@ -8,8 +8,16 @@ import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { composeMirror, fitComposeBox } from "./mirror";
-import { DRAW_NO_DEADLINE, SHOT_DRAW_MS, photoBox, thumbSlide, whenDrawn } from "./photobox";
-import { createPhotoQueue, nearMargin } from "./photolazy";
+import {
+  DRAW_NO_DEADLINE,
+  photoBox,
+  thumbDrop,
+  thumbSlide,
+  trayClose,
+  whenDrawn,
+} from "./photobox";
+import type { DrawWhy } from "./photobox";
+import { WAIT_CLASS, createPhotoQueue, nearMargin } from "./photolazy";
 import { receiptFor } from "./receipts";
 import {
   ENTER_RISE_PX,
@@ -57,7 +65,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.12"; // the bottom gap glides with the shell, bumped so the build is verifiable
+const APP_VERSION = "0.3.13"; // one decode, bubble placeholder, tray eases closed, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -642,10 +650,15 @@ function refreshSend(): void {
 interface Pick {
   url: string; // the one blob url the thumbnail and the sent photo both read
   wrap: HTMLElement; // the tray thumbnail, holding its square from the tap on
-  shot: Promise<HTMLImageElement>; // the thread's photo, already being drawn
+  img: HTMLImageElement; // the ONE drawn photo: the tray shows it, the send carries it
 }
 
 const picks = new Map<File, Pick>();
+
+// the tray's close-down while it runs (dismissPick). A pick landing mid-close
+// has to call it off: an animation still holding the box at zero height would
+// keep the new thumbnail clipped out of sight (showPending).
+let trayClosing: Animation | null = null;
 
 function renderPending(): void {
   refreshSend(); // staged files count toward "something to send"
@@ -678,7 +691,54 @@ function renderPending(): void {
 function showPending(): void {
   const box = document.getElementById("pending");
   if (!box) return;
-  box.style.display = pendingFiles.length > 0 ? "flex" : "none";
+  const open = pendingFiles.length > 0;
+  // a pick landing mid-close calls the close off: the tray owes the new square
+  // its full height this very frame, and the closing animation is still holding
+  // the box at zero with the clip that goes with it
+  if (open) {
+    trayClosing?.cancel();
+    trayClosing = null;
+    box.classList.remove("closing");
+  }
+  box.style.display = open ? "flex" : "none";
+}
+
+// The ✕. Everything the tap DECIDES lands on the tap — the file leaves the
+// staging list and the ↑ answers for it immediately — and only the DOM teardown
+// waits for the motion, so a send fired mid-close can never pick the dismissed
+// photo back up. Removing the square and switching the tray off in one frame was
+// the snap he reported; photobox.ts (thumbDrop, trayClose) holds the two halves
+// of what replaces it and why they are one beat.
+function dismissPick(file: File, pick: Pick): void {
+  const box = document.getElementById("pending");
+  // Out of the ledger on the tap, not when the motion ends. From here this
+  // square belongs to nobody: a renderPending landing mid-close cannot prune it
+  // out from under its own animation, the drawing wait it was staged with reads
+  // the same absence and lets its reveal go, and the teardown below owns the
+  // wrap and the url outright rather than checking whether it still may.
+  picks.delete(file);
+  const beat: KeyframeAnimationOptions = {
+    duration: FLIGHT_MS,
+    easing: FLIGHT_EASE,
+    fill: "forwards", // the square stays gone and the box stays shut until the teardown below
+  };
+  // the tray's own height moves only when this was the last square in it
+  if (box && pendingFiles.length === 0) {
+    const padTop = parseFloat(getComputedStyle(box).paddingTop) || 0;
+    box.classList.add("closing"); // clips the full-size square while the box goes past it
+    trayClosing = box.animate(trayClose(box.offsetHeight, padTop), beat);
+  }
+  const drop = pick.wrap.animate(thumbDrop(), beat);
+  const gone = (): void => {
+    box?.classList.remove("closing");
+    pick.wrap.remove();
+    if (pick.url) URL.revokeObjectURL(pick.url);
+    // display:none only once the height has actually gone — and it re-reads the
+    // staging list, so a pick that arrived mid-close finds the tray open
+    showPending();
+  };
+  drop.addEventListener("finish", gone);
+  drop.addEventListener("cancel", gone);
 }
 
 function stagePick(file: File, box: HTMLElement): Pick {
@@ -688,8 +748,13 @@ function stagePick(file: File, box: HTMLElement): Pick {
   // from this line, wearing the same placeholder the thread's unarrived photos
   // wear (styles.css), and only the img inside it is held back
   wrap.className = "pthumb undrawn";
-  const img = document.createElement("img");
-  img.src = url;
+  // ONE element and ONE decode for this file. It is made here, shown here, and
+  // handed to the send exactly as it stands (takeShot), so the phone draws the
+  // photo once for both places instead of racing two copies of the same work
+  // against each other (photobox.ts has the device numbers).
+  const shot = prepareShot(url);
+  const img = shot.img;
+  const pick: Pick = { url, wrap, img };
   const x = document.createElement("button");
   x.type = "button";
   x.className = "pthumb-x";
@@ -698,33 +763,36 @@ function stagePick(file: File, box: HTMLElement): Pick {
   // thumbnails outlive their neighbours now, so a captured index goes stale
   x.addEventListener("click", () => {
     const at = pendingFiles.indexOf(file);
-    if (at >= 0) pendingFiles.splice(at, 1);
-    renderPending();
+    if (at < 0) return; // a second tap while the first one is still easing out
+    pendingFiles.splice(at, 1);
+    refreshSend(); // the ↑ answers the tap; the tray answers over the beat below
+    dismissPick(file, pick);
   });
   wrap.append(img, x);
   box.appendChild(wrap); // seated now; renderPending opens the tray around it
-  const pick: Pick = { url, wrap, shot: prepareShot(url) };
   const staged = performance.now();
-  // The picture's arrival, and nothing else's. The tray and this square went up
-  // on the tap, so this wait holds nothing back and carries no deadline
-  // (photobox.ts explains why the send keeps one and this does not): waiting a
-  // deadline out and uncovering the img anyway would swap a placeholder that
-  // says "coming" for an empty frame that says nothing, which is the one thing
-  // this tray must not show. It waits on the THUMBNAIL's pixels rather than the
-  // shot's, because that is the element the tray shows. A decode that FAILS
-  // uncovers the img like any other settle: WebKit rejects the odd large photo
-  // that then paints perfectly well, and a square stuck under a spinner forever
-  // is the worse of the two wrong answers.
-  void whenDrawn(img, DRAW_NO_DEADLINE).then((why) => {
+  // The picture's arrival, and nothing else's — the same one wait prepareShot
+  // already started on this element, joined a second time rather than begun
+  // again. The tray and this square went up on the tap, so nothing here is held
+  // back and nothing carries a deadline (photobox.ts): waiting a deadline out
+  // and uncovering the img anyway would swap a placeholder that says "coming"
+  // for an empty frame that says nothing, which is the one thing this tray must
+  // not show. A decode that FAILS uncovers the img like any other settle: WebKit
+  // rejects the odd large photo that then paints perfectly well, and a square
+  // stuck under a spinner forever is the worse of the two wrong answers.
+  void shot.drawn.then((why) => {
     if (picks.get(file) !== pick) return; // removed or sent while it was drawing
     wrap.classList.remove("undrawn");
     // the entrance starts HERE, on the pixels: it moves a square that has its
     // picture, inside a tray that has been open since the tap. Started on the
     // old deadline instead, it spent its whole beat on an empty box.
     wrap.animate(thumbSlide(), { duration: FLIGHT_MS, easing: FLIGHT_EASE });
-    // ms says what the deadline used to say by settling "late", only better:
-    // how long the phone actually took, not merely that it took longer than
-    // SHOT_DRAW_MS (on device every camera photo did, the one screenshot did not)
+    // ms says what a deadline used to say by settling "late", only better: how
+    // long the phone actually took, not merely that it took longer than some
+    // number (on device every camera photo did, the one screenshot did not).
+    // This one is the SQUARE's clock and stops when the square fills; the
+    // pixels' own clock rides shot-dims, which reports whether the photo was
+    // still in the tray or already in the thread when they landed.
     holdDiagRecord("flight", {
       phase: "pick-show", why, ms: Math.round(performance.now() - staged),
     });
@@ -732,17 +800,20 @@ function stagePick(file: File, box: HTMLElement): Pick {
   return pick;
 }
 
-// The send takes the picked file's prepared photo, and its blob url with it: the
-// tray must never revoke a url the thread has started reading from, so the pick
-// stops owning the url here and the send's own tray clear takes the thumbnail
-// away as it always did. A file that somehow reaches send() unstaged is prepared
-// on the spot, which is the pre-staging behaviour and costs only that send its
-// own wait.
-function takeShot(file: File): Promise<HTMLImageElement> {
+// The send takes the picked file's photo — the very element the tray has been
+// drawing since the pick, so nothing is decoded a second time and nothing is
+// waited on here — and its blob url with it: the tray must never revoke a url
+// the thread has started reading from, so the pick stops owning the url here and
+// the send's own tray clear takes the (now empty) thumbnail away as it always
+// did. A file that somehow reaches send() unstaged gets its element made on the
+// spot, which is the pre-staging behaviour: it enters the thread wearing the
+// placeholder and fills in when its pixels land, exactly like a staged one whose
+// send outran its tray.
+function takeShot(file: File): HTMLImageElement {
   const pick = picks.get(file);
-  if (!pick) return prepareShot(URL.createObjectURL(file));
+  if (!pick) return prepareShot(URL.createObjectURL(file)).img;
   pick.url = "";
-  return pick.shot;
+  return pick.img;
 }
 
 const threadEl = () => document.getElementById("thread")!;
@@ -2594,54 +2665,78 @@ function localBubble(role: string, cls: string, text: string): void {
 // send() pins the thread to the bottom immediately after the insert, so that pin
 // used to land on a bubble that had not grown yet; the decode then grew the row
 // downward and the photo came to rest as a thin top sliver under the compose
-// bar. The file's own pixels are therefore in hand FIRST: the element is made
-// here, over the tray's blob url, and its pixels waited on, so the row can be
-// laid out at full height before anything measures, pins, or flies.
+// bar. The file's own size is therefore in hand FIRST, read off the element the
+// tray has already been loading, so the row can be laid out at full height
+// before anything measures, pins, or flies.
 //
-// The wait runs to DRAWN, not merely read (photobox.ts whenDrawn explains the
-// difference). A row inserted the moment the file was read entered the thread as
-// a correctly sized empty frame and filled a beat later, which is the blank the
-// owner saw right after tapping send. Waiting on the decode means the photo is
-// in the bubble on the bubble's first frame, so the flight carries a picture up
-// rather than an empty box.
+// The SIZE and the PIXELS are two different arrivals, and only the size has to
+// be here. A file reports its size the moment it is READ, which on a local blob
+// url is quick; turning twelve megapixels into something paintable is the slow
+// half, and it is the half the row can go without. So send() reserves the seat
+// from whatever the element has read and inserts the row on the spot, and the
+// photo joins it in place — no wait of any kind between the tap and the bubble.
 //
-// The wait is deadlined, by the same number and for the same reason the size
-// read always was. A file whose pixels never arrive must not hold the optimistic
-// bubble back, because instant feedback on tap outranks a perfect first frame;
-// past the deadline the row takes whatever size the file has managed to report
-// and, failing even that, falls back to the old unsized behaviour of re-pinning
-// when the pixels land, like every other photo kind. Every outcome lands on the
-// flight trail, so a device session says whether the seat was reserved and at
-// what size.
+// The blank that used to sit in that bubble is now a PLACEHOLDER instead. The
+// element wears the thread's own not-arrived mark from the frame it is made
+// (WAIT_CLASS below), which is the same grey face and ring the tray's waiting
+// square wears and the same one every history photo wears before it loads, so a
+// bubble whose photo has not drawn yet reads as waiting rather than as nothing.
+// That is what let the wait go: send() used to hold the whole task for up to
+// 350ms hoping for pixels, miss on every camera photo, and then show the empty
+// frame anyway — the lag he reported between the tray vanishing and the photo
+// appearing was that deadline, spent to no purpose.
 //
-// And it happens at PICK time, not here (see stagePick): the tray has to read
-// and draw the same file for its own thumbnail anyway, so the work is done while
-// the owner's thumb is still travelling from the picker to ↑. What send() awaits
-// below is normally a promise that settled seconds ago. The read that used to
-// sit inside send() is gone from it entirely.
+// A file that never reports a size at all falls back to the old unsized
+// behaviour, re-pinning when the pixels land like every other photo kind. Every
+// outcome lands on the flight trail, so a device session says whether the seat
+// was reserved and at what size.
 
 // the file's own pixels, or null when the image has not reported them; read at
-// the moment the row is built rather than when the wait ended, so a photo that
-// outran its deadline but has since drawn still gets its exact seat
+// the moment the row is built rather than when the wait ended, so a photo whose
+// send outran its read still gets its exact seat if the read has since landed
 function naturalSize(img: HTMLImageElement): [number, number] | null {
   return img.naturalWidth > 0 && img.naturalHeight > 0
     ? [img.naturalWidth, img.naturalHeight]
     : null;
 }
 
-// the url is the tray's, not one made here: one blob url per picked file means
-// the phone fetches and decodes that file once for both the thumbnail and the
-// photo the thread will show, instead of doing the whole job twice
-function prepareShot(url: string): Promise<HTMLImageElement> {
+/** the one element a picked photo's pixels land in, and the one wait for them */
+interface Shot {
+  img: HTMLImageElement;
+  drawn: Promise<DrawWhy>;
+}
+
+// The element a picked photo lives in for its whole life on this device: the
+// tray's thumbnail, and then — the same node, moved, never copied — the photo in
+// the sent bubble. Two elements over one blob url meant two decodes of the same
+// twelve megapixels running against each other (photobox.ts has the device
+// numbers); one element means one, started as early as the pick and finished
+// wherever the photo happens to be standing by then.
+function prepareShot(url: string): Shot {
   const img = document.createElement("img");
+  // the thread's own not-arrived mark, worn from the frame the element exists:
+  // whichever box it is standing in while the pixels are missing — the tray's
+  // square or a bubble the send has already built around it — paints the grey
+  // face and the shared ring over it instead of showing a blank (styles.css)
+  img.classList.add(WAIT_CLASS);
   img.src = url;
-  return whenDrawn(img, SHOT_DRAW_MS).then((why) => {
+  const started = performance.now();
+  const drawn = whenDrawn(img, DRAW_NO_DEADLINE).then((why) => {
+    // the mark comes off wherever the element now stands, tray or thread: this
+    // is the one moment a picked photo stops being a placeholder in both places
+    img.classList.remove(WAIT_CLASS);
     const nat = naturalSize(img);
+    // ms and seat are what a deadline used to say by settling "late": how long
+    // the pixels really took, and whether the send had already carried them into
+    // the thread by the time they arrived
     holdDiagRecord("flight", {
       phase: "shot-dims", why, w: nat ? nat[0] : 0, h: nat ? nat[1] : 0,
+      ms: Math.round(performance.now() - started),
+      seat: img.closest(".msg") ? "thread" : "tray",
     });
-    return img;
+    return why;
   });
+  return { img, drawn };
 }
 
 // the width one .row spans: the thread's content box, since rows are its direct
@@ -2664,10 +2759,10 @@ async function send(): Promise<void> {
   const files = [...pendingFiles];
   if (!text && files.length === 0) return;
 
-  // the photos, read AND drawn (prepareShot explains the seat and the frame they
-  // buy). Prepared when they were picked, so these are normally promises that
-  // settled long ago; taken here, before the tray is cleared out from under
-  // them, and awaited further down before anything is measured or inserted
+  // the photos: the very elements the tray has been drawing since each pick, one
+  // decode apiece and not one started here. Taken before the tray is cleared out
+  // from under them, and carried straight into the rows below — nothing in this
+  // function waits on a pixel (prepareShot has the whole story)
   const shots = files.map(takeShot);
 
   // the take-back: a reply still held unseen when he sends must vanish for
@@ -2728,10 +2823,13 @@ async function send(): Promise<void> {
     }
   }
 
-  // the last wait: from here down send() is one synchronous task (measure,
-  // insert, pin, launch), so every photo's size and the width its bubble gets
-  // to share must be in hand NOW. A size arriving after the pin is the sliver.
-  const ready = files.length ? await Promise.all(shots) : [];
+  // from here down send() is one synchronous task (measure, insert, pin,
+  // launch). It used to open with a wait on the photos' own pixels, and that
+  // wait is what he felt as the lag between the tray vanishing and the bubble
+  // arriving: a 12MP camera photo missed its deadline every time, so the tap
+  // bought a blank frame and a beat of nothing to look at. The rows go up now
+  // with whatever their elements have — the seat below if the file has been
+  // read, the placeholder either way — and the pixels join them in place.
   const rowW = files.length ? threadContentWidth() : 0;
 
   // the white-strip fix measures the older content BEFORE anything is
@@ -2746,7 +2844,7 @@ async function send(): Promise<void> {
   const prevSuppress = suppressAnim;
   suppressAnim = true;
   const w = localWrapper("user");
-  for (const img of ready) {
+  for (const img of shots) {
     const div = rowEl(w, "user", "shot", Date.now());
     const nat = naturalSize(img);
     if (nat) {
@@ -2763,8 +2861,13 @@ async function send(): Promise<void> {
         w: Math.round(box.width * 10) / 10, h: Math.round(box.height * 10) / 10,
       });
     } else {
-      // nothing to reserve: the old unsized row, whose late growth re-pins the
-      // bottom the way every other photo kind does
+      // The file has not even been READ yet, which now means a send within a
+      // frame or two of the pick rather than a decode that ran long. Nothing to
+      // reserve: the old unsized row, whose late growth re-pins the bottom the
+      // way every other photo kind does. The placeholder has no box to paint in
+      // either until that read lands, so this row is briefly the empty one the
+      // reserved rows above never are — the one case where there is genuinely
+      // nothing yet to describe.
       img.onload = () => {
         if (followTail) scrollToBottom(true);
       };
