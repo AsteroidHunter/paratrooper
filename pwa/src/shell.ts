@@ -389,9 +389,12 @@ function armGlide(edge: "open" | "close"): void {
 // box. styles.css owns what they mean (.kb collapses --pad-b and vanishes the
 // ＋; .focusing runs that same bar choreography from the focus tap itself;
 // .kb/.gliding size the shell from --shell-top/--shell-h and .gliding alone
-// carries their transition; .settling greys the bar for the whole picker
-// session). Every vv event lands here, so the box is always the freshest
-// numbers iOS has published — no latch, nothing to retract.
+// carries their transition AND the matching one on everything --pad-b moves,
+// so the shell's bottom edge and the bar's bottom gap are armed by the single
+// class recalculation below and cannot travel on separate clocks; .settling
+// greys the bar for the whole picker session). Every vv event lands here, so
+// the box is always the freshest numbers iOS has published — no latch,
+// nothing to retract.
 function applyShell(t: ShellTarget, settling: boolean): void {
   if (!appEl) return;
   // TEMP DIAGNOSTIC (kb-fall, block at the bottom): the last frame with the
@@ -765,12 +768,17 @@ export function currentFileInput(): HTMLInputElement | null {
 // class, style, scroll position or lasting node is written anywhere below, so
 // the app behaves exactly as it did without them.
 //
-//   kb-fall     — the close, frame by frame. The suspicion is that --pad-b
-//                 steps from its keyboard value (0.5rem) to its full
-//                 safe-area value in the SAME frame the shell starts its
-//                 0.2s glide, so the pill hops up by the inset while
-//                 everything around it slides. shell-size samples once per
-//                 viewport event, which is far too slow to catch one frame.
+//   kb-fall     — the close, frame by frame. It has now answered the question
+//                 it was built for: --pad-b DID step from its keyboard value
+//                 (0.5rem) to its full safe-area value in one frame while the
+//                 shell had not moved at all (padB 8.5 then 34 with shellH
+//                 still 400, pillBot 391.5 then 366), so the pill hopped up by
+//                 the inset while everything around it slid. styles.css puts
+//                 every reader of --pad-b on the shell's own glide clock, so
+//                 the same trail should now show padB easing across the frames
+//                 in step with shellH instead of arriving in one. shell-size
+//                 samples once per viewport event, which is far too slow to
+//                 catch either shape.
 //   pick-anchor — the file input's rect against the ＋ button's at the instant
 //                 the picker presents. iOS anchors WKFileUploadPanel to the
 //                 INPUT's rendered rect, and .filepick is parked invisibly on
@@ -947,7 +955,10 @@ function fallSample(ms: number): void {
     // .compose's padding-bottom IS var(--pad-b), and it is the only reachable
     // form of that value in pixels: an unregistered custom property computes
     // to its own token stream (the max()/env() text), so only a property the
-    // engine has actually used reports a resolved length
+    // engine has actually used reports a resolved length. That is also why
+    // styles.css transitions the used property rather than the variable, and
+    // why this read reports the ANIMATED value mid-glide: the two facts are
+    // the same fact.
     padB: () => (fallStyle ? parseFloat(fallStyle.paddingBottom) : NaN),
     shellH: () => appEl?.getBoundingClientRect().height ?? NaN,
     pillBot: () => pill?.bottom ?? NaN,

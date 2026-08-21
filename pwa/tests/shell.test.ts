@@ -439,8 +439,9 @@ describe("presentation — glide scoped to kb edges, focusing keys the choreogra
 
   it("only .gliding carries the top/height transition, 0.2s ease-out", () => {
     expect(css).toMatch(
-      /\n#app\.gliding \{\n  transition: top 0\.2s ease-out, height 0\.2s ease-out;\n\}/,
+      /\n#app\.gliding \{\n  transition: top var\(--glide\), height var\(--glide\);\n\}/,
     );
+    expect(css).toMatch(/\n#app \{[^}]*--glide: 0\.2s ease-out;/); // and that token IS the clock
     const kbRule = css.match(/\n#app\.kb \{([^}]*)\}/)?.[1] ?? "";
     expect(kbRule).toContain("--pad-b: 0.5rem"); // the keyboard hug is untouched
     expect(kbRule).not.toContain("transition"); // .kb alone never animates the box
@@ -469,6 +470,60 @@ describe("presentation — glide scoped to kb edges, focusing keys the choreogra
   it("the focusing class keys the same bar choreography as .kb", () => {
     expect(css).toMatch(/#app\.kb \.compose textarea,\n#app\.focusing \.compose textarea \{/);
     expect(css).toMatch(/#app\.kb \.compose \.attach,\n#app\.focusing \.compose \.attach \{/);
+  });
+});
+
+// The bar's bottom gap and the shell's bottom edge are ONE move. A close
+// recorded frame by frame on device caught them apart: --pad-b stepped 8.5px
+// to 34px while the shell height was still 400px, so the pill hopped 25.5px
+// up in a single frame and only then rode the glide home. These pins say the
+// gap can no longer be given its own clock or its own trigger, and that EVERY
+// reader of --pad-b rides with it, since one left stepping just moves the hop
+// to another element.
+describe("presentation — the home-indicator gap rides the shell's own clock", () => {
+  // comments carry the prose about durations, so strip them: a pin must never
+  // be satisfied by an explanation of the thing it is checking for
+  const bare = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  // innermost brace pairs, which for this sheet is every plain rule (the two
+  // at-rules that wrap anything hold ordinary rules inside them)
+  const rules = [...bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+    sel: m[1].trim().replace(/\s*\n\s*/g, "\n"),
+    body: m[2],
+  }));
+  const selectors = (sel: string): string[] => sel.split(",").map((s) => s.trim());
+  const glideRules = rules.filter((r) =>
+    selectors(r.sel).every((s) => s.startsWith("#app.gliding")),
+  );
+  const transitionOf = (body: string): string => body.match(/transition:([^;]*);/)?.[1] ?? "";
+
+  it("one clock, written once: every glided property spells the same token", () => {
+    expect(glideRules.length).toBeGreaterThan(1); // the box alone is not enough
+    for (const r of glideRules) {
+      const entries = transitionOf(r.body).split(",").map((e) => e.trim());
+      expect(entries.length).toBeGreaterThan(0);
+      // "<property> var(--glide)" and nothing else: a literal duration here
+      // would be a second clock, free to drift from the shell's on any edit
+      for (const entry of entries) expect(entry).toMatch(/^[a-z-]+ var\(--glide\)$/);
+    }
+  });
+
+  it("every --pad-b reader glides: the bar, the chevron's seat, the picker anchor", () => {
+    const consumers = rules.filter((r) => r.body.includes("var(--pad-b)")).map((r) => r.sel);
+    expect(consumers).toContain(".compose"); // the pill and the ＋
+    expect(consumers).toContain(".jump"); // on screen exactly when the thread is scrolled away
+    expect(consumers).toContain(".filepick"); // invisible, but the rect iOS anchors the sheet to
+    const glided = new Set(glideRules.flatMap((r) => selectors(r.sel)));
+    for (const sel of consumers) expect([...glided]).toContain(`#app.gliding ${sel}`);
+  });
+
+  it("the gap is gated on the shell's own class — nothing animates it elsewhere", () => {
+    for (const r of rules) {
+      if (selectors(r.sel).every((s) => s.startsWith("#app.gliding"))) continue;
+      const decl = transitionOf(r.body);
+      expect(decl).not.toContain("padding-bottom");
+      expect(decl).not.toMatch(/(^|,)\s*bottom\s/);
+    }
   });
 });
 

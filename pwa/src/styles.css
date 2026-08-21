@@ -138,6 +138,12 @@ html, body {
      up (.kb, set by shell.ts) so the compose bar hugs the keyboard like
      iMessage instead of floating a dead band above it */
   --pad-b: max(0.5rem, env(safe-area-inset-bottom));
+  /* the glide's one clock: its duration and easing are written down ONCE, so
+     everything that has to arrive with the shell's box spells this token
+     rather than carrying its own copy of the same two words. Two properties
+     agreeing by copy can be edited apart; two properties reading one token
+     cannot. See #app.gliding below for what rides it. */
+  --glide: 0.2s ease-out;
 }
 /* Keyboard provably up (shell.ts's baseline-tested signal): the shell box IS
    the visual viewport. top translates the fixed shell into the visible region
@@ -166,7 +172,39 @@ html, body {
    geometry jump reads as motion; outside it — every mid-typing write — the
    box stays instant, so an active-growth frame never smears. */
 #app.gliding {
-  transition: top 0.2s ease-out, height 0.2s ease-out;
+  transition: top var(--glide), height var(--glide);
+}
+/* The bottom gap travels with the shell's bottom edge: same clock, same gate.
+   applyShell (shell.ts) toggles .kb and .gliding inside ONE style
+   recalculation, so a transition written here is armed by the very write that
+   moves the value, and the two can only be started apart by someone splitting
+   that toggle. Left untransitioned, --pad-b delivered the whole home-indicator
+   inset in a single frame while the shell had not begun to move: a close
+   recorded frame by frame on device read padding 8.5px then 34px with the
+   shell height still 400px, so the pill hopped about 26px up and only then
+   rode the glide back down. At the bottom of the thread the messages re-pin
+   every frame and take the hop with it, which reads as the whole view
+   twitching; scrolled away nothing re-pins, so the bar jumps alone against
+   still messages and reads as the keyboard itself moving. The open leg had
+   the same break mirrored (the gap collapsing in one frame while the shell
+   shrinks over 0.2s), and it is armed on the same edge, so it is fixed here
+   too.
+   The GATE earns its place next to the clock: --pad-b changes for exactly one
+   reason, the .kb toggle, and that toggle is what arms .gliding. Gating on it
+   means the gap can never animate at boot, on a rotation that moves the
+   safe-area inset, or on any other write the shell is not animating alongside.
+   All THREE readers of --pad-b ride it, because one left stepping only moves
+   the hop to a different element: .compose's padding carries the pill and the
+   ＋; .jump's seat is measured up from the same gap, and the chevron is on
+   screen precisely when the thread is scrolled away from the bottom; .filepick
+   is invisible but IS the rect iOS anchors the picker sheet to, so it has to
+   sit on the ＋ mid-glide as well as at rest. */
+#app.gliding .compose {
+  transition: padding-bottom var(--glide);
+}
+#app.gliding .filepick,
+#app.gliding .jump {
+  transition: bottom var(--glide);
 }
 
 /* --- token gate --- */
