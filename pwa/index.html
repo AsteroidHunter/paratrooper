@@ -14,52 +14,118 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
     <title>Paratrooper</title>
-    <!-- DISABLED splash (v0.1.24): on a standalone iOS cold open the ~2s of
-         white happens BEFORE this document arrives from the server, so an
-         in-page splash cannot cover it — it only showed for the last blink.
-         Kept commented out in case a non-PWA shell ever exists, where the
-         page is local and the wait really is the app booting.
+
+    <!--
+      THE LAUNCH COVER. It lives in this document rather than in the bundle,
+      and src/splash.ts adopts the element below instead of building one.
+
+      An in-page splash was tried once before and given up on (v0.1.24) with
+      the note that on a standalone cold open the white happens BEFORE this
+      document arrives, so nothing in the page could cover it. That was true
+      then. It is not true now, because the app paints the phone's OWN launch
+      image at runtime and installs it as apple-touch-startup-image (see the
+      top of src/splash.ts), so the phone covers everything up to the moment
+      the web view is handed this page. What is left is the stretch from that
+      handover to the first thing the app draws, and that stretch has been
+      measured on real cold opens rather than reasoned about: the document
+      finished arriving at 109ms and 318ms, while the module bundle only began
+      running at 338ms and 666ms. The cover went up 16ms after that. So the
+      app's own startup was never the problem; fetching and parsing the bundle
+      was, and the cover could not exist any earlier because the bundle was
+      what built it.
+
+      Hence this. Everything the cover needs is in this one file: the styles
+      below and the logo as a data URI, so there is no request, no
+      service-worker lookup and nothing to decode from a second file. The
+      first frame that carries this document carries the cover.
+
+      What this does NOT claim is zero. The handover from the phone's launch
+      image to this document's first paint is not observable from inside the
+      page, so it cannot be measured from here; and the BUILT page still
+      blocks its first paint on the app's stylesheet, which vite emits as a
+      separate file and links from the head. That link is now the largest
+      thing standing between this markup and the screen.
+    -->
     <style>
-      html { background: #fff; }
-      .splash {
+      /* The panel the phone's launch image hands over to: the same solid
+         white that image is painted on (SPLASH_BG in src/splash.ts), over
+         everything the app draws (the app's own top layer is 30). The fade is
+         stated here and triggered from there, by setting opacity to 0. */
+      #splashcover {
         position: fixed;
         inset: 0;
-        display: grid;
-        place-content: center;
-        justify-items: center;
-        gap: 14px;
-        font: 600 20px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-        color: #000;
+        z-index: 40;
+        background: #ffffff;
+        opacity: 1;
+        transition: opacity 260ms ease;
       }
-      .splash img { width: 76px; height: 76px; border-radius: 18px; }
-      .splash-dots { display: flex; gap: 5px; margin-top: 2px; }
-      .splash-dots span {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: #8e8e93;
-        animation: splash-blink 1.2s infinite both;
+
+      /* The logo, on the rect splashLayout() centers it at, restated in the
+         only unit a stylesheet can say it in. That function sizes the logo's
+         bounding square at SPLASH_LOGO_FRACTION (0.32) of the SHORTER edge of
+         the screen and centers it; vmin is the viewport's shorter edge, so
+         the square is 32vmin, the width is that times the art's own 280/320
+         ratio (0.28), and the corner is the middle less half of each.
+
+         The one thing a stylesheet cannot check is that the viewport IS the
+         screen, which is why splash.ts writes these four numbers back onto
+         this element as inline styles once it runs. On every iPhone the app
+         is opened on it writes the numbers already in force, so nothing
+         moves; tests/splash.test.ts is what holds the two in step. */
+      #splashlogo {
+        position: absolute;
+        display: block;
+        left: calc(50% - 14vmin);
+        top: calc(50% - 16vmin);
+        width: 28vmin;
+        height: 32vmin;
       }
-      .splash-dots span:nth-child(2) { animation-delay: 0.2s; }
-      .splash-dots span:nth-child(3) { animation-delay: 0.4s; }
-      @keyframes splash-blink { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
-      @media (prefers-color-scheme: dark) {
-        html { background: #000; }
-        .splash { color: #fff; }
+
+      /* The credit line, off the same shorter edge for the same reason: type
+         at SPLASH_HANDLE_FRACTION (0.035) of it, and its MIDDLE
+         SPLASH_HANDLE_BOTTOM_FRACTION (0.12) of it up from the bottom. CSS
+         places a box by its top, so the top is those 12vmin plus half the
+         type, and the line-height is pinned to the type size so the box's
+         middle is where the canvas's "middle" baseline sits. Pinned to both
+         side edges with centered text, which is this side's way of saying the
+         canvas's canvasW/2. The font stack is the chat's own (styles.css and
+         SPLASH_FONT_FAMILY), every name in it a face the device already has,
+         so the line costs the cover nothing to wait for. */
+      #splashhandle {
+        position: absolute;
+        left: 0;
+        right: 0;
+        text-align: center;
+        top: calc(100% - 13.75vmin);
+        font: 3.5vmin/3.5vmin -apple-system, BlinkMacSystemFont, "SF Pro Text",
+          "Segoe UI", system-ui, sans-serif;
+        color: #aeaeb2;
+      }
+
+      /* A browser tab had no launch image to hand over from, so there is no
+         handoff to cover and the panel would just be a white flash of its
+         own. splash.ts takes the element out of the document entirely in that
+         case; this is the half of the pair that acts before any code runs. It
+         is written as "hide it in a tab" rather than "show it in an installed
+         window" on purpose: a browser that does not know the display-mode
+         query then errs towards showing the cover, which is the right way
+         round for the one place it matters. */
+      @media (display-mode: browser) {
+        #splashcover {
+          display: none;
+        }
       }
     </style>
-    -->
   </head>
   <body>
-    <div id="app">
-      <!-- splash markup, disabled with the styles above:
-      <div class="splash">
-        <img src="/icon-192.png" alt="" />
-        <div>Paratrooper</div>
-        <div class="splash-dots"><span></span><span></span><span></span></div>
-      </div>
-      -->
+    <!-- First in the body so the parser reaches it first. The logo carries its
+         own art inline, and decoding="sync" tells the browser not to present
+         the element on one frame and the picture on a later one. -->
+    <div id="splashcover">
+      <img id="splashlogo" alt="" decoding="sync" src="data:image/webp;base64,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" />
+      <div id="splashhandle">@theonetrueakash</div>
     </div>
+    <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

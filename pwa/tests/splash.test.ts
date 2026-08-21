@@ -1,16 +1,19 @@
-// Pins for the iOS launch-image generator (src/splash.ts) and for the in-app
-// copy's lift rule. The geometry and the drawing are pure, so every device is
-// encoded as plain inputs: canvas size, centered logo rect, and the
-// device-matching media query come out as data, and the paint step is checked
-// against a recording 2D-context stand-in; the lift rule is pure too and runs
-// entirely on fake timers. No real DOM and no real canvas needed, so this runs
-// in the same node env as the other suites: the one case that has to watch the
-// cover actually mount drives it against a recording element stand-in, the same
-// way the paint step is driven against a recording context.
+// Pins for the iOS launch-image generator (src/splash.ts), for the in-page
+// copy of it that index.html carries, and for that copy's lift rule. The
+// geometry and the drawing are pure, so every device is encoded as plain
+// inputs: canvas size, centered logo rect, and the device-matching media query
+// come out as data, and the paint step is checked against a recording
+// 2D-context stand-in; the lift rule is pure too and runs entirely on fake
+// timers. No real DOM and no real canvas needed, so this runs in the same node
+// env as the other suites. The cover itself is checked by reading index.html,
+// which is the document that actually ships, and the cases that have to watch
+// the script take that cover over drive it against a recording element
+// stand-in, the same way the paint step is driven against a recording context.
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   COVER_CAP_MS,
+  COVER_FADE_MS,
   COVER_MIN_HOLD_MS,
   type CoverLift,
   type DrawTarget,
@@ -30,7 +33,7 @@ import {
   paintSplash,
   splashLayout,
 } from "../src/splash";
-import { SPLASH_LOGO_H, SPLASH_LOGO_INLINE, SPLASH_LOGO_W } from "../src/splashlogo";
+import { SPLASH_LOGO_H, SPLASH_LOGO_W } from "../src/splashlogo";
 
 // the real top-bar logo is 140x160 (portrait); most tests use its aspect ratio
 const LOGO_ASPECT = 140 / 160;
@@ -463,9 +466,186 @@ describe("the splash font: the chat's own stack, and what a canvas does with it"
   });
 });
 
-describe("the inlined logo art (src/splashlogo.ts)", () => {
+// --- the cover the document itself carries -------------------------------------
+//
+// The cover is markup, styles and art in index.html now, so that file is what
+// has to be read to check it. There is no DOM in this env, but more to the
+// point the whole claim is about what the SERVED document says before a line of
+// this bundle has run, and the file is exactly that. Same idea as the styles.css
+// read above: the copy that ships is the copy under test.
+const INDEX_HTML = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+
+// the cover's own markup, from its opening tag to where the app's root begins
+const COVER_HTML = INDEX_HTML.slice(
+  INDEX_HTML.indexOf('<div id="splashcover">'),
+  INDEX_HTML.indexOf('<div id="app">'),
+);
+
+// the document's inline <style> block, whitespace flattened the way the
+// styles.css checks above flatten theirs, so a wrapped declaration reads as one
+const COVER_CSS = (/<style>([\s\S]*?)<\/style>/.exec(INDEX_HTML)?.[1] ?? "").replace(/\s+/g, " ");
+
+// one rule's declarations, by selector, as a property -> value map. The first
+// match in the file wins, which is the top-level rule: the display-mode
+// override deliberately sits below all three of them.
+function cssRule(selector: string): Record<string, string> {
+  const body = new RegExp(`${selector}\\s*\\{([^}]*)\\}`).exec(COVER_CSS)?.[1] ?? "";
+  const out: Record<string, string> = {};
+  for (const decl of body.split(";")) {
+    const at = decl.indexOf(":");
+    if (at > 0) out[decl.slice(0, at).trim()] = decl.slice(at + 1).trim();
+  }
+  return out;
+}
+
+// the vmin coefficient out of a value, for the checks that pin the stylesheet
+// to the layout's constants rather than to any one device
+function vminOf(value: string): number {
+  const m = /([\d.]+)vmin/.exec(value);
+  if (!m) throw new Error(`no vmin in: ${value}`);
+  return Number(m[1]);
+}
+
+// The handful of length shapes the cover's stylesheet uses, resolved to CSS px
+// for a given viewport: "28vmin", "calc(50% - 14vmin)", "calc(100% - 13.75vmin)".
+// vmin is the viewport's shorter edge; the percentage is of the cover, and the
+// cover is fixed at inset 0, so the cover IS the viewport. That pair of
+// substitutions is the whole of what a browser would do with these values, and
+// what the suite below compares against splashLayout()'s answer.
+function resolveCss(value: string, w: number, h: number, axis: "x" | "y"): number {
+  const short = Math.min(w, h);
+  const pct = axis === "x" ? w : h;
+  const calc = /^calc\(([\d.]+)% - ([\d.]+)vmin\)$/.exec(value);
+  if (calc) return (Number(calc[1]) / 100) * pct - (Number(calc[2]) / 100) * short;
+  const plain = /^([\d.]+)vmin$/.exec(value);
+  if (plain) return (Number(plain[1]) / 100) * short;
+  throw new Error(`unhandled length: ${value}`);
+}
+
+// a hair, for comparing two float routes to the same number: everything below
+// that uses it is an EXACT agreement claim, not an approximate one
+function near(a: number, b: number): boolean {
+  return Math.abs(a - b) < 1e-6;
+}
+
+describe("the launch cover lives in the document, not in the bundle", () => {
+  it("is in the served page, and the one script the page loads is a module", () => {
+    // The whole point of the move: the element is parsed and paintable before a
+    // line of the bundle runs. A module script is DEFERRED by definition, so it
+    // cannot execute until the document has been parsed, and that is the
+    // guarantee rather than where the tag sits: vite hoists it into the head at
+    // build time, ahead of this markup, and it makes no difference.
+    expect(INDEX_HTML).toContain('<div id="splashcover">');
+    const scripts = [...INDEX_HTML.matchAll(/<script([^>]*)>/g)].map((m) => m[1]);
+    expect(scripts.length).toBe(1);
+    expect(scripts[0]).toContain('type="module"');
+  });
+
+  it("carries both of the things it shows, with nothing left to go and get", () => {
+    expect(COVER_HTML).toContain('id="splashlogo"');
+    expect(COVER_HTML).toContain(`>${SPLASH_HANDLE}<`);
+    // every src/href inside the cover: there is one, it is the art, and it is a
+    // data URI. No request, no service-worker lookup and no second file between
+    // the document arriving and the picture being on screen.
+    const refs = [...COVER_HTML.matchAll(/(?:src|href)="([^"]*)"/g)].map((m) => m[1]);
+    expect(refs.length).toBe(1);
+    expect(refs[0].startsWith("data:image/webp;base64,")).toBe(true);
+    // and the browser is told not to defer the decode either, so the frame that
+    // carries the element carries the picture
+    expect(COVER_HTML).toContain('decoding="sync"');
+  });
+
+  it("gets its styles from the document too, in the head, before the markup", () => {
+    expect(COVER_CSS).toContain("#splashcover");
+    expect(COVER_CSS).toContain("#splashlogo");
+    expect(COVER_CSS).toContain("#splashhandle");
+    expect(INDEX_HTML.indexOf("<style>")).toBeLessThan(INDEX_HTML.indexOf("</head>"));
+    expect(INDEX_HTML.indexOf("</style>")).toBeLessThan(INDEX_HTML.indexOf('<div id="splashcover">'));
+  });
+
+  it("stands on the same white, in the same grey, with the same fade", () => {
+    expect(cssRule("#splashcover").background).toBe(SPLASH_BG);
+    expect(cssRule("#splashcover").transition).toBe(`opacity ${COVER_FADE_MS}ms ease`);
+    expect(cssRule("#splashhandle").color).toBe(SPLASH_HANDLE_COLOR);
+    expect(cssRule("#splashhandle").font.endsWith(SPLASH_FONT_FAMILY)).toBe(true);
+  });
+
+  it("hides itself in a browser tab, where there was no launch image to cover", () => {
+    // the rule that acts before any code runs; splash.ts removes the element
+    // outright in the same case, which is what catches a browser that does not
+    // know the query at all
+    const tab = /@media \(display-mode: browser\) \{ #splashcover \{([^}]*)\}/.exec(COVER_CSS)?.[1];
+    expect(tab).toBeDefined();
+    expect(tab).toContain("display: none");
+  });
+});
+
+describe("the cover's stylesheet says exactly what splashLayout() says", () => {
+  it("sizes the logo's box by the layout's own fraction of the shorter edge", () => {
+    // splashLayout() puts the logo's bounding square at SPLASH_LOGO_FRACTION of
+    // the shorter edge and contain-fits the art inside it. vmin IS that edge, so
+    // the stylesheet can carry the same statement without carrying the function.
+    const r = cssRule("#splashlogo");
+    expect(vminOf(r.height)).toBeCloseTo(SPLASH_LOGO_FRACTION * 100, 9);
+    expect(vminOf(r.width)).toBeCloseTo(SPLASH_LOGO_FRACTION * (SPLASH_LOGO_W / SPLASH_LOGO_H) * 100, 9);
+    // centered on both axes: the corner is the middle less half the box
+    expect(vminOf(r.left)).toBeCloseTo(vminOf(r.width) / 2, 9);
+    expect(vminOf(r.top)).toBeCloseTo(vminOf(r.height) / 2, 9);
+  });
+
+  it("sizes and places the credit line by the layout's other two fractions", () => {
+    const r = cssRule("#splashhandle");
+    const [size, lineHeight] = r.font.split(" ")[0].split("/");
+    expect(vminOf(size)).toBeCloseTo(SPLASH_HANDLE_FRACTION * 100, 9);
+    // the line-height is pinned to the size, which is what makes the box's
+    // middle land where the canvas's "middle" baseline lands
+    expect(vminOf(lineHeight)).toBeCloseTo(SPLASH_HANDLE_FRACTION * 100, 9);
+    // CSS places a box by its top and the canvas draws from the text's middle,
+    // so the top is the layout's bottom gap plus half the type
+    expect(vminOf(r.top)).toBeCloseTo(
+      (SPLASH_HANDLE_BOTTOM_FRACTION + SPLASH_HANDLE_FRACTION / 2) * 100,
+      9,
+    );
+  });
+
+  it("resolves to the logo's exact rect on every phone the app is opened on", () => {
+    // this is what makes the correction splash.ts writes afterwards invisible:
+    // the numbers it writes are the numbers already in force
+    const r = cssRule("#splashlogo");
+    for (const [name, w, h, dpr] of PHONES) {
+      const g = splashLayout({ screenW: w, screenH: h, dpr, logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H });
+      const want = coverLogoRect(g, w, h);
+      expect([name, near(resolveCss(r.left, w, h, "x"), want.left)]).toEqual([name, true]);
+      expect([name, near(resolveCss(r.top, w, h, "y"), want.top)]).toEqual([name, true]);
+      expect([name, near(resolveCss(r.width, w, h, "x"), want.width)]).toEqual([name, true]);
+      expect([name, near(resolveCss(r.height, w, h, "y"), want.height)]).toEqual([name, true]);
+    }
+  });
+
+  it("resolves to the credit line's row too, within the type's own rounding", () => {
+    // The ONE place the two sides can differ. splashLayout() rounds the type to
+    // whole DEVICE pixels, because the canvas is rasterized once at exactly
+    // those pixels and never resampled, and a stylesheet cannot round. So the
+    // sizes can sit a fraction of a CSS pixel apart and the row half of that,
+    // which is a quarter of a device pixel at worst and is the only tolerance
+    // anywhere in this file's geometry.
+    const r = cssRule("#splashhandle");
+    const size = r.font.split(" ")[0].split("/")[0];
+    for (const [name, w, h, dpr] of PHONES) {
+      const g = splashLayout({ screenW: w, screenH: h, dpr, logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H });
+      const want = coverHandleBox(g, h);
+      const fontGap = Math.abs(resolveCss(size, w, h, "y") - want.fontPx);
+      const topGap = Math.abs(resolveCss(r.top, w, h, "y") - want.top);
+      expect([name, fontGap < 0.2, topGap < 0.1]).toEqual([name, true, true]);
+    }
+  });
+});
+
+describe("the inlined logo art (index.html)", () => {
+  const art = /src="(data:[^"]*)"/.exec(COVER_HTML)?.[1] ?? "";
+
   it("is a data URI, so there is nothing for the cover to go and fetch", () => {
-    expect(SPLASH_LOGO_INLINE.startsWith("data:image/webp;base64,")).toBe(true);
+    expect(art.startsWith("data:image/webp;base64,")).toBe(true);
   });
 
   it("keeps the full-res file's aspect, so the geometry is unchanged by inlining", () => {
@@ -490,95 +670,101 @@ describe("the inlined logo art (src/splashlogo.ts)", () => {
   });
 
   it("stays small enough that inlining it cannot slow the first paint", () => {
-    // the whole point of a small inline copy: a full-res raster as base64 would
-    // trade the flash for a heavier bundle, which is the worse bug. The bundle
-    // this lands in is tens of kB, so a few kB is the ceiling.
-    expect(SPLASH_LOGO_INLINE.length).toBeLessThan(8 * 1024);
+    // the whole point of a small inline copy, and it matters more here than it
+    // did in the bundle: the document is now the thing that has to arrive
+    // before anything can be on screen, so every byte of this is in front of
+    // the cover it draws. A full-res raster as base64 would trade the flash for
+    // a heavier document, which is the worse bug.
+    expect(art.length).toBeLessThan(8 * 1024);
   });
 });
 
-describe("installSplashCover: both marks are in the cover the frame it appears", () => {
-  // A recording stand-in for the handful of DOM calls the mount makes, in the
-  // spirit of the recording 2D context above: enough surface to be driven, and
-  // it remembers WHEN each child arrived, which is the whole question here.
+describe("installSplashCover: it adopts the document's cover, it never builds one", () => {
+  // A recording stand-in for the handful of DOM calls the adoption makes, in
+  // the spirit of the recording 2D context above: a document that already
+  // carries the cover, because every real one does, which remembers whether
+  // anything was ever made or attached and whether the cover was taken out.
   interface FakeEl {
     tag: string;
     id: string;
-    alt: string;
-    src: string;
-    decoding: string;
-    textContent: string;
     style: Record<string, string>;
     children: FakeEl[];
+    gone: boolean;
     appendChild(c: FakeEl): void;
     remove(): void;
   }
 
-  function fakeEl(tag: string): FakeEl {
+  function fakeEl(tag: string, id = ""): FakeEl {
     const el: FakeEl = {
       tag,
-      id: "",
-      alt: "",
-      src: "",
-      decoding: "",
-      textContent: "",
+      id,
       style: { cssText: "" },
       children: [],
+      gone: false,
       appendChild(c) {
         el.children.push(c);
       },
-      remove() {},
+      remove() {
+        el.gone = true;
+      },
     };
     return el;
   }
 
   // every Image the module constructs is a thing the cover would have to wait
-  // for; the mount must construct none
+  // for; the adoption must construct none
   class RecordingImage {
     static made = 0;
-    onload: (() => void) | null = null;
-    naturalWidth = 0;
-    naturalHeight = 0;
     src = "";
     constructor() {
       RecordingImage.made += 1;
     }
   }
 
-  // the cover's children AT THE MOMENT it entered the document: an empty cover
-  // here is a frame the user sees as bare white
-  let attachedWith: number | null = null;
-  let created: FakeEl[] = [];
+  let created: string[] = []; // every element the module asked the document to make
+  let attached = 0; // every child the module added to the body
 
-  async function mount(screenW = 390, screenH = 844, dpr = 3) {
-    attachedWith = null;
+  async function adopt(
+    standalone = true,
+    screenW = 390,
+    screenH = 844,
+    dpr = 3,
+    withCover = true,
+  ) {
     created = [];
+    attached = 0;
     RecordingImage.made = 0;
+    const el = fakeEl("div", "splashcover");
+    const logo = fakeEl("img", "splashlogo");
+    const handle = fakeEl("div", "splashhandle");
+    el.appendChild(logo);
+    el.appendChild(handle);
+    const byId: Record<string, FakeEl> = withCover
+      ? { splashcover: el, splashlogo: logo, splashhandle: handle }
+      : {};
     const body = fakeEl("body");
-    body.appendChild = (c) => {
-      attachedWith = c.children.length;
-      body.children.push(c);
+    body.appendChild = () => {
+      attached += 1;
     };
     vi.stubGlobal("document", {
       body,
+      getElementById: (id: string) => byId[id] ?? null,
       createElement(tag: string) {
-        const e = fakeEl(tag);
-        created.push(e);
-        return e;
+        created.push(tag);
+        return fakeEl(tag);
       },
     });
-    vi.stubGlobal("navigator", { standalone: true, userAgent: "iPhone" });
+    vi.stubGlobal("navigator", { standalone, userAgent: "iPhone" });
     vi.stubGlobal("screen", { width: screenW, height: screenH });
     vi.stubGlobal("window", { devicePixelRatio: dpr });
     vi.stubGlobal("Image", RecordingImage);
-    vi.resetModules(); // the mount runs once per module load, so reload it per case
+    vi.resetModules(); // the adoption runs once per module load, so reload it per case
     const mod = await import("../src/splash");
-    const cover = mod.installSplashCover("/splash-logo.png");
-    return { cover, el: body.children[0] };
+    return { cover: mod.installSplashCover("/splash-logo.png"), el, logo, handle };
   }
 
   beforeEach(() => {
-    vi.useFakeTimers(); // the lift timers start with the mount
+    vi.useFakeTimers(); // the lift timers start with the adoption
   });
 
   afterEach(() => {
@@ -586,41 +772,38 @@ describe("installSplashCover: both marks are in the cover the frame it appears",
     vi.unstubAllGlobals();
   });
 
-  it("enters the document already carrying its logo: no frame shows it empty", async () => {
-    const { el } = await mount();
-    expect(el.id).toBe("splashcover");
-    // the cover was NEVER attached without BOTH of the things it shows
-    expect(attachedWith).toBe(2);
-    expect(el.children[0].tag).toBe("img");
-    expect(el.children[1].tag).toBe("div");
+  it("takes the element the page already carries: no second cover is made", async () => {
+    const { el } = await adopt();
+    expect(created).toEqual([]); // no div, no img, no canvas
+    expect(attached).toBe(0); // and nothing added to the body
+    expect(RecordingImage.made).toBe(0); // and nothing left to decode
+    expect(el.gone).toBe(false); // the one it was handed is still in the page
   });
 
-  it("that logo needs no fetch: it carries the inlined art itself", async () => {
-    const { el } = await mount();
-    expect(el.children[0].src).toBe(SPLASH_LOGO_INLINE);
-    expect(el.children[0].src.startsWith("data:")).toBe(true);
+  it("still lifts on the cap, on the element it adopted", async () => {
+    const { cover, el } = await adopt();
+    expect(cover.lifted()).toBe(false);
+    vi.advanceTimersByTime(COVER_CAP_MS);
+    expect(cover.lifted()).toBe(true);
+    expect(el.style.opacity).toBe("0"); // the transition index.html states
+    expect(el.style.pointerEvents).toBe("none"); // the fade must not eat the first tap
+    expect(el.gone).toBe(false); // still fading
+    vi.advanceTimersByTime(COVER_FADE_MS);
+    expect(el.gone).toBe(true);
   });
 
-  it("the credit line is there at mount, as text in a font the device has", async () => {
-    const { el } = await mount();
-    const handle = el.children[1];
-    expect(handle.textContent).toBe(SPLASH_HANDLE);
-    expect(handle.src).toBe(""); // nothing to go and get, in the same frame
-    expect(handle.style.cssText).toContain(SPLASH_FONT_FAMILY);
-    expect(handle.style.cssText).toContain(`color:${SPLASH_HANDLE_COLOR}`);
+  it("still lifts on the settle, once the minimum hold has passed", async () => {
+    const { cover, el } = await adopt();
+    cover.settled();
+    vi.advanceTimersByTime(COVER_MIN_HOLD_MS - 1);
+    expect(cover.lifted()).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(cover.lifted()).toBe(true);
+    expect(el.style.opacity).toBe("0");
   });
 
-  it("nothing is left pending: no Image is constructed and no canvas is drawn", async () => {
-    const { el } = await mount();
-    expect(RecordingImage.made).toBe(0);
-    expect(created.map((e) => e.tag)).not.toContain("canvas");
-    // and the browser is told not to defer the decode either, so the frame
-    // that carries the element carries the picture
-    expect(el.children[0].decoding).toBe("sync");
-  });
-
-  it("puts the logo on the exact rect the phone's launch image put it", async () => {
-    const { el } = await mount(390, 844, 3);
+  it("writes the launch image's own rect onto the logo it adopted", async () => {
+    const { logo } = await adopt(true, 390, 844, 3);
     const g = splashLayout({
       screenW: 390,
       screenH: 844,
@@ -628,21 +811,17 @@ describe("installSplashCover: both marks are in the cover the frame it appears",
       logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
     });
     const r = coverLogoRect(g, 390, 844);
-    const css = el.children[0].style.cssText;
-    expect(css).toContain(`left:${r.left}px`);
-    expect(css).toContain(`top:${r.top}px`);
-    expect(css).toContain(`width:${r.width}px`);
-    expect(css).toContain(`height:${r.height}px`);
+    expect(logo.style.cssText).toBe(
+      `left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;`,
+    );
   });
 
-  it("puts the credit line on the exact row the launch image drew it on", async () => {
-    // the canvas draws it at handleCenterY in device px; the cover has to land
-    // the middle of its line box on that same row, converted
+  it("writes the credit line's row and size onto the one it adopted", async () => {
     for (const [w, h, dpr] of [
       [390, 844, 3],
       [375, 667, 2],
     ]) {
-      const { el } = await mount(w, h, dpr);
+      const { handle } = await adopt(true, w, h, dpr);
       const g = splashLayout({
         screenW: w,
         screenH: h,
@@ -650,65 +829,58 @@ describe("installSplashCover: both marks are in the cover the frame it appears",
         logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
       });
       const b = coverHandleBox(g, h);
-      const css = el.children[1].style.cssText;
-      expect(css).toContain(`top:${b.top}px`);
-      expect(css).toContain(`font:${b.fontPx}px/${b.height}px `);
-      expect(css).toContain("left:0;right:0;text-align:center"); // the canvas's canvasW/2
-      expect(b.top + b.height / 2).toBeCloseTo((g.handleCenterY * h) / g.canvasH, 9);
+      expect(handle.style.cssText).toBe(
+        `top:${b.top}px;font:${b.fontPx}px/${b.height}px ${SPLASH_FONT_FAMILY};`,
+      );
     }
   });
 
-  it("still stands on the launch image's own white, and still lifts on the cap", async () => {
-    const { cover, el } = await mount();
-    expect(el.style.cssText).toContain(`background:${SPLASH_BG}`);
-    expect(cover.lifted()).toBe(false);
-    vi.advanceTimersByTime(COVER_CAP_MS);
+  it("takes the cover out of the page in a browser tab, and covers nothing", async () => {
+    const { cover, el } = await adopt(false);
+    expect(el.gone).toBe(true); // a fixed full-screen panel does not get to linger
+    expect(cover.lifted()).toBe(true); // the no-op cover: nothing to wait on
+  });
+
+  it("does not fall back to building one where the page carries none", async () => {
+    // an old page still in the service worker's cache predates the markup, and
+    // it is served with the bundle it shipped with, which builds its own
+    const { cover, el } = await adopt(true, 390, 844, 3, false);
+    expect(created).toEqual([]);
+    expect(attached).toBe(0);
+    expect(el.gone).toBe(false);
     expect(cover.lifted()).toBe(true);
-    expect(el.style.opacity).toBe("0"); // the fade is unchanged by the inlining
   });
 });
 
 // ===================== TEMP DIAGNOSTIC (remove after the cold-open session) =====================
 // Pins for the blank-stretch probe (src/splash.ts, the block at the top of it):
-// the record main.ts posts is the only thing a deploy log will have, so both
-// marks have to be in it and they have to be in the right order. A fresh module
+// the record main.ts posts is the only thing a deploy log will have, so every
+// mark has to be in it and they have to be in the right order. A fresh module
 // load stands in for a page load, since the code mark is read as the module
-// evaluates; the cover mark is read when the mount attaches, so the two are
-// separated here by a timer step the way real startup work would separate them.
-describe("bootBlankGap: the two ends of the blank stretch, in one record", () => {
-  // the same recording stand-in idea as the mount suite above, pared to the
-  // handful of properties the cover writes
+// evaluates; the cover mark is read where the script takes the document's cover
+// over, so the two are separated here by a timer step the way real startup work
+// would separate them.
+describe("bootBlankGap: the ends of the blank stretch, in one record", () => {
+  // the same recording stand-in idea as the adoption suite above, pared to the
+  // handful of properties the script writes
   interface FakeEl {
     id: string;
-    alt: string;
-    src: string;
-    decoding: string;
-    textContent: string;
     style: Record<string, string>;
-    children: FakeEl[];
-    appendChild(c: FakeEl): void;
     remove(): void;
   }
 
-  function fakeEl(): FakeEl {
-    const el: FakeEl = {
-      id: "",
-      alt: "",
-      src: "",
-      decoding: "",
-      textContent: "",
-      style: { cssText: "" },
-      children: [],
-      appendChild(c) {
-        el.children.push(c);
-      },
-      remove() {},
-    };
-    return el;
+  function fakeEl(id = ""): FakeEl {
+    return { id, style: { cssText: "" }, remove() {} };
   }
 
   async function loadFresh(standalone: boolean) {
-    vi.stubGlobal("document", { body: fakeEl(), createElement: () => fakeEl() });
+    // a document that carries the cover, like every served one does
+    const byId: Record<string, FakeEl> = {
+      splashcover: fakeEl("splashcover"),
+      splashlogo: fakeEl("splashlogo"),
+      splashhandle: fakeEl("splashhandle"),
+    };
+    vi.stubGlobal("document", { getElementById: (id: string) => byId[id] ?? null });
     vi.stubGlobal("navigator", { standalone, userAgent: "iPhone" });
     vi.stubGlobal("screen", { width: 390, height: 844 });
     vi.stubGlobal("window", { devicePixelRatio: 3 });
@@ -717,7 +889,7 @@ describe("bootBlankGap: the two ends of the blank stretch, in one record", () =>
   }
 
   beforeEach(() => {
-    vi.useFakeTimers(); // the cover's lift timers arm on mount
+    vi.useFakeTimers(); // the cover's lift timers arm on adoption
   });
 
   afterEach(() => {
@@ -728,32 +900,32 @@ describe("bootBlankGap: the two ends of the blank stretch, in one record", () =>
   it("carries both marks, and the cover's is never earlier than the code's", async () => {
     const beforeLoad = performance.now();
     const mod = await loadFresh(true);
-    vi.advanceTimersByTime(50); // stands in for whatever the app does before it covers
-    const beforeMount = performance.now();
+    vi.advanceTimersByTime(50); // stands in for whatever the app does before it adopts
+    const beforeAdopt = performance.now();
     mod.installSplashCover("/splash-logo.png");
-    const afterMount = performance.now();
+    const afterAdopt = performance.now();
     const gap = mod.bootBlankGap();
     expect(typeof gap.codeStartMs).toBe("number");
     expect(typeof gap.coverUpMs).toBe("number");
     // each mark has to sit inside the window it claims to have been taken in:
-    // the code one while the module evaluated, the cover one while the cover
-    // attached. Bracketing them rather than pinning exact numbers keeps this
-    // honest whether or not the runner's clock is the faked one.
+    // the code one while the module evaluated, the cover one while the script
+    // took the cover over. Bracketing them rather than pinning exact numbers
+    // keeps this honest whether or not the runner's clock is the faked one.
     expect(gap.codeStartMs).toBeGreaterThanOrEqual(Math.round(beforeLoad));
-    expect(gap.codeStartMs).toBeLessThanOrEqual(Math.round(beforeMount));
-    expect(gap.coverUpMs as number).toBeGreaterThanOrEqual(Math.round(beforeMount));
-    expect(gap.coverUpMs as number).toBeLessThanOrEqual(Math.round(afterMount));
+    expect(gap.codeStartMs).toBeLessThanOrEqual(Math.round(beforeAdopt));
+    expect(gap.coverUpMs as number).toBeGreaterThanOrEqual(Math.round(beforeAdopt));
+    expect(gap.coverUpMs as number).toBeLessThanOrEqual(Math.round(afterAdopt));
     expect(gap.coverUpMs as number).toBeGreaterThanOrEqual(gap.codeStartMs);
   });
 
-  it("reports no cover mark until a cover has actually gone up", async () => {
+  it("reports no cover mark until the script has taken a cover over", async () => {
     const mod = await loadFresh(true);
-    expect(mod.bootBlankGap().coverUpMs).toBeNull(); // nothing mounted yet: nothing to claim
+    expect(mod.bootBlankGap().coverUpMs).toBeNull(); // nothing adopted yet: nothing to claim
     mod.installSplashCover("/splash-logo.png");
     expect(mod.bootBlankGap().coverUpMs).not.toBeNull();
   });
 
-  it("leaves the cover mark null where no cover mounts at all", async () => {
+  it("leaves the cover mark null where no cover is adopted at all", async () => {
     const mod = await loadFresh(false); // a browser tab: no launch image to hand over from
     mod.installSplashCover("/splash-logo.png");
     const gap = mod.bootBlankGap();
@@ -764,6 +936,15 @@ describe("bootBlankGap: the two ends of the blank stretch, in one record", () =>
   it("degrades the html mark to null where there is no navigation entry", async () => {
     const mod = await loadFresh(true);
     expect(mod.bootBlankGap().htmlDoneMs).toBeNull(); // node reports no navigation timing
+  });
+
+  it("degrades the paint mark to null where the browser reports no paint", async () => {
+    // the mark that says when the cover actually appeared, which is the whole
+    // question the move into the document is judged on. It is the browser's own
+    // and there is nothing to fall back to, so where it is missing the record
+    // says so rather than substituting one of ours.
+    const mod = await loadFresh(true);
+    expect(mod.bootBlankGap().firstPaintMs).toBeNull();
   });
 });
 // =================== END TEMP DIAGNOSTIC (remove after the cold-open session) ===================

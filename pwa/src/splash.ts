@@ -13,7 +13,7 @@
 //
 // Same shape as the shell module: a pure geometry core (unit-tested, no DOM)
 // beneath a thin canvas/DOM layer.
-import { SPLASH_LOGO_H, SPLASH_LOGO_INLINE, SPLASH_LOGO_W } from "./splashlogo";
+import { SPLASH_LOGO_H, SPLASH_LOGO_W } from "./splashlogo";
 
 // ===================== TEMP DIAGNOSTIC (remove after the cold-open session) =====================
 // The white gap, measured instead of reasoned about. On a cold open the phone
@@ -27,14 +27,21 @@ import { SPLASH_LOGO_H, SPLASH_LOGO_INLINE, SPLASH_LOGO_W } from "./splashlogo";
 //     so it carries the fetch and the parse and none of the work the app does
 //     afterwards. Nothing earlier is reachable from here: no timing API says
 //     when a script BEGINS executing, only when its bytes finished arriving.
-//   coverUpMs: the cover is in the document, read the instant the append that
-//     puts it there returns. codeStartMs to coverUpMs is the app's own startup;
-//     zero to codeStartMs is everything that happened before the app had a say.
+//   coverUpMs: the instant the app took the cover OVER, read where the adoption
+//     below returns. It used to be when the cover appeared, back when this
+//     module built it; now the cover is markup in index.html and is on screen
+//     long before this runs, so the stretch from the paint mark to here is time
+//     the user spends looking at a cover that is already right.
 //   htmlDoneMs: the navigation entry's responseEnd, the last byte of the HTML
 //     document. Splits that first stretch again, into waiting for the page and
 //     then fetching plus parsing the bundle the page asks for.
+//   firstPaintMs: the browser's own first-contentful-paint mark, and since the
+//     cover moved into the document, the moment the cover appeared. This is the
+//     number the move is judged on. It is a browser mark rather than one of
+//     ours because the page cannot see its own first paint from inside itself,
+//     and it degrades to null wherever paint timing is not reported.
 //
-// main.ts lands all three on the holddiag boot channel as one boot-blank
+// main.ts lands all four on the holddiag boot channel as one boot-blank
 // record. TO REMOVE: delete this block, the one assignment inside
 // installSplashCover below, the boot-blank record in main.ts, the matching
 // block at the end of tests/splash.test.ts, and the "boot-blank" names in
@@ -54,21 +61,26 @@ export type BootBlankGap = {
   codeStartMs: number;
   coverUpMs: number | null;
   htmlDoneMs: number | null;
+  firstPaintMs: number | null;
 };
 
-// The two marks, plus the split of the first one, as whole milliseconds for
-// the caller to record. The navigation entry is read here rather than at
-// module time on purpose: it is complete long before either of the other two
-// marks, so reading it late costs nothing and keeps the module's first
-// statement to the one thing it has to be.
+// The marks above as whole milliseconds for the caller to record. The two
+// browser entries are read here rather than at module time on purpose: both
+// are complete long before the adoption mark, so reading them late costs
+// nothing and keeps the module's first statement to the one thing it has to
+// be. A contentful paint is asked for first and any paint accepted after it,
+// since a browser that reports only the plain one still answers the question.
 export function bootBlankGap(): BootBlankGap {
   const nav = performance.getEntriesByType("navigation")[0] as
     | PerformanceNavigationTiming
     | undefined;
+  const paints = performance.getEntriesByType("paint");
+  const paint = paints.find((e) => e.name === "first-contentful-paint") ?? paints[0];
   return {
     codeStartMs: Math.round(CODE_START_MS),
     coverUpMs: coverUpMs === null ? null : Math.round(coverUpMs),
     htmlDoneMs: nav ? Math.round(nav.responseEnd) : null,
+    firstPaintMs: paint ? Math.round(paint.startTime) : null,
   };
 }
 // =================== END TEMP DIAGNOSTIC (remove after the cold-open session) ===================
@@ -161,18 +173,21 @@ export interface DrawTarget {
   fillText(text: string, x: number, y: number): void;
 }
 
-// the launch image's background, single-sourced: the in-app cover below is a
-// panel of this same white, and the inlined art the cover shows is flattened
-// onto it, so the handoff between the two is one continuous colour
+// The launch image's background. The in-page cover is a panel of this same
+// white, and the inlined art the cover shows is flattened onto it, so the
+// handoff between the two is one continuous colour. The cover states its own
+// copy of this in index.html, because it has to be right before any of this
+// file has arrived; the suite is what keeps the two saying the same thing.
 export const SPLASH_BG = "#ffffff";
 
-// The chat's own family list, restated (styles.css sets the same one on body).
-// It has to live here as a string because the canvas needs it in JS and reading
-// it back off the stylesheet would mean a computed-style read, which is exactly
-// the kind of waiting the cover exists to avoid. Every name in it is a system
-// face, so there is nothing to fetch and nothing to load-check on either side:
-// the canvas can draw the moment it is asked to and the cover inherits a font
-// that is already there. Keep in step with styles.css if that list ever moves.
+// The chat's own family list, restated (styles.css sets the same one on body,
+// and index.html sets it on the cover). It has to live here as a string because
+// the canvas needs it in JS and reading it back off a stylesheet would mean a
+// computed-style read, which is exactly the kind of waiting the cover exists to
+// avoid. Every name in it is a system face, so there is nothing to fetch and
+// nothing to load-check on any side: the canvas can draw the moment it is asked
+// to and the cover has its font from the first frame. Keep the three in step if
+// that list ever moves.
 export const SPLASH_FONT_FAMILY =
   '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif';
 
@@ -187,9 +202,10 @@ export const SPLASH_FONT_LADDER = [SPLASH_FONT_FAMILY, "system-ui", "sans-serif"
 
 // A quiet credit, not a label: Apple's systemGray2, one step fainter than the
 // grey the app's own secondary text uses (--muted, #8e8e93). Written out rather
-// than taken from that CSS variable because the cover is styled inline for the
-// first frame, and because both splashes are white in either colour scheme
-// while --muted flips with the scheme.
+// than taken from that CSS variable because the cover is styled before any of
+// the app's own CSS has landed, and because both splashes are white in either
+// colour scheme while --muted flips with the scheme. index.html restates it for
+// the same reason it restates the white above.
 export const SPLASH_HANDLE_COLOR = "#aeaeb2";
 
 // Put the credit line's font on a 2D context and hand back what the context
@@ -275,15 +291,15 @@ export function installStartupImage(logoSrc: string): void {
   }
 }
 
-// --- the in-app copy of that launch image: the lift rule (pure) ---------------
+// --- the in-page copy of that launch image: the lift rule (pure) --------------
 //
 // The image above is the PHONE's, and it is gone the instant the web view is
 // handed the page, which is well before the thread has laid out, so the
-// handoff shows a bare or half-drawn frame for the rest of the boot. The app
-// therefore holds its OWN copy of that same image over its own first frames.
-// This is when that copy lifts, and nothing here knows about the DOM: two
-// conditions and a cap, driven by the environment's timers exactly like the
-// chevron's pause window.
+// handoff shows a bare or half-drawn frame for the rest of the boot. The page
+// therefore carries its OWN copy of that same image, as markup and styles in
+// index.html, over the app's first frames. This is when that copy lifts, and
+// nothing here knows about the DOM: two conditions and a cap, driven by the
+// environment's timers exactly like the chevron's pause window.
 //
 //   both of these, then fade: a minimum hold has passed (a launch image that
 //   blinks reads as a glitch), and the thread reported itself settled;
@@ -343,7 +359,7 @@ export function createSplashCover(
   };
 }
 
-// --- the in-app copy: where its logo sits (pure) -------------------------------
+// --- the in-page copy: where its logo sits (pure) ------------------------------
 
 export interface CoverLogoRect {
   left: number; // CSS px from the cover's left edge
@@ -390,7 +406,7 @@ export function coverHandleBox(g: SplashLayout, screenH: number): CoverHandleBox
   return { top: g.handleCenterY * sy - fontPx / 2, height: fontPx, fontPx };
 }
 
-// --- the in-app copy: DOM layer -----------------------------------------------
+// --- the in-page copy: DOM layer ----------------------------------------------
 
 // A launch image preceded this load only when the app opened as an installed
 // window; a browser tab has no handoff to cover, so the copy stays out of one.
@@ -407,25 +423,30 @@ const NO_COVER: SplashCover = { settled: () => {}, lifted: () => true };
 
 let coverStarted = false; // once per load, like the startup image above
 
-// Mount the app's own copy of the launch image over everything and hand back
-// its lift rule. The copy is placed by the SAME splashLayout() the startup
-// image is drawn by, on the same inputs, so the phone's image and this one put
-// the logo on the same spot by construction rather than by eye. Safe to call
-// unconditionally at boot: it no-ops outside an installed window and after the
-// first call, and swallows its own errors. The lift timers start with the
-// mount, so the copy cannot outlive the cap even if the thread never settles.
+// Take over the launch cover the document already carries, and hand back its
+// lift rule. Safe to call unconditionally at boot: it no-ops outside an
+// installed window and after the first call, and swallows its own errors. The
+// lift timers start here, so the cover cannot outlive the cap even if the
+// thread never settles.
 //
-// The whole thing is built and filled before it is attached to the document:
-// the cover enters the page already carrying its logo and its credit line, in
-// one mutation, so the first frame that shows the cover is a frame with both of
-// them in it. It used to attach as bare white and fetch the art afterwards,
-// which put a logo-less white frame between the phone's launch image and this
-// one, and that read as a flash of the logo going away and coming back.
+// Nothing here builds the cover any more. It is markup and styles in
+// index.html (the comment at the top of that file carries the why), so it is
+// on screen from the document's first paint instead of from this bundle's
+// first statement, which on a measured cold open was two to six hundred
+// milliseconds later. What is left is the three things a stylesheet cannot do:
+// decide whether there was a launch image to hand over from at all, restate
+// the geometry in the exact numbers splashLayout() computes, and own the lift.
 //
-// logoSrc is the full-res file the startup image is built from. The cover no
-// longer reads it (its art is inlined, see splashlogo.ts) and keeps the
-// argument only so both install calls at the boot site still name the same
-// picture; it can be dropped whenever that call site is next edited.
+// No cover in the document is a legitimate state, not an error: an old page
+// still in the service worker's cache predates the markup, and a page like that
+// is served with the bundle it shipped with, which builds its own. Nothing is
+// mounted in its place here, because the art that would go in it lives in the
+// document too.
+//
+// logoSrc is the full-res file the startup image is built from. The cover has
+// not read it since the art was inlined and does not read it now; the argument
+// stays only so both install calls at the boot site still name the same
+// picture, and can be dropped whenever that call site is next edited.
 export function installSplashCover(
   _logoSrc: string,
   onLift?: (why: CoverLift) => void,
@@ -433,19 +454,30 @@ export function installSplashCover(
   if (coverStarted) return NO_COVER;
   coverStarted = true;
   try {
-    if (typeof document === "undefined" || !document.body) return NO_COVER;
-    if (!isInstalledWindow(navigator)) return NO_COVER;
-    const el = document.createElement("div");
-    el.id = "splashcover";
-    // inline, not a stylesheet rule: the cover has to be right from the very
-    // first frame, before any imported CSS has had to land
-    el.style.cssText =
-      `position:fixed;inset:0;z-index:40;background:${SPLASH_BG};` +
-      `opacity:1;transition:opacity ${COVER_FADE_MS}ms ease;`;
-    // the SAME geometry the startup image is built from, on the same inputs:
-    // nothing here decides anything about the picture. The aspect comes from
-    // the inlined art's own declared size instead of a decoded image's
-    // naturalWidth, which is the only reason this no longer has to wait.
+    if (typeof document === "undefined") return NO_COVER;
+    const el = document.getElementById("splashcover");
+    if (!el) return NO_COVER;
+    // A browser tab has no launch image to hand over from, so the cover comes
+    // straight back out of the document rather than merely being hidden: it is
+    // a fixed, full-screen panel, and one of those has no business sitting over
+    // a page for the rest of its life. The stylesheet already hid it before any
+    // of this ran (its display-mode rule); this is the half of the pair that
+    // also catches a browser which does not know that query.
+    if (!isInstalledWindow(navigator)) {
+      el.remove();
+      return NO_COVER;
+    }
+    // The SAME geometry the startup image is built from, on the same inputs,
+    // written back over the stylesheet's statement of it. index.html says these
+    // numbers as fractions of the VIEWPORT's shorter edge, which is what
+    // splashLayout() means by the screen's shorter edge on every phone this app
+    // is opened on, so on those phones the writes below put back the numbers
+    // already in force and nothing moves. They happen anyway, for three
+    // reasons: the pure functions stay the one place the picture is decided; a
+    // window that is not the whole screen (or a device pixel ratio that rounds)
+    // snaps into agreement with the phone's own launch image instead of
+    // drifting off it; and an inline style cannot be outranked by the app's
+    // stylesheet when that finally lands.
     const screenW = screen.width;
     const screenH = screen.height;
     const layout = splashLayout({
@@ -455,44 +487,29 @@ export function installSplashCover(
       logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
     });
     const rect = coverLogoRect(layout, screenW, screenH);
-    const logo = document.createElement("img");
-    logo.alt = "";
-    // decode on the spot rather than whenever the browser gets round to it:
-    // the default lets an image present a frame or two after its element does,
-    // which is the exact gap this whole change exists to close. Cheap to insist
-    // on here because the inlined art is small.
-    logo.decoding = "sync";
-    // a data URI: no request, no service-worker lookup, nothing that could
-    // resolve on a later task than this one
-    logo.src = SPLASH_LOGO_INLINE;
-    logo.style.cssText =
-      `position:absolute;display:block;` +
-      `left:${rect.left}px;top:${rect.top}px;` +
-      `width:${rect.width}px;height:${rect.height}px;`;
-    el.appendChild(logo);
-    // the credit line, from the same layout and in the same mutation as the
-    // logo: it is plain text in a font the device already has, so it costs the
-    // cover nothing to wait for. Pinned to both side edges and centered inside
-    // that, which is the CSS way of saying the canvas's canvasW/2; the box's
-    // height is the line-height coverHandleBox() asks for, and the pair of them
-    // is what puts this text on the row the phone's launch image drew it on.
+    const logo = document.getElementById("splashlogo");
+    if (logo) {
+      logo.style.cssText =
+        `left:${rect.left}px;top:${rect.top}px;` +
+        `width:${rect.width}px;height:${rect.height}px;`;
+    }
+    // the credit line, off the same layout. Only the row and the type size are
+    // restated: being pinned to both side edges with centered text is how this
+    // side says the canvas's canvasW/2, and that needs no number at all.
     const handleBox = coverHandleBox(layout, screenH);
-    const handle = document.createElement("div");
-    handle.textContent = SPLASH_HANDLE;
-    handle.style.cssText =
-      `position:absolute;left:0;right:0;text-align:center;` +
-      `top:${handleBox.top}px;` +
-      `font:${handleBox.fontPx}px/${handleBox.height}px ${SPLASH_FONT_FAMILY};` +
-      `color:${SPLASH_HANDLE_COLOR};`;
-    el.appendChild(handle);
-    document.body.appendChild(el);
+    const handle = document.getElementById("splashhandle");
+    if (handle) {
+      handle.style.cssText =
+        `top:${handleBox.top}px;` +
+        `font:${handleBox.fontPx}px/${handleBox.height}px ${SPLASH_FONT_FAMILY};`;
+    }
     // TEMP DIAGNOSTIC (the block at the top of this file owns the why): the
-    // cover is on screen from this instant, so this is the far end of the
-    // stretch the page spent with nothing drawn on it
+    // cover has been on screen since the document's first paint, so this mark
+    // is when the app took it over, not when the user first saw it
     coverUpMs = performance.now();
     const cover = createSplashCover((why) => {
       el.style.pointerEvents = "none"; // the fade must not eat the first tap
-      el.style.opacity = "0";
+      el.style.opacity = "0"; // index.html states the transition this rides
       setTimeout(() => el.remove(), COVER_FADE_MS);
       onLift?.(why);
     });
