@@ -81,10 +81,10 @@ export function zoomReturn(
 // that box's edge (the bars do not paint over it — the compose bar has no panel
 // at all, and the top bar's lower half is see-through). The flying copy is a
 // sheet above everything, so unless it is cut the same way it paints straight
-// across whichever bar it overlaps. main.ts cuts it with a rect that starts on
-// the thread's box and opens to the whole screen over the flight — the resting
-// zoom must cover both bars — and closes back onto the thread's box coming
-// home, so the frame that lands is cut exactly like the photo it hands back to.
+// across whichever bar it overlaps. main.ts cuts it with a rect that rides the
+// flight: the thread's own box at the thread end, and at the open end the
+// tightest rect the resting zoom actually needs (zoomClipRest below), so the
+// frame that lands is cut exactly like the photo it hands back to.
 // Edges come back as the four css inset() lengths, measured inward from the
 // flying box and never negative: an image paints nothing past its own box, so a
 // negative edge would be the same picture as no cut at all.
@@ -108,4 +108,30 @@ export function zoomClipInset(box: MorphBox, clip: MorphBox): ZoomInset {
 
 export function zoomClipCuts(i: ZoomInset): boolean {
   return i.top > 0 || i.right > 0 || i.bottom > 0 || i.left > 0;
+}
+
+// The cut's OPEN end: the tightest rect that still hides nothing of the copy
+// where it is resting. It used to be the whole screen, on the true but far too
+// generous reasoning that a resting zoom may cover both bars and so must not be
+// cut at all. The cut travels with the flight on the flight's own ease, so a
+// close that starts its cut at the whole screen only arrives at the thread's box
+// on the very last frame, while the copy's own edge crosses the bar's edge long
+// before that — and the band of photo between the two is exactly the paint on
+// the bars the close was showing.
+//
+// The union of the thread's box and the resting box is the smallest rect that
+// cannot cut the resting frame, and it answers both shapes:
+//   - a photo whose resting fit lands inside the thread's box: the union IS the
+//     thread's box, so the copy is cut at the bar's edge from the first frame of
+//     the close and no band can ever appear;
+//   - a tall capture whose resting fit genuinely covers the bars: the union
+//     reaches past them by exactly as much as the resting frame already does,
+//     then shrinks to the thread's box, so no frame reveals more bar than the
+//     frame before it, which is the property that matters.
+export function zoomClipRest(thread: MorphBox, box: MorphBox): MorphBox {
+  const left = Math.min(thread.left, box.left);
+  const top = Math.min(thread.top, box.top);
+  const right = Math.max(thread.left + thread.width, box.left + box.width);
+  const bottom = Math.max(thread.top + thread.height, box.top + box.height);
+  return { left, top, width: right - left, height: bottom - top };
 }

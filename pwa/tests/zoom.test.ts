@@ -6,14 +6,17 @@
 // that moment (never the open-time memory), the off-screen and gone-row
 // fallbacks exist, the thread photo hides under the copy and is handed back
 // byte-clean, the airborne copy is cut by the thread's box exactly as the real
-// photo is, the landed box STANDS as the one source of the resting size (with a
-// resize re-running that same source), and both legs leave rect-delta records on
-// the flight channel.
+// photo is and its cut opens only as far as the resting frame genuinely needs
+// (never to the whole screen, which is what let a band of photo sit on both bars
+// for most of the way back), the landed box STANDS as the one source of the
+// resting size (with a resize re-running that same source), and both legs leave
+// rect-delta records on the flight channel.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { flightEase, morphBox } from "../src/shift";
+import { FLIGHT_MS, flightEase, morphBox } from "../src/shift";
+import type { MorphBox } from "../src/shift";
 import {
   ZOOM_EDGE_SCALE,
   ZOOM_FADE_SCALE,
@@ -21,6 +24,7 @@ import {
   ZOOM_MAX_VW,
   zoomClipCuts,
   zoomClipInset,
+  zoomClipRest,
   zoomFit,
   zoomReturn,
 } from "../src/zoom";
@@ -227,12 +231,217 @@ describe("the cut over a whole flight (same beat and ease as the box)", () => {
   it("the close landing is the photo's rect, cut exactly as the photo is", () => {
     const ret = zoomReturn(photo, fit, 390, 844);
     expect(ret.mode).toBe("exact");
-    const last = frame(fit, ret.box, screen, thread, 1);
+    const last = frame(fit, ret.box, zoomClipRest(thread, fit), thread, 1);
     expect(last.box.left).toBeCloseTo(photo.left, 2);
     expect(last.box.top).toBeCloseTo(photo.top, 2);
     expect(last.box.width).toBeCloseTo(photo.width, 2);
     expect(last.box.height).toBeCloseTo(photo.height, 2);
     expect(last.inset.top).toBeCloseTo(43, 5); // the handover moves no pixel
+  });
+});
+
+// --- the cut's open end: the tightest rect the resting frame needs -------------
+// The band of photo the close used to paint across both bars came from ONE
+// over-general endpoint: the cut started at the whole screen, on the true but
+// far too generous reasoning that a resting zoom may cover both bars. Riding
+// the flight's own hard ease-out alongside the box, that cut only arrived at
+// the thread's box on the last frame, while the copy's own edge crossed the
+// bar's edge far earlier — and everything between the two painted on the bar.
+// The replacement is the union of the thread's box and the resting box: the
+// smallest rect that still cannot cut the frame at rest.
+describe("zoomClipRest — the cut opens only as far as the resting frame needs", () => {
+  const thread = { left: 0, top: 103, width: 390, height: 642 };
+
+  it("a resting fit that lands inside the thread IS the thread's own box", () => {
+    const fit = zoomFit(1280, 960, 390, 844); // 374x281, well clear of both bars
+    expect(fit.top).toBeGreaterThan(thread.top);
+    expect(fit.top + fit.height).toBeLessThan(thread.top + thread.height);
+    expect(zoomClipRest(thread, fit)).toEqual(thread); // so the cut never opens at all
+  });
+
+  it("a tall capture reaches past the bars by exactly its own overhang, no further", () => {
+    const fit = zoomFit(400, 4000, 390, 844); // binds on 92vh: over both bars
+    const r = zoomClipRest(thread, fit);
+    expect(fit.top).toBeLessThan(thread.top); // genuinely on the top bar at rest
+    expect(fit.top + fit.height).toBeGreaterThan(thread.top + thread.height);
+    expect(r.top).toBeCloseTo(fit.top, 5);
+    expect(r.top + r.height).toBeCloseTo(fit.top + fit.height, 5);
+    expect(r.top).toBeGreaterThan(0); // and still short of the whole screen
+  });
+
+  it("the thread spans the width, so the sides stay the thread's own", () => {
+    const fit = zoomFit(1280, 960, 390, 844);
+    const r = zoomClipRest(thread, fit);
+    expect(r.left).toBe(thread.left);
+    expect(r.width).toBe(thread.width);
+  });
+
+  it("cuts nothing at rest, whatever the photo's shape", () => {
+    for (const [w, h] of [[1280, 960], [400, 4000], [960, 1280], [100, 80]]) {
+      const fit = zoomFit(w, h, 390, 844);
+      expect(zoomClipCuts(zoomClipInset(fit, zoomClipRest(thread, fit)))).toBe(false);
+    }
+  });
+});
+
+// --- the close leg, frame by frame --------------------------------------------
+// The defect lived in the frames, not in the landing: the last frame was always
+// right. So these sample the whole 400ms and lean on the early ones, where the
+// ease has already carried the copy most of the way home while a cut starting
+// at the whole screen has barely left it.
+describe("the way back paints no photo on either bar, from the first frame on", () => {
+  const thread = { left: 0, top: 103, width: 390, height: 642 };
+  const screen = { left: 0, top: 0, width: 390, height: 844 };
+  const fit = zoomFit(1280, 960, 390, 844); // the resting zoom, inside the thread
+  const under = { left: 20, top: 640, width: 280, height: 210 }; // 105px under the compose bar
+  const behind = { left: 20, top: 60, width: 280, height: 210 }; // 43px behind the top bar
+
+  // one close frame exactly as main.ts draws it: the box and the cut share the
+  // flight's beat and ease, so they are read at the same p
+  const frame = (spot: MorphBox, clipFrom: MorphBox, ms: number) => {
+    const p = flightEase(ms / FLIGHT_MS);
+    return { box: morphBox(fit, spot, p), clip: morphBox(clipFrom, thread, p) };
+  };
+  // how much photo a frame paints ON a bar: the part of the copy past the
+  // thread's edge that the cut still lets through
+  type Frame = ReturnType<typeof frame>;
+  const onTopBar = (fr: Frame): number =>
+    Math.max(0, thread.top - Math.max(fr.box.top, fr.clip.top));
+  const onComposeBar = (fr: Frame): number =>
+    Math.max(0, Math.min(fr.box.top + fr.box.height, fr.clip.top + fr.clip.height)
+      - (thread.top + thread.height));
+
+  // the first 40ms carry the copy 40% of the way home; the rest of the flight
+  // is the long creep the ease-out spends arriving
+  const MS = [0, 4, 8, 12, 16, 24, 40, 60, 100, 160, 240, 320, 400];
+
+  it("the cut is the thread's box on every frame, not only the last", () => {
+    const clipFrom = zoomClipRest(thread, fit);
+    for (const spot of [behind, under]) {
+      for (const ms of MS) {
+        const { clip } = frame(spot, clipFrom, ms);
+        expect(clip.top).toBeGreaterThanOrEqual(thread.top - 1e-9);
+        expect(clip.top + clip.height)
+          .toBeLessThanOrEqual(thread.top + thread.height + 1e-9);
+      }
+    }
+  });
+
+  it("no frame lets photo through onto the top bar or the compose bar", () => {
+    const clipFrom = zoomClipRest(thread, fit);
+    for (const spot of [behind, under]) {
+      for (const ms of MS) {
+        const fr = frame(spot, clipFrom, ms);
+        expect(onTopBar(fr)).toBe(0);
+        expect(onComposeBar(fr)).toBe(0);
+      }
+    }
+  });
+
+  it("the landed frame is still cut exactly like the photo it hands back to", () => {
+    const clipFrom = zoomClipRest(thread, fit);
+    const top = frame(behind, clipFrom, FLIGHT_MS);
+    expect(zoomClipInset(top.box, top.clip).top).toBeCloseTo(43, 5);
+    const bottom = frame(under, clipFrom, FLIGHT_MS);
+    expect(zoomClipInset(bottom.box, bottom.clip).bottom).toBeCloseTo(105, 5);
+  });
+
+  // What the fix removed, kept as the reason it exists: the same frames with the
+  // old whole-screen start show a band on both bars for most of the way back.
+  // How early it opens is set by how deep the spot sits behind the bar — these
+  // two are the file's shallow fixtures, and a spot running off the screen's
+  // bottom opens it sooner still.
+  it("the whole-screen start is what let the band through, for most of the flight", () => {
+    let topBand = 0;
+    let bottomBand = 0;
+    let topOpens = FLIGHT_MS;
+    let bottomOpens = FLIGHT_MS;
+    for (let ms = 0; ms <= FLIGHT_MS; ms++) {
+      const onTop = onTopBar(frame(behind, screen, ms));
+      const onCompose = onComposeBar(frame(under, screen, ms));
+      if (onTop > 0) topOpens = Math.min(topOpens, ms);
+      if (onCompose > 0) bottomOpens = Math.min(bottomOpens, ms);
+      topBand = Math.max(topBand, onTop);
+      bottomBand = Math.max(bottomBand, onCompose);
+    }
+    expect(topBand).toBeGreaterThan(10); // 13.6px of photo sitting on the top bar
+    expect(bottomBand).toBeGreaterThan(25); // 26.6px of it on the compose bar
+    // and once open it never shuts until the landing frame
+    expect(FLIGHT_MS - topOpens).toBeGreaterThan(250);
+    expect(FLIGHT_MS - bottomOpens).toBeGreaterThan(300);
+  });
+});
+
+describe("a tall capture whose resting fit genuinely covers both bars", () => {
+  const thread = { left: 0, top: 103, width: 390, height: 642 };
+  const fit = zoomFit(400, 4000, 390, 844); // 92vh: past the top bar and the compose bar
+  const spot = { left: 150, top: 400, width: 90, height: 900 }; // its row, mostly below the fold
+  const clipFrom = zoomClipRest(thread, fit);
+  const clipAt = (ms: number): MorphBox => morphBox(clipFrom, thread, flightEase(ms / FLIGHT_MS));
+  const MS = [0, 4, 8, 12, 16, 24, 40, 60, 100, 160, 240, 320, 400];
+
+  it("the cut starts on the resting overhang, so the launch frame is uncut", () => {
+    expect(zoomClipCuts(zoomClipInset(fit, clipFrom))).toBe(false);
+  });
+
+  it("the cut only shrinks: no frame gives back bar the frame before it had taken", () => {
+    let prevTop = -Infinity;
+    let prevBottom = Infinity;
+    for (const ms of MS) {
+      const clip = clipAt(ms);
+      expect(clip.top).toBeGreaterThanOrEqual(prevTop - 1e-9); // the top edge only descends
+      expect(clip.top + clip.height).toBeLessThanOrEqual(prevBottom + 1e-9); // the bottom only rises
+      prevTop = clip.top;
+      prevBottom = clip.top + clip.height;
+    }
+    const last = clipAt(FLIGHT_MS);
+    expect(last.top).toBeCloseTo(thread.top, 5); // and it ends on the thread's own box
+    expect(last.top + last.height).toBeCloseTo(thread.top + thread.height, 5);
+  });
+
+  it("no frame shows more bar than the resting frame already did", () => {
+    const restingOnTopBar = thread.top - fit.top;
+    const restingOnComposeBar = fit.top + fit.height - (thread.top + thread.height);
+    expect(restingOnTopBar).toBeGreaterThan(0); // the shape this test exists for
+    for (const ms of MS) {
+      const p = flightEase(ms / FLIGHT_MS);
+      const box = morphBox(fit, spot, p);
+      const clip = clipAt(ms);
+      const onTop = Math.max(0, thread.top - Math.max(box.top, clip.top));
+      const onCompose = Math.max(0, Math.min(box.top + box.height, clip.top + clip.height)
+        - (thread.top + thread.height));
+      expect(onTop).toBeLessThanOrEqual(restingOnTopBar + 1e-9);
+      expect(onCompose).toBeLessThanOrEqual(restingOnComposeBar + 1e-9);
+    }
+  });
+});
+
+describe("the open leg still lands on a cut that takes nothing off the resting photo", () => {
+  const thread = { left: 0, top: 103, width: 390, height: 642 };
+  const photo = { left: 20, top: 60, width: 280, height: 210 };
+
+  it("every shape ends uncut, so no resting zoom is newly cropped", () => {
+    for (const [w, h] of [[1280, 960], [400, 4000], [960, 1280], [100, 80], [720, 1280]]) {
+      const fit = zoomFit(w, h, 390, 844);
+      const landed = morphBox(thread, zoomClipRest(thread, fit), flightEase(1));
+      expect(zoomClipCuts(zoomClipInset(fit, landed))).toBe(false);
+    }
+  });
+
+  it("the launch frame is still cut exactly as the photo behind the bar is", () => {
+    const fit = zoomFit(1280, 960, 390, 844);
+    const first = morphBox(thread, zoomClipRest(thread, fit), flightEase(0));
+    expect(zoomClipInset(photo, first).top).toBeCloseTo(43, 5);
+  });
+
+  // the resting cut is re-measured out of the same helper when the viewport
+  // moves under a resting copy, so a rotation cannot leave the landed frame
+  // cropped by a cut measured for the screen it used to be on
+  it("a rotation re-measures the cut with the box, and it still cuts nothing", () => {
+    const turned = { left: 0, top: 60, width: 844, height: 270 }; // the thread, phone turned
+    const fit = zoomFit(960, 1280, 844, 390); // the same photo on the rotated screen
+    expect(fit.top).toBeLessThan(turned.top); // now tall enough to cover both bars
+    expect(zoomClipCuts(zoomClipInset(fit, zoomClipRest(turned, fit)))).toBe(false);
   });
 });
 
@@ -317,8 +526,11 @@ describe("photo zoom wiring (openLightbox)", () => {
     expect(body).toMatch(/writeClip\(box, morphBox\(cA, cB, p\)\)/);
   });
 
-  it("the open leg starts on the thread's box and opens to the whole screen", () => {
-    expect(body).toContain("fly(fromBox, to, fromRadius, restRadius, openFrom, screenBox()");
+  it("the open leg starts on the thread's box and opens no further than rest", () => {
+    expect(body).toContain(
+      "fly(fromBox, to, fromRadius, restRadius, openFrom, zoomClipRest(openFrom, to)",
+    );
+    expect(body).not.toContain("restRadius, openFrom, screenBox()"); // the too-generous end, gone
   });
 
   it("the close leg lands back on the thread's box only when a photo is there", () => {
@@ -326,9 +538,14 @@ describe("photo zoom wiring (openLightbox)", () => {
     expect(body).toContain("fly(cur, ret.box, curRadius, endRadius, clipFrom, clipTo");
   });
 
-  it("a mid-flight turn keeps the cut it has, like the box it has", () => {
-    expect(body).toContain("const clipFrom = clipNow;");
+  it("the close starts its cut at the tightest rect, not at the whole screen", () => {
+    expect(body).toContain(
+      'const clipFrom = ret.mode === "exact" ? zoomClipRest(threadBox(), cur) : screenBox();',
+    );
     expect(body).toContain("freeze(cur, curRadius, clipFrom);");
+    // like the spot it flies to, the cut is decided at dismissal from what is on
+    // screen now — there is no remembered cut left to turn stale
+    expect(body).not.toContain("clipNow");
   });
 
   it("only the copy is ever cut: the backdrop still covers both bars", () => {
@@ -373,7 +590,7 @@ describe("photo zoom wiring (openLightbox)", () => {
   });
 
   it("the resting cut is re-measured with the resting box, and cuts nothing", () => {
-    expect(body).toMatch(/const refit[\s\S]*?writeClip\(b, screenBox\(\)\)/);
+    expect(body).toMatch(/const refit[\s\S]*?writeClip\(b, zoomClipRest\(threadBox\(\), b\)\)/);
   });
 
   it("the close leg reads the landed box, never a second fit of the screen", () => {

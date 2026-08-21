@@ -25,7 +25,7 @@ import {
   shiftParticipates,
 } from "./shift";
 import type { MorphBox } from "./shift";
-import { zoomClipCuts, zoomClipInset, zoomFit, zoomReturn } from "./zoom";
+import { zoomClipCuts, zoomClipInset, zoomClipRest, zoomFit, zoomReturn } from "./zoom";
 import {
   bindPicker,
   bindSendShield,
@@ -54,7 +54,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.7"; // photos wait for drawn, preview slides in, bumped so the build is verifiable
+const APP_VERSION = "0.3.8"; // zoom cut starts tight, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1146,13 +1146,13 @@ function watchPhotos(thread: HTMLElement): void {
 // handed back byte-clean as the copy lands home. The copy also inherits the
 // photo's own cut: the thread paints nothing outside its scrolling box, so a
 // photo half behind the top bar or the compose bar ends at that edge, and the
-// copy is clipped to the same box (opening to the whole screen over the flight,
-// since the resting zoom covers both bars). Dismissal re-reads the
-// photo's rect at that moment: the thread may have scrolled or gained rows
-// while zoomed, and the copy must land where the photo IS. A spot scrolled
-// off-screen gets the edge return (shrink toward its direction while fading);
-// a spot whose row is gone gets the center fade (zoom.ts decides). Records
-// ride the flight channel like every other motion.
+// copy is clipped to the same box, opening over the flight only as far as the
+// resting frame genuinely needs. Dismissal re-reads the photo's rect at that
+// moment: the thread may have scrolled or gained rows while zoomed, and the
+// copy must land where the photo IS. A spot scrolled off-screen gets the edge
+// return (shrink toward its direction while fading); a spot whose row is gone
+// gets the center fade (zoom.ts decides). Records ride the flight channel like
+// every other motion.
 function openLightbox(src: string, from?: HTMLImageElement): void {
   if (document.querySelector(".lightbox")) return; // a double-tap must not stack overlays
   const overlay = document.createElement("div");
@@ -1183,20 +1183,17 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
   // the thread is its own scrolling box, so a photo half behind the top bar or
   // the compose bar ends at that box's edge, while the copy is a sheet over the
   // whole screen and would paint across the bar unless it is cut to match. The
-  // cut travels with the flight — thread box at the thread end, whole screen at
-  // the open end — and only the copy is ever cut: the backdrop and the resting
-  // photo still cover both bars.
+  // cut travels with the flight — thread box at the thread end, and at the open
+  // end the tightest rect the resting frame actually needs (zoomClipRest, which
+  // carries the whole argument) rather than the whole screen. Only the copy is
+  // ever cut: the backdrop and the resting photo still cover both bars.
   const clipper = from.closest(".thread"); // where the photo's own cut comes from
   const screenBox = (): MorphBox => ({
     left: 0, top: 0, width: window.innerWidth, height: window.innerHeight,
   });
   const threadBox = (): MorphBox =>
     clipper ? boxOf(clipper.getBoundingClientRect()) : screenBox();
-  // the cut last written, so a mid-flight turn home keeps it (freeze writes the
-  // launch one below, before any frame paints)
-  let clipNow = screenBox();
   const writeClip = (b: MorphBox, clip: MorphBox): void => {
-    clipNow = clip;
     const i = zoomClipInset(b, clip);
     if (!zoomClipCuts(i)) {
       img.style.removeProperty("clip-path"); // nothing to cut: no cut at all
@@ -1267,7 +1264,7 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
     if (!atRest) return;
     const b = restBox();
     writeBox(b);
-    writeClip(b, screenBox()); // the resting cut is re-measured with it, and cuts nothing
+    writeClip(b, zoomClipRest(threadBox(), b)); // re-measured with it, and cuts nothing
   };
   window.addEventListener("resize", refit);
   // TEMP DIAGNOSTIC (hold.ts trail, flight channel): the two resting sizes side
@@ -1303,7 +1300,10 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
     dw: Math.round(to.width - fromBox.width),
     dh: Math.round(to.height - fromBox.height),
   });
-  fly(fromBox, to, fromRadius, restRadius, openFrom, screenBox(), (f) => {
+  // the cut opens only as far as the landed frame needs, not to the whole
+  // screen: for a photo whose fit lands inside the thread that is the thread's
+  // own box the whole way, so the copy never paints on a bar it has not reached
+  fly(fromBox, to, fromRadius, restRadius, openFrom, zoomClipRest(openFrom, to), (f) => {
     back.style.opacity = String(f);
   }, () => {
     // The landed geometry stands. Only the backdrop hands itself back to css;
@@ -1329,11 +1329,18 @@ function openLightbox(src: string, from?: HTMLImageElement): void {
       ? parseFloat(getComputedStyle(from).borderTopLeftRadius) || 0
       : curRadius;
     const back0 = back.style.opacity ? parseFloat(back.style.opacity) : 1;
-    const clipFrom = clipNow; // a mid-open tap turns home from the cut it has now
-    // the cut closes back onto the thread's box, so the landed frame is cut
-    // exactly like the photo it uncovers and the handover moves no pixel. The
-    // other two modes have no photo to land on and dissolve on their way out of
-    // the screen, so their cut stays open and the exit is the one it always was.
+    // The cut closes back onto the thread's box, so the landed frame is cut
+    // exactly like the photo it uncovers and the handover moves no pixel. It
+    // STARTS at the tightest rect that hides nothing of the copy where it is
+    // right now (zoom.ts carries the argument): starting at the whole screen
+    // was what let a band of photo sit on both bars for most of the way back,
+    // since a cut riding this ease only reaches the thread's box on the last
+    // frame while the copy's own edge crosses the bar's edge far earlier. Like
+    // the spot it flies to, the cut is decided here from what is on screen now
+    // rather than remembered from the open. The other two modes have no photo to
+    // land on and dissolve on their way out of the screen, so both ends of their
+    // cut stay the whole screen and the exit is the one it always was.
+    const clipFrom = ret.mode === "exact" ? zoomClipRest(threadBox(), cur) : screenBox();
     const clipTo = ret.mode === "exact" ? threadBox() : screenBox();
     freeze(cur, curRadius, clipFrom); // a mid-open tap turns home from wherever the copy is
     holdDiagRecord("flight", {
