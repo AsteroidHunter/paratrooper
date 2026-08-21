@@ -920,16 +920,42 @@ html, body {
   padding: 0.4rem 0.75rem 0;
 }
 .pthumb { position: relative; }
-/* a thumbnail whose pixels are not drawn yet holds no seat: it is already in the
-   tray so its slide has something to move, but an empty frame that fills a beat
-   later is the thing this tray is not allowed to show (main.ts stagePick) */
-.pthumb.undrawn { display: none; }
+/* The seat: a hard 64px square that stands whether or not the img has anything
+   to show yet, so the tray's height lands on the tap and the picture is the
+   only thing left waiting (main.ts stagePick). */
 .pthumb img {
   width: 64px;
   height: 64px;
   object-fit: cover;
   border-radius: 12px;
   display: block;
+}
+/* Waiting on its own pixels. Hiding the seat until they arrived is what made
+   the whole strip land a beat late on device, and simply uncovering an empty
+   square would be the frame this tray must never show — so the square wears the
+   SAME placeholder the thread's unarrived photos wear (.msg.shot img.waiting
+   above): a grey face and the shared ring, painted over the img rather than
+   beside it, costing the layout nothing when they go. A mark that plainly says
+   "coming" cannot be mistaken for the picture; a bare square could be. */
+.pthumb.undrawn img { opacity: 0; }
+.pthumb.undrawn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--received);
+  border-radius: 12px; /* the thumbnail's own corner: nothing changes shape on arrival */
+}
+.pthumb.undrawn::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto; /* dead centre of the seat */
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--hairline);
+  border-top-color: var(--muted);
+  border-radius: 50%;
+  animation: oldspin 0.8s linear infinite; /* the history spinner's ring, one vocabulary */
 }
 .pthumb-x {
   position: absolute;

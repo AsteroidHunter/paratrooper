@@ -1,7 +1,8 @@
-// The sent photo's reserved seat: unit tests for the box math (photobox.ts) and
-// source pins for the DOM wiring in send() (main.ts), which lives in the layer
-// that boots a real shell at import time and cannot load under node, the same
-// split flight.test.ts and zoom.test.ts use.
+// The sent photo's reserved seat: unit tests for the box math and the pixel
+// wait (photobox.ts), and source pins for the DOM wiring in send() and the
+// picked-photo tray (main.ts), which lives in the layer that boots a real shell
+// at import time and cannot load under node, the same split flight.test.ts and
+// zoom.test.ts use.
 //
 // What the math tests hold is the whole point of the change: the height
 // reserved BEFORE the photo's pixels arrive is the height the photo actually
@@ -15,6 +16,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  DRAW_NO_DEADLINE,
   SHOT_DRAW_MS,
   SHOT_MAX_WIDTH,
   THUMB_SLIDE_PX,
@@ -240,6 +242,59 @@ describe("whenDrawn: nothing shows a photo until the pixels are there", () => {
   });
 });
 
+// --- the wait with nothing behind it ------------------------------------------
+// The tray's own wait. Its seat and the tray's opening are already on screen, so
+// there is nothing for a deadline to release: settling "late" there would only
+// uncover an empty square. A deadline this caller cannot express by hand —
+// setTimeout takes a long, so an Infinity handed to it straight arrives as zero
+// and fires on the very next tick, which is why the arming is guarded.
+
+describe("whenDrawn with no deadline: it waits as long as the pixels take", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("arms no timer at all", () => {
+    watch(whenDrawn(new FakeImg(), DRAW_NO_DEADLINE));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("never settles late, however far past the send's deadline the clock runs", async () => {
+    const img = new FakeImg();
+    const seen = watch(whenDrawn(img, DRAW_NO_DEADLINE));
+    img.read(); // the bytes are in; the 12MP decode is still running
+    vi.advanceTimersByTime(SHOT_DRAW_MS * 100);
+    await microtasks();
+    expect(seen.why).toBeNull(); // nothing has uncovered the square
+  });
+
+  it("settles the moment the pixels land, which is what starts the slide", async () => {
+    const img = new FakeImg();
+    const seen = watch(whenDrawn(img, DRAW_NO_DEADLINE));
+    vi.advanceTimersByTime(SHOT_DRAW_MS * 4); // his camera photos all took longer
+    await microtasks();
+    expect(seen.why).toBeNull();
+    img.drawn();
+    await microtasks();
+    expect(seen.why).toBe("drawn");
+  });
+
+  it("a decode that fails still settles, so the square is never stuck waiting", async () => {
+    const img = new FakeImg();
+    const seen = watch(whenDrawn(img, DRAW_NO_DEADLINE));
+    img.broke();
+    await microtasks();
+    expect(seen.why).toBe("error");
+  });
+
+  it("a browser with no decode() settles on the read, not on nothing", async () => {
+    const img = new ReadOnlyImg();
+    const seen = watch(whenDrawn(img, DRAW_NO_DEADLINE));
+    img.read();
+    await microtasks();
+    expect(seen.why).toBe("load");
+  });
+});
+
 // --- the picked photo's entrance ----------------------------------------------
 
 describe("thumbSlide: the preview comes in from the left and settles", () => {
@@ -266,10 +321,9 @@ describe("thumbSlide: the preview comes in from the left and settles", () => {
 
 // --- source pins on the main.ts wiring ----------------------------------------
 
-const src = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), "../src/main.ts"),
-  "utf8",
-);
+const here = dirname(fileURLToPath(import.meta.url));
+const src = readFileSync(join(here, "../src/main.ts"), "utf8");
+const css = readFileSync(join(here, "../src/styles.css"), "utf8");
 
 // read inside each test, never at describe level: a pin for a function that does
 // not exist yet must fail as its own test, not take the whole file down with it
@@ -344,48 +398,79 @@ describe("photo send wiring: the seat is taken before the thread pins", () => {
   });
 });
 
-describe("picked-photo preview wiring: it carries its pixels before it is seen", () => {
-  it("the thumbnail is built holding no seat at all", () => {
-    const stage = fnBody("stagePick");
-    expect(stage).toContain('wrap.className = "pthumb undrawn"');
-    // and the stylesheet is what makes that mean "not on screen"
-    const css = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "../src/styles.css"),
-      "utf8",
-    );
-    expect(css).toMatch(/\.pthumb\.undrawn\s*\{\s*display:\s*none;\s*\}/);
-  });
+// The tray's own seat, split from its pixels. Gating BOTH on the decode is what
+// left the strip and the thumbnail arriving a beat after the tap: on device every
+// 12MP camera photo missed the 350ms deadline and was revealed undrawn, while the
+// one screenshot came back "drawn" and felt instant. The seat is the tap's own
+// feedback and owes the pixels nothing; only the picture inside waits.
+describe("picked-photo preview wiring: the seat lands on the tap, the picture later", () => {
+  const stage = (): string => fnBody("stagePick");
 
-  it("the reveal is the drawn wait's own continuation, not a step beside it", () => {
-    const stage = fnBody("stagePick");
-    const wait = stage.indexOf("whenDrawn(img, SHOT_DRAW_MS).then");
-    const reveal = stage.indexOf('wrap.classList.remove("undrawn")');
+  it("the square is in the tray before anything is waited on", () => {
+    const seat = stage().indexOf("box.appendChild(wrap)");
+    const wait = stage().indexOf("whenDrawn(img");
+    expect(seat).toBeGreaterThan(-1);
     expect(wait).toBeGreaterThan(-1);
-    expect(wait).toBeLessThan(reveal);
-    // nothing before the wait puts it on screen: the tray is opened by showPending,
-    // and the only call to it inside stagePick sits inside that continuation
-    expect(stage.indexOf("showPending()")).toBeGreaterThan(wait);
+    expect(seat).toBeLessThan(wait);
+    // and nothing in the stylesheet takes that seat away again while it waits
+    expect(css).not.toMatch(/\.pthumb\.undrawn\s*\{\s*display:\s*none/);
   });
 
-  it("the slide starts from a drawn thumbnail, never an empty frame", () => {
-    const stage = fnBody("stagePick");
-    const reveal = stage.indexOf('wrap.classList.remove("undrawn")');
-    const slide = stage.indexOf("wrap.animate(thumbSlide()");
-    expect(slide).toBeGreaterThan(-1);
-    expect(reveal).toBeLessThan(slide);
-    expect(stage).toContain("{ duration: FLIGHT_MS, easing: FLIGHT_EASE }"); // the app's own beat
-  });
-
-  it("the tray opens only for thumbnails that have their pixels", () => {
-    expect(fnBody("showPending")).toContain(
-      'pendingFiles.some((f) => picks.get(f)?.shown) ? "flex" : "none"',
-    );
+  it("the tray opens on the files it holds, never on their pixels", () => {
+    expect(fnBody("showPending")).toContain('pendingFiles.length > 0 ? "flex" : "none"');
+    expect(fnBody("showPending")).not.toContain("shown"); // the pixel test WAS the defect
     // the old tray rebuilt itself blank on every change
     expect(fnBody("renderPending")).not.toContain('box.innerHTML = ""');
+    // and the tap's own render is what opens it, not the wait's continuation
+    expect(fnBody("renderPending")).toContain("showPending()");
+    expect(stage()).not.toContain("showPending()");
   });
 
-  it("a thumbnail that never draws still appears, on the send's own deadline", () => {
-    expect(fnBody("stagePick")).toContain("whenDrawn(img, SHOT_DRAW_MS)");
-    expect(src).toContain("import { SHOT_DRAW_MS, photoBox, thumbSlide, whenDrawn }");
+  it("only the IMG is gated, by opacity, so the reserved box keeps its space", () => {
+    expect(stage()).toContain('wrap.className = "pthumb undrawn"');
+    expect(css).toMatch(/\.pthumb\.undrawn img \{ opacity: 0; \}/);
+    // the 64px square is written on the img itself and gated on nothing
+    expect(css).toMatch(/\.pthumb img \{[^}]*\bwidth: 64px;[^}]*\bheight: 64px;/);
+  });
+
+  it("the waiting square wears the thread's own placeholder, not a bare frame", () => {
+    // the same grey face and shared ring .msg.shot img.waiting uses
+    expect(css).toMatch(/\.pthumb\.undrawn::before \{[^}]*background: var\(--received\)/);
+    expect(css).toMatch(/\.pthumb\.undrawn::after \{[^}]*animation: oldspin/);
+  });
+
+  it("the wait carries no deadline: no timer ever uncovers an empty square", () => {
+    expect(stage()).toContain("whenDrawn(img, DRAW_NO_DEADLINE)");
+    expect(stage()).not.toContain("whenDrawn(img, SHOT_DRAW_MS)"); // the send's deadline, not this one
+    expect(src).toContain("DRAW_NO_DEADLINE");
+  });
+
+  it("the reveal and the slide both wait for the pixels, in that order", () => {
+    const wait = stage().indexOf("whenDrawn(img, DRAW_NO_DEADLINE).then");
+    const reveal = stage().indexOf('wrap.classList.remove("undrawn")');
+    const slide = stage().indexOf("wrap.animate(thumbSlide()");
+    expect(wait).toBeGreaterThan(-1);
+    expect(wait).toBeLessThan(reveal);
+    expect(reveal).toBeLessThan(slide);
+    expect(stage()).toContain("{ duration: FLIGHT_MS, easing: FLIGHT_EASE }"); // the app's own beat
+  });
+
+  it("the pick-show record survives, now carrying how long the pixels took", () => {
+    expect(stage()).toContain('phase: "pick-show"');
+    expect(stage()).toContain("ms: Math.round(performance.now() - staged)");
+  });
+
+  it("a photo that never decodes still sends AND still previews", () => {
+    // sends: the SEND's wait keeps its deadline, so the row goes without pixels
+    expect(fnBody("prepareShot")).toContain("whenDrawn(img, SHOT_DRAW_MS)");
+    expect(fnBody("send")).toContain("await Promise.all(shots)");
+    expect(fnBody("send")).toContain("img.onload"); // and re-pins if they land later
+    // previews: the seat, its placeholder and the removal ✕ are all on screen
+    // from the tap, none of them behind the wait
+    const stageBody = stage();
+    const wait = stageBody.indexOf("whenDrawn(img");
+    expect(stageBody.indexOf("wrap.append(img, x)")).toBeLessThan(wait);
+    expect(stageBody.indexOf("box.appendChild(wrap)")).toBeLessThan(wait);
+    expect(stageBody).toContain('x.className = "pthumb-x"');
   });
 });

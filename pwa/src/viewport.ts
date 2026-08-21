@@ -54,6 +54,43 @@ export function giveUpTarget(
   return Math.max(0, Math.min(maxScrollTop, scrollTop + (newHeight - oldHeight)));
 }
 
+// The at-bottom verdict, blind to airborne transforms. "Am I at the bottom" is
+// asked on every thread scroll event and its answer flips following on and off,
+// which in turn decides whether the jump chevron may surface. It was asked of a
+// scrollHeight that a send flight INFLATES: the fresh bubble is translated down
+// to the compose field and released, CSS counts transformed overflow as
+// scrollable area, and so for the flight's whole beat the thread reports a
+// bottom sitting the bubble's remaining travel below the one the reader is
+// already on. Every send whose bubble travelled more than this window therefore
+// read as "away", turned following off, and armed the chevron over a reader who
+// had not moved at all — on device six sends split exactly here, the four with
+// 213px of travel or more flipping within 30ms and the two shorter ones not at
+// all, after which he had to tap the chevron away.
+//
+// The answer is to subtract the flight, never to widen the window: his travel
+// reaches 575px and a window that wide would stop the chevron working. The
+// inflation is the part of the translate poking past the thread's own bottom
+// padding, which is the subtraction the send-motion recorder (main.ts) has
+// always made at the recording site and nothing made at the reading site.
+// main.ts reads the live transforms and hands the number in, so the verdict
+// stays a live measurement: a real gesture mid-flight still reads honestly.
+
+export const NEAR_BOTTOM_PX = 150; // how close to the end still counts as the bottom
+
+/** how far a translated row hangs past the thread's own bottom padding */
+export function flightOverflow(translateY: number, paddingBottom: number): number {
+  return Math.max(0, translateY - paddingBottom);
+}
+
+export function nearBottomOf(
+  scrollHeight: number,
+  scrollTop: number,
+  clientHeight: number,
+  overflow = 0,
+): boolean {
+  return scrollHeight - overflow - scrollTop - clientHeight < NEAR_BOTTOM_PX;
+}
+
 // followTail protection while composing — the decision half of the device bug
 // where each new composer line slid the view up a little more. Failure shape:
 // an iOS caret shove (or our own snap-back / pin write) fires thread scroll

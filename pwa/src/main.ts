@@ -8,7 +8,7 @@ import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { composeMirror, fitComposeBox } from "./mirror";
-import { SHOT_DRAW_MS, photoBox, thumbSlide, whenDrawn } from "./photobox";
+import { DRAW_NO_DEADLINE, SHOT_DRAW_MS, photoBox, thumbSlide, whenDrawn } from "./photobox";
 import { createPhotoQueue, nearMargin } from "./photolazy";
 import { receiptFor } from "./receipts";
 import {
@@ -39,8 +39,10 @@ import { bootBlankGap, installSplashCover, installStartupImage } from "./splash"
 import {
   USER_SCROLL_INTENT_MS,
   compensationFor,
+  flightOverflow,
   followFlipDecision,
   giveUpTarget,
+  nearBottomOf,
 } from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
 import type { OutboxRecord } from "./outbox";
@@ -55,7 +57,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.10"; // cover moved into the page, bumped so the build is verifiable
+const APP_VERSION = "0.3.11"; // pending strip opens on tap, chevron ignores flights, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -530,6 +532,7 @@ function renderChat(): void {
   downBtn.bottomReached(); // fresh shell opens pinned: no chevron, no pending timer
   bootGate.reset(); // fresh shell: replay ledger re-arms, the first settle owns the pin
   flightsUp = 0; // airborne flights died with the old shell (late settles floor at 0)
+  airborneRows.clear(); // and their rows belong to a thread that no longer exists
   receiptPending = false;
   restoredOutbox = false; // a fresh shell re-reads the durable outbox
   threadObserver?.disconnect(); // the old shell's thread element is gone
@@ -638,9 +641,8 @@ function refreshSend(): void {
 // blinks the survivors.
 interface Pick {
   url: string; // the one blob url the thumbnail and the sent photo both read
-  wrap: HTMLElement; // the tray thumbnail, holding no seat until it is drawn
+  wrap: HTMLElement; // the tray thumbnail, holding its square from the tap on
   shot: Promise<HTMLImageElement>; // the thread's photo, already being drawn
-  shown: boolean; // its pixels landed (or its deadline fired) and it is on screen
 }
 
 const picks = new Map<File, Pick>();
@@ -668,20 +670,23 @@ function renderPending(): void {
   showPending();
 }
 
-// The tray is open exactly when it has something DRAWN to show. An empty frame
-// waiting to fill is what the owner reported here, so an undrawn thumbnail holds
-// no seat at all (styles.css .pthumb.undrawn) and the tray itself stays shut
-// until the first one is ready — which also means the tray's height opens in one
-// step with the photo already in it, instead of opening bare and growing.
+// The tray is open exactly when something is staged in it — a file test, not a
+// pixel test. Gating this on the pixels instead meant the tray's whole height
+// change waited on a decode, and a 12MP camera photo misses that deadline every
+// time on device, so the strip and the thumbnail both arrived a beat after the
+// tap. The seat opens now and the picture fills it later (stagePick).
 function showPending(): void {
   const box = document.getElementById("pending");
   if (!box) return;
-  box.style.display = pendingFiles.some((f) => picks.get(f)?.shown) ? "flex" : "none";
+  box.style.display = pendingFiles.length > 0 ? "flex" : "none";
 }
 
 function stagePick(file: File, box: HTMLElement): Pick {
   const url = URL.createObjectURL(file);
   const wrap = document.createElement("div");
+  // undrawn is about the PICTURE now, never the seat: the square is on screen
+  // from this line, wearing the same placeholder the thread's unarrived photos
+  // wear (styles.css), and only the img inside it is held back
   wrap.className = "pthumb undrawn";
   const img = document.createElement("img");
   img.src = url;
@@ -697,20 +702,32 @@ function stagePick(file: File, box: HTMLElement): Pick {
     renderPending();
   });
   wrap.append(img, x);
-  box.appendChild(wrap); // in the tray but seatless, so nothing of it shows yet
-  const pick: Pick = { url, wrap, shot: prepareShot(url), shown: false };
-  // The reveal IS the wait's own continuation: there is no path that puts the
-  // frame on screen and fills it afterwards. It waits on the THUMBNAIL's pixels
-  // rather than the shot's, because that is the element the tray shows. Past the
-  // deadline it shows regardless — a photo the phone cannot draw must still tell
-  // the owner his pick landed, the same give-up the send makes.
-  void whenDrawn(img, SHOT_DRAW_MS).then((why) => {
+  box.appendChild(wrap); // seated now; renderPending opens the tray around it
+  const pick: Pick = { url, wrap, shot: prepareShot(url) };
+  const staged = performance.now();
+  // The picture's arrival, and nothing else's. The tray and this square went up
+  // on the tap, so this wait holds nothing back and carries no deadline
+  // (photobox.ts explains why the send keeps one and this does not): waiting a
+  // deadline out and uncovering the img anyway would swap a placeholder that
+  // says "coming" for an empty frame that says nothing, which is the one thing
+  // this tray must not show. It waits on the THUMBNAIL's pixels rather than the
+  // shot's, because that is the element the tray shows. A decode that FAILS
+  // uncovers the img like any other settle: WebKit rejects the odd large photo
+  // that then paints perfectly well, and a square stuck under a spinner forever
+  // is the worse of the two wrong answers.
+  void whenDrawn(img, DRAW_NO_DEADLINE).then((why) => {
     if (picks.get(file) !== pick) return; // removed or sent while it was drawing
-    pick.shown = true;
     wrap.classList.remove("undrawn");
-    showPending();
+    // the entrance starts HERE, on the pixels: it moves a square that has its
+    // picture, inside a tray that has been open since the tap. Started on the
+    // old deadline instead, it spent its whole beat on an empty box.
     wrap.animate(thumbSlide(), { duration: FLIGHT_MS, easing: FLIGHT_EASE });
-    holdDiagRecord("flight", { phase: "pick-show", why });
+    // ms says what the deadline used to say by settling "late", only better:
+    // how long the phone actually took, not merely that it took longer than
+    // SHOT_DRAW_MS (on device every camera photo did, the one screenshot did not)
+    holdDiagRecord("flight", {
+      phase: "pick-show", why, ms: Math.round(performance.now() - staged),
+    });
   });
   return pick;
 }
@@ -777,9 +794,33 @@ const threadObserver =
       })
     : null;
 
+// Rows the send flight has in the air, each one translated down toward the
+// compose field and each one inflating the thread's scrollHeight by whatever
+// part of that translate hangs past the thread's bottom padding. The bar-morph
+// leaves nothing here on purpose: its shell is a fixed element in the body and
+// the real bubble holds its seat untransformed, so it inflates nothing. Kept as
+// the elements themselves rather than a running total because the transforms
+// deflate frame by frame and only the live style knows where they are.
+const airborneRows = new Set<HTMLElement>();
+
+function flightInflation(t: HTMLElement): number {
+  if (airborneRows.size === 0) return 0; // the ordinary case: not one style read
+  const pad = parseFloat(getComputedStyle(t).paddingBottom) || 0;
+  let most = 0;
+  for (const msg of airborneRows) {
+    if (!msg.isConnected) continue; // a replay took the seat mid-flight
+    const tr = getComputedStyle(msg).transform;
+    if (tr === "none") continue;
+    most = Math.max(most, flightOverflow(new DOMMatrixReadOnly(tr).f, pad));
+  }
+  return most;
+}
+
+// the one at-bottom reading in the app (viewport.ts explains the window and why
+// the flight is subtracted rather than the window widened)
 function nearBottom(): boolean {
   const t = threadEl();
-  return t.scrollHeight - t.scrollTop - t.clientHeight < 150;
+  return nearBottomOf(t.scrollHeight, t.scrollTop, t.clientHeight, flightInflation(t));
 }
 
 function scrollToBottom(force = false): void {
@@ -2250,15 +2291,22 @@ function flyFromField(wrapper: HTMLElement, morph: FieldMorph | null = null): vo
       { duration: FLIGHT_MS, easing: FLIGHT_EASE },
     );
     flightsUp++;
+    // this translate holds the bubble below the content edge for the whole
+    // beat, and scrollHeight counts it: registered so the at-bottom reading can
+    // subtract it instead of reporting the reader hundreds of pixels from a
+    // bottom he is sitting on (nearBottom)
+    airborneRows.add(msg);
     holdDiagRecord("flight", {
       phase: "start", i, dx: Math.round(dx * 10) / 10, dy: Math.round(dy * 10) / 10,
     });
     anim.finished.then(
       () => {
+        airborneRows.delete(msg);
         holdDiagRecord("flight", { phase: "finish", i });
         flightSettled();
       },
       () => {
+        airborneRows.delete(msg);
         holdDiagRecord("flight", { phase: "cancel", i });
         flightSettled();
       },

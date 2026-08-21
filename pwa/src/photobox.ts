@@ -1,6 +1,6 @@
 // A photo's pixels, before they land: the seat one takes in the thread, the
-// deadlined wait until it is actually DRAWN, and the entrance the picked-photo
-// preview rides in on. main.ts does the DOM half of all three.
+// wait until it is actually DRAWN, and the entrance the picked-photo preview
+// rides in on. main.ts does the DOM half of all three.
 //
 // --- the seat -----------------------------------------------------------------
 // The seat is worked out from the file's own pixels before a single one of them
@@ -49,13 +49,22 @@ export function photoBox(natW: number, natH: number, rowW: number): PhotoBox {
 // read AND the draw, and an element it has resolved for is safe to put on
 // screen. That is the one wait both places ride now.
 //
-// It is deadlined exactly as the size read was, and by the same number: instant
-// feedback outranks a perfect first frame, so a photo that decodes slowly, or
-// not at all, still goes and still previews — falling back to the old behaviour
-// of filling itself in whenever it can.
+// The deadline belongs to whatever the wait is HOLDING BACK, and that is only
+// ever the send. A tap must produce a bubble, so send() waits this long for the
+// pixels and then goes without them, taking whatever size the file has managed
+// to report: instant feedback outranks a perfect first frame.
+//
+// The picked-photo tray holds nothing back. Its seat and the tray's own opening
+// land on the tap (main.ts stagePick), and only the picture inside is still to
+// come, so that one waits with no deadline at all. Uncovering an empty square on
+// a timer would put on screen exactly the frame this whole section exists to
+// prevent, and would buy nothing, because the preview is already there.
 
-/** how long anything waits on a photo's own pixels before going ahead without them */
+/** how long a SEND waits on a photo's own pixels before going ahead without them */
 export const SHOT_DRAW_MS = 350;
+
+/** a wait with nothing held back behind it: no timer, the pixels take what they take */
+export const DRAW_NO_DEADLINE = Number.POSITIVE_INFINITY;
 
 /** why the wait ended: drawn and safe to show, or one of the three give-ups */
 export type DrawWhy = "drawn" | "load" | "error" | "late";
@@ -76,8 +85,11 @@ export function whenDrawn(img: Drawable, deadlineMs: number = SHOT_DRAW_MS): Pro
       clearTimeout(timer);
       resolve(why);
     };
-    // armed before the decode is asked for, so nothing below can outlive it
-    timer = setTimeout(() => settle("late"), deadlineMs);
+    // armed before the decode is asked for, so nothing below can outlive it. A
+    // non-finite deadline arms nothing: setTimeout takes a long, so Infinity
+    // arrives there as zero and would fire on the spot, which is the exact
+    // opposite of what a caller asking to wait indefinitely means.
+    if (Number.isFinite(deadlineMs)) timer = setTimeout(() => settle("late"), deadlineMs);
     let drawing: Promise<unknown> | undefined;
     try {
       drawing = img.decode?.();
@@ -101,9 +113,14 @@ export function whenDrawn(img: Drawable, deadlineMs: number = SHOT_DRAW_MS): Pro
 // plainly it must not read as coming out of the ＋ button, so the distance is
 // short enough to have no visible origin. The beat and ease are the send
 // flight's (shift.ts), because the tray should move the way the rest of the app
-// moves rather than in a curve of its own. It fades up as it travels, from
-// pixels it already has: whenDrawn holds the thumbnail off screen until then,
-// so nothing here ever slides an empty frame in.
+// moves rather than in a curve of its own.
+//
+// What moves is the SQUARE, and it moves when the picture lands in it. The seat
+// went up on the tap wearing a placeholder, so this animation never slides an
+// empty frame, and it never plays in the same frame as the tray opening from
+// nothing — an 18px hop is invisible beside a whole strip appearing, which is
+// what made the first version of this look like no motion at all. It fades up
+// as it travels, from pixels it already has.
 
 export const THUMB_SLIDE_PX = 18; // a short hop beside the 64px thumbnail it moves
 
