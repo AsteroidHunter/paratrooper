@@ -40,7 +40,7 @@ from ..agent.config import Config, load_config
 from . import push
 from .auth import require_token, verify_token
 from .batching import ThreadCoordinator
-from .db import ThreadStore
+from .db import ThreadStore, ThumbMeta
 from .inbox import InboxStore, RedisInbox, new_key
 from .models import (
     EVENT_POLICY,
@@ -61,7 +61,7 @@ from .publish import (
 )
 from .queue import JobQueue, connect
 from .render_control import RenderControl
-from .thumbs import make_thumbnail
+from .thumbs import image_blurhash, make_thumbnail
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,30 @@ def install_log_redaction() -> None:
             lg.addFilter(_RedactTokenFilter())
 
 
+def install_service_logging() -> None:
+    """Give this package's loggers somewhere to go (idempotent).
+
+    uvicorn configures its own uvicorn.* loggers and nothing else. The root
+    logger keeps its default WARNING and no handlers, so every ``logger.info``
+    in this package was thrown away in the deployed service: the boot line
+    saying how many legacy previews had just been measured was written,
+    emitted, and dropped, which is why nobody could tell whether that repair
+    had ever done anything. One INFO StreamHandler on the package logger and
+    the whole of paratrooper reaches the deploy logs, same shape as the
+    holddiag logger further down, which had to carry its own handler for
+    exactly this reason.
+
+    Scoped to the package rather than the root logger on purpose: root would
+    also unmute redis, httpx and asyncio at INFO, and their chatter would bury
+    the lines this exists to surface."""
+    lg = logging.getLogger("paratrooper")
+    if not lg.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        lg.addHandler(handler)
+    lg.setLevel(logging.INFO)
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -126,22 +150,33 @@ def _to_event(thread_id: str, result: ResultMessage) -> ThreadEvent:
     )
 
 
-def _frame(seq: int, event: ThreadEvent, dims: dict[str, tuple[int, int]]) -> dict:
-    """The one wire shape for keyed events. Events with attachments carry
-    ``attachment_dims`` (same order as ``attachments``, null for legacy rows
-    without recorded sizes) so the client can reserve each image's box before
-    any pixels arrive — an unreserved image renders 0-tall then grows on
-    decode, shoving the scroll position under the reader."""
+def _frame(seq: int, event: ThreadEvent, meta: dict[str, ThumbMeta]) -> dict:
+    """The one wire shape for keyed events. Events with attachments carry two
+    index-aligned lists beside ``attachments``:
+
+    ``attachment_dims`` so the client can reserve each image's box before any
+    pixels arrive. An unreserved image renders 0-tall then grows on decode,
+    shoving the scroll position under the reader, and a box guessed at the
+    wrong ratio squishes a portrait photo into a landscape frame.
+
+    ``attachment_blurhashes`` so it can paint the photo's own colours into that
+    box meanwhile, instead of a grey rectangle (the trick Signal's attachment
+    pointers carry). Both are null per entry only when the stored preview will
+    not decode at all."""
     data = {"seq": seq, **event.model_dump()}
     if event.attachments:
-        data["attachment_dims"] = [dims.get(k) for k in event.attachments]
+        rows = [meta.get(k) for k in event.attachments]
+        data["attachment_dims"] = [(m.width, m.height) if m else None for m in rows]
+        data["attachment_blurhashes"] = [m.blurhash if m else None for m in rows]
     return data
 
 
-def _page_dims(store: ThreadStore, rows: list[tuple[int, ThreadEvent]]) -> dict:
-    """One dims lookup for a whole page of events (most events carry none)."""
+def _page_meta(store: ThreadStore, rows: list[tuple[int, ThreadEvent]]) -> dict[str, ThumbMeta]:
+    """One attachment lookup for a whole page of events (most events carry
+    none). Measures and back-fills anything the store is missing, so a photo
+    stored before those columns existed still ships a real size and blurhash."""
     keys = [k for _, m in rows for k in m.attachments]
-    return store.thumb_dims(keys) if keys else {}
+    return store.thumb_meta(keys) if keys else {}
 
 
 def _pr_ref(payload: Any) -> str:
@@ -420,23 +455,20 @@ def _lifespan(injected: AppState | None):
 #     wins) is fine.
 #   - the "paratrooper.holddiag" logger: one structured line per batching and
 #     delivery decision (this file + batching.py), tagged "holddiag" so the
-#     deploy logs alone reconstruct a session. It carries its own INFO
-#     StreamHandler because nothing configures the root logger under uvicorn,
-#     so plain logger.info from app modules never reaches the deploy logs.
+#     deploy logs alone reconstruct a session. It used to carry its own INFO
+#     StreamHandler because nothing configured logging under uvicorn; it now
+#     rides install_service_logging's package handler like every other logger
+#     here, so these lines are not printed twice.
 # TO REMOVE: delete this block, the two /api/debug/holddiag routes below, every
 # _diag line in this file and batching.py, and the matching TEMP DIAGNOSTIC
 # block in pwa/src/hold.ts.
 _holddiag_latest: dict[str, Any] = {}
 _diag = logging.getLogger("paratrooper.holddiag")
-if not _diag.handlers:
-    _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-    _diag.addHandler(_handler)
-    _diag.setLevel(logging.INFO)
 # =================== END TEMP DIAGNOSTIC (remove after the hold session) ===================
 
 
 def create_app(injected: AppState | None = None) -> FastAPI:
+    install_service_logging()
     install_log_redaction()
     app = FastAPI(title="Paratrooper", lifespan=_lifespan(injected))
 
@@ -455,13 +487,18 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         key = new_key(file.filename)
         await st().inbox.put(key, content)  # cross-service store (Key Value on Render)
         # persist a small preview NOW — the inbox blob expires in ~24h and this
-        # is the only pixel record history replay will have. Its dimensions ride
-        # along so message frames can tell the client how big each box is.
+        # is the only pixel record history replay will have. Its dimensions and
+        # blurhash ride along so message frames can tell the client how big each
+        # box is and what to paint in it. Measured here rather than left to the
+        # first read purely to save that read the work; a row that somehow
+        # arrives without them heals the first time it is looked at.
         thumb = await asyncio.to_thread(make_thumbnail, content)
         if thumb is not None:
             data, w, h = thumb
+            blurhash = await asyncio.to_thread(image_blurhash, data)
             await asyncio.to_thread(
-                st().store.add_thumbnail, key, data, ts=_now(), width=w, height=h
+                st().store.add_thumbnail, key, data, ts=_now(),
+                width=w, height=h, blurhash=blurhash,
             )
         return UploadResponse(inbox_key=key, content_type=file.content_type, size=len(content))
 
@@ -515,8 +552,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
     @app.get("/api/thread/{thread_id}", dependencies=[Depends(require_token)])
     async def thread(thread_id: str, since: int = 0) -> dict:
         rows = await asyncio.to_thread(st().store.messages, thread_id, since_seq=since)
-        dims = await asyncio.to_thread(_page_dims, st().store, rows)
-        return {"messages": [_frame(seq, m, dims) for seq, m in rows]}
+        meta = await asyncio.to_thread(_page_meta, st().store, rows)
+        return {"messages": [_frame(seq, m, meta) for seq, m in rows]}
 
     @app.get("/api/history/{thread_id}", dependencies=[Depends(require_token)])
     async def history(thread_id: str, before: int, limit: int = 50) -> dict:
@@ -524,8 +561,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         rows = await asyncio.to_thread(
             st().store.messages_page, thread_id, before_seq=before, limit=min(limit, 200)
         )
-        dims = await asyncio.to_thread(_page_dims, st().store, rows)
-        return {"messages": [_frame(seq, m, dims) for seq, m in rows]}
+        meta = await asyncio.to_thread(_page_meta, st().store, rows)
+        return {"messages": [_frame(seq, m, meta) for seq, m in rows]}
 
     @app.post("/api/publish", dependencies=[Depends(require_token)])
     async def publish(req: PublishRequest) -> JSONResponse:
@@ -591,9 +628,9 @@ def create_app(injected: AppState | None = None) -> FastAPI:
             rows = await asyncio.to_thread(state.store.messages_page, thread_id, limit=50)
         else:
             rows = await asyncio.to_thread(state.store.messages, thread_id, since_seq=since)
-        dims = await asyncio.to_thread(_page_dims, state.store, rows)
+        meta = await asyncio.to_thread(_page_meta, state.store, rows)
         for seq, m in rows:
-            await websocket.send_json(_frame(seq, m, dims))
+            await websocket.send_json(_frame(seq, m, meta))
         _diag.info("holddiag ws open thread=%s since=%d replayed=%d sockets=%d",
                    thread_id, since, len(rows), len(state.sockets.get(thread_id, set())))
         try:

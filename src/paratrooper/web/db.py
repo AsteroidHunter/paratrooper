@@ -14,9 +14,10 @@ import logging
 import sqlite3
 import threading
 from pathlib import Path
+from typing import NamedTuple
 
 from .models import ThreadEvent
-from .thumbs import image_dims
+from .thumbs import image_blurhash, image_dims
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,24 @@ CREATE TABLE IF NOT EXISTS attachments (
     content_type TEXT NOT NULL DEFAULT 'image/webp',
     ts           TEXT NOT NULL,
     width        INTEGER,            -- thumb pixel size, NULL on pre-dims rows;
-    height       INTEGER             -- the client reserves image boxes from these
+    height       INTEGER,            -- the client reserves image boxes from these
+    blurhash     TEXT                -- ~28 chars; painted in the box until pixels land
 );
 """
+
+# columns added to `attachments` after the table shipped, and their types. Rows
+# created before each one exists carry NULL until something measures them.
+_ATTACHMENT_ADDED_COLUMNS = {"width": "INTEGER", "height": "INTEGER", "blurhash": "TEXT"}
+
+
+class ThumbMeta(NamedTuple):
+    """Everything a photo bubble needs before a single pixel of the preview has
+    arrived: the real box to reserve, and a blurred stand-in to paint into it.
+    ``blurhash`` is None only for a preview whose bytes will not decode."""
+
+    width: int
+    height: int
+    blurhash: str | None
 
 
 def _event(r: sqlite3.Row) -> ThreadEvent:
@@ -74,13 +90,14 @@ class ThreadStore:
             self._migrate_backfill_thumb_dims()  # needs the columns above to exist
 
     def _migrate_attachment_dims(self) -> None:
-        """Additive columns for thumbnail dimensions on DBs created before them.
-        Idempotent (column-presence gated); legacy rows keep NULL and the client
-        falls back to a fixed-ratio box for those."""
+        """Additive columns (dimensions, blurhash) on DBs created before them.
+        Idempotent (column-presence gated). A row keeps NULL in a new column
+        until it is read: ``thumb_meta`` measures it from the row's own stored
+        preview bytes at that point and writes it back."""
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(attachments)")}
-        for col in ("width", "height"):
+        for col, sqltype in _ATTACHMENT_ADDED_COLUMNS.items():
             if col not in cols:
-                self._conn.execute(f"ALTER TABLE attachments ADD COLUMN {col} INTEGER")
+                self._conn.execute(f"ALTER TABLE attachments ADD COLUMN {col} {sqltype}")
         self._conn.commit()
 
     def _migrate_backfill_thumb_dims(self) -> None:
@@ -270,12 +287,14 @@ class ThreadStore:
 
     def add_thumbnail(self, key: str, thumb: bytes, *, ts: str,
                       content_type: str = "image/webp",
-                      width: int | None = None, height: int | None = None) -> None:
+                      width: int | None = None, height: int | None = None,
+                      blurhash: str | None = None) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO attachments(key, thumb, content_type, ts, width, height) "
-                "VALUES (?,?,?,?,?,?)",
-                (key, thumb, content_type, ts, width, height),
+                "INSERT OR REPLACE INTO attachments"
+                "(key, thumb, content_type, ts, width, height, blurhash) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (key, thumb, content_type, ts, width, height, blurhash),
             )
             self._conn.commit()
 
@@ -287,8 +306,9 @@ class ThreadStore:
         return (row["thumb"], row["content_type"]) if row else None
 
     def thumb_dims(self, keys: list[str]) -> dict[str, tuple[int, int]]:
-        """Thumb pixel sizes for ``keys`` (rows with recorded dims only) — the
-        client reserves each image's box from these before any pixels arrive."""
+        """Thumb pixel sizes AS CURRENTLY RECORDED for ``keys``: rows whose
+        columns are still NULL are simply absent. The raw view of the table;
+        the frame path wants ``thumb_meta``, which fills those in."""
         if not keys:
             return {}
         marks = ",".join("?" for _ in keys)
@@ -299,6 +319,95 @@ class ThreadStore:
                 tuple(keys),
             ).fetchall()
         return {r["key"]: (r["width"], r["height"]) for r in rows}
+
+    def thumb_meta(self, keys: list[str]) -> dict[str, ThumbMeta]:
+        """Box size and blurhash for ``keys``, measuring and persisting
+        whatever is missing on the way past.
+
+        This is the answer to "how big is this photo, and what colour is it",
+        and it must never come back "unknown" for a preview we are holding the
+        pixels of. A row that predates a column gets that column filled from
+        its own stored bytes the first time anybody reads it, and written back,
+        so the cost is paid once per photo, ever, by whichever read arrives
+        first. That is deliberately not a boot-time backfill: a one-time repair
+        is a thing that either ran or did not, with no way to tell afterwards
+        and no second chance for rows that arrive later; healing on the read
+        path is self-correcting and needs nobody to have remembered anything.
+
+        A key with no row (thumbnail expired, non-image upload) is absent from
+        the result, and so is one whose bytes will not decode. The client's
+        fixed-ratio fallback exists for exactly those."""
+        if not keys:
+            return {}
+        marks = ",".join("?" for _ in keys)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT key, width, height, blurhash FROM attachments WHERE key IN ({marks})",
+                tuple(keys),
+            ).fetchall()
+        out: dict[str, ThumbMeta] = {}
+        for r in rows:
+            width, height, blurhash = r["width"], r["height"], r["blurhash"]
+            if width is None or height is None or blurhash is None:
+                width, height, blurhash = self._heal_thumb_meta(
+                    r["key"], width, height, blurhash
+                )
+            if width is not None and height is not None:
+                out[r["key"]] = ThumbMeta(width, height, blurhash)
+        return out
+
+    def _heal_thumb_meta(
+        self, key: str, width: int | None, height: int | None, blurhash: str | None
+    ) -> tuple[int | None, int | None, str | None]:
+        """Fill this row's missing size/blurhash from its own preview bytes and
+        persist them, returning what it now has.
+
+        NEVER RAISES. A read of the thread is not allowed to fail because one
+        stored blob is unreadable, half-written, or something Pillow chokes on
+        in a way it does not advertise. The photo must still arrive in the chat
+        with whatever is known about it, and the reason must show up in the
+        logs rather than as a 500. An undecodable row keeps its NULLs and
+        is retried on later reads, which costs one header read each.
+
+        The measuring and encoding happen with the connection lock released:
+        the blurhash is real CPU work, and every other caller of this store
+        would otherwise queue behind it."""
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT thumb FROM attachments WHERE key=?", (key,)
+                ).fetchone()
+            if row is None:
+                return width, height, blurhash
+            data = row["thumb"]
+            filled = []
+            if width is None or height is None:
+                dims = image_dims(data)
+                if dims is not None:
+                    width, height = dims
+                    filled.append(f"dims={width}x{height}")
+            if blurhash is None:
+                blurhash = image_blurhash(data)
+                if blurhash is not None:
+                    filled.append(f"blurhash={blurhash}")
+            if not filled:
+                logger.warning(
+                    "attachment %s: preview bytes (%d) did not decode, leaving it "
+                    "unmeasured; the client falls back to a fixed-ratio box", key, len(data)
+                )
+                return width, height, blurhash
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE attachments SET width=?, height=?, blurhash=? WHERE key=?",
+                    (width, height, blurhash, key),
+                )
+                self._conn.commit()
+            logger.info("healed attachment %s on read: %s", key, " ".join(filled))
+        except Exception as exc:
+            # includes the sqlite errors: a read must survive a write it could
+            # not make, it just costs the next read another measure
+            logger.warning("attachment %s: could not heal its stored size/blurhash: %s", key, exc)
+        return width, height, blurhash
 
     # --- web push subscriptions (Phase 6) ---
 

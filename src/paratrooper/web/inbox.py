@@ -12,6 +12,7 @@ filesystem backend for local dev and tests.
 from __future__ import annotations
 
 import base64
+import time
 import uuid
 from pathlib import Path
 from typing import Protocol
@@ -23,8 +24,26 @@ DEFAULT_TTL = 24 * 3600  # staged uploads must survive deploys + queue waits
 
 
 def new_key(filename: str | None) -> str:
-    """A fresh opaque inbox key (uuid + safe extension)."""
-    return f"{uuid.uuid4().hex}{_safe_ext(filename)}"
+    """A fresh opaque inbox key (upload second + uuid + safe extension).
+
+    The leading second is what makes the age of an upload knowable to anyone
+    holding nothing but the key. That only matters once the blob is gone: the
+    TTL below is absolute from the upload and never refreshed, so the age is the
+    one thing that says whether it ran out of time or went missing for some
+    other reason. A message to the owner must not name a cause nobody checked,
+    and without this there is nothing to check.
+    """
+    return f"{int(time.time())}-{uuid.uuid4().hex}{_safe_ext(filename)}"
+
+
+def key_age_seconds(key: str) -> float | None:
+    """Seconds since the upload that minted ``key``, or None when the key
+    carries no time (keys minted before it did, or anything hand-made). None
+    means unknown and must be treated as such, never as brand new or as old."""
+    stamp, sep, _ = key.partition("-")
+    if not sep or not stamp.isdigit():
+        return None
+    return time.time() - int(stamp)
 
 
 class InboxStore(Protocol):

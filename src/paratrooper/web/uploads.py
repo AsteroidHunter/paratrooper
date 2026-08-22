@@ -3,7 +3,9 @@
 The PWA POSTs a photo over an authenticated multipart request; the web service
 writes the raw bytes to the staging inbox (persistent disk) under an opaque key
 and enqueues a job referencing only that key. The worker reads the file from the
-same store, optimizes it into the pin folder, then deletes the staged original.
+same store and optimizes it into the pin folder; it never deletes the original,
+because the same key can be handed to a second job (see ``_cleanup`` in the
+worker runner). The store's TTL is what reclaims it.
 """
 
 from __future__ import annotations

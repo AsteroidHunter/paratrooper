@@ -13,7 +13,7 @@ from paratrooper.web import ThreadCoordinator, ThreadStore, is_stop_word
 from paratrooper.web.app import AppState, create_app
 from paratrooper.web.auth import verify_token
 from paratrooper.web.batching import DEFAULT_WINDOW
-from paratrooper.web.inbox import DiskInbox, RedisInbox, new_key
+from paratrooper.web.inbox import DiskInbox, RedisInbox, key_age_seconds, new_key
 from paratrooper.web.models import ThreadEvent
 from paratrooper.web.publish import (
     PublishError,
@@ -305,6 +305,24 @@ def test_new_key_extension():
     assert new_key("../evil").count("/") == 0
 
 
+def _aged_key(seconds_old: int, filename: str = "photo.jpeg") -> str:
+    """An inbox key that looks minted ``seconds_old`` ago. Built by rewinding a
+    real key's own stamp, so it can't drift from whatever new_key mints."""
+    stamp, _, rest = new_key(filename).partition("-")
+    return f"{int(stamp) - seconds_old}-{rest}"
+
+
+def test_key_carries_its_upload_time():
+    """The key is the only thing a reader still holds once the blob is gone, so
+    the age has to travel in it."""
+    assert key_age_seconds(new_key("photo.jpeg")) < 5
+    assert key_age_seconds(_aged_key(30 * 3600)) > 24 * 3600
+    # keys minted before the stamp existed, and anything hand-made: unknown age,
+    # never a guess in either direction
+    assert key_age_seconds("deadbeef" * 4 + ".jpeg") is None
+    assert key_age_seconds("not-a-stamp.jpeg") is None
+
+
 def test_disk_inbox_roundtrip(tmp_path):
     async def scenario():
         ib = DiskInbox(tmp_path / "ib")
@@ -544,6 +562,64 @@ def test_make_thumbnail_downscales_reports_dims_and_rejects_non_images():
     assert make_thumbnail(b"not an image") is None
 
 
+# --- blurhash (the Signal-style placeholder) ----------------------------------
+
+def _rgb_solid(w, h, colour) -> bytes:
+    return bytes(v for _ in range(w * h) for v in colour)
+
+
+def _rgb_ramp(w, h) -> bytes:
+    return bytes(
+        v for y in range(h) for x in range(w)
+        for v in ((x * 7) % 256, (y * 13) % 256, ((x + y) * 3) % 256)
+    )
+
+
+def test_blurhash_matches_the_reference_implementation():
+    """Golden vectors, and the only thing that makes this encoder worth
+    vendoring: every expected string below came out of woltapp/blurhash's own
+    C reference (C/encode.c + C/common.h, compiled and fed the identical
+    pixel buffer), not out of this implementation. A hash that decodes to the
+    wrong thing on a phone is worse than no hash, so "it returned a string" is
+    not the bar."""
+    from paratrooper.web.blurhash import encode
+
+    assert encode(_rgb_solid(5, 4, (18, 52, 200)), 5, 4) == "Ll27GZkIfQkIkJfnfQfnfQfQfQfQ"
+    assert encode(_rgb_ramp(21, 13), 21, 13) == "LK9k7l7DsVbtqMWEjue;f~fkfQfj"
+    assert encode(_rgb_ramp(21, 13), 21, 13, 1, 1) == "009k7l"  # DC only, no AC terms
+    assert encode(_rgb_ramp(6, 9), 6, 9, 3, 2) == "B72QoVTXWol^a3a|"
+
+
+def test_blurhash_shape_and_bad_input():
+    """4x3 components is what rides to the client: 28 characters, and the
+    first one encodes the component counts so a decoder can read them back."""
+    from paratrooper.web.blurhash import encode
+
+    h = encode(_rgb_ramp(20, 20), 20, 20)
+    # size flag + AC scale + 4-char DC + two chars per AC term
+    assert len(h) == 1 + 1 + 4 + 2 * (4 * 3 - 1) == 28
+    size_flag = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".index(h[0])
+    assert (size_flag % 9 + 1, size_flag // 9 + 1) == (4, 3)
+
+    with pytest.raises(ValueError):
+        encode(_rgb_ramp(4, 4), 4, 4, 0, 3)  # components are 1..9
+    with pytest.raises(ValueError):
+        encode(_rgb_ramp(4, 4), 8, 8)  # buffer smaller than the claimed size
+
+
+def test_image_blurhash_reads_encoded_bytes_and_survives_junk():
+    """The store hands this webp bytes, not pixels. Anything that will not
+    decode comes back None rather than raising: a broken preview must not be
+    able to take a photo out of the chat."""
+    from paratrooper.web.thumbs import image_blurhash, make_thumbnail
+
+    thumb, _, _ = make_thumbnail(_png_bytes(size=(400, 300)))
+    got = image_blurhash(thumb)
+    assert got is not None and len(got) == 28
+    assert image_blurhash(b"not an image") is None
+    assert image_blurhash(b"") is None
+
+
 def test_thumbnail_store_roundtrip(tmp_path):
     store = ThreadStore(tmp_path / "t.sqlite")
     store.add_thumbnail("inbox/abc.png", b"webpbytes", ts="2026-07-07T00:00:00+00:00")
@@ -559,6 +635,136 @@ def test_thumb_dims_roundtrip_and_legacy_null(tmp_path):
     dims = store.thumb_dims(["a.png", "legacy.png", "missing.png"])
     assert dims == {"a.png": (320, 240)}
     assert store.thumb_dims([]) == {}
+
+
+# --- heal on read: a photo is never allowed to have no size -------------------
+
+def _meta_row(store, key):
+    row = store._conn.execute(
+        "SELECT width, height, blurhash FROM attachments WHERE key=?", (key,)
+    ).fetchone()
+    return (row["width"], row["height"], row["blurhash"])
+
+
+def test_thumb_meta_heals_missing_size_and_blurhash_and_persists(tmp_path):
+    """The squish bug's root: a preview stored before the size columns existed
+    ships no dims, the client falls back to a fixed 4:3 box, and a portrait
+    photo opens out of a landscape crop. A one-time boot repair was supposed to
+    fix those and nobody could tell whether it had, so the answer is not to
+    depend on a repair at all: the first read of a row measures it, answers
+    with the truth, and writes it back."""
+    from paratrooper.web.thumbs import make_thumbnail
+
+    store = ThreadStore(tmp_path / "heal.sqlite")
+    thumb, w, h = make_thumbnail(_png_bytes(size=(800, 500)))
+    store.add_thumbnail("legacy.webp", thumb, ts="t")  # no dims, no blurhash
+
+    assert _meta_row(store, "legacy.webp") == (None, None, None)  # before
+    assert store.thumb_dims(["legacy.webp"]) == {}  # nothing on file to answer with
+
+    meta = store.thumb_meta(["legacy.webp"])["legacy.webp"]
+    assert (meta.width, meta.height) == (w, h)  # the real shape, measured now
+    assert meta.blurhash is not None and len(meta.blurhash) == 28
+
+    # and it stuck: the row itself now carries both, so the next read is a
+    # plain SELECT
+    assert _meta_row(store, "legacy.webp") == (w, h, meta.blurhash)
+
+
+def test_thumb_meta_second_read_does_no_measuring(tmp_path, monkeypatch):
+    """Healed once, healed forever. Proven by making measuring impossible on
+    the way back in: if the second read still answers, it read the columns."""
+    from paratrooper.web import db as db_mod
+    from paratrooper.web.thumbs import make_thumbnail
+
+    store = ThreadStore(tmp_path / "once.sqlite")
+    thumb, w, h = make_thumbnail(_png_bytes(size=(640, 480)))
+    store.add_thumbnail("k.webp", thumb, ts="t")
+    first = store.thumb_meta(["k.webp"])["k.webp"]
+
+    def _boom(_data):
+        raise AssertionError("second read must not measure anything")
+
+    monkeypatch.setattr(db_mod, "image_dims", _boom)
+    monkeypatch.setattr(db_mod, "image_blurhash", _boom)
+    assert store.thumb_meta(["k.webp"])["k.webp"] == first
+    assert (first.width, first.height) == (w, h)
+
+
+def test_thumb_meta_heals_a_portrait_photo_as_portrait(tmp_path):
+    """The actual complaint: portrait photos drawn into a landscape frame.
+    A tall preview with no recorded size must come back tall."""
+    from paratrooper.web.thumbs import make_thumbnail
+
+    store = ThreadStore(tmp_path / "tall.sqlite")
+    portrait, pw, ph = make_thumbnail(_png_bytes(size=(480, 640)))
+    landscape, lw, lh = make_thumbnail(_png_bytes(size=(800, 500)))
+    store.add_thumbnail("tall.webp", portrait, ts="t")
+    store.add_thumbnail("wide.webp", landscape, ts="t")
+
+    meta = store.thumb_meta(["tall.webp", "wide.webp"])
+    assert (meta["tall.webp"].width, meta["tall.webp"].height) == (pw, ph)
+    assert meta["tall.webp"].height > meta["tall.webp"].width  # portrait stays portrait
+    assert (meta["wide.webp"].width, meta["wide.webp"].height) == (lw, lh)
+    assert meta["wide.webp"].width > meta["wide.webp"].height
+
+
+def test_thumb_meta_survives_an_undecodable_preview(tmp_path, caplog):
+    """One unreadable blob must never fail the read that touched it, or take
+    its neighbours down with it: it is simply absent from the answer (the
+    client's fixed-ratio fallback exists for exactly that row) and it says so
+    in the log instead of raising."""
+    import logging
+
+    from paratrooper.web.thumbs import make_thumbnail
+
+    store = ThreadStore(tmp_path / "junk.sqlite")
+    good, w, h = make_thumbnail(_png_bytes(size=(300, 200)))
+    store.add_thumbnail("junk.webp", b"not an image at all", ts="t")
+    store.add_thumbnail("good.webp", good, ts="t")
+
+    with caplog.at_level(logging.INFO, logger="paratrooper.web.db"):
+        meta = store.thumb_meta(["junk.webp", "good.webp", "never-stored.webp"])
+    assert "junk.webp" not in meta and "never-stored.webp" not in meta
+    assert (meta["good.webp"].width, meta["good.webp"].height) == (w, h)
+    assert _meta_row(store, "junk.webp") == (None, None, None)  # keeps its NULLs
+    assert any("junk.webp" in r.message for r in caplog.records)  # and says why
+
+    # a row with sizes on file but bytes that will not encode still answers
+    # with those sizes, just without a blurhash
+    store.add_thumbnail("halfjunk.webp", b"still not an image", ts="t", width=12, height=34)
+    half = store.thumb_meta(["halfjunk.webp"])["halfjunk.webp"]
+    assert (half.width, half.height, half.blurhash) == (12, 34, None)
+
+
+def test_thumb_meta_read_survives_a_failing_write(tmp_path, monkeypatch):
+    """The write-back is an optimisation, not a precondition. If the UPDATE
+    itself blows up, the reader still gets the measured truth for this photo
+    and the next read simply measures again."""
+    import sqlite3
+
+    from paratrooper.web.thumbs import make_thumbnail
+
+    store = ThreadStore(tmp_path / "nowrite.sqlite")
+    thumb, w, h = make_thumbnail(_png_bytes(size=(640, 480)))
+    store.add_thumbnail("k.webp", thumb, ts="t")
+
+    class _NoUpdates:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *a, **kw):
+            if sql.lstrip().upper().startswith("UPDATE"):
+                raise sqlite3.OperationalError("disk I/O error")
+            return self._conn.execute(sql, *a, **kw)
+
+        def commit(self):
+            return self._conn.commit()
+
+    monkeypatch.setattr(store, "_conn", _NoUpdates(store._conn))
+    meta = store.thumb_meta(["k.webp"])["k.webp"]
+    assert (meta.width, meta.height) == (w, h)
+    assert meta.blurhash is not None
 
 
 def test_history_frames_carry_attachment_dims(client):
@@ -584,6 +790,53 @@ def test_history_frames_carry_attachment_dims(client):
     # text-only events carry no dims field at all
     textual = next(m for m in rows if not m.get("attachments"))
     assert "attachment_dims" not in textual
+    assert "attachment_blurhashes" not in textual
+
+
+def test_history_frames_carry_attachment_blurhashes(client):
+    """Every photo frame ships a blurhash next to its size, index-aligned with
+    ``attachments`` exactly like the dims are. The client paints it into the
+    reserved box instead of a grey rectangle while the preview loads."""
+    auth = {"Authorization": "Bearer tok"}
+    up = client.post(
+        "/api/upload", headers=auth, files={"file": ("p.png", _png_bytes(), "image/png")}
+    )
+    key = up.json()["inbox_key"]
+    client.post(
+        "/api/send", headers=auth,
+        json={"thread_id": "bht", "text": "pic", "attachments": [key]},
+    )
+    rows = client.get("/api/thread/bht", headers=auth).json()["messages"]
+    msg = next(m for m in rows if m.get("attachments"))
+    hashes = msg["attachment_blurhashes"]
+    assert len(hashes) == len(msg["attachments"]) == 1
+    assert isinstance(hashes[0], str) and len(hashes[0]) == 28
+
+
+def test_legacy_photo_frame_heals_through_the_route(client):
+    """End to end, through the route the phone actually calls: a row with no
+    size and no blurhash on file comes back with both, and a portrait one comes
+    back portrait rather than in the 4:3 box that squished it."""
+    from paratrooper.web.thumbs import make_thumbnail
+
+    auth = {"Authorization": "Bearer tok"}
+    store = client.app.state.app_state.store
+    portrait, pw, ph = make_thumbnail(_png_bytes(size=(480, 640)))
+    store.add_thumbnail("old-tall.webp", portrait, ts="t")  # pre-columns row
+    store.add_thumbnail("old-junk.webp", b"unreadable", ts="t")  # and a broken one
+    store.add_message(ThreadEvent(
+        thread_id="legacy", role="user", payload="two photos",
+        attachments=["old-tall.webp", "old-junk.webp"], ts="2026-07-07T00:00:00+00:00",
+    ))
+
+    body = client.get("/api/thread/legacy", headers=auth)
+    assert body.status_code == 200  # the broken row must not fail the read
+    msg = body.json()["messages"][0]
+    assert msg["attachment_dims"] == [[pw, ph], None]
+    assert msg["attachment_dims"][0][1] > msg["attachment_dims"][0][0]  # portrait
+    tall_hash, junk_hash = msg["attachment_blurhashes"]
+    assert isinstance(tall_hash, str) and len(tall_hash) == 28
+    assert junk_hash is None
 
 
 def test_thumb_route_serves_persisted_previews(client):
@@ -958,7 +1211,7 @@ def test_failed_job_reports_error_and_spares_the_loop(tmp_path):
     w = Worker(_FakeQueue())
     w._config = cfg  # skip load_config
     msg = JobMessage(job_id="j1", thread_id="d", text="add this",
-                     attachments=["expired-key.jpeg"])
+                     attachments=[_aged_key(30 * 3600)])  # really is past the TTL
 
     _run(w._run_one(msg))  # must NOT raise
 
@@ -966,7 +1219,7 @@ def test_failed_job_reports_error_and_spares_the_loop(tmp_path):
     assert kinds[0] == "working"
     assert "error" in kinds
     err = next(r for r in published if r.kind == "error")
-    assert "expired" in str(err.payload)
+    assert "older than 24 hours" in str(err.payload)
 
 
 def test_shutdown_requeues_job_without_user_facing_noise(tmp_path, monkeypatch):
@@ -1023,6 +1276,195 @@ def test_shutdown_requeues_job_without_user_facing_noise(tmp_path, monkeypatch):
     kinds = [r.kind for r in published]
     assert "error" not in kinds  # no fake 'interrupted' bubble on deploys
     assert _run(w.inbox.get("k.jpeg")) == b"img"  # attachment kept for the re-run
+
+
+class _RecordingQueue:
+    """Worker-side fake: the shared store plus a log of what reached the phone."""
+
+    def __init__(self):
+        self.r = _FakeRedis()
+        self.published: list = []
+        self.requeued: list = []
+
+    async def publish_result(self, thread_id, result):
+        self.published.append(result)
+
+    async def requeue_front(self, job):
+        self.requeued.append(job.job_id)
+
+
+def _worker(tmp_path):
+    from paratrooper.web.worker_runner import Worker
+
+    w = Worker(_RecordingQueue())
+    w._config = Config(  # skip load_config
+        inbox=tmp_path / "inbox", site_root=tmp_path / "site",
+        pins_dir=tmp_path / "pins", archive_dir=tmp_path / "arch",
+        later_dir=tmp_path / "later", changelog=tmp_path / "cl.jsonl",
+        remote=None, default_branch="main", branch_prefix="paratrooper",
+    )
+    return w
+
+
+def _scratch_exists(tmp_path, key) -> bool:
+    """Is the worker's own materialized copy on its local disk right now?"""
+    return (tmp_path / "inbox" / key).exists()
+
+
+def test_superseded_run_leaves_the_photo_there_for_the_rerun(tmp_path, monkeypatch):
+    """The incident: he sent photos, then sent another message while the run was
+    still going. That send supersedes the run (batching folds the running batch
+    back in front of the buffer, so the rerun carries the SAME keys) and then
+    cancels it. The dying run's teardown deleted the shared copy, and the rerun
+    found nothing. A job only reads that copy, so a cancelled job must leave it
+    exactly where it found it."""
+    import paratrooper.web.worker_runner as wr
+    from paratrooper.web.models import JobMessage
+
+    w = _worker(tmp_path)
+    key = new_key("photo.jpeg")
+    _run(w.inbox.put(key, b"pixels"))
+    seen, park = [], [True]
+
+    async def fake_run_job(job, **kw):
+        seen.append(list(job.attachments))
+        if park[0]:
+            await asyncio.sleep(30)  # pin it in flight so the cancel lands mid-run
+
+    monkeypatch.setattr(wr, "run_job", fake_run_job)
+
+    async def scenario():
+        first = JobMessage(job_id="j1", thread_id="d", text="these two",
+                           attachments=[key])
+        task = asyncio.ensure_future(w._run_one(first))
+        await asyncio.sleep(0.05)
+        task.cancel()  # exactly what the interrupt listener does on a supersede
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not _scratch_exists(tmp_path, key)  # its own copy IS gone
+        assert await w.inbox.get(key) == b"pixels"  # the shared one is untouched
+
+        park[0] = False  # the rerun the coordinator fires next, same key
+        rerun = JobMessage(job_id="j2", thread_id="d", text="these two\nand this",
+                           attachments=[key])
+        await w._run_one(rerun)
+
+    _run(scenario())
+    assert seen == [[key], [key]]  # the rerun really did get the photo
+    # the cancel itself is the only error, and the web swallows that one for a
+    # superseded run: nothing about a lost photo ever reaches him
+    assert [str(r.payload) for r in w.queue.published if r.kind == "error"] == ["interrupted"]
+
+
+def test_local_scratch_copy_is_cleaned_up_on_every_path(tmp_path, monkeypatch):
+    """The copy a job materializes on its own disk is the one thing it does own,
+    so it goes on the way out of every path: finished, failed, interrupted, and
+    deploy shutdown. The shared copy goes on none of them, which is why the
+    teardown needs no special cases any more."""
+    import paratrooper.web.worker_runner as wr
+    from paratrooper.web.models import JobMessage
+
+    w = _worker(tmp_path)
+    outcome = ["ok"]
+
+    async def fake_run_job(job, **kw):
+        # the scratch copy must be sitting there while the job is running
+        assert _scratch_exists(tmp_path, job.attachments[0])
+        if outcome[0] == "boom":
+            raise RuntimeError("agent blew up")
+        if outcome[0] == "hang":
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(wr, "run_job", fake_run_job)
+
+    def one_run(name, *, cancel=False, shutting_down=False):
+        key = new_key(f"{name}.jpeg")
+        _run(w.inbox.put(key, b"pixels"))
+        msg = JobMessage(job_id=name, thread_id="d", text=name, attachments=[key])
+
+        async def scenario():
+            w._shutting_down = shutting_down
+            if not cancel:
+                await w._run_one(msg)
+                return
+            task = asyncio.ensure_future(w._run_one(msg))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        _run(scenario())
+        w._shutting_down = False
+        assert not _scratch_exists(tmp_path, key), f"{name}: scratch copy left behind"
+        assert _run(w.inbox.get(key)) == b"pixels", f"{name}: shared copy deleted"
+
+    one_run("finished")
+    outcome[0] = "boom"
+    one_run("failed")
+    outcome[0] = "hang"
+    one_run("interrupted", cancel=True)
+    one_run("shutdown", cancel=True, shutting_down=True)
+
+
+# words from inside the machine that must never reach a chat bubble
+_INTERNAL_WORDS = ("staging", "stage", "inbox", "blob", "key", "ttl", "redis", "store")
+
+
+def test_missing_photo_message_never_claims_a_cause_it_did_not_check():
+    """The old line said photos "expired from staging" whatever had happened,
+    and it once said that 93ms after he sent them. The TTL runs from the upload and
+    the key carries the upload second, so running out of time is checkable.
+    Claim it only when it checks out, and say it in words he'd use."""
+    from paratrooper.web.worker_runner import _missing_photos_message
+
+    day = 24 * 3600
+    ran_out = _missing_photos_message([_aged_key(day + 3600)], day)
+    assert ran_out == (
+        "That photo is older than 24 hours, and I only keep photos for that long. "
+        "Please send it again."
+    )
+    # sent minutes ago and already gone: something else happened, so say only
+    # what is known. Never the word expired, never a duration.
+    fresh = _missing_photos_message([_aged_key(120)], day)
+    assert fresh == (
+        "I couldn't find that photo when I went to open it. Please send it again."
+    )
+    assert "expire" not in fresh and "24 hours" not in fresh and "older" not in fresh
+    # a key with no readable upload time is unknown, not old
+    assert _missing_photos_message(["deadbeef" * 4 + ".jpeg"], day) == fresh
+    # one of them recent is enough to drop the claim for all of them
+    mixed = _missing_photos_message([_aged_key(day + 3600), _aged_key(60)], day)
+    assert "24 hours" not in mixed and "them again" in mixed
+    both_old = _missing_photos_message([_aged_key(day + 60), _aged_key(day + 90)], day)
+    assert both_old.startswith("Those photos are older than 24 hours")
+
+    for message in (ran_out, fresh, mixed, both_old):
+        low = message.lower()
+        assert not any(w in low for w in _INTERNAL_WORDS), message
+
+
+def test_missing_photo_reaches_the_phone_in_plain_words(tmp_path, monkeypatch):
+    """End to end: a photo genuinely past its day, and one that just isn't
+    there, both land as an error bubble that reads like a person wrote it."""
+    import paratrooper.web.worker_runner as wr
+    from paratrooper.web.models import JobMessage
+
+    async def never(*a, **kw):
+        raise AssertionError("the job must not run with photos it couldn't read")
+
+    monkeypatch.setattr(wr, "run_job", never)
+    w = _worker(tmp_path)
+
+    _run(w._run_one(JobMessage(job_id="j1", thread_id="d", text="look",
+                               attachments=[_aged_key(30 * 3600)])))
+    _run(w._run_one(JobMessage(job_id="j2", thread_id="d", text="look",
+                               attachments=[new_key("photo.jpeg")])))
+
+    old_err, new_err = (str(r.payload) for r in w.queue.published if r.kind == "error")
+    assert "older than 24 hours" in old_err
+    assert "older" not in new_err and "expire" not in new_err
+    for message in (old_err, new_err):
+        assert not any(word in message.lower() for word in _INTERNAL_WORDS), message
 
 
 def test_requeue_front_puts_job_next_in_line():
@@ -1489,6 +1931,44 @@ def test_token_redaction_native_access_records_survive_real_formatter():
     line = AccessFormatter(_ACCESS_FMT, use_colors=False).format(rec)
     assert "hunter2" not in line
     assert '1.2.3.4:5 - "GET /api/thumb/gone.webp?token=REDACTED HTTP/1.1" 404 Not Found' in line
+
+
+# --- the package's own logs actually reaching the deploy logs -----------------
+
+def test_service_logging_unmutes_the_package_under_uvicorns_config():
+    """Two days of this bug were spent blind: uvicorn configures its own
+    uvicorn.* loggers and leaves the root logger at WARNING with no handlers,
+    so every logger.info in this package was written and thrown away, the one
+    line that would have said whether the legacy-preview repair had done
+    anything included. Reproduce uvicorn's own logging setup and show the
+    package go from muted to audible."""
+    import logging as _logging
+    import logging.config as _logging_config
+
+    from uvicorn.config import LOGGING_CONFIG
+
+    from paratrooper.web.app import install_service_logging
+
+    pkg = _logging.getLogger("paratrooper")
+    saved_handlers, saved_level = list(pkg.handlers), pkg.level
+    try:
+        pkg.handlers.clear()
+        pkg.setLevel(_logging.NOTSET)
+        _logging_config.dictConfig(LOGGING_CONFIG)  # what uvicorn does on boot
+        assert not _logging.getLogger("paratrooper.web.db").isEnabledFor(_logging.INFO)
+
+        install_service_logging()
+        assert _logging.getLogger("paratrooper.web.db").isEnabledFor(_logging.INFO)
+        assert _logging.getLogger("paratrooper.web.app").isEnabledFor(_logging.INFO)
+
+        # idempotent: the factory runs once per boot, but tests build many apps
+        install_service_logging()
+        install_service_logging()
+        assert len(pkg.handlers) == 1  # and holddiag is not printed twice
+        assert not _logging.getLogger("paratrooper.holddiag").handlers
+    finally:
+        pkg.handlers[:] = saved_handlers
+        pkg.setLevel(saved_level)
 
 
 # --- live job-marker broadcast (roadmap 7) ------------------------------------

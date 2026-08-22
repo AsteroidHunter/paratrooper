@@ -21,7 +21,7 @@ from redis import exceptions as redis_exc
 from ..agent.config import Config, github_token, load_config
 from ..agent.siterepo import SiteRepo
 from ..agent.worker import Job, run_job
-from .inbox import DiskInbox, RedisInbox
+from .inbox import DiskInbox, RedisInbox, key_age_seconds
 from .models import JobMessage, ResultMessage
 from .queue import JobQueue, connect
 
@@ -29,6 +29,37 @@ logger = logging.getLogger(__name__)
 
 # transient transport failures: retry with a short pause, never kill the process
 _REDIS_TRANSIENT = (redis_exc.ConnectionError, redis_exc.TimeoutError)
+
+
+def _missing_photos_message(keys: list[str], ttl: int) -> str:
+    """What to tell the owner when photos he sent are not in the shared store.
+
+    The store lets a blob go at exactly one moment, when its TTL runs out, and
+    that TTL counts from the upload and is never refreshed. So "it ran out of
+    time" is checkable rather than guessable: every key carries the second it
+    was minted. Say it only when every missing photo really is past the TTL. A
+    photo that went missing for any other reason would make that sentence false,
+    and a wrong reason sends him looking in the wrong place (it once told him
+    photos had expired 93ms after he sent them). Otherwise say only what is
+    known, which is that they are not there.
+
+    Wording rule for anything he reads: plain words, nothing from inside the
+    machine. He sent photos from his phone; he never staged anything.
+    """
+    ages = [key_age_seconds(k) for k in keys]
+    past_ttl = all(age is not None and age >= ttl for age in ages)
+    many = len(keys) > 1
+    if past_ttl:
+        hours = round(ttl / 3600)
+        return (
+            f"{'Those photos are' if many else 'That photo is'} older than {hours} hours, "
+            f"and I only keep photos for that long. "
+            f"Please send {'them' if many else 'it'} again."
+        )
+    return (
+        f"I couldn't find {'those photos' if many else 'that photo'} when I went to "
+        f"open {'them' if many else 'it'}. Please send {'them' if many else 'it'} again."
+    )
 
 
 def _screenshot_data_uri(path: str) -> str:
@@ -56,9 +87,11 @@ class Worker:
         return self._config
 
     async def _materialize(self, keys: list[str]) -> None:
-        """Pull staged uploads from the shared store onto the worker's local
-        inbox so the image tool can read them as plain files. Missing/expired
-        blobs raise a clear, user-facing error instead of a bare KeyError."""
+        """Copy the uploaded photos out of the shared store into this worker's
+        own local inbox, so the image tool can read them as plain files. This is
+        a READ of the shared store: the copy is ours, the original is not.
+        Anything not there raises an error worded for the owner, not a bare
+        KeyError."""
         local = DiskInbox(self._cfg().inbox)
         missing = []
         for key in keys:
@@ -67,16 +100,30 @@ class Worker:
             except KeyError:
                 missing.append(key)
         if missing:
-            raise RuntimeError(
-                f"{len(missing)} attached photo(s) expired from staging before I could "
-                "process them. please re-send the photo(s)."
-            )
+            raise RuntimeError(_missing_photos_message(missing, self.inbox.ttl))
 
     async def _cleanup(self, keys: list[str]) -> None:
+        """Delete the local scratch copies this job materialized, and nothing
+        else.
+
+        It used to delete the shared blob too, and that was the bug. Two stores
+        with two different owners were being torn down as if the job owned both.
+        The job creates the local copy and must destroy it. The shared blob is
+        created by the web service when the photo is uploaded, its key is
+        written into the persisted thread row, and a second job can be handed
+        that same key: a message sent mid-run folds the running batch back into
+        the buffer, so the rerun carries the very same keys. A job is a reader of
+        that blob, never its owner, and a reader deleting what it read is how a
+        rerun ends up with nothing to read.
+
+        A job may run more than once on the same inputs, so it must not consume
+        its own inputs. The lifetime of an upload belongs to the store: the TTL
+        set at upload time is the reclamation mechanism, and one day of a few
+        photos is the whole cost of leaving it to do its work.
+        """
         local = DiskInbox(self._cfg().inbox)
         for key in keys:
             with contextlib.suppress(Exception):
-                await self.inbox.delete(key)
                 await local.delete(key)
 
     async def _on_event(self, thread_id: str, event: dict) -> None:
@@ -126,10 +173,12 @@ class Worker:
                 ResultMessage(job_id=msg.job_id, kind="error", payload=str(exc)),
             )
         finally:
-            # on deploy shutdown keep the staged attachments: the requeued job
-            # needs to materialize them again on the next instance
-            if not self._shutting_down:
-                await self._cleanup(msg.attachments)
+            # unconditional: this only removes the local copies this job made,
+            # so it needs no exemptions. The shutdown exemption that used to sit
+            # here existed to protect the shared blob for the requeued job, and
+            # nothing touches the shared blob any more. A reader that never
+            # deletes shared state does not have to know why it stopped.
+            await self._cleanup(msg.attachments)
 
     async def _interrupt_listener(self) -> None:
         while True:  # re-subscribe after transient redis drops

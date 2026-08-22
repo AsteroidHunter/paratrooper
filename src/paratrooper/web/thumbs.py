@@ -12,7 +12,15 @@ from io import BytesIO
 
 from PIL import Image, ImageOps
 
+from .blurhash import encode as blurhash_encode
+
 THUMB_EDGE = 1280
+
+# the blurhash is 4x3 cosine components over the whole picture, so it cannot
+# see anything finer than a twelfth of the frame anyway. Encoding a 32px-long-
+# edge copy costs a few milliseconds instead of a few seconds and produces the
+# same string to within a character.
+BLURHASH_EDGE = 32
 
 
 def make_thumbnail(data: bytes) -> tuple[bytes, int, int] | None:
@@ -44,5 +52,23 @@ def image_dims(data: bytes) -> tuple[int, int] | None:
     try:
         with Image.open(BytesIO(data)) as im:
             return im.width, im.height
+    except Exception:
+        return None
+
+
+def image_blurhash(data: bytes) -> str | None:
+    """~28-character blurhash of already-encoded image bytes, or None when they
+    won't decode. The client paints this while the real preview is still coming
+    down the wire, so a photo bubble shows the photo's own colours and shape
+    from the first frame instead of a grey rectangle.
+
+    Alpha is dropped rather than composited, matching every reference
+    implementation: they read the RGB of an RGBA pixel and ignore the A. Same
+    no-transpose reasoning as ``image_dims``."""
+    try:
+        with Image.open(BytesIO(data)) as im:
+            im.thumbnail((BLURHASH_EDGE, BLURHASH_EDGE), Image.Resampling.BOX)
+            small = im.convert("RGB")
+        return blurhash_encode(small.tobytes(), small.width, small.height)
     except Exception:
         return None
