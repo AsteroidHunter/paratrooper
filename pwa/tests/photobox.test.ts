@@ -461,6 +461,14 @@ describe("one decode per picked photo: the tray's element IS the thread's", () =
 // between holding the tap and showing a blank. It shows the same grey face and
 // ring the tray's waiting square wears instead, which is the same mark every
 // history photo wears before it loads, so there is no third vocabulary here.
+//
+// A history photo now paints its own blurred colours over that face when the
+// server sent it a blurhash (blurhash.ts). A photo picked off this phone has no
+// hash, since nothing has encoded it yet, so a sent row writes no --blur and
+// this grey is exactly what it still wears. That is why the face below is
+// checked as a colour underneath an image layer rather than as a bare
+// background: the layer is what a hash fills in, and the colour is what stands
+// when there is none.
 
 describe("the sent row carries the placeholder until the pixels are there", () => {
   it("the element wears the mark from the frame it is made, before any wait", () => {
@@ -485,8 +493,11 @@ describe("the sent row carries the placeholder until the pixels are there", () =
   });
 
   it("the stylesheet paints it inside a sent row exactly as inside a history one", () => {
-    expect(css).toMatch(/\.msg\.shot:has\(img\.waiting\)::before \{[^}]*background: var\(--received\)/);
+    expect(css).toMatch(/\.msg\.shot:has\(img\.waiting\)::before \{[^}]*background-color: var\(--received\)/);
     expect(css).toMatch(/\.msg\.shot:has\(img\.waiting\)::after \{[^}]*animation: oldspin/);
+    // a sent photo has no blurhash to paint, so the image layer resolves to
+    // none and the grey below it is the whole face, exactly as before
+    expect(css).toMatch(/\.msg\.shot:has\(img\.waiting\)::before \{[^}]*background-image: var\(--blur, none\)/);
     // the same two layers the tray's own square has always worn
     expect(css).toMatch(/\.pthumb\.undrawn::before \{[^}]*background: var\(--received\)/);
     expect(css).toMatch(/\.pthumb\.undrawn::after \{[^}]*animation: oldspin/);

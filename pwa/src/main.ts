@@ -1,6 +1,7 @@
 // Paratrooper PWA — message the pinboard agent. Vanilla TS + DOM (lightest build).
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
+import { BLUR_EDGE, decodeBlurhash } from "./blurhash";
 import { createBootGate } from "./bootgate";
 import { caretCountsAsComposing } from "./caret";
 import { moveTypingAfter, placeTyping } from "./dots";
@@ -68,7 +69,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.15"; // measures the room under the last message after a send, bumped so the build is verifiable
+const APP_VERSION = "0.3.16"; // paints a loading photo's own blurred colours instead of a grey box, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -179,7 +180,8 @@ interface ServerMsg {
   kind?: string | null; // ResultKind or system kind; absent/null on user messages
   payload?: unknown; // any JSON value; message text is a plain string
   attachments?: string[];
-  attachment_dims?: ([number, number] | null)[]; // thumb sizes, index-aligned; null = legacy row
+  attachment_dims?: ([number, number] | null)[]; // thumb sizes, index-aligned; null = undecodable preview
+  attachment_blurhashes?: (string | null)[]; // ~28-char previews, same index, same null rule
   ts?: string; // ISO-8601, server clock (live and replay alike)
 }
 
@@ -1539,6 +1541,58 @@ function isDuplicateAgentText(seq: number, text: string): boolean {
 
 type Renderer = (m: ServerMsg, wrapper: HTMLElement, at: number, value: string) => void;
 
+// The blurred picture a photo wears while its real pixels are still coming:
+// the server's ~28-character blurhash (blurhash.ts) painted into a data uri
+// that the stylesheet stretches over the box already reserved for the photo.
+//
+// Small on purpose. The hash holds nothing but the lowest frequencies of the
+// picture, so 32 square is everything there is in one, and decoding at the
+// photo's real size would be a few hundred times the work for pixels nobody
+// could tell apart. The square is not a compromise on shape either: a decoded
+// pixel's colour depends only on how far across and down the picture it sits,
+// never on the shape of the grid, so a square stretched over the reserved box
+// shows exactly the picture a box-shaped decode would have.
+//
+// Null when there is nothing to paint, which the caller reads as "leave the
+// grey face alone". Null hashes, a canvas this browser will not give a 2d
+// context for, and anything malformed all land there.
+//
+// Nothing in here can put a raw hash into the stylesheet. base83 carries
+// characters CSS would read as syntax, so what comes back is a base64 png and
+// only ever a base64 png, quoted into the url() at the call below.
+//
+// Kept between renders because a re-render rebuilds every row it touches, and a
+// thread of photos re-decoding wholesale is the one place this could be felt.
+// The cap is there because the row's own inline style already holds a copy of
+// each string, so an unbounded map would be a second copy of every photo ever
+// scrolled past. Dropped wholesale rather than one at a time: this is a memo,
+// not a store, and losing it costs a fraction of a millisecond per photo.
+const BLUR_FACE_CAP = 200; // far more photos than one screen, or one cached thread, holds
+const blurFaces = new Map<string, string | null>(); // one decode per distinct hash
+
+function blurFace(hash: string | null | undefined): string | null {
+  if (typeof hash !== "string" || !hash) return null;
+  const cached = blurFaces.get(hash);
+  if (cached !== undefined) return cached;
+  if (blurFaces.size >= BLUR_FACE_CAP) blurFaces.clear();
+  let uri: string | null = null;
+  const pixels = decodeBlurhash(hash, BLUR_EDGE, BLUR_EDGE);
+  if (pixels) {
+    const canvas = document.createElement("canvas");
+    canvas.width = BLUR_EDGE;
+    canvas.height = BLUR_EDGE;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      const face = ctx.createImageData(BLUR_EDGE, BLUR_EDGE);
+      face.data.set(pixels);
+      ctx.putImageData(face, 0, 0);
+      uri = canvas.toDataURL();
+    }
+  }
+  blurFaces.set(hash, uri);
+  return uri;
+}
+
 function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
   // photos render as their own frameless bubbles (same shape as the send
   // echo); pre-thumbnail history 404s and falls back to the old chip
@@ -1547,8 +1601,18 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
     const img = document.createElement("img");
     // reserve the box BEFORE any pixels arrive: an unsized image is 0-tall
     // until decode, and its late growth shoves the scroll position (the
-    // residual history-landing jump). Server sends each thumb's real size;
-    // legacy rows without one get a fixed 4:3 frame, cover-cropped.
+    // residual history-landing jump). Server sends each thumb's real size.
+    //
+    // The 4:3 branch below is the squish: a portrait photo dropped into a
+    // landscape frame because the client had to guess. It is not a legacy
+    // branch any more. The server measures a preview it has never measured
+    // before on first read and stores what it finds, so a photo arrives here
+    // without a size only when its stored bytes will not decode at all, in
+    // which case no pixels are ever coming and the guessed frame is a box for
+    // a placeholder rather than a box for a photo. Same condition sends a null
+    // blurhash, so that box keeps the flat grey face. Kept, not deleted: the
+    // guess is still the only thing standing between an undecodable photo and
+    // a 0-tall row that shoves the scroll under the reader.
     const dims = m.attachment_dims?.[i];
     if (dims) {
       img.width = dims[0];
@@ -1559,6 +1623,11 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
       img.style.aspectRatio = "4 / 3"; // lock the box even after decode
       img.style.objectFit = "cover";
     }
+    // the photo's own colours in the box, in place of the grey rectangle, from
+    // this frame and with no second request (styles.css reads --blur). A photo
+    // with no usable hash simply never sets it and the grey stands.
+    const face = blurFace(m.attachment_blurhashes?.[i]);
+    if (face) div.style.setProperty("--blur", `url("${face}")`);
     img.alt = "photo";
     img.onload = () => {
       photoQueue.arrived(img); // the grey box comes off with the first pixels
