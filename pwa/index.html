@@ -73,10 +73,14 @@
          ratio (0.28), and the corner is the middle less half of each.
 
          The one thing a stylesheet cannot check is that the viewport IS the
-         screen, which is why splash.ts writes these four numbers back onto
-         this element as inline styles once it runs. On every iPhone the app
-         is opened on it writes the numbers already in force, so nothing
-         moves; tests/splash.test.ts is what holds the two in step. */
+         screen, and on iOS it is not on the first frame, which is the whole
+         reason for the script below this block. Two things restate these four
+         numbers in screen pixels afterwards: that script, before the parser
+         has even reached the cover, and splash.ts once the bundle runs. Both
+         write the same numbers, and where the viewport is honest they are the
+         numbers already in force, so nothing moves either way. What is left
+         here is the fallback for a load that cannot run either of them;
+         tests/splash.test.ts is what holds all three in step. */
       #splashlogo {
         position: absolute;
         display: block;
@@ -95,7 +99,12 @@
          side edges with centered text, which is this side's way of saying the
          canvas's canvasW/2. The font stack is the chat's own (styles.css and
          SPLASH_FONT_FAMILY), every name in it a face the device already has,
-         so the line costs the cover nothing to wait for. */
+         so the line costs the cover nothing to wait for.
+
+         The row and the type size are restated in screen pixels by the script
+         below, for the reason the logo's block gives, and the family survives
+         that because the script sets the two longhands rather than the
+         shorthand. */
       #splashhandle {
         position: absolute;
         left: 0;
@@ -121,6 +130,84 @@
         }
       }
     </style>
+
+    <!--
+      WHERE THE LOGO GOES, decided off the SCREEN rather than off the viewport.
+
+      The rules above put it in the middle of the cover, and the cover is fixed
+      at inset 0, so that middle is the middle of the LAYOUT VIEWPORT. On iOS
+      the layout viewport is reported short on the first frame and grows a
+      moment later, as the safe-area insets appear. Measured on real cold
+      opens: 762 tall at first paint, 812 between 68 and 289ms afterwards. So
+      those rules resolve to 321 on the frame the user is handed and to 346
+      once the viewport settles, while the phone's own launch image, which is
+      built from the SCREEN, had the logo at 346 the whole time. The logo
+      therefore jumps 25px up on the handover and drops back a quarter of a
+      second later. The credit line moves twice as far, because its rule is a
+      whole percentage of that same height rather than half of one.
+
+      screen.width and screen.height do not have that problem. They are the
+      device's own numbers, they are right on the first frame, and they are
+      what splashLayout() is fed. So this computes the very same rect off the
+      very same inputs and states it in CSS pixels. A classic script with no
+      src runs where it is parsed, which is before the parser has reached the
+      cover, so the style it appends is in force for the first paint. There is
+      nothing to fetch and nothing to decode.
+
+      It is a hand copy of arithmetic that lives in src/splash.ts, because a
+      script that must not fetch anything cannot import it. Two things stop the
+      copies drifting. installSplashCover writes the function's own answer over
+      these declarations once the bundle runs, so a disagreement would show as
+      a jump rather than as a quietly wrong picture; and tests/splash.test.ts
+      executes THIS script's own text against splashLayout() on every screen
+      shape in its list and fails on any gap at all.
+
+      Where the layout viewport is honest from the first frame, every number
+      below is the number the rules above already resolved to, so it changes
+      nothing. Where the screen cannot be read it writes nothing and those
+      rules stand, which is also what happens with scripting off.
+    -->
+    <script>
+      (function () {
+        try {
+          var scr = window.screen;
+          var w = scr && scr.width;
+          var h = scr && scr.height;
+          var d = window.devicePixelRatio;
+          // two real edges and a real ratio, or leave the rules above alone
+          if (!(w > 0) || !(h > 0) || !(d > 0)) return;
+          var cw = Math.round(w * d); // the launch image's canvas, in device px
+          var ch = Math.round(h * d);
+          var sx = w / cw; // canvas back to screen, per axis, after that rounding
+          var sy = h / ch;
+          var edge = cw < ch ? cw : ch;
+          var box = edge * 0.32; // SPLASH_LOGO_FRACTION: the logo's bounding square
+          var a = 280 / 320; // SPLASH_LOGO_W / SPLASH_LOGO_H
+          var lw = a >= 1 ? box : box * a; // contain-fit the art inside that square
+          var lh = a >= 1 ? box / a : box;
+          var font = Math.round(edge * 0.035) * sy; // SPLASH_HANDLE_FRACTION
+          // SPLASH_HANDLE_BOTTOM_FRACTION up from the bottom is the text's MIDDLE,
+          // and CSS places a box by its top, so hand over top-plus-half-the-type
+          var row = (ch - edge * 0.12) * sy - font / 2;
+          var css =
+            "#splashlogo{" +
+            "left:" + ((cw - lw) / 2) * sx + "px;" +
+            "top:" + ((ch - lh) / 2) * sy + "px;" +
+            "width:" + lw * sx + "px;" +
+            "height:" + lh * sy + "px}" +
+            "#splashhandle{" +
+            "top:" + row + "px;" +
+            "font-size:" + font + "px;" +
+            "line-height:" + font + "px}";
+          var tag = document.createElement("style");
+          tag.id = "splashfit";
+          tag.appendChild(document.createTextNode(css));
+          document.head.appendChild(tag);
+        } catch (e) {
+          /* cosmetic only: a launch must never fail over where a logo sits */
+        }
+      })();
+    </script>
   </head>
   <body>
     <!-- First in the body so the parser reaches it first. The logo carries its

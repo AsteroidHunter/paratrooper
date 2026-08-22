@@ -80,11 +80,16 @@ describe("the built page blocks its first paint on nothing", () => {
 
   it("ships no stylesheet file at all, so there is nothing left to go and get", () => {
     expect(FILES.filter((f) => f.endsWith(".css"))).toEqual([]);
-    // the one thing the page still fetches is the bundle, and a module script
-    // is deferred, so it cannot hold the paint either
+    // The one thing the page still fetches is the bundle, and a module script
+    // is deferred, so it cannot hold the paint either. The head's geometry
+    // script is the other tag, and it fetches nothing at all: it is inline, so
+    // it is already in the bytes the document arrived in.
     const scripts = [...PAGE.matchAll(/<script([^>]*)>/g)].map((m) => m[1]);
-    expect(scripts.length).toBe(1);
-    expect(scripts[0]).toContain('type="module"');
+    expect(scripts.length).toBe(2);
+    const fetched = scripts.filter((s) => s.includes("src="));
+    expect(fetched.length).toBe(1);
+    expect(fetched[0]).toContain('type="module"');
+    expect(scripts.filter((s) => !s.includes("src="))).toEqual([""]);
   });
 
   it("carries the app's styles itself, all of them", () => {
@@ -149,8 +154,22 @@ describe("the cover cannot lift before the app's styles have applied", () => {
     // first statement runs the document has been parsed end to end: every
     // <style> in it has been applied and the cover element exists
     const scripts = [...PAGE.matchAll(/<script([^>]*)>/g)].map((m) => m[1]);
-    expect(scripts.length).toBe(1);
-    expect(scripts[0]).toContain('type="module"');
+    const fetched = scripts.filter((s) => s.includes("src="));
+    expect(fetched.length).toBe(1);
+    expect(fetched[0]).toContain('type="module"');
+  });
+
+  it("keeps the head's geometry script inline, and ahead of that module", () => {
+    // The opposite property, on the other script the page carries: it must run
+    // at the point it is parsed, which is before the parser reaches the cover,
+    // so the rect it computes off the SCREEN is in force for the first paint
+    // rather than a few hundred milliseconds into it. A build step that gave
+    // it a src, a type or a defer would take that away silently, so the built
+    // page is where it is checked rather than the template.
+    const inline = /<script>([\s\S]*?)<\/script>/.exec(PAGE)?.[1] ?? "";
+    expect(inline).toContain("splashfit");
+    expect(PAGE.indexOf("<script>")).toBeLessThan(PAGE.indexOf('<div id="splashcover">'));
+    expect(PAGE.indexOf("<script>")).toBeLessThan(PAGE.indexOf('type="module"'));
   });
 
   it("arms the lift inside that script, so nothing can lift before the parse", async () => {

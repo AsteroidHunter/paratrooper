@@ -69,7 +69,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.16"; // paints a loading photo's own blurred colours instead of a grey box, bumped so the build is verifiable
+const APP_VERSION = "0.3.17"; // the launch logo is placed off the screen, so it no longer settles after first paint, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

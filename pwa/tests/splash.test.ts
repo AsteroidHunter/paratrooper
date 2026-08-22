@@ -529,7 +529,7 @@ function near(a: number, b: number): boolean {
 }
 
 describe("the launch cover lives in the document, not in the bundle", () => {
-  it("is in the served page, and the one script the page loads is a module", () => {
+  it("is in the served page, and the only script the page fetches is a module", () => {
     // The whole point of the move: the element is parsed and paintable before a
     // line of the bundle runs. A module script is DEFERRED by definition, so it
     // cannot execute until the document has been parsed, and that is the
@@ -537,8 +537,15 @@ describe("the launch cover lives in the document, not in the bundle", () => {
     // build time, ahead of this markup, and it makes no difference.
     expect(INDEX_HTML).toContain('<div id="splashcover">');
     const scripts = [...INDEX_HTML.matchAll(/<script([^>]*)>/g)].map((m) => m[1]);
-    expect(scripts.length).toBe(1);
-    expect(scripts[0]).toContain('type="module"');
+    // two tags, and only one of them is a file. The other is the geometry
+    // script the head carries, and its attribute list is EMPTY: no src to go
+    // and get, no type, no defer and no async, which between them are every way
+    // a script can be made to run later than where it sits.
+    expect(scripts.length).toBe(2);
+    const fetched = scripts.filter((s) => s.includes("src="));
+    expect(fetched.length).toBe(1);
+    expect(fetched[0]).toContain('type="module"');
+    expect(scripts.filter((s) => !s.includes("src="))).toEqual([""]);
   });
 
   it("carries both of the things it shows, with nothing left to go and get", () => {
@@ -638,6 +645,232 @@ describe("the cover's stylesheet says exactly what splashLayout() says", () => {
       const topGap = Math.abs(resolveCss(r.top, w, h, "y") - want.top);
       expect([name, fontGap < 0.2, topGap < 0.1]).toEqual([name, true, true]);
     }
+  });
+});
+
+// --- the head's own geometry script --------------------------------------------
+//
+// The rules above resolve against the VIEWPORT, and on iOS the layout viewport
+// is reported short on the first frame and grows a moment later, so those rules
+// put the logo somewhere the phone's own launch image never had it and then
+// move it. index.html therefore carries a classic, src-less <script> in its
+// head, which is a script that runs where it is parsed, and that script reads
+// the SCREEN, which is right from the first frame, and appends a <style> saying
+// the same thing splashLayout() says.
+//
+// That is a hand copy of arithmetic that lives in src/splash.ts, because a
+// script that must fetch nothing cannot import a module, and a hand copy that
+// quietly drifts would put the bug straight back. So this is where the two are
+// held together, and it is held by EXECUTION rather than by reading: the block
+// below runs the shipped script's own text against made-up screens and compares
+// what it wrote with what the functions say. coverLogoRect and coverHandleBox
+// are also exactly what installSplashCover writes once the bundle runs, so the
+// same comparison is the proof that the later write moves nothing.
+const FIT_SCRIPT = /<script>([\s\S]*?)<\/script>/.exec(INDEX_HTML)?.[1] ?? "";
+
+// a stand-in <style>: it remembers its id and whatever text was put inside it,
+// which is the whole of what the script does to one
+interface FakeStyle {
+  id: string;
+  text: string;
+  appendChild(node: { data: string }): void;
+}
+
+// the screens the guard sweeps: the phones above, plus the shapes an iPhone
+// list would never cover: a ratio of 1, a fractional one, and both
+// orientations, since the layout is written off the SHORTER edge
+const SCREENS: Array<[string, number, number, number]> = [
+  ...PHONES,
+  ["a 1x screen", 412, 915, 1],
+  ["a fractional ratio", 393, 851, 2.625],
+  ["landscape", 812, 375, 3],
+  ["a square screen", 800, 800, 2],
+];
+
+// Run the shipped script against a made-up screen and hand back the CSS it
+// appended. window and document are parameters, so they shadow whatever the
+// test env has, and nothing else in the script reaches outside itself.
+function runFitScript(screenObj: unknown, dpr: unknown): { css: string; styles: FakeStyle[] } {
+  const made: FakeStyle[] = [];
+  const doc = {
+    createElement: (): FakeStyle => ({
+      id: "",
+      text: "",
+      appendChild(node: { data: string }): void {
+        this.text += node.data;
+      },
+    }),
+    createTextNode: (data: string) => ({ data }),
+    head: {
+      appendChild: (el: FakeStyle): void => {
+        made.push(el);
+      },
+    },
+  };
+  const win = { screen: screenObj, devicePixelRatio: dpr };
+  new Function("window", "document", FIT_SCRIPT)(win, doc);
+  return { css: made.map((s) => s.text).join(""), styles: made };
+}
+
+// one rule out of that generated CSS as a property -> number map. Every value
+// it writes is a plain px length, so there is nothing else to parse.
+function fitRule(css: string, selector: string): Record<string, number> {
+  const body = new RegExp(`${selector}\\{([^}]*)\\}`).exec(css)?.[1] ?? "";
+  const out: Record<string, number> = {};
+  for (const decl of body.split(";")) {
+    const at = decl.indexOf(":");
+    if (at > 0) out[decl.slice(0, at).trim()] = Number(decl.slice(at + 1).replace("px", ""));
+  }
+  return out;
+}
+
+describe("the head's geometry script: the same rect, before the first paint", () => {
+  it("is a classic script, in the head, below the rules it overrides", () => {
+    // classic and src-less is what makes it parse-time: the parser stops, runs
+    // it, and only then reaches the cover, so the style it appends is in force
+    // for the frame the cover first appears on. Below the cover's own <style>
+    // because the style it appends lands at the end of the head as the head
+    // stands at that instant, and two rules of equal weight are settled by
+    // which came last.
+    expect(FIT_SCRIPT).not.toBe("");
+    const at = INDEX_HTML.indexOf("<script>");
+    expect(at).toBeGreaterThan(INDEX_HTML.indexOf("</style>"));
+    expect(at).toBeLessThan(INDEX_HTML.indexOf("</head>"));
+    expect(at).toBeLessThan(INDEX_HTML.indexOf('<div id="splashcover">'));
+    // and it goes and gets nothing, which is the other half of parse-time
+    expect(FIT_SCRIPT).not.toMatch(/\b(fetch|import|XMLHttpRequest|new Image)\b/);
+  });
+
+  it("restates every property the fallback rules state, and nothing besides", () => {
+    const { css, styles } = runFitScript({ width: 375, height: 812 }, 3);
+    expect(styles.length).toBe(1);
+    expect(styles[0].id).toBe("splashfit");
+    expect(Object.keys(fitRule(css, "#splashlogo")).sort()).toEqual([
+      "height",
+      "left",
+      "top",
+      "width",
+    ]);
+    // the fallback says the credit line with the font shorthand, which carries
+    // the family too, so the row and the size are restated as longhands and the
+    // family is left alone
+    expect(Object.keys(fitRule(css, "#splashhandle")).sort()).toEqual([
+      "font-size",
+      "line-height",
+      "top",
+    ]);
+  });
+
+  it("writes exactly what splashLayout() writes, on every screen shape there is", () => {
+    // THE DIVERGENCE GUARD. Every constant in the script (0.32, 0.035, 0.12,
+    // 280/320) and every step of its arithmetic is checked here against the
+    // functions that own them, so changing one side and not the other fails.
+    for (const [name, w, h, dpr] of SCREENS) {
+      const g = splashLayout({
+        screenW: w,
+        screenH: h,
+        dpr,
+        logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
+      });
+      const rect = coverLogoRect(g, w, h);
+      const box = coverHandleBox(g, h);
+      const { css } = runFitScript({ width: w, height: h }, dpr);
+      const logo = fitRule(css, "#splashlogo");
+      const handle = fitRule(css, "#splashhandle");
+      expect([
+        name,
+        near(logo.left, rect.left),
+        near(logo.top, rect.top),
+        near(logo.width, rect.width),
+        near(logo.height, rect.height),
+      ]).toEqual([name, true, true, true, true]);
+      expect([
+        name,
+        near(handle.top, box.top),
+        near(handle["font-size"], box.fontPx),
+        near(handle["line-height"], box.height),
+      ]).toEqual([name, true, true, true]);
+    }
+  });
+
+  it("changes nothing where the layout viewport is the screen from the first frame", () => {
+    // The fallback rules resolve against the viewport and the script resolves
+    // against the screen, so wherever the two are the same thing the script
+    // writes the numbers already in force. That is the claim that it costs a
+    // device with an honest viewport nothing: it runs, and the picture it
+    // describes is the picture that was already there.
+    const logoCss = cssRule("#splashlogo");
+    const handleCss = cssRule("#splashhandle");
+    const sizeCss = handleCss.font.split(" ")[0].split("/")[0];
+    for (const [name, w, h, dpr] of SCREENS) {
+      const { css } = runFitScript({ width: w, height: h }, dpr);
+      const logo = fitRule(css, "#splashlogo");
+      const handle = fitRule(css, "#splashhandle");
+      // Where the screen times the ratio is a whole number of device pixels,
+      // which it is on every iPhone, the agreement is exact and the script is
+      // a no-op to the last bit. Where it is not, splashLayout() rounds the
+      // canvas and coverLogoRect() carries THAT rounding back rather than
+      // dividing by the ratio, on purpose and for the reason its own comment
+      // gives: the logo has to land where the phone's launch image put it, not
+      // where a stylesheet would have. So the gap that opens on such a screen
+      // is that rounding and nothing else, and it is under half a device pixel.
+      const whole = Number.isInteger(w * dpr) && Number.isInteger(h * dpr);
+      const agrees = (a: number, b: number): boolean =>
+        whole ? near(a, b) : Math.abs(a - b) <= 0.5 / dpr;
+      expect([
+        name,
+        agrees(logo.left, resolveCss(logoCss.left, w, h, "x")),
+        agrees(logo.top, resolveCss(logoCss.top, w, h, "y")),
+        agrees(logo.width, resolveCss(logoCss.width, w, h, "x")),
+        agrees(logo.height, resolveCss(logoCss.height, w, h, "y")),
+      ]).toEqual([name, true, true, true, true]);
+      // The credit line carries the one tolerance in this file's geometry, and
+      // it is the same one the block above explains: splashLayout() rounds the
+      // type to whole DEVICE pixels, because the launch image is rasterized
+      // once at exactly those pixels, and a stylesheet cannot round at all. So
+      // the type can be half a device pixel out and the row half of that again.
+      // Stated in device pixels rather than as a flat number, since on a 1x
+      // screen half a device pixel IS half a CSS pixel.
+      const fontGap = Math.abs(handle["font-size"] - resolveCss(sizeCss, w, h, "y"));
+      const topGap = Math.abs(handle.top - resolveCss(handleCss.top, w, h, "y"));
+      expect([name, fontGap <= 0.5 / dpr, topGap <= 0.25 / dpr]).toEqual([name, true, true]);
+    }
+  });
+
+  it("writes nothing at all, rather than throwing, when the screen makes no sense", () => {
+    // It runs on every launch before anything else does, so the one thing it
+    // must never do is throw. Where it cannot get two real edges and a real
+    // ratio it writes nothing and the fallback rules above stand, which is the
+    // behaviour the app had before this script existed.
+    const junk: Array<[string, unknown, unknown]> = [
+      ["no screen at all", undefined, 3],
+      ["a null screen", null, 3],
+      ["a screen with no edges", {}, 3],
+      ["a zero width", { width: 0, height: 812 }, 3],
+      ["a zero height", { width: 375, height: 0 }, 3],
+      ["a negative edge", { width: 375, height: -812 }, 3],
+      ["an edge that is not a number", { width: Number.NaN, height: 812 }, 3],
+      ["no device pixel ratio", { width: 375, height: 812 }, undefined],
+      ["a zero ratio", { width: 375, height: 812 }, 0],
+      ["a ratio that is not a number", { width: 375, height: 812 }, Number.NaN],
+    ];
+    for (const [name, scr, dpr] of junk) {
+      const go = () => runFitScript(scr, dpr);
+      expect(go).not.toThrow();
+      expect([name, go().styles.length]).toEqual([name, 0]);
+    }
+  });
+
+  it("swallows a document that will not take the style, for the same reason", () => {
+    // the other half of never throwing: the guard above covers bad inputs, and
+    // this covers a DOM that refuses the one call the script makes to it
+    const doc = {
+      createElement: () => ({ id: "", appendChild: () => {} }),
+      createTextNode: (data: string) => ({ data }),
+      head: null,
+    };
+    const win = { screen: { width: 375, height: 812 }, devicePixelRatio: 3 };
+    expect(() => new Function("window", "document", FIT_SCRIPT)(win, doc)).not.toThrow();
   });
 });
 
