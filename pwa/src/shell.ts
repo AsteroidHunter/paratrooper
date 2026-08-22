@@ -41,6 +41,10 @@
 //   track: the typing-time shove clear (shoveVerdict below) — the deploy-log
 //   proof that "track everything" faithfully turned iOS's caret-reveal scroll
 //   into a visible step per grown line, 412px piled up by close (2026-08-18).
+//   That same caret-reveal scroll has a second way in, riding the keyboard's
+//   own resize at an EDGE, where the shove decision does not apply. It is
+//   refused in the same spirit and by the same standard: the edge writes the
+//   fresh height and holds its top (edgeBoxTop below, 2026-08-21).
 // - Dismissing the picker menu only LOOKS instant: WKFileUploadPanel keeps
 //   tearing down natively for another ~0.5–2s, and a files.click() forwarded
 //   inside that window is silently DROPPED by WebKit — the dead-＋-tap bug.
@@ -99,6 +103,49 @@ export function computeShell(w: World): ShellTarget {
 // needs no measurement, so cold-start height misreports can't touch it.
 export function shellBox(t: ShellTarget): { top: number; height: number } | null {
   return t.kb ? { top: t.vvTop, height: t.vvHeight } : null;
+}
+
+// The box top at a keyboard edge, and the one case where the freshest number
+// iOS published is not the truth (the whole-app yank, device trail 2026-08-21).
+//
+// When iOS presents the keyboard by SHRINKING the window instead of overlaying
+// it, the document is left holding real scrollable overflow: innerHeight reads
+// 400 against an 812 screen, so there are 412px for iOS to spend scrolling the
+// WINDOW to reveal the caret. A reveal that rides the SAME event as the
+// keyboard's own resize hands the edge a vv.offsetTop that describes a
+// displacement about to be taken back again. The very next event's shove clear
+// zeroes the scroll, and because the clear hands applyShell the APPLIED numbers
+// the shell keeps standing at that large top until some later event rewrites
+// it. The glide window is still open, so it does not snap: the whole app, from
+// the very top, rides down to the large value and back. The trail states it in
+// two lines, on both the old build and the new one: edge open with sy 412,
+// vvTop 362, box top 362, then box top 0 twenty-four ms later, with a shove
+// clear in between.
+//
+// So an edge fired on a scrolled window takes the keyboard's HEIGHT from the
+// fresh read, which is the genuine geometry change the edge exists to track,
+// and leaves the TOP standing where it already is. Nothing is written to fight
+// iOS and nothing is guessed: the existing shove clear zeroes the scroll on the
+// very next event, and the event after that publishes an honest offsetTop which
+// the still-open glide animates to. An unscrolled window returns the fresh
+// number untouched, so the shrink-and-pan correction the top exists for is
+// exactly as it was.
+//
+// The two shapes this was chosen over, both replayed headless in WebKit and
+// Chromium against the device script:
+//   * clear the scroll at the edge, re-read offsetTop, size from the re-read.
+//     It only works if iOS republishes the viewport inside the same task as the
+//     scrollTo, and the trail says it does not: the un-panned offsetTop arrived
+//     as its own event 24ms later. Replayed with that latency the yank came
+//     back at full size, so it would have shipped and done nothing.
+//   * top = max(0, vvTop - scrollY). It fixes the trail's own numbers only
+//     because 412 is larger than 362 and the subtraction underflows into the
+//     clamp. It treats the window scroll and the pan as one displacement, which
+//     those same two numbers deny, and with a smaller reveal sitting on top of
+//     a real pan (vvTop 362, scrollY 100) it writes 262, a number that was
+//     never true of anything, and the shell travels to it and then on to 362.
+export function edgeBoxTop(vvTop: number, scrollY: number, lastTop: number | null): number {
+  return scrollY === 0 ? vvTop : (lastTop ?? 0);
 }
 
 // Close-time correction: displacement still on the books once the keyboard
@@ -592,6 +639,16 @@ export function reconcile(): void {
     } else if (verdict === "yield") {
       holdDiagRecord("kb-shove", { act: "yield", n: shoveClears, x, y, top: Math.round(t.vvTop) });
     }
+    // The edges stay the shell's own business, and they still resize with the
+    // viewport: only the TOP an edge writes is held back, and only when the
+    // window is scrolled under it (edgeBoxTop owns the whole reason). This can
+    // never overlap the verdict above, because shoveVerdict returns "track" at
+    // both edges by design, and it can never touch the close edge, which writes
+    // no box at all. scrollX plays no part: a sideways scroll cannot inflate
+    // offsetTop.
+    if (t.kb && wasUp !== t.kb) {
+      target = { kb: t.kb, vvTop: edgeBoxTop(t.vvTop, y, appliedTop), vvHeight: t.vvHeight };
+    }
   }
   // the visual off-state covers the whole session; the tap hold stays
   // teardown-only (see holdsBarTap)
@@ -846,7 +903,10 @@ export function currentFileInput(): HTMLInputElement | null {
 //                 shove clear alongside) is an edge that fired on a
 //                 scroll-displaced viewport and tracked it, and nothing records
 //                 a tracked shove: shoveVerdict returns "track" at the edges by
-//                 design and writes no kb-shove.
+//                 design and writes no kb-shove. That is what this record was
+//                 built to catch, and it caught it; edgeBoxTop refuses it now,
+//                 so a `sy` far from 0 with `boxTop` 0 on the same line is the
+//                 refusal working rather than the bug repeating.
 //   shell-pin   : the one frame the shell leaves its numeric box for the
 //                 four-edge pin, at the end of the glide's settle window. The
 //                 pin cannot be animated, so if the ride home had not landed

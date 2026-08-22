@@ -14,6 +14,7 @@ import {
   closeCorrectionNeeded,
   computeShell,
   createPickerLifecycle,
+  edgeBoxTop,
   focusingActive,
   healNeeded,
   holdsBarTap,
@@ -93,6 +94,49 @@ describe("computeShell + shellBox — one rule for iOS 26's keyboard modes (tapl
 
   it("parked file-input focus is not 'keyboard up' — no shell resize for the picker", () => {
     expect(computeShell(world({ fileFocused: true, vvHeight: 508 })).kb).toBe(false);
+  });
+});
+
+// The whole-app yank (device trail 2026-08-21, and the same double box write on
+// the build before it): an edge fired on a scrolled window sized its box from a
+// vv.offsetTop that the very next event's shove clear was about to take away,
+// and the still-open glide rode the whole app from the very top down to that
+// value and back. Every number below is off that trail.
+describe("edgeBoxTop: the edge's box top, refusing a displacement the window scroll made", () => {
+  it("the trail's own edge (sy 412 under vvTop 362): the top stays where it stands", () => {
+    expect(edgeBoxTop(362, 412, null)).toBe(0);
+  });
+
+  it("an unscrolled window is the fresh number, so shrink-and-pan is untouched", () => {
+    expect(edgeBoxTop(362, 0, null)).toBe(362);
+    expect(edgeBoxTop(40, 0, 0)).toBe(40); // overlay mode's small pan, likewise
+  });
+
+  it("a scroll SMALLER than the pan is refused whole, never subtracted", () => {
+    // max(0, vvTop - scrollY) would write 262 here: a number that was never
+    // true of anything, and one the shell would then travel to on its way to
+    // the honest offsetTop that arrives an event later
+    expect(edgeBoxTop(362, 100, null)).toBe(0);
+  });
+
+  it("the held top is the one already applied, not a hardcoded zero", () => {
+    expect(edgeBoxTop(362, 412, 40)).toBe(40);
+  });
+
+  it("any scroll at all is displacement, in either direction", () => {
+    expect(edgeBoxTop(362, 1, null)).toBe(0);
+    expect(edgeBoxTop(362, -20, null)).toBe(0);
+  });
+
+  it("window-shrink mode, nothing scrolled and nothing panned: the ordinary edge", () => {
+    expect(edgeBoxTop(0, 0, null)).toBe(0);
+  });
+
+  it("through the box: the edge still writes the keyboard's height, only the top is held", () => {
+    const t = computeShell(world({ editorFocused: true, vvHeight: 400, vvTop: 362 }));
+    expect(shellBox(t)).toEqual({ top: 362, height: 400 }); // as the fresh read has it
+    const held = { ...t, vvTop: edgeBoxTop(t.vvTop, 412, null) };
+    expect(shellBox(held)).toEqual({ top: 0, height: 400 });
   });
 });
 
@@ -404,6 +448,52 @@ describe("wiring: same-frame clear, per-keystroke budget, per-keystroke blink", 
     expect(main).toMatch(
       /decision === "give-up"[\s\S]{0,400}t\.scrollTop = giveUpTarget\(t\.scrollTop, oldHeight, newHeight, t\.scrollHeight - t\.clientHeight\);/,
     );
+  });
+});
+
+// Wiring pins for the edge's held top. The decision is one line, so what needs
+// pinning is where it sits: it must be the EDGE that consults it, off the same
+// rounded scroll the shove reads, it must leave the height alone, and above all
+// it must add no new write. A fix for a yank that itself scrolled the window at
+// the edge was measured and rejected (edgeBoxTop's own note says why), and a
+// later hand could add one back without noticing.
+describe("wiring: the edge holds its top, and only where the window is scrolled under it", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+
+  it("consulted at the edge, off the same rounded scroll and the same applied top", () => {
+    expect(shell).toMatch(/const y = Math\.round\(window\.scrollY\);/);
+    expect(shell).toMatch(
+      /if \(t\.kb && wasUp !== t\.kb\) \{\n\s*target = \{ kb: t\.kb, vvTop: edgeBoxTop\(t\.vvTop, y, appliedTop\), vvHeight: t\.vvHeight \};/,
+    );
+  });
+
+  it("the height stays the fresh read: an edge that stopped resizing would be no fix at all", () => {
+    expect(shell).toMatch(/edgeBoxTop\(t\.vvTop, y, appliedTop\), vvHeight: t\.vvHeight \}/);
+    expect(shell).not.toMatch(/edgeBoxTop\([^)]*\), vvHeight: appliedHeight/);
+  });
+
+  it("one call site, and shellBox is otherwise untouched", () => {
+    expect(shell.match(/edgeBoxTop\(/g)).toHaveLength(2); // the definition and the call
+    expect(shell).toMatch(/return t\.kb \? \{ top: t\.vvTop, height: t\.vvHeight \} : null;/);
+  });
+
+  it("the verdict still hands both edges to the shell: that line is load-bearing history", () => {
+    expect(shell).toMatch(
+      /if \(!kbWasUp \|\| !kbStillUp\) return "track"; \/\/ the edges are the shell's own business/,
+    );
+  });
+
+  it("no new fight: the only scrollTo writes are still the shove clear and the close pass", () => {
+    expect(shell.match(/^\s*(if \(snap\) )?window\.scrollTo\(0, 0\);$/gm)).toHaveLength(2);
+    expect(shell).toMatch(/if \(snap\) window\.scrollTo\(0, 0\);/);
+    expect(shell).toMatch(/verdict === "clear"[\s\S]{0,120}window\.scrollTo\(0, 0\);/);
+  });
+
+  it("the close edge cannot reach the rule, so the correction pass runs on its own numbers", () => {
+    // t.kb is false at the close, so the target is never rebuilt there and
+    // keyboardClosed still sees whatever scroll iOS actually left behind
+    expect(shell).toMatch(/if \(wasUp && !t\.kb\) keyboardClosed\(\);/);
+    expect(shell).toMatch(/function correctionPass[\s\S]{0,300}const snap = closeCorrectionNeeded\(x, y, top\);/);
   });
 });
 

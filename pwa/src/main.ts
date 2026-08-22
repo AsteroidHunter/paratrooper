@@ -69,7 +69,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.18"; // records both keyboard edges frame by frame, and a second picker trigger far from the plus, bumped so the build is verifiable
+const APP_VERSION = "0.3.19"; // the shell stops following a page scroll it did not cause, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
