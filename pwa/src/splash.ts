@@ -112,6 +112,14 @@ export interface SplashInput {
 export interface SplashLayout {
   canvasW: number; // device px
   canvasH: number; // device px
+  // The screen this layout was built for, carried back out in the CSS pixels it
+  // came in as. Two things need it and neither can go and read it for itself:
+  // the cover's own restatement of this picture (coverLogoRect and
+  // coverHandleBox below), and the credit line the launch image paints, which
+  // has to be asked for in the cover's unit rather than the canvas's for the
+  // reason paintSplash gives.
+  screenW: number; // CSS px, as handed in
+  screenH: number; // CSS px, as handed in
   logoX: number; // device px, logo's left edge
   logoY: number; // device px, logo's top edge
   logoW: number; // device px
@@ -150,6 +158,8 @@ export function splashLayout(inp: SplashInput): SplashLayout {
   return {
     canvasW,
     canvasH,
+    screenW: inp.screenW,
+    screenH: inp.screenH,
     logoX,
     logoY,
     logoW,
@@ -171,6 +181,10 @@ export interface DrawTarget {
   fillRect(x: number, y: number, w: number, h: number): void;
   drawImage(img: CanvasImageSource, x: number, y: number, w: number, h: number): void;
   fillText(text: string, x: number, y: number): void;
+  // the credit line is drawn through a scale, so these three come with it
+  save(): void;
+  restore(): void;
+  scale(x: number, y: number): void;
 }
 
 // The launch image's background. The in-page cover is a panel of this same
@@ -216,7 +230,18 @@ export const SPLASH_HANDLE_COLOR = "#aeaeb2";
 export function applySplashFont(ctx: Pick<DrawTarget, "font">, px: number): string {
   for (const family of SPLASH_FONT_LADDER) {
     ctx.font = `${px}px ${family}`;
-    if (ctx.font.includes(`${px}px`)) break;
+    // The size that comes back is read as a NUMBER, not looked for as a piece
+    // of the string. The size asked for is the cover's own CSS pixels now (see
+    // paintSplash), and those are a repeating fraction on most screens: 41
+    // device px over a ratio of 3 is 13.666666666666666, which a browser hands
+    // back as "13.6667px". Matching on the text would miss that and walk the
+    // whole ladder down to a plain sans-serif, which is the exact failure the
+    // ladder exists to prevent. The tolerance only has to tell the size asked
+    // for apart from the size a REFUSED shorthand leaves behind, and that is
+    // either the canvas default of 10px or a rung that asked for this very
+    // number, so a hair is plenty.
+    const back = /(\d+(?:\.\d+)?)px/.exec(ctx.font);
+    if (back && Math.abs(Number(back[1]) - px) < 0.05) break;
   }
   return ctx.font;
 }
@@ -228,16 +253,50 @@ export function paintSplash(ctx: DrawTarget, logo: CanvasImageSource, g: SplashL
   ctx.fillStyle = SPLASH_BG;
   ctx.fillRect(0, 0, g.canvasW, g.canvasH);
   ctx.drawImage(logo, g.logoX, g.logoY, g.logoW, g.logoH);
-  // Anchored by its middle on both axes. "middle" is the point half the font's
+  // THE CREDIT LINE IS ASKED FOR IN THE COVER'S PIXELS, NOT THE CANVAS'S.
+  //
+  // Everything else on this canvas is a rectangle, and a rectangle drawn at
+  // three times the size and shown at a third of it is the same picture. Type
+  // is not. The system face this app sets its text in carries a tracking table:
+  // the SAME string at the same proportion of the screen is measurably wider
+  // per em at a small size than at a large one, because small type is spaced
+  // loose to stay readable and large type is spaced tight to stay even. Asking
+  // a canvas for 39px and asking a stylesheet for 13px on a 3x screen therefore
+  // does NOT produce the same line, even though both land on 39 device pixels:
+  // measured in this app's own stack, 13px comes out 8.735 em-widths long and
+  // 39px comes out 8.091, so the launch image's credit line was about eight
+  // percent narrower than the cover's. That is the tag changing size under the
+  // user on the handover, and it is invisible on a 1x screen, where the two
+  // sizes are the same number, which is why nothing but a real measurement on a
+  // real screen would have found it.
+  //
+  // So the line is asked for at the size the COVER will ask for, which is what
+  // coverHandleBox states, and the canvas is scaled to put it on the device
+  // pixels the launch image needs. The font engine picks its spacing off the
+  // size it is asked for and the scale is applied afterwards, so the two
+  // splashes now set the same string at the same tracking. The scale is the
+  // canvas-to-screen ratio per axis, inverted, for the same reason
+  // coverLogoRect takes it per axis rather than as the device pixel ratio: the
+  // canvas is rounded to whole device pixels and the screen is stretched onto
+  // exactly that, so this is the stretch the phone itself will apply.
+  //
+  // The anchor is unchanged and still the layout's own: the point below is
+  // handleCenterX/handleCenterY stated in the scaled unit, so it lands on the
+  // very same device pixel it always did. "middle" is the point half the font's
   // ascent-minus-descent above the baseline, which is the same point CSS puts
   // at the middle of a line box, and that correspondence is the whole reason
   // the cover below can land its copy of this text on the same spot without
   // measuring a single glyph.
-  applySplashFont(ctx, g.handleFont);
+  const sx = g.screenW / g.canvasW;
+  const sy = g.screenH / g.canvasH;
+  ctx.save();
+  ctx.scale(1 / sx, 1 / sy);
+  applySplashFont(ctx, coverHandleBox(g).fontPx);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillStyle = SPLASH_HANDLE_COLOR;
-  ctx.fillText(SPLASH_HANDLE, g.handleCenterX, g.handleCenterY);
+  ctx.fillText(SPLASH_HANDLE, g.handleCenterX * sx, g.handleCenterY * sy);
+  ctx.restore();
 }
 
 // --- DOM/canvas layer ---------------------------------------------------------
@@ -400,7 +459,15 @@ export interface CoverHandleBox {
 // as long as the caller sets BOTH the returned top and the returned height (as
 // line-height, whatever the font's own metrics would have given), the two
 // splashes put the same text on the same row.
-export function coverHandleBox(g: SplashLayout, screenH: number): CoverHandleBox {
+//
+// This is now the ONLY place the credit line's size is decided, for either
+// splash. paintSplash asks it for the size the launch image sets the line in,
+// because type does not survive being drawn large and shown small (the comment
+// there carries the why), so a change here moves both pictures together and
+// there is no second copy of it to fall out of step. The screen defaults to the
+// one the layout was built for, which is the only screen any caller has ever
+// passed; naming it stays allowed so the pairing is visible at the call site.
+export function coverHandleBox(g: SplashLayout, screenH: number = g.screenH): CoverHandleBox {
   const sy = screenH / g.canvasH;
   const fontPx = g.handleFont * sy;
   return { top: g.handleCenterY * sy - fontPx / 2, height: fontPx, fontPx };

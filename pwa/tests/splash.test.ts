@@ -171,6 +171,12 @@ describe("splashLayout — the device-matching media query", () => {
 // A stand-in 2D context that records what was drawn and, like the real thing,
 // keeps its previous font when handed a shorthand it cannot parse — `rejects`
 // says which strings this particular context refuses.
+//
+// It also keeps a transform, because the credit line is drawn through one: a
+// pair of scales, pushed and popped by save/restore exactly as a real context
+// would. That is what lets the checks below read the same draw two ways, in the
+// cover's CSS pixels it was asked for in and in the canvas's device pixels it
+// lands on.
 function recordingCtx(rejects: (v: string) => boolean = () => false) {
   const calls: Array<[string, ...unknown[]]> = [];
   let fillAtRect: DrawTarget["fillStyle"] | null = null;
@@ -178,6 +184,11 @@ function recordingCtx(rejects: (v: string) => boolean = () => false) {
   let fontAtText = "";
   let fill: DrawTarget["fillStyle"] = "";
   let font = "10px sans-serif"; // what a fresh canvas context starts on
+  let sx = 1;
+  let sy = 1;
+  const saved: Array<[number, number]> = [];
+  let scaleAtText: [number, number] = [1, 1];
+  let textAtCss: [number, number] = [0, 0];
   const ctx: DrawTarget = {
     get fillStyle() {
       return fill;
@@ -203,15 +214,43 @@ function recordingCtx(rejects: (v: string) => boolean = () => false) {
     fillText(text, x, y) {
       fillAtText = fill; // same for the credit line: colour and font as drawn
       fontAtText = font;
+      scaleAtText = [sx, sy]; // and the transform it was drawn through
+      textAtCss = [x, y];
       calls.push(["fillText", text, x, y]);
+    },
+    save() {
+      saved.push([sx, sy]);
+      calls.push(["save"]);
+    },
+    restore() {
+      const was = saved.pop();
+      if (was) [sx, sy] = was;
+      calls.push(["restore"]);
+    },
+    scale(x, y) {
+      sx *= x;
+      sy *= y;
+      calls.push(["scale", x, y]);
     },
   };
   return {
     ctx,
     calls,
+    /** the drawing calls only, with save/restore/scale left out */
+    drawn: () => calls.filter((c) => c[0] !== "save" && c[0] !== "restore" && c[0] !== "scale"),
     fillAt: () => fillAtRect,
     fillAtText: () => fillAtText,
     fontAtText: () => fontAtText,
+    /** where the credit line was asked for, in the unit it was asked for in */
+    textAtCss: () => textAtCss,
+    /** and the device pixel that same point lands on, once the scale applies */
+    textAtDevice: (): [number, number] => [
+      textAtCss[0] * scaleAtText[0],
+      textAtCss[1] * scaleAtText[1],
+    ],
+    scaleAtText: () => scaleAtText,
+    /** anything left pushed at the end: a transform that was never put back */
+    openTransforms: () => saved.length,
   };
 }
 
@@ -237,6 +276,10 @@ describe("paintSplash — white first, then the logo at its rect", () => {
     const logo = {} as CanvasImageSource;
     paintSplash(r.ctx, logo, g);
     expect(r.calls[1]).toEqual(["drawImage", g.logoX, g.logoY, g.logoW, g.logoH]);
+    // in device pixels, straight onto the canvas: the logo is a rectangle, and
+    // a rectangle is the same picture at any scale, so it is drawn where it
+    // sits and nothing is transformed for it
+    expect(r.calls.slice(0, 2).some((c) => c[0] === "scale")).toBe(false);
   });
 });
 
@@ -256,7 +299,19 @@ describe("paintSplash — the credit line, last and off the layout", () => {
 
   it("draws the handle on the layout's anchor, after the logo", () => {
     const r = painted();
-    expect(r.calls[2]).toEqual(["fillText", SPLASH_HANDLE, g.handleCenterX, g.handleCenterY]);
+    // asked for in the cover's pixels, but landing on the layout's own
+    // device-pixel anchor once the scale it is drawn through applies: the fix
+    // for the type size moved the UNIT the line is asked for in and nothing
+    // else, so the spot it is put on is the spot it was always put on
+    expect(r.drawn()[2]).toEqual([
+      "fillText",
+      SPLASH_HANDLE,
+      g.handleCenterX * (g.screenW / g.canvasW),
+      g.handleCenterY * (g.screenH / g.canvasH),
+    ]);
+    const [x, y] = r.textAtDevice();
+    expect(x).toBeCloseTo(g.handleCenterX, 9);
+    expect(y).toBeCloseTo(g.handleCenterY, 9);
     expect(SPLASH_HANDLE).toBe("@theonetrueakash");
   });
 
@@ -272,9 +327,29 @@ describe("paintSplash — the credit line, last and off the layout", () => {
     expect(r.fillAt()).toBe(SPLASH_BG); // the background was still white when filled
   });
 
-  it("is set in the layout's size, in the chat's own font", () => {
+  it("is set in the size the COVER sets it in, in the chat's own font", () => {
+    // Not the layout's device-pixel size, which is what this used to be and
+    // what made the tag change width on the handover: the system face spaces
+    // small type looser than large type, so a line drawn at 41 device px and
+    // shown at a third of that is not the line a stylesheet draws at 13.67 CSS
+    // px. paintSplash asks coverHandleBox for the size and scales the canvas up
+    // to it instead. Its own comment carries the measurement.
     const r = painted();
-    expect(r.fontAtText()).toBe(`${g.handleFont}px ${SPLASH_FONT_FAMILY}`);
+    expect(r.fontAtText()).toBe(`${coverHandleBox(g, 844).fontPx}px ${SPLASH_FONT_FAMILY}`);
+    expect(coverHandleBox(g, 844).fontPx).not.toBe(g.handleFont); // genuinely a different number
+  });
+
+  it("scales by the canvas-to-screen ratio, and puts the transform back", () => {
+    // The scale is taken per axis off the ROUNDED canvas rather than as the
+    // device pixel ratio, for the reason coverLogoRect gives: the phone
+    // stretches this canvas onto the screen, and this is that stretch. And it
+    // is pushed and popped, so nothing drawn after it inherits it.
+    const r = painted();
+    const [sx, sy] = r.scaleAtText();
+    expect(sx).toBeCloseTo(g.canvasW / g.screenW, 9);
+    expect(sy).toBeCloseTo(g.canvasH / g.screenH, 9);
+    expect(r.openTransforms()).toBe(0);
+    expect(r.calls[r.calls.length - 1]).toEqual(["restore"]);
   });
 });
 
@@ -871,6 +946,124 @@ describe("the head's geometry script: the same rect, before the first paint", ()
     };
     const win = { screen: { width: 375, height: 812 }, devicePixelRatio: 3 };
     expect(() => new Function("window", "document", FIT_SCRIPT)(win, doc)).not.toThrow();
+  });
+});
+
+// --- all three copies of the credit line, held together -------------------------
+//
+// The block above holds the DOCUMENT's copy of the geometry to the functions
+// that own it. The credit line has a THIRD copy: the launch image paints one
+// too, and it used to state its own size in its own unit, which is exactly how
+// it drifted. It was drawn at the layout's whole device pixels while the cover
+// was laid out at the same size in CSS pixels, and those are not the same line,
+// because the system face spaces small type looser than large type. Measured in
+// this app's own stack: the string is 8.735 em-widths long at 13px and 8.091 at
+// 39px, so the cover's tag came out about eight percent wider than the launch
+// image's and the swap between them was visible.
+//
+// So paintSplash now asks coverHandleBox for the size, which is the same
+// function the cover's own write and the head's script are already held to, and
+// scales the canvas to put that size on the device pixels the launch image
+// needs. This is where that is checked, by DRAWING rather than by reading, the
+// same way the head's script is checked by running: the launch image, the
+// document's script and the bundle's write are compared against one another on
+// every screen shape in the list.
+describe("the launch image says the credit line exactly as the cover says it", () => {
+  it("asks for the cover's size and lands on the layout's anchor, on every shape", () => {
+    for (const [name, w, h, dpr] of SCREENS) {
+      const g = splashLayout({
+        screenW: w,
+        screenH: h,
+        dpr,
+        logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
+      });
+      const box = coverHandleBox(g, h);
+      const r = recordingCtx();
+      paintSplash(r.ctx, {} as CanvasImageSource, g);
+      // the size the font engine is asked for is the size the cover asks for,
+      // to the last bit: that is the whole of the fix
+      expect([name, r.fontAtText()]).toEqual([name, `${box.fontPx}px ${SPLASH_FONT_FAMILY}`]);
+      // the point it is anchored on is the middle of the cover's own line box,
+      // on the cover's own centre column
+      const [x, y] = r.textAtCss();
+      expect([name, near(x, w / 2), near(y, box.top + box.height / 2)]).toEqual([name, true, true]);
+      // and, back in device pixels, the launch image has not moved an inch off
+      // the anchor the layout has always named
+      const [dx, dy] = r.textAtDevice();
+      expect([name, near(dx, g.handleCenterX), near(dy, g.handleCenterY)]).toEqual([
+        name,
+        true,
+        true,
+      ]);
+      // per axis, off the rounded canvas, and put back afterwards
+      const [sx, sy] = r.scaleAtText();
+      expect([name, near(sx, g.canvasW / w), near(sy, g.canvasH / h)]).toEqual([name, true, true]);
+      expect([name, r.openTransforms()]).toEqual([name, 0]);
+    }
+  });
+
+  it("agrees with the document's script and the bundle's write, on every shape", () => {
+    // THE THREE-WAY GUARD. The launch image is what the phone shows, the fit
+    // script is what the document's first frame shows, and coverHandleBox is
+    // what installSplashCover writes over that once the bundle runs. All three
+    // are read here off the same screen and required to name one line.
+    for (const [name, w, h, dpr] of SCREENS) {
+      const g = splashLayout({
+        screenW: w,
+        screenH: h,
+        dpr,
+        logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
+      });
+      const bundle = coverHandleBox(g, h); // what the bundle writes
+      const doc = fitRule(runFitScript({ width: w, height: h }, dpr).css, "#splashhandle");
+      const r = recordingCtx();
+      paintSplash(r.ctx, {} as CanvasImageSource, g); // what the phone shows
+      const drawn = Number(/^([\d.]+)px/.exec(r.fontAtText())?.[1]);
+      const middle = r.textAtCss()[1];
+      expect([
+        name,
+        near(drawn, bundle.fontPx),
+        near(doc["font-size"], bundle.fontPx),
+        near(doc["line-height"], bundle.height),
+      ]).toEqual([name, true, true, true]);
+      // one row, said three ways: the canvas anchors on the middle, and both of
+      // the others state the top of a line box whose height they also state
+      expect([
+        name,
+        near(middle, bundle.top + bundle.height / 2),
+        near(doc.top + doc["line-height"] / 2, bundle.top + bundle.height / 2),
+      ]).toEqual([name, true, true]);
+    }
+  });
+
+  it("asks for a size the font ladder can still prove it got", () => {
+    // The size is a CSS pixel now, so it is a repeating fraction on most
+    // screens, and applySplashFont proves a shorthand parsed by reading the
+    // size back. A browser is free to hand back a rounded serialization of what
+    // it was given, so that readback is numeric; this is the check that the
+    // whole stack still survives the trip on a size with a long tail.
+    for (const [name, w, h, dpr] of SCREENS) {
+      const g = splashLayout({
+        screenW: w,
+        screenH: h,
+        dpr,
+        logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
+      });
+      const px = coverHandleBox(g, h).fontPx;
+      // a context that serializes to four decimal places, which is what a real
+      // one does with 41/3
+      const rounded = recordingCtx();
+      const short = (v: string): string => v.replace(/^([\d.]+)px/, (_m, n) => `${+(+n).toFixed(4)}px`);
+      const ctx = {
+        get font() {
+          return short(rounded.ctx.font);
+        },
+        set font(v: string) {
+          rounded.ctx.font = v;
+        },
+      };
+      expect([name, applySplashFont(ctx, px).endsWith(SPLASH_FONT_FAMILY)]).toEqual([name, true]);
+    }
   });
 });
 
