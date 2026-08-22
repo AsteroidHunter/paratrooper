@@ -174,9 +174,21 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // and the viewport/flight marks (main.ts records them onto this same trail:
   // a snap-back fired, following flipped, a send flight ran), so a slip
   // session posts even when the hold itself never engages.
-  // "kb-fall" is deliberately absent: one close writes about twenty of them,
-  // and the kb-close that opens the same close already arms the post, so the
-  // whole run rides it without churning a timer per frame.
+  // "kb-fall" and "kb-rise" are deliberately absent: one keyboard edge writes
+  // thirty of them, and something else on that same edge always arms the post,
+  // so the whole run rides it without churning a timer per frame.
+  //
+  // "kb-edge" is IN, and it is the one that makes the frame trails arrive
+  // WHOLE. It fires from the edge's first frame, about 20ms in, so the post it
+  // arms lands ~620ms after the edge, past the last of the thirty frames at
+  // 60fps. kb-close and kb-glide fire at the edge itself and would settle at
+  // ~600ms, which is the tighter window of the two. A slower phone simply
+  // posts mid-run and the rest rides the next post: the payload is the whole
+  // ring buffer, not a delta, so nothing is ever lost, only later.
+  //
+  // "shell-pin" stays out for the opposite reason: it fires ~470ms after the
+  // close, inside a window some earlier mark already armed, and arming there
+  // would only push that post later.
   if (
     ev === "held" || ev === "release" || ev === "pass" || ev === "reset" ||
     ev === "snapback" || ev === "followtail" || ev === "flight" ||
@@ -184,8 +196,8 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "kb-close" || ev === "send-motion" || ev === "receipt-hold" ||
     ev === "boot-motion" || ev === "boot-repin" || ev === "boot-blank" ||
     ev === "grow-blink" || ev === "kb-shove" ||
-    ev === "kb-focusing" || ev === "kb-glide" || ev === "pick-anchor" ||
-    ev === "tail-gap"
+    ev === "kb-focusing" || ev === "kb-glide" || ev === "kb-edge" ||
+    ev === "pick-anchor" || ev === "tail-gap"
   ) {
     diagPost();
   }

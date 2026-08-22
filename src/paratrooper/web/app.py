@@ -673,7 +673,7 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                                   "shell-size", "kb-close", "send-motion",
                                   "receipt-hold", "boot-motion", "boot-repin",
                                   "grow-blink", "kb-shove",
-                                  "kb-focusing", "kb-glide",
+                                  "kb-focusing", "kb-glide", "shell-pin",
                                   "dom-census", "pick-anchor", "tail-gap")]
         if vp:
             _diag.info("holddiag viewport events=%d tail=%s",
@@ -688,11 +688,27 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         if bm:
             _diag.info("holddiag boot events=%d head=%s", len(bm), json.dumps(bm[:30]))
         # keyboard-close frame trail, its own line and a long tail: ONE close
-        # writes about twenty kb-fall records, which would flush every other
+        # writes about thirty kb-fall records, which would flush every other
         # mark out of the viewport tail above if they rode it
         kf = [e for e in events if isinstance(e, dict) and e.get("ev") == "kb-fall"]
         if kf:
             _diag.info("holddiag fall events=%d tail=%s", len(kf), json.dumps(kf[-40:]))
+        # keyboard-raise frame trail, its own line for exactly the same reason:
+        # the raise probe writes the same thirty records per edge, and the two
+        # trails must not clip each other either: a session that raises and
+        # closes in one breath posts once, and a shared line would leave one of
+        # the two motions half recorded
+        kr = [e for e in events if isinstance(e, dict) and e.get("ev") == "kb-rise"]
+        if kr:
+            _diag.info("holddiag rise events=%d tail=%s", len(kr), json.dumps(kr[-40:]))
+        # keyboard-edge marks, their own line as well. Only two per keyboard
+        # cycle, so volume is not the reason: they carry the answer this session
+        # was built for, and the viewport tail above holds the last twenty marks
+        # of every kind, so a busy typing session would push them out. On their
+        # own line a dozen cycles survive whatever else the trail is doing.
+        ke = [e for e in events if isinstance(e, dict) and e.get("ev") == "kb-edge"]
+        if ke:
+            _diag.info("holddiag edge events=%d tail=%s", len(ke), json.dumps(ke[-24:]))
         return {"ok": True}
 
     @app.get("/api/debug/holddiag")

@@ -238,6 +238,116 @@ def test_holddiag_boot_digest_carries_boot_motion_head_first(client, caplog):
     assert '"boot-motion"' in vp[0]
 
 
+def _rise_trail():
+    """One raise as the phone records it: the glide edge, the edge's own box
+    write, the kb-edge mark, thirty kb-rise frames, and the pin drop at the end
+    of the settle window."""
+    events = [
+        {"t": 1, "ev": "kb-focusing", "d": {"phase": "focus"}},
+        {"t": 2, "ev": "kb-glide", "d": {"edge": "open"}},
+        {"t": 3, "ev": "shell-size",
+         "d": {"top": 412, "h": 508, "glide": True, "edge": True, "ems": 0.3}},
+        {"t": 4, "ev": "kb-edge",
+         "d": {"edge": "open", "n": 7, "src": "resize", "evt": 0.4, "armed": 9.6,
+               "frame": 20.2, "read": 24.1, "dTop": 140, "dH": -144, "dPad": -26,
+               "sx": 0, "sy": 412, "vvTop": 412, "vvH": 508, "foc": 260,
+               "boxTop": 412, "boxH": 508, "seed": True}},
+        {"t": 5, "ev": "shell-size",
+         "d": {"top": 0, "h": 508, "glide": True, "edge": False, "ems": 16.9}},
+    ]
+    events += [
+        {"t": 10 + i, "ev": "kb-rise",
+         "d": {"ms": i * 17, "fts": i * 17 - 1, "padB": 34 - i, "shellH": 508,
+               "shellTop": 412 - i * 14, "pillBot": 470, "thBot": 460, "st": 1200}}
+        for i in range(30)
+    ]
+    events.append({"t": 90, "ev": "shell-pin", "d": {"top": 0, "h": 844, "ems": 471.6}})
+    return events
+
+
+def test_holddiag_rise_trail_gets_its_own_line(client, caplog):
+    """ONE raise writes thirty kb-rise frames. Riding the shared viewport tail
+    they would flush every other mark out of the twenty it keeps, which is why
+    the close already has its own line, so the raise gets the same treatment.
+    The proof is not that the rise line exists but that the marks it would have
+    displaced are still on the viewport line beside it."""
+    trail = {"build": "b", "events": _rise_trail()}
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    rise = [r.message for r in caplog.records if "holddiag rise" in r.message]
+    assert len(rise) == 1
+    assert "events=30" in rise[0]
+    assert '"kb-rise"' in rise[0] and '"shellTop": 412' in rise[0] and '"fts"' in rise[0]
+
+    # the tail that would have been flushed: every one of these sits BEFORE the
+    # thirty frames in the trail, and all of them survive
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"kb-glide"' in vp[0] and '"edge": "open"' in vp[0]
+    assert '"kb-focusing"' in vp[0]
+    assert '"shell-size"' in vp[0] and '"boxTop"' not in vp[0]
+    assert '"shell-pin"' in vp[0] and '"ems": 471.6' in vp[0]
+    assert '"kb-rise"' not in vp[0]  # the frames stay off the shared tail entirely
+
+
+def test_holddiag_edge_marks_get_their_own_line(client, caplog):
+    """kb-edge is two records per keyboard cycle, so volume is not why it is
+    split out: it carries the answer (which clock the start-of-motion delay went
+    into) and the viewport tail keeps only the last twenty marks of every kind,
+    so a busy typing session between two taps would push it out."""
+    noise = [
+        {"t": 100 + i, "ev": "grow-blink", "d": {"oldH": 39, "newH": 61}}
+        for i in range(25)
+    ]
+    trail = {"build": "b", "events": _rise_trail() + noise}
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    edge = [r.message for r in caplog.records if "holddiag edge" in r.message]
+    assert len(edge) == 1
+    assert "events=1" in edge[0]
+    assert '"armed": 9.6' in edge[0] and '"frame": 20.2' in edge[0] and '"read": 24.1' in edge[0]
+    assert '"dTop": 140' in edge[0] and '"dH": -144' in edge[0] and '"dPad": -26' in edge[0]
+    assert '"sy": 412' in edge[0] and '"boxTop": 412' in edge[0]  # the double-write edge
+    assert '"seed": true' in edge[0] and '"foc": 260' in edge[0]
+    # twenty-five keystrokes after the raise have taken the viewport tail whole
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"kb-glide"' not in vp[0]
+    # and the mark rode through it anyway, which is the point of the split
+    assert '"kb-edge"' in edge[0]
+
+
+def test_holddiag_fall_and_rise_lines_do_not_clip_each_other(client, caplog):
+    """A raise and a close inside one post window: each frame trail lands whole
+    on its own line. Sharing one would leave one of the two motions half
+    recorded, since the tail is bounded per line."""
+    events = _rise_trail() + [
+        {"t": 200, "ev": "kb-glide", "d": {"edge": "close"}},
+        {"t": 201, "ev": "kb-close",
+         "d": {"phase": "close", "x": 0, "y": 0, "top": 0, "snap": False,
+               "heal": False, "ih": 844, "base": 844}},
+    ] + [
+        {"t": 210 + i, "ev": "kb-fall",
+         "d": {"ms": i * 17, "padB": 8 + i, "shellH": 508 + i * 11,
+               "shellTop": 0, "pillBot": 470, "thBot": 460, "st": 1200}}
+        for i in range(30)
+    ]
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post(
+            "/api/debug/holddiag", json={"build": "b", "events": events}
+        ).json() == {"ok": True}
+    fall = [r.message for r in caplog.records if "holddiag fall" in r.message]
+    rise = [r.message for r in caplog.records if "holddiag rise" in r.message]
+    assert len(fall) == 1 and len(rise) == 1
+    assert "events=30" in fall[0] and "events=30" in rise[0]
+    # neither trail carries the other's frames
+    assert '"kb-rise"' not in fall[0]
+    assert '"kb-fall"' not in rise[0]
+    # and the close's first frame is still on the fall line, thirty raise frames
+    # and two close marks later in the trail
+    assert '"ms": 0' in fall[0] and '"ms": 493' in fall[0]
+
+
 def test_relay_logs_persist_and_superseded_drop(tmp_path, monkeypatch, caplog):
     """One line per delivery decision: a live done logs persist with its seq and
     terminal flag; a superseded run's output logs drop with the reason."""

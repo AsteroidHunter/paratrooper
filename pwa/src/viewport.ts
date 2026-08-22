@@ -178,7 +178,7 @@ export function rowName(el: Element): string {
 
 // One reading, as the trail carries it. An alias rather than an interface so it
 // hands straight to holdDiagRecord's Record<string, unknown> without a cast,
-// the same reason fallFrame's frame is one (shell.ts).
+// the same reason edgeFrame's frame is one (shell.ts).
 export type TailGap = {
   when: string;
   gap: number | null;

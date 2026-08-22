@@ -397,10 +397,15 @@ function armGlide(edge: "open" | "close"): void {
 // nothing to retract.
 function applyShell(t: ShellTarget, settling: boolean): void {
   if (!appEl) return;
+  // TEMP DIAGNOSTIC (kb-edge, block at the bottom): this call is the edge, so
+  // the box written further down is the edge's own target rather than a
+  // mid-session resize
+  const atEdge = t.kb !== appliedKb;
   // TEMP DIAGNOSTIC (kb-fall, block at the bottom): the last frame with the
   // keyboard still up, sampled on the close edge and BEFORE the class toggle
   // below collapses --pad-b — after it, the comparison the bug turns on is gone
   if (!t.kb && appliedKb) fallEdge();
+  if (t.kb && !appliedKb) riseEdge(); // TEMP DIAGNOSTIC (kb-rise): the same, mirrored
   if (t.kb !== appliedKb) {
     appliedKb = t.kb;
     armGlide(t.kb ? "open" : "close");
@@ -434,13 +439,14 @@ function applyShell(t: ShellTarget, settling: boolean): void {
         appEl.style.setProperty("--shell-top", "0px");
         appEl.style.setProperty("--shell-h", `${Math.round(baseline)}px`);
         void appEl.offsetHeight;
+        edgeSeeded = true; // TEMP DIAGNOSTIC (kb-edge): this edge paid for that reflow
       }
       appliedTop = top;
       appliedHeight = height;
       appEl.style.setProperty("--shell-top", `${box.top}px`);
       appEl.style.setProperty("--shell-h", `${box.height}px`);
       // the device's read-back for every shell resize the keyboard causes
-      holdDiagRecord("shell-size", { top, h: height });
+      recordShellSize(top, height, gliding, atEdge);
     }
   } else if (appliedTop !== null || appliedHeight !== null) {
     if (gliding) {
@@ -453,13 +459,20 @@ function applyShell(t: ShellTarget, settling: boolean): void {
         appliedHeight = restH;
         appEl.style.setProperty("--shell-top", "0px");
         appEl.style.setProperty("--shell-h", `${restH}px`);
-        holdDiagRecord("shell-size", { top: 0, h: restH });
+        recordShellSize(0, restH, gliding, atEdge);
       }
     } else {
+      const wasTop = appliedTop;
+      const wasH = appliedHeight;
       appliedTop = null;
       appliedHeight = null;
       appEl.style.removeProperty("--shell-top");
       appEl.style.removeProperty("--shell-h");
+      // TEMP DIAGNOSTIC (shell-pin, block at the bottom): the numeric box is
+      // gone and the four-edge pin takes over. If the ride home had not landed
+      // exactly on the pin's own geometry this is the frame it snaps, and
+      // nothing else in the trail marks the moment.
+      recordShellPin(wasTop, wasH);
     }
   }
 
@@ -516,7 +529,7 @@ function keyboardClosed(): void {
   if (closeRetry) clearTimeout(closeRetry);
   shoveClears = 0; // a new session must not inherit a spent budget
   correctionPass("close");
-  startFallProbe(); // TEMP DIAGNOSTIC (kb-fall, block at the bottom): the close, frame by frame
+  startEdgeProbe(); // TEMP DIAGNOSTIC (kb-fall, block at the bottom): the close, frame by frame
   closeRetry = setTimeout(() => {
     closeRetry = null;
     if (kbUp) return; // a new keyboard session owns the geometry now
@@ -587,6 +600,12 @@ export function reconcile(): void {
   // the viewport (except a scroll-sourced shove, refused above) and never
   // rewrites tracked displacement (the retired counter's lesson)
   if (wasUp && !t.kb) keyboardClosed();
+  // TEMP DIAGNOSTIC (kb-rise, block at the bottom): the raise, frame by frame.
+  // The open edge has no bookkeeping of its own, since corrections belong to
+  // the close alone, so arming the probe is the whole of it. The edge record's
+  // `armed` therefore reads applyShell's work here against applyShell plus the
+  // correction pass on the close.
+  if (!wasUp && t.kb) startEdgeProbe();
 }
 
 const picker = createPickerLifecycle({
@@ -673,6 +692,13 @@ export function initShell(el: HTMLElement): void {
       true,
     );
   }
+  // TEMP DIAGNOSTIC (kb-edge, block at the bottom): stamp each viewport event's
+  // own dispatch time BEFORE the handler that acts on it, so an edge record can
+  // say how much of its delay was already spent before the app looked at all.
+  // Registered first because listeners run in registration order; each one
+  // assigns two numbers and touches nothing else.
+  window.visualViewport?.addEventListener("resize", markViewportEvent);
+  window.visualViewport?.addEventListener("scroll", markViewportEvent);
   window.visualViewport?.addEventListener("resize", reconcile);
   window.visualViewport?.addEventListener("scroll", reconcile);
   window.addEventListener("orientationchange", () => {
@@ -718,8 +744,27 @@ export function initShell(el: HTMLElement): void {
     true,
   );
   // TEMP DIAGNOSTIC (safe-area, block at the bottom): the device's own bottom
-  // inset, once, so the --pad-b step the fall probe measures has a fact to sit against
+  // inset, once, so the --pad-b step the edge probe measures on either edge has
+  // a fact to sit against
   recordSafeArea();
+}
+
+// The ＋'s two tap handlers, lifted out of the listener bodies and given names.
+// Nothing about the ＋ changed: the shield prevents the focus grab under the
+// same rule as before, and the click still refuses to reach open() inside the
+// teardown window. Naming them is what lets a SECOND trigger run this very
+// code instead of a copy of it, and a copy is worth nothing here: two triggers
+// that do not share their lines cannot be compared with each other.
+function pickerTapShield(e: Event): void {
+  if (preservesFocus(readWorld())) e.preventDefault();
+}
+
+function pickerTapOpen(): void {
+  // a held tap still delivers its click (device-proven); during the window it
+  // must not reach open(), which would present straight into the dropped-click
+  // zone — the falsified fresh-input path, 0/6 on device
+  if (picker.isTearing()) return;
+  picker.open();
 }
 
 // wire the compose ＋ button and file input; called per renderChat because the
@@ -730,16 +775,14 @@ export function bindPicker(input: HTMLInputElement, button: HTMLElement, pick: (
   plusEl = button;
   onPick = pick;
   bindInputSignals(input);
-  button.addEventListener("pointerdown", (e) => {
-    if (preservesFocus(readWorld())) e.preventDefault();
-  });
+  button.addEventListener("pointerdown", pickerTapShield);
   button.addEventListener("click", () => {
-    // a held tap still delivers its click (device-proven); during the window it
-    // must not reach open(), which would present straight into the dropped-click
-    // zone — the falsified fresh-input path, 0/6 on device
-    if (picker.isTearing()) return;
-    picker.open();
+    markPickVia(PICK_VIA_PLUS); // TEMP DIAGNOSTIC (pick-probe, block at the bottom)
+    pickerTapOpen();
   });
+  // TEMP DIAGNOSTIC (pick-probe, block at the bottom): the far trigger, wired
+  // to the same two handlers the ＋ just took
+  mountPickProbe();
 }
 
 // The in-pill ↑ send button gets the same pointerdown shield as the ＋: its
@@ -762,56 +805,101 @@ export function currentFileInput(): HTMLInputElement | null {
 }
 
 // ===================== TEMP DIAGNOSTIC (remove after the keyboard-fall session) =====================
-// Three recorders for three open device bugs, riding the same trail as the
-// rest of the probe (hold.ts's ring buffer, POSTed to /api/debug/holddiag and
-// digested into the deploy logs by web/app.py). Every one of them READS: no
-// class, style, scroll position or lasting node is written anywhere below, so
-// the app behaves exactly as it did without them.
+// Recorders for the open device bugs, riding the same trail as the rest of the
+// probe (hold.ts's ring buffer, POSTed to /api/debug/holddiag and digested into
+// the deploy logs by web/app.py). Every one of them READS: no class, style,
+// scroll position or lasting node is written anywhere below, so the app behaves
+// exactly as it did without them.
 //
-//   kb-fall     — the close, frame by frame. It has now answered the question
-//                 it was built for: --pad-b DID step from its keyboard value
+//   kb-fall     : the close, frame by frame. It has now answered the question
+//   kb-rise       it was built for: --pad-b DID step from its keyboard value
 //                 (0.5rem) to its full safe-area value in one frame while the
 //                 shell had not moved at all (padB 8.5 then 34 with shellH
 //                 still 400, pillBot 391.5 then 366), so the pill hopped up by
 //                 the inset while everything around it slid. styles.css puts
-//                 every reader of --pad-b on the shell's own glide clock, so
-//                 the same trail should now show padB easing across the frames
-//                 in step with shellH instead of arriving in one. shell-size
-//                 samples once per viewport event, which is far too slow to
-//                 catch either shape.
-//   pick-anchor — the file input's rect against the ＋ button's at the instant
+//                 every reader of --pad-b on the shell's own glide clock, and
+//                 the trail now shows padB easing across the frames in step
+//                 with shellH. What it left uncovered was everything else: the
+//                 RAISE was never sampled at all (only the close ran a probe),
+//                 and neither edge recorded the shell's rendered TOP, which is
+//                 the coordinate the shrink-and-pan mode moves by hundreds of
+//                 pixels. Both edges now run ONE probe, on one budget, through
+//                 one record builder, so the two motions are comparable line
+//                 for line; only the channel name differs. shell-size samples
+//                 once per viewport event, which is far too slow to catch
+//                 either shape.
+//   kb-edge     : one record per keyboard edge, and the reason this session
+//                 exists. The close trail says the bar's first painted frame
+//                 lands 6 to 45ms after the edge, so its first visible move is
+//                 0 to 141px of a 386px trip, and that the app's own
+//                 bookkeeping for the edge took 1-3ms on the four closes that
+//                 started gently and 8-12ms on the twenty-four that stalled.
+//                 Both of those were FITTED out of timestamps a millisecond
+//                 apart. This record states them: when the viewport event that
+//                 carried the edge was dispatched, when the edge was detected,
+//                 when the app finished the edge's bookkeeping, when the first
+//                 frame started, when the probe read inside it, and how far
+//                 each of the three moving quantities had actually travelled by
+//                 then. Plus the numbers the edge decided on (viewport, window
+//                 scroll, the box it wrote), because the double box write on
+//                 the raise (top 412, then top 0 sixteen ms later, with a
+//                 shove clear alongside) is an edge that fired on a
+//                 scroll-displaced viewport and tracked it, and nothing records
+//                 a tracked shove: shoveVerdict returns "track" at the edges by
+//                 design and writes no kb-shove.
+//   shell-pin   : the one frame the shell leaves its numeric box for the
+//                 four-edge pin, at the end of the glide's settle window. The
+//                 pin cannot be animated, so if the ride home had not landed
+//                 exactly on the pin's geometry this is where it snaps, about
+//                 470ms after the close edge. Nothing recorded that moment, and
+//                 an eighteen-frame probe stopped before it.
+//   pick-anchor : the file input's rect against the ＋ button's at the instant
 //                 the picker presents. iOS anchors WKFileUploadPanel to the
 //                 INPUT's rendered rect, and .filepick is parked invisibly on
 //                 top of the ＋ precisely so the two agree; a panel opening
 //                 off to the right means on that tap they did not.
-//   dom-census  — how many #app / .compose / .bar / .thread / mirror twins the
+//   dom-census  : how many #app / .compose / .bar / .thread / mirror twins the
 //                 document holds at each close. A screenshot showed what
 //                 looked like two compose bars; a census that always reads 1
 //                 turns "the phone composited a stale paint" from an
 //                 inference into a measurement, and a 2 falsifies it outright.
 //
 // Plus one boot record, safe-area, carrying env(safe-area-inset-bottom) in
-// pixels: the step size the fall probe is looking for is then a device fact
+// pixels: the step size the frame probe is looking for is then a device fact
 // rather than arithmetic over two records.
 //
 // The frame loop is the one part with a way to disturb what it measures, so it
 // is read-only by construction: element lookups and the live computed style
-// are resolved ONCE at the close edge, the per-frame body only reads, and
-// kb-fall is deliberately left out of hold.ts's post-now list so eighteen
-// frames cannot churn eighteen POST timers. A read pass inside rAF with no
-// interleaved write forces at most the one style/layout the glide's animated
-// top/height was going to need on that frame anyway.
+// are resolved ONCE at the edge, the per-frame body only reads, one rect per
+// element per frame serves every field taken off it, and kb-fall/kb-rise are
+// deliberately left out of hold.ts's post-now list so thirty frames cannot
+// churn thirty POST timers. A read pass inside rAF with no interleaved write
+// forces at most the one style/layout the glide's animated top/height was
+// going to need on that frame anyway.
 //
-// TO REMOVE: delete this block plus the five call sites above marked TEMP
-// DIAGNOSTIC (the pre-close sample in applyShell, the census in
-// correctionPass, the probe start in keyboardClosed, the anchor record in the
-// picker's present effect, the safe-area probe at the end of initShell), the
-// watchFollowTail wiring in main.ts, "pick-anchor" in hold.ts's post-now list,
-// and the kb-fall/dom-census/pick-anchor/safe-area names in web/app.py's
-// digest filters.
+// TO REMOVE: delete this block plus the call sites above marked TEMP
+// DIAGNOSTIC (the atEdge flag, the two edge samples and the seeding-reflow mark
+// in applyShell, the shell-size and shell-pin records in the same function, the
+// census in correctionPass, the probe start in keyboardClosed and the mirror
+// one in reconcile, the anchor record in the picker's present effect, the two
+// markViewportEvent listeners and the safe-area probe in initShell), the
+// watchFollowTail wiring in main.ts, "pick-anchor" and "kb-edge" in hold.ts's
+// post-now list, and the kb-fall/kb-rise/kb-edge/shell-pin/dom-census/
+// pick-anchor/safe-area names in web/app.py's digest filters.
 
-/** frames the fall probe samples after the close edge — about 0.3s at 60fps */
-export const FALL_FRAMES = 18;
+/**
+ * Frames one edge probe samples, on either edge: about 0.5s at 60fps. The
+ * budget has to OUTLIVE the motion it is measuring, and the motion is longer
+ * than the 0.2s transition: the shell holds its numeric box for the whole of
+ * GLIDE_SETTLE_MS and drops it for the four-edge pin about 470ms after the
+ * edge, so a probe that stops at eighteen frames cannot see whether the ride
+ * home landed on the pin or snapped onto it. The first eighteen frames are
+ * unchanged, so trails recorded either side of this read against each other.
+ */
+export const EDGE_FRAMES = 30;
+
+/** a viewport-event stamp older than this cannot be the event that carried an edge */
+export const EVT_FRESH_MS = 100;
 
 /** what the census counts, and the label each count carries in the record */
 export const CENSUS_SELECTORS: Record<string, string> = {
@@ -822,28 +910,49 @@ export const CENSUS_SELECTORS: Record<string, string> = {
   mirror: "textarea[data-mirror='compose']",
 };
 
-// One frame of the fall, as the trail carries it. An alias rather than an
+// One frame of a keyboard edge, as the trail carries it, and the same shape on
+// the raise and on the close, because two motions recorded through two builders
+// could only be compared by trusting the builders. An alias rather than an
 // interface so it hands straight to holdDiagRecord's Record<string, unknown>
 // without a cast — only object literal types carry the implicit index
 // signature that assignment needs.
-export type FallFrame = {
+//
+// ms is when the probe READ, on the edge's own clock. fts is when the browser
+// started the frame that read belongs to, on the same clock, and the two are
+// not the same question: the gap between consecutive fts values is the frame
+// spacing the compositor actually kept, while ms - fts is how much main-thread
+// work sat between the frame starting and the probe getting to run. A close
+// whose ms values are 33ms apart is a dropped frame if fts moved with them and
+// a starved callback if it did not, and the trail could not tell those apart.
+export type EdgeFrame = {
   ms: number;
+  fts?: number;
   padB: number | null;
   shellH: number | null;
+  shellTop: number | null;
   pillBot: number | null;
   thBot: number | null;
   st: number | null;
   ft?: boolean;
 };
 
-/** the five geometry reads a frame needs, injectable so the shape can be pinned */
-export interface FallReader {
+/** the geometry reads a frame needs, injectable so the shape can be pinned */
+export interface EdgeReader {
   padB(): number; // the RESOLVED --pad-b, in px
   shellH(): number;
+  shellTop(): number; // the shell's rendered top: what shrink-and-pan moves
   pillBot(): number;
   thBot(): number;
   st(): number;
+  fts(): number | undefined; // absent on the edge sample, which is not in a frame
   ft(): boolean | undefined; // absent when nothing registered a follow reader
+}
+
+/** the three clocks a start-of-motion stall is read from, all on the edge's own */
+export interface EdgeTiming {
+  armed: number; // the edge -> the app finished the edge's bookkeeping
+  frame: number; // the edge -> the first probe frame's own start
+  read: number; // the edge -> the read inside that frame
 }
 
 /** a rect, narrowed to what the anchor record needs */
@@ -862,18 +971,81 @@ function px(n: number): number | null {
 }
 
 /** assemble one frame's record; pure, so a test pins the field names */
-export function fallFrame(ms: number, r: FallReader): FallFrame {
-  const frame: FallFrame = {
+export function edgeFrame(ms: number, r: EdgeReader): EdgeFrame {
+  const frame: EdgeFrame = {
     ms: Math.round(ms),
     padB: px(r.padB()),
     shellH: px(r.shellH()),
+    shellTop: px(r.shellTop()),
     pillBot: px(r.pillBot()),
     thBot: px(r.thBot()),
     st: px(r.st()),
   };
+  const fts = r.fts();
+  if (fts !== undefined) frame.fts = Math.round(fts);
   const ft = r.ft();
   if (ft !== undefined) frame.ft = ft;
   return frame;
+}
+
+/**
+ * The edge record: the head gathered at the edge itself (which edge, what the
+ * viewport and the window scroll said, what box the shell was told to go to)
+ * joined to the three clocks and to how far the three moving quantities had
+ * really travelled by the first frame. dTop/dH/dPad are the stall in pixels,
+ * already subtracted, so nobody has to fit a curve to find it: a raise or a
+ * close that started gently reads a few px, one that held still and then
+ * jumped reads a third of its trip.
+ *
+ * Pure and taking both frames rather than reaching for module state, so the
+ * subtraction and the field names are pinned directly.
+ */
+export function edgeMark(
+  head: Record<string, unknown>,
+  timing: EdgeTiming,
+  at0: EdgeFrame,
+  at1: EdgeFrame,
+): Record<string, unknown> {
+  const moved = (a: number | null, b: number | null): number | null =>
+    a === null || b === null ? null : px(a - b);
+  return {
+    ...head,
+    armed: px(timing.armed),
+    frame: px(timing.frame),
+    read: px(timing.read),
+    dTop: moved(at1.shellTop, at0.shellTop),
+    dH: moved(at1.shellH, at0.shellH),
+    dPad: moved(at1.padB, at0.padB),
+  };
+}
+
+/**
+ * A box write, as the trail carries it. top/h are exactly what the session
+ * before this one was read in, so old and new trails still line up. The rest is
+ * what that session could not tell: `glide` says whether the write ANIMATED or
+ * landed in one frame, `edge` says it is the edge's own first write rather than
+ * a mid-session resize, and `ems` places it on the edge's clock. Together they
+ * turn "the box was written twice on the raise" into "written twice, seventeen
+ * ms apart, both inside the glide window", which is the difference between a
+ * harmless correction and a shell told to slide 412px and then re-aimed.
+ */
+export function sizeRecord(
+  top: number,
+  h: number,
+  glide: boolean,
+  edge: boolean,
+  ems: number,
+): Record<string, unknown> {
+  return { top, h, glide, edge, ems: px(ems) };
+}
+
+/** the box the shell held at the instant it went back to the four-edge pin */
+export function pinRecord(
+  top: number | null,
+  h: number | null,
+  ems: number,
+): Record<string, unknown> {
+  return { top, h, ems: px(ems) };
 }
 
 /**
@@ -938,20 +1110,41 @@ export function watchFollowTail(read: () => boolean): void {
   readFollowTail = read;
 }
 
-// resolved once at the close edge and reused for the whole run: a querySelector
-// per frame would be work the probe does not need, and the elements cannot be
-// replaced mid-close (only a re-render swaps them, and a close never renders)
-let fallStyle: CSSStyleDeclaration | null = null; // .compose's live computed style
-let fallPill: Element | null = null;
-let fallThread: HTMLElement | null = null;
-let fallT0 = 0;
-let fallRun = 0; // a second close inside the window owns the frames from there on
+// resolved once at the edge and reused for the whole run: a querySelector per
+// frame would be work the probe does not need, and the elements cannot be
+// replaced mid-edge (only a re-render swaps them, and an edge never renders)
+let edgeStyle: CSSStyleDeclaration | null = null; // .compose's live computed style
+let edgePill: Element | null = null;
+let edgeThread: HTMLElement | null = null;
+let edgeT0 = 0;
+let edgeRun = 0; // a newer edge inside the window owns the frames from there on
+let edgeChannel = "kb-fall"; // which of the two trails this run is writing
+let edgeZero: EdgeFrame | null = null; // the ms 0 sample: the deltas' FROM value
+let edgeHead: Record<string, unknown> | null = null; // this edge's record, half built
+let edgeSeeded = false; // the edge's box write had to seed the pin's geometry
+let edgeVvAt = -1; // the last viewport event's own dispatch time
+let edgeVvSrc = "other";
 
-function fallSample(ms: number): void {
-  if (!appEl) return;
-  const pill = fallPill?.getBoundingClientRect();
-  const thread = fallThread?.getBoundingClientRect();
-  holdDiagRecord("kb-fall", fallFrame(ms, {
+// Stamped by a listener registered ahead of the one that acts on the event
+// (initShell), so an edge knows which event carried it and when the browser
+// dispatched it. Two assignments; it reads no geometry and writes nothing else.
+function markViewportEvent(e: Event): void {
+  edgeVvAt = e.timeStamp;
+  edgeVvSrc = e.type;
+}
+
+/** ms since the last keyboard edge; -1 before there has been one */
+function edgeAge(): number {
+  return edgeT0 === 0 ? -1 : performance.now() - edgeT0;
+}
+
+// One rect per element, taken before any of the readers run, so every field
+// lifted off the same element costs one measurement rather than one each.
+function edgeSample(ms: number, fts: number | undefined): EdgeFrame {
+  const shell = appEl?.getBoundingClientRect();
+  const pill = edgePill?.getBoundingClientRect();
+  const thread = edgeThread?.getBoundingClientRect();
+  const frame = edgeFrame(ms, {
     // .compose's padding-bottom IS var(--pad-b), and it is the only reachable
     // form of that value in pixels: an unregistered custom property computes
     // to its own token stream (the max()/env() text), so only a property the
@@ -959,42 +1152,112 @@ function fallSample(ms: number): void {
     // styles.css transitions the used property rather than the variable, and
     // why this read reports the ANIMATED value mid-glide: the two facts are
     // the same fact.
-    padB: () => (fallStyle ? parseFloat(fallStyle.paddingBottom) : NaN),
-    shellH: () => appEl?.getBoundingClientRect().height ?? NaN,
+    padB: () => (edgeStyle ? parseFloat(edgeStyle.paddingBottom) : NaN),
+    shellH: () => shell?.height ?? NaN,
+    shellTop: () => shell?.top ?? NaN,
     pillBot: () => pill?.bottom ?? NaN,
     thBot: () => thread?.bottom ?? NaN,
-    st: () => fallThread?.scrollTop ?? NaN,
+    st: () => edgeThread?.scrollTop ?? NaN,
+    fts: () => fts,
     ft: () => readFollowTail?.(),
-  }));
+  });
+  holdDiagRecord(edgeChannel, frame);
+  return frame;
 }
 
-// The last frame with the keyboard still up. Called from applyShell on the .kb
-// false edge BEFORE the class comes off, because that class is what collapses
-// --pad-b: once it is toggled a computed read already reports the stepped
-// value, and the before/against/after comparison the bug turns on is gone.
-// This is the frame the first rAF sample is measured against.
-function fallEdge(): void {
+// The last frame before the edge. Called from applyShell on the .kb edge and
+// BEFORE the class is toggled, because that class is what moves --pad-b: once
+// it is toggled a computed read already reports the stepped value, and the
+// before/against/after comparison the motion is read from is gone. This is the
+// frame every rAF sample of the run is measured against.
+function edgeStart(kind: "open" | "close"): void {
   if (!appEl || typeof document === "undefined") return;
   const compose = document.querySelector(".compose");
-  fallStyle = compose ? getComputedStyle(compose) : null;
-  fallPill = document.querySelector(".compose .field");
-  fallThread = document.getElementById("thread");
-  fallT0 = performance.now();
-  fallRun += 1;
-  fallSample(0); // ms 0 is always the pre-close frame; every later one is the fall
+  edgeStyle = compose ? getComputedStyle(compose) : null;
+  edgePill = document.querySelector(".compose .field");
+  edgeThread = document.getElementById("thread");
+  edgeChannel = kind === "open" ? "kb-rise" : "kb-fall";
+  edgeSeeded = false;
+  edgeT0 = performance.now();
+  edgeRun += 1;
+  const vv = window.visualViewport;
+  const since = edgeT0 - edgeVvAt;
+  // a stale stamp would read as a fast dispatch and quietly invent a fact; an
+  // edge reached from focusin or a timer says so instead
+  const fresh = edgeVvAt >= 0 && since >= 0 && since < EVT_FRESH_MS;
+  edgeHead = {
+    edge: kind,
+    n: edgeRun,
+    src: fresh ? edgeVvSrc : "other",
+    evt: fresh ? px(since) : -1,
+    // the window scroll the edge fired on. A displaced viewport tracked at an
+    // edge is the double box write, and shoveVerdict writes no record for it:
+    // the edges always track, by design.
+    sx: Math.round(window.scrollX),
+    sy: Math.round(window.scrollY),
+    vvTop: Math.round(vv?.offsetTop ?? 0),
+    vvH: Math.round(vv?.height ?? 0),
+    // how much of the keyboard's rise had already happened: styles.css starts
+    // the ＋ collapse and the pill widen from the focus tap (.focusing) and the
+    // shell's own glide only from this edge, so this is how far apart the two
+    // halves of the raise were started
+    foc: Number.isFinite(focusStartAt) ? Math.round(edgeT0 - focusStartAt) : -1,
+    boxTop: null,
+    boxH: null,
+  };
+  edgeZero = edgeSample(0, undefined); // ms 0 is always the pre-edge frame
 }
 
-function startFallProbe(): void {
+function fallEdge(): void {
+  edgeStart("close");
+}
+
+function riseEdge(): void {
+  edgeStart("open");
+}
+
+// the box the edge's own write aimed at, kept on the edge record so one line
+// says where the shell was told to go as well as where it got to
+function recordShellSize(top: number, h: number, glide: boolean, edge: boolean): void {
+  if (edge && edgeHead) {
+    edgeHead.boxTop = top;
+    edgeHead.boxH = h;
+  }
+  holdDiagRecord("shell-size", sizeRecord(top, h, glide, edge, edgeAge()));
+}
+
+function recordShellPin(top: number | null, h: number | null): void {
+  holdDiagRecord("shell-pin", pinRecord(top, h, edgeAge()));
+}
+
+function startEdgeProbe(): void {
   if (!appEl || typeof requestAnimationFrame !== "function") return;
-  const run = fallRun;
+  const run = edgeRun;
+  // the app has finished this edge's bookkeeping: on the close that is
+  // applyShell plus the correction pass, on the raise applyShell alone
+  const armed = performance.now() - edgeT0;
+  let fts = -1; // the running frame's own start, handed over by the rAF callback
   pumpFrames(
-    FALL_FRAMES,
-    () => {
-      if (run !== fallRun) return; // a newer close is recording; leave its trail clean
-      fallSample(performance.now() - fallT0);
+    EDGE_FRAMES,
+    (i) => {
+      if (run !== edgeRun) return; // a newer edge is recording; leave its trail clean
+      const read = performance.now() - edgeT0;
+      const started = fts >= 0 ? fts - edgeT0 : undefined;
+      const frame = edgeSample(read, started);
+      if (i === 0 && edgeHead && edgeZero) {
+        edgeHead.seed = edgeSeeded; // the seeding reflow, if any, has happened by now
+        holdDiagRecord(
+          "kb-edge",
+          edgeMark(edgeHead, { armed, frame: started ?? read, read }, edgeZero, frame),
+        );
+        edgeHead = null; // one record per edge, whatever else the run does
+      }
     },
     (cb) => {
-      requestAnimationFrame(() => cb());
+      requestAnimationFrame((ts) => {
+        fts = ts;
+        cb();
+      });
     },
   );
 }
@@ -1003,11 +1266,13 @@ function pickAnchorRecord(fresh: boolean): void {
   if (!fileEl || !plusEl) return;
   holdDiagRecord(
     "pick-anchor",
-    anchorFrame(
+    // anchorRecord is anchorFrame plus the trigger's name (pick-probe block)
+    anchorRecord(
       fileEl.getBoundingClientRect(),
       plusEl.getBoundingClientRect(),
       fresh,
       performance.now(), // ms since the page began loading = how long the app has run
+      pickVia,
     ),
   );
 }
@@ -1036,3 +1301,104 @@ function recordSafeArea(): void {
   holdDiagRecord("safe-area", { insetB: px(insetB) });
 }
 // =================== END TEMP DIAGNOSTIC (remove after the keyboard-fall session) ===================
+
+// ===================== TEMP DIAGNOSTIC (remove after the pick-probe session) =====================
+// A second trigger for the picker, put as far from the ＋ as the chrome allows,
+// to settle which of two accounts of the misplaced panel is the true one. They
+// predict opposite screens, so one tap decides it.
+//
+//   the rect account:   iOS anchors WKFileUploadPanel to the file INPUT's
+//                       rendered rect. This is what the pick-anchor block
+//                       above states as fact and why .filepick is parked
+//                       invisibly on top of the ＋. If it holds, the panel
+//                       opens down by the ＋ no matter where the tap landed.
+//   the finger account: the request WebKit sends carries no rect and no
+//                       element at all; the panel uses the view's last
+//                       interaction point and the bounds of whatever an
+//                       asynchronous hit test at that point finds, which is
+//                       also a way for a stale point to be used. If it holds,
+//                       the panel opens where the finger was, so a tap up top
+//                       opens the panel up top.
+//
+// The probe runs the ＋'s own handlers, pickerTapShield and pickerTapOpen, and
+// therefore the same picker.open() on the same module-level fileEl: it makes no
+// input of its own and knows nothing about how a present works. Two triggers
+// that did not share their lines would settle nothing, because a difference on
+// screen could then be a difference in the code.
+//
+// The only thing that differs is the label each marks before calling it. The
+// label rides the pick-anchor record as `via`, so a trail holding both taps can
+// be read apart; without it the two are indistinguishable in the log. It is
+// marked before the teardown guard rather than after, which is harmless: a tap
+// the guard refuses writes no record at all, and every tap that does open marks
+// its own label one call earlier.
+//
+// It sits on document.body rather than inside #app because a render rewrites
+// #app's markup wholesale and would take the probe with it, and it is
+// deliberately loud and unlike anything the app ships so it cannot be read as a
+// feature or hit by accident.
+//
+// One honest difference from the ＋: the capture-phase tap hold (holdsBarTap)
+// recognises the ＋ by element identity, so it does not hold a probe tap during
+// the teardown window. The decision is unchanged, since pickerTapOpen's own
+// isTearing guard refuses the open either way; only the preventDefault is
+// missing, and a button has no focus to protect.
+//
+// TO REMOVE, every call site: delete this block; delete the
+// markPickVia(PICK_VIA_PLUS) line inside the ＋'s click listener in bindPicker;
+// delete the mountPickProbe() call at the end of bindPicker; in
+// pickAnchorRecord call anchorFrame again instead of anchorRecord and drop the
+// pickVia argument; delete the matching block in styles.css; delete the
+// pick-probe describe in tests/shelldiag.test.ts. Nothing else refers to any of
+// it, and what is left compiles as it did before.
+
+/** the probe's element id, so a re-render cannot mount a second one */
+export const PICK_PROBE_ID = "pickprobe";
+
+/** what the ＋ passes, and what the probe passes: the two values `via` can hold */
+export const PICK_VIA_PLUS = "plus";
+export const PICK_VIA_PROBE = "probe";
+
+// which trigger opened the present being recorded. Set on the tap, read one
+// call later inside the same gesture by pickAnchorRecord, so there is no window
+// in which it can go stale.
+let pickVia: string = PICK_VIA_PLUS;
+
+function markPickVia(via: string): void {
+  pickVia = via;
+}
+
+/**
+ * The anchor record with the trigger's name on it. A separate builder rather
+ * than a field inside anchorFrame, so the rect record keeps the exact shape the
+ * session before this one was read in and this block stays deletable on its own.
+ */
+export function anchorRecord(
+  file: AnchorRect,
+  plus: AnchorRect,
+  fresh: boolean,
+  upMs: number,
+  via: string,
+): Record<string, unknown> {
+  return { ...anchorFrame(file, plus, fresh, upMs), via };
+}
+
+// Mounted from bindPicker, which runs on every render, so the id guard is what
+// keeps there being exactly one.
+function mountPickProbe(): void {
+  if (typeof document === "undefined" || !document.body) return;
+  if (document.getElementById(PICK_PROBE_ID)) return;
+  const el = document.createElement("button");
+  el.type = "button";
+  el.id = PICK_PROBE_ID;
+  el.className = "pickprobe";
+  el.textContent = "PICK?";
+  el.title = "temporary probe: opens the picker from up here";
+  el.addEventListener("pointerdown", pickerTapShield);
+  el.addEventListener("click", () => {
+    markPickVia(PICK_VIA_PROBE);
+    pickerTapOpen();
+  });
+  document.body.appendChild(el);
+}
+// =================== END TEMP DIAGNOSTIC (remove after the pick-probe session) ===================
