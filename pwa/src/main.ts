@@ -65,7 +65,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.13"; // one decode, bubble placeholder, tray eases closed, bumped so the build is verifiable
+const APP_VERSION = "0.3.14"; // styles inlined so nothing blocks first paint, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

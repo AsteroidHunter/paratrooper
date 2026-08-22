@@ -41,10 +41,15 @@
 
       What this does NOT claim is zero. The handover from the phone's launch
       image to this document's first paint is not observable from inside the
-      page, so it cannot be measured from here; and the BUILT page still
-      blocks its first paint on the app's stylesheet, which vite emits as a
-      separate file and links from the head. That link is now the largest
-      thing standing between this markup and the screen.
+      page, so it cannot be measured from here. What it does claim is that
+      nothing on this side of that handover is waiting on a file. The app's
+      stylesheet used to be one: vite emitted it separately and linked it from
+      the head, and a linked stylesheet stops the browser painting ANYTHING,
+      including markup it has already parsed, until that file is back. It is
+      folded into the built document now (vite.config.ts), so the served page
+      holds every byte it needs to put this cover up and fetches nothing at all
+      before it does. The bundle below is a module, and a module script is
+      deferred, so it cannot hold the paint either.
     -->
     <style>
       /* The panel the phone's launch image hands over to: the same solid
