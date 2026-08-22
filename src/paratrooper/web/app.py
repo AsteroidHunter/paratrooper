@@ -637,7 +637,7 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                                   "receipt-hold", "boot-motion", "boot-repin",
                                   "grow-blink", "kb-shove",
                                   "kb-focusing", "kb-glide",
-                                  "dom-census", "pick-anchor")]
+                                  "dom-census", "pick-anchor", "tail-gap")]
         if vp:
             _diag.info("holddiag viewport events=%d tail=%s",
                        len(vp), json.dumps(vp[-20:]))

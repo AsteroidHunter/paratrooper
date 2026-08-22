@@ -91,6 +91,152 @@ export function nearBottomOf(
   return scrollHeight - overflow - scrollTop - clientHeight < NEAR_BOTTOM_PX;
 }
 
+// ===================== TEMP DIAGNOSTIC (remove after the tail-gap session) =====================
+// The room under the last message, as one number.
+//
+// Failure shape: after a send he sees the conversation end at its last bubble
+// with roughly a screen and a half of nothing between it and the compose bar.
+// Two readings taken at that moment disagree with that picture — the document
+// held exactly one compose bar, one thread and one mirror, and the at-bottom
+// verdict said the thread was already at its end. Both can only be true if the
+// thread's content really is taller than its last row, with nothing in the
+// difference. Nothing in the app measured that difference, and the census that
+// would have come closest fires only on a keyboard close, which is not when he
+// sees this.
+//
+// So: content height, minus the thread's own intentional bottom padding, minus
+// the last row's bottom, all in content coordinates. Airborne send rows inflate
+// scrollHeight for the length of their flight and are subtracted here for the
+// same reason nearBottomOf subtracts them. A gap near zero clears the thread's
+// own box and moves the question to the shell; a gap the size of the white
+// space is the bug, and `below` then names what is sitting under the message he
+// just sent, or reads null when nothing is.
+//
+// The one thing this reading must never do is measure a wrapper. Every direct
+// child of the thread is a .evt grouping shell and styles.css gives those
+// display: contents, which means no box at all: zero client rects, a zero-sized
+// rect, offsetHeight 0. Geometry taken off one collapses onto the thread's own
+// top edge, and the gap that falls out is about one screen tall on ANY thread,
+// healthy or not. That is the very symptom under investigation, so a probe
+// reading wrappers would answer its own question with a number it invented.
+// laidOutRows is the guard: it walks past anything that generates no box.
+//
+// Readers are injected so the arithmetic is testable without a DOM, the same
+// split the kb-fall and dom-census probes use. A reader whose element is gone
+// returns NaN and lands as null, never as a zero a reader could mistake for a
+// measurement of nothing.
+
+export interface TailReader {
+  sh: () => number; // thread scrollHeight, exactly as the engine reports it
+  st: () => number; // thread scrollTop
+  ch: () => number; // thread clientHeight
+  pad: () => number; // the thread's own bottom padding
+  air: () => number; // flight inflation already counted inside sh
+  lastBottom: () => number; // the last laid-out row's bottom, content coordinates, transforms stripped
+  rows: () => number; // how many rows the thread lays out
+  below: () => string | null; // the first laid-out row sitting under the sent message, named
+}
+
+/**
+ * The rows the thread actually lays out, in document order.
+ *
+ * A .evt wrapper is display: contents, so it holds no box and its children are
+ * the thread's own flex items. Rather than list the row classes, which would
+ * quietly miss a kind added later, the walk asks the engine directly: an
+ * element with client rects IS a laid-out row, and one without is either a
+ * wrapper to look inside or a hidden subtree with nothing to report. Same shape
+ * laidOutTail (main.ts) walks for the sibling shift, decided by the engine
+ * instead of by a class name.
+ */
+export function laidOutRows(thread: Element): Element[] {
+  const out: Element[] = [];
+  const walk = (parent: Element): void => {
+    for (const el of Array.from(parent.children)) {
+      if (el.getClientRects().length > 0) out.push(el);
+      else walk(el); // no box of its own: whatever it groups is the real row
+    }
+  };
+  walk(thread);
+  return out;
+}
+
+/**
+ * An element named the way a reader can act on it: tag, id, every class, and
+ * the child it holds. "div.row.agent" on its own does not say whether the room
+ * under his last message belongs to a photo, a receipt or the typing dots, and
+ * that is the entire question `below` is asked.
+ */
+export function rowName(el: Element): string {
+  const spell = (e: Element): string => {
+    const id = e.id ? `#${e.id}` : "";
+    const cls = typeof e.className === "string" ? e.className.trim() : "";
+    return `${e.tagName.toLowerCase()}${id}${cls ? `.${cls.split(/\s+/).join(".")}` : ""}`;
+  };
+  const inner = el.firstElementChild;
+  return inner ? `${spell(el)} > ${spell(inner)}` : spell(el);
+}
+
+// One reading, as the trail carries it. An alias rather than an interface so it
+// hands straight to holdDiagRecord's Record<string, unknown> without a cast,
+// the same reason fallFrame's frame is one (shell.ts).
+export type TailGap = {
+  when: string;
+  gap: number | null;
+  sh: number | null;
+  st: number | null;
+  ch: number | null;
+  pad: number | null;
+  air: number;
+  lastB: number | null;
+  rows: number;
+  below: string | null;
+  atB: boolean | null;
+  short: boolean | null;
+};
+
+const tenth = (n: number): number | null =>
+  Number.isFinite(n) ? Math.round(n * 10) / 10 : null;
+
+export function tailGapFrame(when: string, read: TailReader): TailGap {
+  const sh = read.sh();
+  const st = read.st();
+  const ch = read.ch();
+  const pad = read.pad();
+  const air = Number.isFinite(read.air()) ? read.air() : 0;
+  const lastB = read.lastBottom();
+  // the empty room: everything the thread can scroll through, less the flight
+  // still in the air, less the padding the design puts there on purpose, less
+  // where the last message actually ends
+  const gap = sh - air - pad - lastB;
+  // scrollHeight never drops below clientHeight, so a conversation too short to
+  // fill the thread reports room under its last message honestly, for a reason
+  // that has nothing to do with the bug: the box is simply bigger than what is
+  // in it, and there is no scrolling to be done at all. In `gap` alone that is
+  // indistinguishable from his screen and a half of white space, so the frame
+  // says which of the two it is looking at.
+  const short =
+    Number.isFinite(lastB) && Number.isFinite(pad) && Number.isFinite(ch)
+      ? lastB + pad < ch
+      : null;
+  return {
+    when,
+    gap: tenth(gap),
+    sh: tenth(sh),
+    st: tenth(st),
+    ch: tenth(ch),
+    pad: tenth(pad),
+    air: tenth(air) ?? 0,
+    lastB: tenth(lastB),
+    rows: read.rows(),
+    below: read.below(),
+    atB: Number.isFinite(sh) && Number.isFinite(st) && Number.isFinite(ch)
+      ? nearBottomOf(sh, st, ch, air)
+      : null,
+    short,
+  };
+}
+// =================== END TEMP DIAGNOSTIC (remove after the tail-gap session) ===================
+
 // followTail protection while composing — the decision half of the device bug
 // where each new composer line slid the view up a little more. Failure shape:
 // an iOS caret shove (or our own snap-back / pin write) fires thread scroll

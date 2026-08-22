@@ -184,7 +184,8 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "kb-close" || ev === "send-motion" || ev === "receipt-hold" ||
     ev === "boot-motion" || ev === "boot-repin" || ev === "boot-blank" ||
     ev === "grow-blink" || ev === "kb-shove" ||
-    ev === "kb-focusing" || ev === "kb-glide" || ev === "pick-anchor"
+    ev === "kb-focusing" || ev === "kb-glide" || ev === "pick-anchor" ||
+    ev === "tail-gap"
   ) {
     diagPost();
   }

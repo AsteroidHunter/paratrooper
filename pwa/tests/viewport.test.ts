@@ -274,3 +274,463 @@ describe("at-bottom wiring: the reading site subtracts what the flight adds", ()
 // The mid-typing shove doors and the kb-vv counter were retired with the
 // vv-sized shell (shell.ts owns keyboard geometry; its close-time correction,
 // heal, and growth-time shove decisions are pinned in shell.test.ts).
+
+// --- TEMP DIAGNOSTIC pins: the room under the last message (tail-gap) ---------
+//
+// The screenshot showed the conversation ending at its last bubble with about a
+// screen and a half of nothing beneath it, while the census read one of every
+// element and the at-bottom verdict read true. This probe measures the only
+// quantity that can make all three true at once, so what it must not do is
+// invent one: no zero where an element is missing, no gap conjured by a send
+// still in the air, and no write of any kind on a thread it is measuring.
+
+import { laidOutRows, rowName, tailGapFrame } from "../src/viewport";
+import type { TailReader } from "../src/viewport";
+import { FLIGHT_MS } from "../src/shift";
+
+function tailReader(over: Partial<Record<keyof TailReader, unknown>> = {}): TailReader {
+  const base = { sh: 4000, st: 3200, ch: 800, pad: 12, air: 0, lastBottom: 3988, rows: 40 };
+  return {
+    sh: () => (over.sh as number) ?? base.sh,
+    st: () => (over.st as number) ?? base.st,
+    ch: () => (over.ch as number) ?? base.ch,
+    pad: () => (over.pad as number) ?? base.pad,
+    air: () => (over.air as number) ?? base.air,
+    lastBottom: () => (over.lastBottom as number) ?? base.lastBottom,
+    rows: () => (over.rows as number) ?? base.rows,
+    below: () => (over.below as string | null) ?? null,
+  };
+}
+
+describe("tail-gap — the empty room under the last message, as one number", () => {
+  it("a healthy thread ends where its last message ends: no room, gap zero", () => {
+    const f = tailGapFrame("settle", tailReader());
+    expect(f.gap).toBe(0);
+    expect(f.below).toBeNull();
+    expect(f.atB).toBe(true);
+  });
+
+  it("his symptom: a screen and a half of room reads as the gap, not as at-bottom noise", () => {
+    // last row ends at 2800 in a 4000-tall content, thread 800 tall
+    const f = tailGapFrame("settle", tailReader({ lastBottom: 2800, below: "div.spacer" }));
+    expect(f.gap).toBe(1188); // 4000 - 0 air - 12 pad - 2800
+    expect(f.below).toBe("div.spacer"); // and the probe names what is sitting in it
+  });
+
+  it("room with nothing in it stays reported: the height is the thread's own box", () => {
+    const f = tailGapFrame("settle", tailReader({ lastBottom: 2800 }));
+    expect(f.gap).toBe(1188);
+    expect(f.below).toBeNull();
+  });
+
+  it("a send still in the air does not fake a gap: its inflation comes back off", () => {
+    // scrollHeight carries 300px of translated bubble that is not layout
+    const flying = tailGapFrame("settle", tailReader({ sh: 4300, air: 300 }));
+    expect(flying.gap).toBe(0);
+    expect(flying.air).toBe(300);
+  });
+
+  it("the padding the design puts there is not counted as empty room", () => {
+    expect(tailGapFrame("settle", tailReader({ pad: 120, sh: 4108 })).gap).toBe(0);
+  });
+
+  it("the at-bottom verdict rides the shared reading, flight subtracted", () => {
+    const away = tailGapFrame("settle", tailReader({ st: 0 }));
+    expect(away.atB).toBe(false);
+    expect(nearBottomOf(4000, 0, 800, 0)).toBe(false); // the same call, spelled out
+  });
+
+  it("a missing element lands as null, never a zero a reader would take for a measurement", () => {
+    const f = tailGapFrame("late", tailReader({ sh: NaN, lastBottom: NaN, pad: NaN }));
+    expect(f.gap).toBeNull();
+    expect(f.sh).toBeNull();
+    expect(f.lastB).toBeNull();
+    expect(f.pad).toBeNull();
+    expect(f.atB).toBeNull(); // no guess about where he was
+  });
+
+  it("a gone flight reader contributes nothing rather than poisoning the gap", () => {
+    const f = tailGapFrame("settle", tailReader({ air: NaN }));
+    expect(f.air).toBe(0);
+    expect(f.gap).toBe(0);
+  });
+
+  it("keeps a tenth of a pixel and names which of the two readings it is", () => {
+    const f = tailGapFrame("late", tailReader({ lastBottom: 3987.44 }));
+    expect(f.gap).toBe(0.6);
+    expect(f.when).toBe("late");
+  });
+
+  it("a conversation too short to fill the box says so, instead of looking like the bug", () => {
+    // scrollHeight never drops below clientHeight, so two messages in an
+    // 800-tall thread report 500-odd pixels of room under the last one — true,
+    // and nothing to do with his white space. gap alone cannot tell them apart.
+    const tiny = tailGapFrame("settle", tailReader({ sh: 800, st: 0, lastBottom: 280 }));
+    expect(tiny.gap).toBe(508);
+    expect(tiny.short).toBe(true);
+    expect(tailGapFrame("settle", tailReader()).short).toBe(false); // a full thread
+  });
+
+  it("content that exactly fills the box is not short", () => {
+    expect(tailGapFrame("settle", tailReader({ sh: 800, st: 0, lastBottom: 788 })).short).toBe(
+      false,
+    );
+  });
+
+  it("no rows to measure leaves the verdict unclaimed rather than guessed", () => {
+    expect(tailGapFrame("settle", tailReader({ lastBottom: NaN })).short).toBeNull();
+  });
+});
+
+// --- the defect this probe shipped with ---------------------------------------
+//
+// Every direct child of #thread is a .evt wrapper and styles.css gives those
+// `display: contents`, which means no box at all. Checked in Chromium and in
+// WebKit rather than assumed: a wrapper returns zero client rects, a
+// zero-sized getBoundingClientRect, and offsetHeight 0, while the .row inside
+// it returns one rect and its real height.
+//
+// The first cut of the probe measured t.lastElementChild, so the last message's
+// bottom collapsed onto the thread's own top edge and the gap came back at
+// roughly the height of the box — about one screen — on ANY thread whatsoever.
+// That is almost exactly the symptom under investigation, so the probe would
+// have read as confirmation of the bug rather than as a measurement of it.
+//
+// The stand-in below is the load-bearing part: wrappers with no geometry around
+// rows that have some. Without it these tests pass either way.
+
+type Fake = {
+  tagName: string;
+  id: string;
+  className: string;
+  children: Fake[];
+  firstElementChild: Fake | null;
+  getClientRects: () => { length: number };
+  getBoundingClientRect: () => { top: number };
+  offsetHeight: number;
+};
+
+function node(
+  tag: string,
+  className: string,
+  kids: Fake[] = [],
+  box: { top: number; height: number } | null = null,
+  id = "",
+): Fake {
+  return {
+    tagName: tag.toUpperCase(),
+    id,
+    className,
+    children: kids,
+    firstElementChild: kids[0] ?? null,
+    // the display:contents signature, exactly as both engines report it
+    getClientRects: () => ({ length: box ? 1 : 0 }),
+    getBoundingClientRect: () => ({ top: box ? box.top : 0 }),
+    offsetHeight: box ? box.height : 0,
+  };
+}
+
+const PAD = 12.8; // the thread's own padding, top and bottom
+const THREAD_H = 731; // the thread box on a 390x844 phone, keyboard down
+const ROW_H = 88.8; // a two-line bubble, as Chromium lays one out
+const ROW_GAP = 2; // .thread's flex gap
+
+type Spec = { className: string; inner?: string; id?: string; bare?: boolean; height?: number };
+
+function bubbles(n: number): Spec[] {
+  return Array.from({ length: n }, (_, i) => {
+    const role = i % 2 ? "user" : "agent";
+    return { className: `row ${role}`, inner: `msg ${role} text` };
+  });
+}
+
+/**
+ * A thread laid out the way the app lays one out, scrolled to its end the way
+ * send() leaves it. `room` is scrollable height under the last row with no
+ * element in it, which is the shape of the reported symptom.
+ */
+function buildThread(specs: Spec[], room = 0) {
+  let y = PAD; // content coordinate of the next row's top
+  const placed = specs.map((s) => {
+    const box = { top: y, height: s.height ?? ROW_H };
+    y += box.height + ROW_GAP;
+    return { s, box };
+  });
+  y -= placed.length ? ROW_GAP : 0; // no gap after the last row
+  const sh = Math.max(y + room + PAD, THREAD_H); // and never below the box itself
+  const st = Math.max(0, sh - THREAD_H); // pinned to the end
+  const kids = placed.map(({ s, box }) => {
+    const seen = { top: box.top - st, height: box.height }; // viewport coordinates
+    const inner = s.inner ? [node("div", s.inner, [], seen)] : [];
+    const el = node("div", s.className, inner, seen, s.id ?? "");
+    return s.bare ? el : node("div", "evt", [el]); // display: contents, no box
+  });
+  const t = node("main", "thread", kids, null, "thread") as unknown as Element;
+  // main.ts's seatBottom, written out: the row's viewport top, less the
+  // thread's own, plus how far the thread is scrolled, plus the row's height.
+  // A source pin below holds main.ts to this same formula.
+  const bottom = (el: unknown): number => {
+    const f = el as Fake;
+    return f.getBoundingClientRect().top - 0 + st + f.offsetHeight;
+  };
+  return { t, sh, st, ch: THREAD_H, pad: PAD, bottom };
+}
+
+function readOf(b: ReturnType<typeof buildThread>, sentFromEnd = 1): TailReader {
+  const rows = laidOutRows(b.t);
+  const last = rows[rows.length - 1];
+  const sent = rows[rows.length - sentFromEnd];
+  return {
+    sh: () => b.sh,
+    st: () => b.st,
+    ch: () => b.ch,
+    pad: () => b.pad,
+    air: () => 0,
+    lastBottom: () => (last ? b.bottom(last) : NaN),
+    rows: () => rows.length,
+    below: () => {
+      if (!sent) return null;
+      const floor = b.bottom(sent);
+      for (const r of rows) if (b.bottom(r) > floor + 1) return rowName(r);
+      return null;
+    },
+  };
+}
+
+describe("laidOutRows: the boxes, never the wrappers around them", () => {
+  it("a thread of .evt wrappers reports the rows inside them", () => {
+    const rows = laidOutRows(buildThread(bubbles(3)).t);
+    expect(rows).toHaveLength(3);
+    for (const r of rows) expect((r as unknown as Fake).className).toContain("row");
+  });
+
+  it("a wrapper is never one of them: it has no box to measure", () => {
+    const rows = laidOutRows(buildThread(bubbles(3)).t);
+    expect(rows.some((r) => (r as unknown as Fake).className === "evt")).toBe(false);
+  });
+
+  it("a bare child with a box IS a row: the typing dots sit in the thread directly", () => {
+    const b = buildThread([
+      ...bubbles(2),
+      { className: "msg agent typing", id: "typing", bare: true },
+    ]);
+    expect(laidOutRows(b.t)).toHaveLength(3);
+  });
+
+  it("a wrapper whose event rendered nothing contributes nothing", () => {
+    const t = {
+      children: [
+        { children: [], className: "evt", getClientRects: () => ({ length: 0 }) },
+        ...(laidOutRows(buildThread(bubbles(1)).t) as unknown[]),
+      ],
+    } as unknown as Element;
+    expect(laidOutRows(t)).toHaveLength(1);
+  });
+
+  it("counts stamps and receipts too: they are rows the thread lays out", () => {
+    const b = buildThread([
+      { className: "stamp", height: 24 },
+      ...bubbles(2),
+      { className: "receipt", height: 18 },
+    ]);
+    expect(laidOutRows(b.t)).toHaveLength(4);
+  });
+});
+
+describe("tail-gap on a real thread shape: rows measured, wrappers walked past", () => {
+  it("a healthy thread, last row flush to the bottom, reports no room", () => {
+    const b = buildThread(bubbles(24));
+    const f = tailGapFrame("settle", readOf(b));
+    expect(Math.abs(f.gap as number)).toBeLessThanOrEqual(1);
+    expect(f.atB).toBe(true);
+    expect(f.short).toBe(false);
+    expect(f.below).toBeNull();
+  });
+
+  it("THE DEFECT: measuring the last wrapper invents a screen-tall gap on that same thread", () => {
+    // what the first cut did: t.lastElementChild is a .evt, its seat collapses
+    // to the thread's top edge, and the answer is the box height less its own
+    // padding no matter what the conversation looks like
+    const b = buildThread(bubbles(24));
+    const wrapper = (b.t as unknown as Fake).children[23];
+    expect(wrapper.className).toBe("evt");
+    const wrapped = tailGapFrame("settle", {
+      ...readOf(b),
+      lastBottom: () => b.bottom(wrapper),
+    });
+    expect(wrapped.gap).toBeCloseTo(THREAD_H - PAD, 1); // 718.2: one screen of nothing
+    expect(wrapped.gap as number).toBeGreaterThan(600);
+  });
+
+  it("the same wrapper reading is screen-tall on a five-message thread too", () => {
+    // the tell that it is not a measurement: the answer does not move with the
+    // conversation, because nothing about the conversation is in it
+    const short = buildThread(bubbles(5));
+    const wrapper = (short.t as unknown as Fake).children[4];
+    const f = tailGapFrame("settle", { ...readOf(short), lastBottom: () => short.bottom(wrapper) });
+    expect(f.gap).toBeCloseTo(THREAD_H - PAD, 1);
+  });
+
+  it("real room under the last row reports the size of the room", () => {
+    const b = buildThread(bubbles(24), 240);
+    expect(tailGapFrame("settle", readOf(b)).gap).toBeCloseTo(240, 1);
+  });
+
+  it("and it tracks the room rather than the box: 60, 240, 900", () => {
+    for (const room of [60, 240, 900]) {
+      expect(tailGapFrame("settle", readOf(buildThread(bubbles(24), room))).gap).toBeCloseTo(
+        room,
+        1,
+      );
+    }
+  });
+
+  it("rows counts what the thread lays out, not how many events it holds", () => {
+    // one wrapper carrying a gap stamp above its bubble: 24 children, 25 rows
+    const b = buildThread([{ className: "stamp", height: 24 }, ...bubbles(23)]);
+    expect((b.t as unknown as Fake).children).toHaveLength(24);
+    expect(tailGapFrame("settle", readOf(b)).rows).toBe(24);
+    const wide = buildThread([...bubbles(24), { className: "receipt", height: 18 }]);
+    expect(tailGapFrame("settle", readOf(wide)).rows).toBe(25);
+  });
+
+  it("the dots under his newest bubble are named, not filtered out", () => {
+    // an agent composing under the last message is real occupied room and a
+    // genuine finding; the reading is anchored on the message he just sent, so
+    // anything laid out below it gets named
+    const b = buildThread([
+      ...bubbles(24),
+      { className: "msg agent typing", id: "typing", bare: true, height: 40 },
+    ]);
+    const f = tailGapFrame("settle", readOf(b, 2)); // his bubble, dots beneath it
+    expect(f.below).toBe("div#typing.msg.agent.typing");
+    expect(Math.abs(f.gap as number)).toBeLessThanOrEqual(1); // the dots are not empty room
+  });
+
+  it("nothing under the last message reads null, and the gap then belongs to the box", () => {
+    const f = tailGapFrame("settle", readOf(buildThread(bubbles(24), 240)));
+    expect(f.below).toBeNull();
+    expect(f.gap).toBeCloseTo(240, 1);
+  });
+
+  it("a two-message thread is short, not symptomatic", () => {
+    const f = tailGapFrame("settle", readOf(buildThread(bubbles(2))));
+    expect(f.short).toBe(true);
+    expect(f.gap as number).toBeGreaterThan(400); // honest, and not his bug
+  });
+
+  it("an empty thread measures nothing rather than reporting a screen of room", () => {
+    const f = tailGapFrame("settle", readOf(buildThread([])));
+    expect(f.lastB).toBeNull();
+    expect(f.gap).toBeNull();
+    expect(f.rows).toBe(0);
+  });
+});
+
+describe("rowName: specific enough to act on", () => {
+  it("names the row and the bubble it holds, since the kind lives on the bubble", () => {
+    const b = buildThread(bubbles(2));
+    expect(rowName(laidOutRows(b.t)[1])).toBe("div.row.user > div.msg.user.text");
+  });
+
+  it("carries the id when there is one, and the dots are found by theirs", () => {
+    const b = buildThread([{ className: "msg agent typing", id: "typing", bare: true }]);
+    expect(rowName(laidOutRows(b.t)[0])).toBe("div#typing.msg.agent.typing");
+  });
+
+  it("every class, not just the first: .row.user.cont is a different finding to .row.user", () => {
+    const b = buildThread([{ className: "row user cont" }]);
+    expect(rowName(laidOutRows(b.t)[0])).toBe("div.row.user.cont");
+  });
+});
+
+// One entry of TAIL_GAP_AT_MS as the milliseconds it really is. The first is
+// spelled with the send window's name, so resolve that name out of main.ts too
+// rather than hardcoding 600: if the window ever moves under the flight this
+// pin fails, which is the whole point of it.
+function delayMs(entry: string): number {
+  if (/^\d+(?:\.\d+)?$/.test(entry)) return Number(entry);
+  const named = src.match(new RegExp(`const ${entry} = (\\d+(?:\\.\\d+)?)`));
+  expect(named, `${entry} is not a number declared in main.ts`).not.toBeNull();
+  return Number(named![1]);
+}
+
+describe("tail-gap wiring: measured where he sees it, and writing nothing", () => {
+  it("fires on every send, beside the motion recorder", () => {
+    expect(src).toContain("recordTailGap(msgs[msgs.length - 1])");
+  });
+
+  it("both readings wait for the flight to land: a mid-flight number is not the gap", () => {
+    const at = src.match(/TAIL_GAP_AT_MS = \[([^\]]+)\]/);
+    expect(at).not.toBeNull();
+    const delays = at![1].split(",").map((s) => delayMs(s.trim()));
+    expect(delays).toHaveLength(2);
+    for (const d of delays) expect(d).toBeGreaterThan(FLIGHT_MS);
+  });
+
+  it("the second reading sits well past the first: a late photo changes the height", () => {
+    const at = src.match(/TAIL_GAP_AT_MS = \[([^\]]+)\]/)![1];
+    const [first, second] = at.split(",").map((s) => s.trim());
+    expect(first).toBe("SEND_MOTION_WINDOW_MS"); // the window already proven to cover a send
+    expect(Number(second)).toBeGreaterThan(2000);
+  });
+
+  it("a second send re-arms rather than stacking a timer per send", () => {
+    expect(fnBody("recordTailGap")).toContain("clearTimeout(tailGapTimers.pop())");
+  });
+
+  it("the probe only reads: nothing in it writes a scroll, a style or a class", () => {
+    const body = fnBody("recordTailGap") + fnBody("firstBelow") + fnBody("seatBottom");
+    expect(body).not.toMatch(/\.scrollTop\s*=/);
+    expect(body).not.toMatch(/\.style\./);
+    expect(body).not.toMatch(/classList\.(add|remove|toggle)/);
+    expect(body).not.toMatch(/scrollTo\(/);
+  });
+
+  it("the last row's bottom strips running transforms rather than trusting the rect", () => {
+    // a bubble mid-flight or mid-shift is translated; its rect is where it is
+    // flying, not where the conversation ends
+    expect(fnBody("seatBottom")).toContain("seatTop(row)");
+  });
+
+  it("every element it measures is a laid-out row, never a boxless wrapper", () => {
+    // the defect: t.lastElementChild is a .evt, display: contents, no box,
+    // and the gap that falls out of one is a screen tall on any thread at all
+    const body = fnBody("recordTailGap");
+    expect(body).toContain("laidOutRows(t)");
+    expect(body).not.toContain("lastElementChild");
+    expect(body).toContain("const last = rows[rows.length - 1]");
+  });
+
+  it("rows counts the rows the thread lays out, not the events it holds", () => {
+    expect(fnBody("recordTailGap")).toContain("rows: () => rows.length");
+    expect(fnBody("recordTailGap")).not.toContain("childElementCount");
+  });
+
+  it("no rows at all reports null, never a zero taken for a measurement of nothing", () => {
+    expect(fnBody("recordTailGap")).toContain("last ? seatBottom(t, last) : NaN");
+  });
+
+  it("what sits below is asked of the message he just sent, and walks real rows", () => {
+    const rec = fnBody("recordTailGap");
+    expect(rec).toContain('msg.closest<HTMLElement>(".row")'); // the bubble's own row
+    expect(rec).toContain("firstBelow(t, rows, sent)");
+    const below = fnBody("firstBelow");
+    expect(below).toContain("for (const row of rows)");
+    expect(below).toContain("rowName(row)"); // named, not just tag plus first class
+    expect(below).not.toMatch(/typing/); // the dots are a finding, not noise to filter
+  });
+
+  it("one walk feeds every row field, so the record describes one instant", () => {
+    const rec = fnBody("recordTailGap");
+    expect(rec.match(/laidOutRows\(/g)).toHaveLength(1);
+  });
+
+  it("the record reaches the phone's trail immediately instead of waiting for a later send", () => {
+    const hold = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../src/hold.ts"),
+      "utf8",
+    );
+    expect(hold).toContain('ev === "tail-gap"');
+  });
+});

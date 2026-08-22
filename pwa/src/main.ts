@@ -50,7 +50,10 @@ import {
   flightOverflow,
   followFlipDecision,
   giveUpTarget,
+  laidOutRows,
   nearBottomOf,
+  rowName,
+  tailGapFrame,
 } from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
 import type { OutboxRecord } from "./outbox";
@@ -65,7 +68,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.14"; // styles inlined so nothing blocks first paint, bumped so the build is verifiable
+const APP_VERSION = "0.3.15"; // measures the room under the last message after a send, bumped so the build is verifiable
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -2385,6 +2388,7 @@ function flyFromField(wrapper: HTMLElement, morph: FieldMorph | null = null): vo
   });
   if (morph && !morph.launched()) morph.cancel(); // no text row rendered: no seat to morph into
   recordSendMotion(msgs[msgs.length - 1]);
+  recordTailGap(msgs[msgs.length - 1]);
 }
 
 // ===================== TEMP DIAGNOSTIC (remove after the hold session) =====================
@@ -2453,6 +2457,82 @@ function recordSendMotion(msg: HTMLElement): void {
   sendMotionRaf = requestAnimationFrame(step);
 }
 // =================== END TEMP DIAGNOSTIC (remove after the hold session) ===================
+
+// ===================== TEMP DIAGNOSTIC (remove after the tail-gap session) =====================
+// The white space after a send, measured where he sees it. viewport.ts
+// (tailGapFrame) holds the arithmetic and why; this half only reads the DOM.
+//
+// Two readings per send, both after the 400ms flight has landed: one when the
+// send window closes, one a second and a half later, because a photo that
+// decodes late changes the thread's height after everything else has settled
+// and the first reading alone could not tell the two apart.
+//
+// Nothing here writes. Every read is a getter, the walk stops at the thread,
+// and no layout is flushed that the send was not going to flush anyway.
+//
+// Every element measured comes out of laidOutRows (viewport.ts), never off a
+// direct child of the thread: those are .evt wrappers, display: contents gives
+// them no box, and reading geometry off one manufactures a screen-tall gap on
+// any thread at all. That number would have looked exactly like his bug.
+
+const TAIL_GAP_AT_MS = [SEND_MOTION_WINDOW_MS, 2100] as const;
+const tailGapTimers: number[] = [];
+
+// the bottom of a laid-out row in the thread's content coordinates, every
+// running translate stripped: seatTop already walks the ancestors for the
+// flight and the sibling shift, so the seat plus the row's own height is where
+// that row truly ends, whatever is mid-animation on top of it
+function seatBottom(t: HTMLElement, row: HTMLElement): number {
+  return seatTop(row) - t.getBoundingClientRect().top + t.scrollTop + row.offsetHeight;
+}
+
+// what is sitting under the message this send just landed, named the way a
+// reader can act on it. The dots are the case worth catching, so nothing is
+// filtered out: an agent composing under his newest bubble is real occupied
+// room and a genuine answer, not noise. null means nothing sits below and any
+// gap belongs to the thread's own box rather than to a row.
+function firstBelow(t: HTMLElement, rows: HTMLElement[], sent: number): string | null {
+  for (const row of rows) {
+    if (seatBottom(t, row) > sent + 1) return rowName(row);
+  }
+  return null;
+}
+
+function recordTailGap(msg: HTMLElement): void {
+  while (tailGapTimers.length) clearTimeout(tailGapTimers.pop()); // a second send re-arms
+  TAIL_GAP_AT_MS.forEach((delay, i) => {
+    tailGapTimers.push(
+      window.setTimeout(() => {
+        const t = document.getElementById("thread");
+        if (!t || !msg.isConnected) return; // shell torn down, or a replay took the row
+        // one walk for all three row questions, so every field in the record
+        // describes the same instant
+        const rows = laidOutRows(t).filter((el): el is HTMLElement => el instanceof HTMLElement);
+        const last = rows[rows.length - 1];
+        const floor = last ? seatBottom(t, last) : NaN; // no rows at all: null, not a zero
+        // the seat of the bubble this send landed, which is what "under the
+        // last message" is measured from; the row holds it, so the row is the
+        // laid-out box to ask
+        const seat = msg.closest<HTMLElement>(".row") ?? msg;
+        const sent = seatBottom(t, seat);
+        holdDiagRecord(
+          "tail-gap",
+          tailGapFrame(i === 0 ? "settle" : "late", {
+            sh: () => t.scrollHeight,
+            st: () => t.scrollTop,
+            ch: () => t.clientHeight,
+            pad: () => parseFloat(getComputedStyle(t).paddingBottom),
+            air: () => flightInflation(t),
+            lastBottom: () => floor,
+            rows: () => rows.length,
+            below: () => firstBelow(t, rows, sent),
+          }),
+        );
+      }, delay),
+    );
+  });
+}
+// =================== END TEMP DIAGNOSTIC (remove after the tail-gap session) ===================
 
 // ===================== TEMP DIAGNOSTIC (remove after the cold-open session) =====================
 // Boot-window motion recorder, riding the holddiag trail like the send-window
