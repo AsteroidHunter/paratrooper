@@ -17,6 +17,8 @@ import {
   COVER_MIN_HOLD_MS,
   type CoverLift,
   type DrawTarget,
+  SPLASH_BAND_EMS,
+  SPLASH_BAND_PAD_EMS,
   SPLASH_BG,
   SPLASH_FONT_FAMILY,
   SPLASH_FONT_LADDER,
@@ -30,7 +32,9 @@ import {
   coverHandleBox,
   coverLogoRect,
   createSplashCover,
+  drawSplashHandle,
   paintSplash,
+  splashHandleBand,
   splashLayout,
 } from "../src/splash";
 import { SPLASH_LOGO_H, SPLASH_LOGO_W } from "../src/splashlogo";
@@ -762,19 +766,91 @@ const SCREENS: Array<[string, number, number, number]> = [
   ["a square screen", 800, 800, 2],
 ];
 
+// A stand-in <canvas> for the half of the script that DRAWS the credit line: a
+// recording 2D context with a measureText bolted on, plus the two size writes,
+// logged into the same call list so the order can be checked as well as the
+// calls. The measured width is a stand-in metric, not a real face's: what the
+// checks below compare is the script's band against splashHandleBand's band on
+// the SAME measured width, so the number only has to be the same on both sides.
+function fitCanvas(
+  opts: { url?: string | null; context?: boolean; measurable?: boolean; em?: number } = {},
+) {
+  const r = recordingCtx();
+  const ctx = r.ctx as DrawTarget & { measureText(t: string): { width: number } };
+  let measured = 0;
+  ctx.measureText = (t: string) => {
+    const px = Number(/^([\d.]+)px/.exec(ctx.font)?.[1] ?? 0);
+    measured = t.length * px * (opts.em ?? 0.55);
+    return { width: measured };
+  };
+  if (opts.measurable === false) delete (ctx as { measureText?: unknown }).measureText;
+  let w = 300;
+  let h = 150;
+  const canvas = {
+    get width() {
+      return w;
+    },
+    set width(v: number) {
+      w = v;
+      r.calls.push(["canvas.width", v]);
+    },
+    get height() {
+      return h;
+    },
+    set height(v: number) {
+      h = v;
+      r.calls.push(["canvas.height", v]);
+    },
+    getContext: (kind: string) => (opts.context === false ? null : kind === "2d" ? ctx : null),
+    toDataURL: opts.url === null ? undefined : () => opts.url ?? "data:image/png;base64,ZHJhd24=",
+  };
+  return {
+    canvas,
+    rec: r,
+    size: (): [number, number] => [w, h],
+    /** what the stand-in face said the string measured, in the size it was set in */
+    measuredWidth: () => measured,
+    /** the calls from the first save onwards: the credit line's own drawing */
+    handleCalls: () => {
+      const at = r.calls.findIndex((c) => c[0] === "save");
+      return at < 0 ? [] : r.calls.slice(at);
+    },
+  };
+}
+
 // Run the shipped script against a made-up screen and hand back the CSS it
 // appended. window and document are parameters, so they shadow whatever the
 // test env has, and nothing else in the script reaches outside itself.
-function runFitScript(screenObj: unknown, dpr: unknown): { css: string; styles: FakeStyle[] } {
+//
+// The document stands in for the two things the script asks one for: the meta
+// that carries the handle, and an element by tag name. It hands back a <style>
+// for anything but a canvas, and for a canvas whatever the caller passed, which
+// defaults to a bare object with no getContext. That default is what keeps every
+// geometry case below on the same path it was on before the script learned to
+// draw: no context, so the drawing half skips itself and writes nothing.
+interface FitOpts {
+  handle?: string | null; // what the meta says; null is no meta in the document
+  canvas?: () => unknown; // what createElement("canvas") hands back
+  noQuery?: boolean; // a document with no querySelector at all
+}
+
+function runFitScript(
+  screenObj: unknown,
+  dpr: unknown,
+  opts: FitOpts = {},
+): { css: string; styles: FakeStyle[] } {
   const made: FakeStyle[] = [];
-  const doc = {
-    createElement: (): FakeStyle => ({
-      id: "",
-      text: "",
-      appendChild(node: { data: string }): void {
-        this.text += node.data;
-      },
-    }),
+  const style = (): FakeStyle => ({
+    id: "",
+    text: "",
+    appendChild(node: { data: string }): void {
+      this.text += node.data;
+    },
+  });
+  const handle = opts.handle === undefined ? SPLASH_HANDLE : opts.handle;
+  const doc: Record<string, unknown> = {
+    createElement: (tag: string): unknown =>
+      tag === "canvas" ? (opts.canvas ? opts.canvas() : {}) : style(),
     createTextNode: (data: string) => ({ data }),
     head: {
       appendChild: (el: FakeStyle): void => {
@@ -782,9 +858,30 @@ function runFitScript(screenObj: unknown, dpr: unknown): { css: string; styles: 
       },
     },
   };
+  if (!opts.noQuery) doc.querySelector = () => (handle === null ? null : { content: handle });
   const win = { screen: screenObj, devicePixelRatio: dpr };
   new Function("window", "document", FIT_SCRIPT)(win, doc);
   return { css: made.map((s) => s.text).join(""), styles: made };
+}
+
+// the one rule the drawing half appends, pulled apart. A data URI carries both
+// a colon and a semicolon, so this reads the declarations it wants by name
+// rather than splitting the block the way fitRule below does.
+function coverRule(css: string): {
+  image: string | null;
+  repeat: string | null;
+  size: [number, number] | null;
+  position: [number, number] | null;
+} {
+  const body = /#splashcover\{([^}]*)\}/.exec(css)?.[1] ?? "";
+  const size = /background-size:(-?[\d.]+)px (-?[\d.]+)px/.exec(body);
+  const pos = /background-position:(-?[\d.]+)px (-?[\d.]+)px/.exec(body);
+  return {
+    image: /background-image:url\(([^)]*)\)/.exec(body)?.[1] ?? null,
+    repeat: /background-repeat:([a-z-]+)/.exec(body)?.[1] ?? null,
+    size: size ? [Number(size[1]), Number(size[2])] : null,
+    position: pos ? [Number(pos[1]), Number(pos[2])] : null,
+  };
 }
 
 // one rule out of that generated CSS as a property -> number map. Every value
@@ -1064,6 +1161,372 @@ describe("the launch image says the credit line exactly as the cover says it", (
       };
       expect([name, applySplashFont(ctx, px).endsWith(SPLASH_FONT_FAMILY)]).toEqual([name, true]);
     }
+  });
+});
+
+// --- the credit line as PIXELS, on both splashes ---------------------------------
+//
+// Matching the size took the tag's width to within a pixel and left two things
+// no metric could close: the cover's line carried 15 to 25 percent less ink,
+// and its middle sat up to three device pixels off. Both come from the line
+// being a picture on one splash and live text on the other, so two rasterizers
+// drew one string. The fix is to stop doing that: the cover shows a picture
+// too, drawn by drawSplashHandle into the band splashHandleBand names, by the
+// script in the document's head so it is there on the first painted frame.
+//
+// Measured after, on eight screen shapes in both engines available, comparing
+// the launch image's own PNG against a screenshot of the cover: the handle's
+// band is byte for byte identical on all eight in WebKit, which is the engine
+// iOS runs, and on seven of eight in Chromium, the exception being a device
+// pixel ratio that does not divide the screen evenly, where nothing can land on
+// both grids at once and no iPhone lives.
+
+describe("splashHandleBand: where the cover's picture of the credit line goes", () => {
+  const shapes = SCREENS.map(([name, w, h, dpr]) => {
+    const g = splashLayout({ screenW: w, screenH: h, dpr, logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H });
+    // a plausible run of type at the cover's own size, in the cover's own px
+    const textW = SPLASH_HANDLE.length * coverHandleBox(g, h).fontPx * 0.55;
+    return { name, w, h, dpr, g, band: splashHandleBand(g, textW), textW };
+  });
+
+  it("puts the raster's corner on a whole device pixel, on every screen shape", () => {
+    // the phase claim: an integer corner is what keeps the fraction of a pixel
+    // the anchor sits at inside the band equal to the fraction it sits at on
+    // the launch image, and that is what makes the two rasters the same pixels
+    for (const { name, band } of shapes) {
+      expect([name, Number.isInteger(band.bandX), Number.isInteger(band.bandY)]).toEqual([
+        name,
+        true,
+        true,
+      ]);
+    }
+  });
+
+  it("lands the anchor back on the layout's own, to the last bit", () => {
+    for (const { name, g, band } of shapes) {
+      expect([name, band.bandX + band.drawX, band.bandY + band.drawY]).toEqual([
+        name,
+        g.handleCenterX,
+        g.handleCenterY,
+      ]);
+    }
+  });
+
+  it("states the same rect in the cover's pixels, by the canvas-to-screen ratio", () => {
+    for (const { name, w, h, g, band } of shapes) {
+      const sx = w / g.canvasW;
+      const sy = h / g.canvasH;
+      expect([
+        name,
+        near(band.left, band.bandX * sx),
+        near(band.top, band.bandY * sy),
+        near(band.width, band.bandW * sx),
+        near(band.height, band.bandH * sy),
+      ]).toEqual([name, true, true, true, true]);
+    }
+  });
+
+  it("puts every edge on a whole CSS pixel wherever the screen has one", () => {
+    // The second rounding, and the one that took the last two shapes to exact.
+    // A stylesheet holds a length at a resolution of its own, so a band stated
+    // as a third of a pixel comes back a hair wider than the picture is and the
+    // browser resamples it. Where the canvas is a whole multiple of the screen,
+    // which is every phone, there is a whole CSS pixel to land on and this
+    // lands on it; where it is not, nothing can, and the band is left alone.
+    for (const { name, w, h, dpr, band } of shapes) {
+      const whole = Number.isInteger(w * dpr) && Number.isInteger(h * dpr);
+      const flat = (v: number): boolean => !whole || Number.isInteger(v);
+      expect([
+        name,
+        flat(band.left),
+        flat(band.top),
+        flat(band.width),
+        flat(band.height),
+      ]).toEqual([name, true, true, true, true]);
+    }
+  });
+
+  it("holds the whole line with slack round it, and stays on the canvas", () => {
+    for (const { name, w, h, g, band, textW } of shapes) {
+      const sx = w / g.canvasW;
+      const em = g.handleFont;
+      // the device pixels one CSS pixel is worth, where that is a whole number:
+      // the most the snap onto whole CSS pixels can eat off an edge
+      const step = (edge: number, screen: number): number =>
+        Number.isInteger(edge / screen) ? edge / screen : 1;
+      const qx = step(g.canvasW, w);
+      const qy = step(g.canvasH, h);
+      const runW = textW / sx; // the glyph run in device px
+      const slack = em - qx; // the padding, less what the snap can eat
+      expect([
+        name,
+        band.drawX - runW / 2 >= slack,
+        band.bandW - (band.drawX + runW / 2) >= slack,
+        band.drawY >= em,
+        band.bandH - band.drawY >= em - qy,
+      ]).toEqual([name, true, true, true, true]);
+      expect([
+        name,
+        band.bandX >= 0,
+        band.bandY >= 0,
+        band.bandX + band.bandW <= g.canvasW,
+        band.bandY + band.bandH <= g.canvasH,
+      ]).toEqual([name, true, true, true, true]);
+    }
+  });
+
+  it("is measured in ems of the line itself, not in numbers of its own", () => {
+    // the band has to grow with the type, or a big screen crops the line. Only
+    // ever grown from those ems, never cut: the snap onto whole CSS pixels adds
+    // up to a device pixel and takes none away.
+    for (const { name, g, dpr } of shapes) {
+      const bare = splashHandleBand(g, 0);
+      const wantW = 2 * SPLASH_BAND_PAD_EMS * g.handleFont;
+      const wantH = SPLASH_BAND_EMS * g.handleFont;
+      expect([name, bare.bandW >= wantW, bare.bandW < wantW + dpr]).toEqual([name, true, true]);
+      expect([name, bare.bandH >= wantH, bare.bandH < wantH + dpr]).toEqual([name, true, true]);
+    }
+  });
+
+  it("never grows past the picture it is cut from", () => {
+    const g = splashLayout({ screenW: 390, screenH: 844, dpr: 3, logoAspect: 1 });
+    const huge = splashHandleBand(g, 10000);
+    expect(huge.bandW).toBe(g.canvasW);
+    expect(huge.bandX).toBe(0);
+  });
+});
+
+describe("drawSplashHandle: the one routine both splashes draw the line with", () => {
+  const g = splashLayout({ screenW: 390, screenH: 844, dpr: 3, logoAspect: LOGO_ASPECT });
+
+  it("is what paintSplash uses: the launch image makes no calls of its own", () => {
+    const whole = recordingCtx();
+    paintSplash(whole.ctx, {} as CanvasImageSource, g);
+    const ref = recordingCtx();
+    drawSplashHandle(
+      ref.ctx,
+      SPLASH_HANDLE,
+      coverHandleBox(g).fontPx,
+      g.screenW / g.canvasW,
+      g.screenH / g.canvasH,
+      g.handleCenterX,
+      g.handleCenterY,
+    );
+    // everything after the white fill and the logo is exactly this routine
+    expect(whole.calls.slice(2)).toEqual(ref.calls);
+    expect(whole.fontAtText()).toBe(ref.fontAtText());
+    expect(whole.fillAtText()).toBe(ref.fillAtText());
+  });
+
+  it("sets the font through the ladder, and puts its transform back", () => {
+    const r = recordingCtx((v) => v.includes("-apple-system"));
+    drawSplashHandle(r.ctx, "@x", 13, 1 / 3, 1 / 3, 30, 40);
+    expect(r.fontAtText()).toBe("13px system-ui"); // the rung below the refused one
+    expect(r.ctx.textAlign).toBe("center");
+    expect(r.ctx.textBaseline).toBe("middle");
+    expect(r.fillAtText()).toBe(SPLASH_HANDLE_COLOR);
+    expect(r.openTransforms()).toBe(0);
+    expect(r.textAtDevice()).toEqual([30, 40]);
+  });
+});
+
+// --- the document's own copy of that drawing ------------------------------------
+//
+// The block further up holds the head script's GEOMETRY to the functions that
+// own it. This holds its DRAWING to them the same way and for the same reason:
+// the script cannot import a module, so the drawing is a hand copy of
+// drawSplashHandle and splashHandleBand, and a hand copy that drifts puts the
+// flash straight back. So the shipped script's own text is run against a
+// recording canvas and every call it makes is compared with the calls the
+// function makes on the same band.
+describe("the head's script draws the line exactly as the launch image draws it", () => {
+  function drawn(w: number, h: number, dpr: number) {
+    const cv = fitCanvas();
+    const { css } = runFitScript({ width: w, height: h }, dpr, { canvas: () => cv.canvas });
+    const g = splashLayout({
+      screenW: w,
+      screenH: h,
+      dpr,
+      logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
+    });
+    return { cv, css, g, band: splashHandleBand(g, cv.measuredWidth()), rule: coverRule(css) };
+  }
+
+  it("makes the very calls drawSplashHandle makes, on every screen shape", () => {
+    // THE RASTER GUARD. Same font, same alignment, same colour, same scale and
+    // the same point, on a band it worked out for itself: if either side of the
+    // copy moves, this stops matching.
+    for (const [name, w, h, dpr] of SCREENS) {
+      const { cv, g, band } = drawn(w, h, dpr);
+      const ref = recordingCtx();
+      drawSplashHandle(
+        ref.ctx,
+        SPLASH_HANDLE,
+        coverHandleBox(g, h).fontPx,
+        g.screenW / g.canvasW,
+        g.screenH / g.canvasH,
+        band.drawX,
+        band.drawY,
+      );
+      expect([name, cv.handleCalls()]).toEqual([name, ref.calls]);
+      expect([name, cv.rec.fontAtText(), cv.rec.fillAtText()]).toEqual([
+        name,
+        ref.fontAtText(),
+        ref.fillAtText(),
+      ]);
+      expect([name, cv.rec.ctx.textAlign, cv.rec.ctx.textBaseline]).toEqual([
+        name,
+        "center",
+        "middle",
+      ]);
+      // and back in device pixels it is the layout's own anchor, offset only by
+      // where the band's corner sits, which is the whole trick
+      const [dx, dy] = cv.rec.textAtDevice();
+      expect([name, near(dx + band.bandX, g.handleCenterX), near(dy + band.bandY, g.handleCenterY)]).toEqual([
+        name,
+        true,
+        true,
+      ]);
+    }
+  });
+
+  it("cuts the band splashHandleBand names, and stands it on the same white", () => {
+    for (const [name, w, h, dpr] of SCREENS) {
+      const { cv, band, rule } = drawn(w, h, dpr);
+      expect([name, cv.size()]).toEqual([name, [band.bandW, band.bandH]]);
+      // sized first, then filled: sizing a canvas clears it, so a fill before
+      // the size would be wiped and the line would stand on nothing
+      const order = cv.rec.calls.map((c) => c[0]);
+      expect([name, order.indexOf("canvas.width") < order.indexOf("fillRect")]).toEqual([
+        name,
+        true,
+      ]);
+      expect([name, cv.rec.calls[order.indexOf("fillRect")]]).toEqual([
+        name,
+        ["fillRect", 0, 0, band.bandW, band.bandH],
+      ]);
+      expect([name, cv.rec.fillAt()]).toEqual([name, SPLASH_BG]);
+      // and hung on the cover at the rect the function states, in CSS pixels
+      expect([
+        name,
+        rule.repeat,
+        rule.size?.[0],
+        rule.size?.[1],
+        rule.position?.[0],
+        rule.position?.[1],
+      ]).toEqual([name, "no-repeat", band.width, band.height, band.left, band.top]);
+    }
+  });
+
+  it("shows the picture and takes the live text out of the way, together", () => {
+    const { css, rule } = drawn(390, 844, 3);
+    expect(rule.image).toBe("data:image/png;base64,ZHJhd24=");
+    expect(css).toContain("#splashhandle{color:transparent}");
+    // the geometry rule is still there and still first, so the fallback line
+    // keeps its row and its size for anything that reads the text
+    expect(Object.keys(fitRule(css, "#splashhandle")).sort()).toEqual([
+      "font-size",
+      "line-height",
+      "top",
+    ]);
+  });
+
+  it("draws the handle the DOCUMENT carries, not one of its own", () => {
+    // nothing here is tied to one owner: the string comes off the meta at
+    // runtime, and a different one moves the band with it
+    const cv = fitCanvas();
+    const { css } = runFitScript({ width: 390, height: 844 }, 3, {
+      handle: "@somebodyelse",
+      canvas: () => cv.canvas,
+    });
+    expect(cv.rec.calls.some((c) => c[0] === "fillText" && c[1] === "@somebodyelse")).toBe(true);
+    const g = splashLayout({ screenW: 390, screenH: 844, dpr: 3, logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H });
+    expect(coverRule(css).size?.[0]).toBe(splashHandleBand(g, cv.measuredWidth()).width);
+  });
+
+  it("leaves the line as text, rather than throwing, when it cannot draw one", () => {
+    // Every way the drawing half can come up empty. In all of them the geometry
+    // rule above it is still written, no picture is hung, the live text is left
+    // visible, and nothing is thrown: the app falls back to exactly what it did
+    // before it learned to draw.
+    const cases: Array<[string, FitOpts]> = [
+      ["no meta to read the handle off", { handle: null }],
+      ["an empty handle", { handle: "" }],
+      ["a document with no querySelector", { noQuery: true }],
+      ["an element that is not a canvas", { canvas: () => ({}) }],
+      [
+        "a document that refuses to make one",
+        {
+          canvas: (): unknown => {
+            throw new Error("no canvas here");
+          },
+        },
+      ],
+      [
+        "a canvas that refuses to serialize",
+        {
+          canvas: (): unknown => {
+            const c = fitCanvas().canvas as { toDataURL: unknown };
+            c.toDataURL = (): string => {
+              throw new Error("tainted");
+            };
+            return c;
+          },
+        },
+      ],
+      ["a canvas that hands back no context", { canvas: () => fitCanvas({ context: false }).canvas }],
+      ["a context that cannot measure", { canvas: () => fitCanvas({ measurable: false }).canvas }],
+      ["a canvas with no toDataURL", { canvas: () => fitCanvas({ url: null }).canvas }],
+      ["a toDataURL that hands back nothing", { canvas: () => fitCanvas({ url: "" }).canvas }],
+      ["a toDataURL that hands back junk", { canvas: () => fitCanvas({ url: "about:blank" }).canvas }],
+      ["a blank canvas serialization", { canvas: () => fitCanvas({ url: "data:," }).canvas }],
+    ];
+    for (const [name, opts] of cases) {
+      const go = () => runFitScript({ width: 390, height: 844 }, 3, opts);
+      expect(go, name).not.toThrow();
+      const { css, styles } = go();
+      expect([name, styles.length]).toEqual([name, 1]);
+      expect([name, coverRule(css).image]).toEqual([name, null]);
+      expect([name, css.includes("color:transparent")]).toEqual([name, false]);
+      // the geometry the script exists for is untouched by any of it
+      const g = splashLayout({
+        screenW: 390,
+        screenH: 844,
+        dpr: 3,
+        logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
+      });
+      const rect = coverLogoRect(g, 390, 844);
+      const logo = fitRule(css, "#splashlogo");
+      expect([name, near(logo.left, rect.left), near(logo.width, rect.width)]).toEqual([
+        name,
+        true,
+        true,
+      ]);
+    }
+  });
+
+  it("still writes nothing at all when the screen makes no sense, canvas or not", () => {
+    // the drawing half must not resurrect a picture on a screen the geometry
+    // half already refused to describe
+    const cv = fitCanvas();
+    const { styles } = runFitScript({}, 3, { canvas: () => cv.canvas });
+    expect(styles.length).toBe(0);
+    expect(cv.rec.calls.length).toBe(0);
+  });
+});
+
+describe("the handle string: one line, said in the two places that need it", () => {
+  it("the meta the script reads and the markup the cover shows say the same thing", () => {
+    const meta = /<meta name="splash-handle" content="([^"]*)"/.exec(INDEX_HTML)?.[1];
+    expect(meta).toBe(SPLASH_HANDLE);
+    expect(COVER_HTML).toContain(`>${SPLASH_HANDLE}<`);
+    // and the meta is above the script, or the script would read nothing
+    expect(INDEX_HTML.indexOf('name="splash-handle"')).toBeLessThan(INDEX_HTML.indexOf("<script>"));
+  });
+
+  it("is nowhere in the script itself: the picture is drawn from the document", () => {
+    expect(FIT_SCRIPT).not.toContain(SPLASH_HANDLE);
+    expect(FIT_SCRIPT).toContain('meta[name="splash-handle"]');
   });
 });
 

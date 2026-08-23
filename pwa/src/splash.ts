@@ -246,6 +246,44 @@ export function applySplashFont(ctx: Pick<DrawTarget, "font">, px: number): stri
   return ctx.font;
 }
 
+// THE ONE ROUTINE THAT DRAWS THE CREDIT LINE, for either splash.
+//
+// Both pictures now come out of this. The launch image gets it through
+// paintSplash below; the cover gets it through the hand copy index.html carries
+// in its head, which rasterizes the same line into a small canvas and shows it
+// as the cover's background. That is why the cover no longer sets the line as
+// live text: two rasterizers drawing one string do not agree, and no amount of
+// matching metrics makes them, because a stylesheet and a canvas do not share a
+// smoothing setting or a baseline rounding rule. Measured on this app before
+// the change, on eight screen shapes in both engines available: the same glyph
+// run to within a pixel of width, but the cover carrying 15 to 25 percent less
+// ink and sitting up to three device pixels off vertically. One rasterizer
+// leaves nothing to differ.
+//
+// The point is drawn in DEVICE pixels and the type is asked for in the COVER's
+// pixels, through a scale of the canvas-to-screen ratio per axis. paintSplash's
+// own comment carries the why of that split; the short version is that the
+// system face spaces small type looser than large type, so the size the font
+// engine is ASKED for has to be the cover's size, whatever pixels it lands on.
+export function drawSplashHandle(
+  ctx: DrawTarget,
+  text: string,
+  fontPx: number,
+  sx: number,
+  sy: number,
+  deviceX: number,
+  deviceY: number,
+): void {
+  ctx.save();
+  ctx.scale(1 / sx, 1 / sy);
+  applySplashFont(ctx, fontPx);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = SPLASH_HANDLE_COLOR;
+  ctx.fillText(text, deviceX * sx, deviceY * sy);
+  ctx.restore();
+}
+
 // paint solid white, then the logo centered, then the credit line near the
 // bottom — pure drawing over a 2D-context-shaped target; the caller owns the
 // canvas the target writes to.
@@ -280,23 +318,27 @@ export function paintSplash(ctx: DrawTarget, logo: CanvasImageSource, g: SplashL
   // canvas is rounded to whole device pixels and the screen is stretched onto
   // exactly that, so this is the stretch the phone itself will apply.
   //
-  // The anchor is unchanged and still the layout's own: the point below is
-  // handleCenterX/handleCenterY stated in the scaled unit, so it lands on the
-  // very same device pixel it always did. "middle" is the point half the font's
+  // The anchor is the layout's own, handed over in device pixels for
+  // drawSplashHandle to put through the scale, so it lands on the very same
+  // device pixel it always did. "middle" is the point half the font's
   // ascent-minus-descent above the baseline, which is the same point CSS puts
-  // at the middle of a line box, and that correspondence is the whole reason
-  // the cover below can land its copy of this text on the same spot without
-  // measuring a single glyph.
+  // at the middle of a line box.
+  //
+  // The drawing itself moved out to drawSplashHandle above, because the cover
+  // draws this same line now instead of setting it as text, and one routine is
+  // the only way two pictures come out identical. Nothing here changed with it:
+  // the calls, their order and the numbers they carry are what they were.
   const sx = g.screenW / g.canvasW;
   const sy = g.screenH / g.canvasH;
-  ctx.save();
-  ctx.scale(1 / sx, 1 / sy);
-  applySplashFont(ctx, coverHandleBox(g).fontPx);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = SPLASH_HANDLE_COLOR;
-  ctx.fillText(SPLASH_HANDLE, g.handleCenterX * sx, g.handleCenterY * sy);
-  ctx.restore();
+  drawSplashHandle(
+    ctx,
+    SPLASH_HANDLE,
+    coverHandleBox(g).fontPx,
+    sx,
+    sy,
+    g.handleCenterX,
+    g.handleCenterY,
+  );
 }
 
 // --- DOM/canvas layer ---------------------------------------------------------
@@ -471,6 +513,94 @@ export function coverHandleBox(g: SplashLayout, screenH: number = g.screenH): Co
   const sy = screenH / g.canvasH;
   const fontPx = g.handleFont * sy;
   return { top: g.handleCenterY * sy - fontPx / 2, height: fontPx, fontPx };
+}
+
+// --- the in-page copy: the credit line as PIXELS ------------------------------
+
+// The strip of the launch image the credit line lives in, in ems of that line.
+// Wide enough that a longer handle than this app's own still has slack either
+// side, tall enough that any face's ascenders and descenders are inside it:
+// with the canvas anchoring on the text's middle, half of three ems is a full
+// em and a half of headroom each way, against a system face that needs about
+// two thirds of one. Nothing is cropped and the extra rows are white, which
+// costs a PNG almost nothing to carry.
+export const SPLASH_BAND_EMS = 3; // band height
+export const SPLASH_BAND_PAD_EMS = 1; // slack each side of the measured text
+
+export interface HandleBand {
+  bandW: number; // device px, the raster's own size
+  bandH: number;
+  bandX: number; // device px, where the raster sits on the launch image
+  bandY: number;
+  drawX: number; // device px INSIDE the raster: where the text is anchored
+  drawY: number;
+  left: number; // CSS px, the same rect on the cover
+  top: number;
+  width: number;
+  height: number;
+}
+
+// The device pixels one CSS pixel is worth on an axis, but only where that is a
+// WHOLE number, and 1 otherwise. On every screen whose size times its ratio is
+// an integer, which is every phone, this is the ratio itself; where the canvas
+// had to be rounded it is 1, which snaps nothing and is the honest answer, since
+// no rect on such a screen lands on both grids at once.
+function pixelStep(canvasEdge: number, screenEdge: number): number {
+  const q = canvasEdge / screenEdge;
+  return q > 0 && q === Math.round(q) ? q : 1;
+}
+
+// pure: the small raster the cover shows the credit line as, given how wide the
+// string measures at the cover's own font size.
+//
+// The cover cannot set this line as text, for the reason drawSplashHandle's
+// comment gives, so it shows a picture of it instead, drawn by that same
+// routine into a canvas this names the size and place of. Two things make the
+// two splashes the same PIXELS rather than merely the same instructions.
+//
+// The corner is a whole DEVICE pixel, so the fraction of a pixel the text's
+// anchor sits at inside the band is the very fraction it sits at on the launch
+// image, and the glyphs land on the device grid identically on both sides. Any
+// other rounding leaves a subpixel phase between the two rasters, which reads as
+// a shimmer and passes every measurement of size and position.
+//
+// And every edge is a whole CSS pixel too, wherever the screen allows one. The
+// cover states this rect to a stylesheet, and a stylesheet holds a length at a
+// resolution of its own: 419 device pixels over a ratio of 3 comes back out of
+// a computed style as 139.666672, which is 419.000016 device pixels, and a
+// browser handed a picture to draw a fraction of a pixel wider than the picture
+// is RESAMPLES it. Measured: the two shapes where that happened were the only
+// two of eight that still did not match, and the resampling smeared the line
+// across seven percent more pixels. Widening the band to the next whole CSS
+// pixel and pushing its corner back to one costs at most a device pixel of the
+// slack the padding already carries, and it is what takes those two to exact.
+//
+// left/top/width/height are that same rect in the cover's CSS pixels, by the
+// canvas-to-screen ratio per axis, exactly as coverLogoRect converts the logo's
+// and for the same reason.
+export function splashHandleBand(g: SplashLayout, textWidthCss: number): HandleBand {
+  const sx = g.screenW / g.canvasW;
+  const sy = g.screenH / g.canvasH;
+  const qx = pixelStep(g.canvasW, g.screenW);
+  const qy = pixelStep(g.canvasH, g.screenH);
+  const em = g.handleFont; // one em of the credit line, in device px
+  const wanted = Math.ceil(textWidthCss / sx) + 2 * SPLASH_BAND_PAD_EMS * em;
+  const bandW = Math.min(g.canvasW, Math.ceil(wanted / qx) * qx);
+  const bandH = Math.min(g.canvasH, Math.ceil((SPLASH_BAND_EMS * em) / qy) * qy);
+  const bandX = Math.floor((g.handleCenterX - bandW / 2) / qx) * qx;
+  const bandY = Math.floor((g.handleCenterY - bandH / 2) / qy) * qy;
+  return {
+    bandW,
+    bandH,
+    bandX,
+    bandY,
+    drawX: g.handleCenterX - bandX,
+    drawY: g.handleCenterY - bandY,
+    left: bandX * sx,
+    top: bandY * sy,
+    width: bandW * sx,
+    height: bandH * sy,
+  };
 }
 
 // --- the in-page copy: DOM layer ----------------------------------------------

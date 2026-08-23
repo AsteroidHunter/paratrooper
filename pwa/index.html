@@ -13,6 +13,12 @@
     <meta name="theme-color" content="#0b0b0c" media="(prefers-color-scheme: dark)" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
+    <!-- The credit line, said where a script in the head can read it: the one
+         below draws THIS string into a picture, and it runs before the parser
+         has reached the cover's own copy in the body. Read rather than written
+         into that script so nothing is hardcoded to one owner; the suite holds
+         the two copies equal. -->
+    <meta name="splash-handle" content="@theonetrueakash" />
     <title>Paratrooper</title>
 
     <!--
@@ -55,7 +61,11 @@
       /* The panel the phone's launch image hands over to: the same solid
          white that image is painted on (SPLASH_BG in src/splash.ts), over
          everything the app draws (the app's own top layer is 30). The fade is
-         stated here and triggered from there, by setting opacity to 0. */
+         stated here and triggered from there, by setting opacity to 0.
+
+         The script below hangs one more thing on this panel: the credit line
+         drawn as pixels, as a background IMAGE. It is a longhand, so this white
+         stays underneath it rather than being replaced, and both fade as one. */
       #splashcover {
         position: fixed;
         inset: 0;
@@ -104,7 +114,14 @@
          The row and the type size are restated in screen pixels by the script
          below, for the reason the logo's block gives, and the family survives
          that because the script sets the two longhands rather than the
-         shorthand. */
+         shorthand.
+
+         This is the FALLBACK line now. Live text and a canvas do not rasterize
+         a string the same way, so the script below draws the line with the very
+         routine the launch image uses, hangs that picture on the cover, and
+         turns this text transparent behind it. With no script or no canvas this
+         text stands and the app behaves as it did before, and either way the
+         string stays in the document for anything that reads one. */
       #splashhandle {
         position: absolute;
         left: 0;
@@ -166,6 +183,11 @@
       below is the number the rules above already resolved to, so it changes
       nothing. Where the screen cannot be read it writes nothing and those
       rules stand, which is also what happens with scripting off.
+
+      It has a second job, and the comment inside it carries the why: it also
+      DRAWS the credit line, into a picture the cover shows in place of the live
+      text, so that line is the same pixels on both splashes rather than the
+      same instructions to two rasterizers.
     -->
     <script>
       (function () {
@@ -185,10 +207,11 @@
           var a = 280 / 320; // SPLASH_LOGO_W / SPLASH_LOGO_H
           var lw = a >= 1 ? box : box * a; // contain-fit the art inside that square
           var lh = a >= 1 ? box / a : box;
-          var font = Math.round(edge * 0.035) * sy; // SPLASH_HANDLE_FRACTION
-          // SPLASH_HANDLE_BOTTOM_FRACTION up from the bottom is the text's MIDDLE,
-          // and CSS places a box by its top, so hand over top-plus-half-the-type
-          var row = (ch - edge * 0.12) * sy - font / 2;
+          var hf = Math.round(edge * 0.035); // SPLASH_HANDLE_FRACTION, device px
+          var font = hf * sy; // and the same type in the cover's own pixels
+          var mid = ch - edge * 0.12; // SPLASH_HANDLE_BOTTOM_FRACTION: the text's MIDDLE
+          // CSS places a box by its top, so hand over top-plus-half-the-type
+          var row = mid * sy - font / 2;
           var css =
             "#splashlogo{" +
             "left:" + ((cw - lw) / 2) * sx + "px;" +
@@ -199,6 +222,97 @@
             "top:" + row + "px;" +
             "font-size:" + font + "px;" +
             "line-height:" + font + "px}";
+          /*
+            AND THE CREDIT LINE AS PIXELS, so the cover shows the same raster
+            the phone's launch image carries rather than setting the same string
+            again as live text. drawSplashHandle in src/splash.ts carries what
+            was measured and why two rasterizers cannot be made to agree.
+
+            It is drawn here, not in the bundle, for the reason the block above
+            gives: the bundle runs hundreds of milliseconds late, and a line
+            that arrives late is the same flash by another route. So this is a
+            hand copy of drawSplashHandle and splashHandleBand, held to them by
+            tests/splash.test.ts, which runs this script's own text against a
+            recording canvas and compares every call.
+
+            The band's corner is rounded to whole DEVICE pixels on purpose: that
+            keeps the fraction of a pixel the anchor sits at inside the band
+            equal to the fraction it sits at on the launch image, so the glyphs
+            land on the same grid both times. Any other anchoring leaves a
+            subpixel phase between the two rasters, which reads as a shimmer and
+            passes every measurement of size and position.
+
+            Its own try, below the CSS the geometry already built: no handle to
+            read or no canvas to draw on leaves the line as text, which is what
+            it was before any of this.
+          */
+          try {
+            var meta = document.querySelector('meta[name="splash-handle"]');
+            var text = meta && meta.content;
+            var cv = text && document.createElement("canvas");
+            var g = cv && cv.getContext && cv.getContext("2d");
+            if (g) {
+              // the font ladder from src/splash.ts: a context throws away a
+              // shorthand it cannot parse and silently keeps the one it had, so
+              // every rung is read back and the size coming back is the proof
+              var fam = [
+                '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif',
+                "system-ui",
+                "sans-serif",
+              ];
+              var face = function () {
+                for (var i = 0; i < fam.length; i++) {
+                  g.font = font + "px " + fam[i];
+                  var back = /(\d+(?:\.\d+)?)px/.exec(g.font);
+                  if (back && Math.abs(+back[1] - font) < 0.05) break;
+                }
+              };
+              face();
+              // The band, in device px: SPLASH_BAND_PAD_EMS of slack each side
+              // of the measured string, SPLASH_BAND_EMS tall around its middle,
+              // every edge grown or pushed back to a whole CSS pixel where the
+              // screen has one. splashHandleBand's comment carries why both
+              // roundings are needed and what each one is worth.
+              var qx = cw / w === Math.round(cw / w) ? cw / w : 1;
+              var qy = ch / h === Math.round(ch / h) ? ch / h : 1;
+              var bw = Math.ceil(g.measureText(text).width / sx) + 2 * hf;
+              bw = Math.ceil(bw / qx) * qx;
+              if (bw > cw) bw = cw;
+              var bh = Math.ceil((3 * hf) / qy) * qy;
+              if (bh > ch) bh = ch;
+              var bx = Math.floor((cw / 2 - bw / 2) / qx) * qx;
+              var by = Math.floor((mid - bh / 2) / qy) * qy;
+              if (bw > 0 && bh > 0) {
+                cv.width = bw; // sizing a canvas clears it, so the face goes on after
+                cv.height = bh;
+                g.fillStyle = "#ffffff"; // SPLASH_BG, the white both splashes stand on
+                g.fillRect(0, 0, bw, bh);
+                g.save();
+                g.scale(1 / sx, 1 / sy);
+                face();
+                g.textAlign = "center";
+                g.textBaseline = "middle";
+                g.fillStyle = "#aeaeb2"; // SPLASH_HANDLE_COLOR
+                g.fillText(text, (cw / 2 - bx) * sx, (mid - by) * sy);
+                g.restore();
+                var pic = cv.toDataURL && cv.toDataURL("image/png");
+                // the picture goes on the COVER, not on the line's own box: the
+                // cover spans the viewport from its top left corner, so the
+                // band is placed in plain screen pixels and nothing clips it
+                if (pic && pic.slice(0, 15) === "data:image/png;") {
+                  css +=
+                    "#splashcover{" +
+                    "background-image:url(" + pic + ");" +
+                    "background-repeat:no-repeat;" +
+                    "background-size:" + bw * sx + "px " + bh * sy + "px;" +
+                    "background-position:" + bx * sx + "px " + by * sy + "px}" +
+                    "#splashhandle{color:transparent}";
+                }
+              }
+            }
+          } catch (e) {
+            /* the picture is the better half, not the only one: leave the text */
+          }
           var tag = document.createElement("style");
           tag.id = "splashfit";
           tag.appendChild(document.createTextNode(css));
