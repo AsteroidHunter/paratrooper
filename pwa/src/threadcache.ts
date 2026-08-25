@@ -22,7 +22,9 @@ const STORE = "thread";
 
 // bump on any change to the cached frame shape or its meaning; mismatched
 // records are dropped wholesale on read
-export const SCHEMA_VERSION = 1;
+// 2: attachment_dims/attachment_blurhashes joined the frame shape; era-1
+//    records lack them and render photos squished with no blur preview
+export const SCHEMA_VERSION = 2;
 
 // mirrors the server's fresh-login replay window (web/app.py limit=50), so a
 // cached boot and a replayed boot build identical DOM

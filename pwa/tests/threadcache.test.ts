@@ -99,6 +99,17 @@ describe("threadcache put/get/del round-trips", () => {
     expect(await rawGet("default")).toBeUndefined(); // deleted, not just skipped
   });
 
+  it("an era-1 record (frames without the attachment fields) is discarded", async () => {
+    // the bump itself: era-1 photo frames lack attachment_dims and
+    // attachment_blurhashes, so the whole store is dropped once and the boot
+    // rebuilds from the server's healed rows
+    expect(cache.SCHEMA_VERSION).toBeGreaterThan(1);
+    await rawPut({ id: "default", schema: 1, lastSeq: 9,
+      frames: [{ seq: 9, role: "user", payload: "pic", attachments: ["k1"] }] });
+    expect(await cache.get("default")).toBeNull();
+    expect(await rawGet("default")).toBeUndefined();
+  });
+
   it("a record that lost its shape (frames not an array) is dropped too", async () => {
     await rawPut({ id: "default", schema: cache.SCHEMA_VERSION, lastSeq: 9, frames: "no" });
     expect(await cache.get("default")).toBeNull();

@@ -7,6 +7,7 @@ import { caretCountsAsComposing } from "./caret";
 import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
+import { enrichFrame } from "./enrich";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { composeMirror, fitComposeBox } from "./mirror";
 import {
@@ -69,7 +70,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.21"; // the credit line is the same PIXELS on both splashes, drawn once and shown twice
+const APP_VERSION = "0.3.22"; // the thread cache drops its stale era and keeps the server's copy of a sent photo
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -125,6 +126,9 @@ const PROBE_FALLBACK_MS = 5000; // past any believable probe round trip; only a 
 // idempotent (duplicate seqs no-op — reconnect replays and zombie-socket
 // re-deliveries vanish here) and ordered (older pages and out-of-order frames
 // insert in position). The DOM is a projection of this map, never the state.
+// One carve-out from the no-op: a RICHER duplicate repairs the stored frame
+// in place (enrichStored below), because the server heals photo rows on read
+// and the re-delivery may be the only copy carrying the attachment fields.
 const store = new Map<number, ServerMsg>();
 
 // finished-reply hold (hold.ts owns the state machine): a "done" landing while
@@ -1155,7 +1159,14 @@ function decorate(): void {
 // replay, and older history pages alike. Idempotent by seq, ordered by seq.
 function applyEvent(m: ServerMsg): void {
   const seq = m.seq;
-  if (!seq || store.has(seq)) return; // duplicate delivery no-ops
+  if (!seq) return;
+  if (store.has(seq)) {
+    // a duplicate delivery no-ops UNLESS it is richer: the server heals photo
+    // rows on read, so a re-delivery can carry the attachment fields a frame
+    // stored before they shipped is missing (enrich.ts holds the rule)
+    enrichStored(m);
+    return;
+  }
   const prevMax = lastSeq;
   store.set(seq, m);
   if (seq > lastSeq) lastSeq = seq;
@@ -1193,6 +1204,23 @@ function applyEvent(m: ServerMsg): void {
   if (m.kind === "published") flipCorrelatedPr(m);
   updateReceipt(); // any event can move the watermark (user row, job row, working)
   cacheWrites.bump(); // the cold-open snapshot trails every applied frame, debounced
+}
+
+// Store-only repair for a re-delivered seq: adopt whatever meaningful fields
+// the stored frame lacks (enrich.ts decides; identical or poorer copies
+// change nothing). Deliberately no DOM re-render: this session already drew
+// the frame from what it had, and the point is the cold-open snapshot the
+// next boot paints from. True when the store changed.
+function enrichStored(m: ServerMsg): boolean {
+  const seq = m.seq;
+  if (!seq) return false;
+  const cur = store.get(seq);
+  if (!cur) return false;
+  const merged = enrichFrame(cur, m);
+  if (!merged) return false;
+  store.set(seq, merged);
+  cacheWrites.bump(); // the repaired frame must reach the snapshot
+  return true;
 }
 
 // re-render one event's wrapper in place (e.g. its pr button state changed)
@@ -2078,6 +2106,11 @@ async function reconcileRetracts(): Promise<void> {
     return; // reconcile is best-effort; the next settle gets another look
   }
   if (!document.getElementById("thread")) return;
+  // the page in hand is also the server's authoritative copy of every row it
+  // spans: give stored frames from a poorer era their attachment fields back
+  // (the enrich rule no-ops on plain duplicates), so a send whose read-back
+  // fetch failed still heals on the next connect
+  for (const m of messages) enrichStored(m);
   const present = new Set(messages.map((m) => m.seq ?? 0).filter((s) => s > 0));
   if (!present.size) return; // an empty page bounds nothing: drop nothing
   const lo = Math.min(...present);
@@ -3112,9 +3145,37 @@ async function transmit(
       if (seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
       if (oldestSeq === 0 || seq < oldestSeq) oldestSeq = seq;
       cacheWrites.bump(); // the ACKed send enters the cold-open snapshot like any applied frame
+      // the frame above is synthesized and the ACK carries nothing more than
+      // the seq, so a photo send is missing its attachment_dims and
+      // attachment_blurhashes: read the authoritative row back and let the
+      // enrich rule replace the synthesized copy before it can poison the
+      // cold-open snapshot (text-only sends have nothing to gain)
+      if (keys.length) void adoptServerFrame(seq);
     }
   }
   updateReceipt(); // the server has it: the stored row now derives Delivered
+}
+
+// The read-back half of a photo send. /api/send ACKs with the seq alone, and
+// the socket never echoes your own message (lastSeq already covers it, so no
+// replay ever re-delivers it either): the server's complete frame, attachment
+// sizes and blurhashes included, exists only behind the history endpoint the
+// client already pages with. One exact-row fetch, routed through the same
+// enrich rule as any richer re-delivery. Best-effort: on failure the next
+// connect's reconcile page gets the same chance.
+async function adoptServerFrame(seq: number): Promise<void> {
+  let messages: ServerMsg[];
+  try {
+    const r = await fetch(`/api/history/${THREAD_ID}?before=${seq + 1}&limit=1`, {
+      headers: authHeaders(),
+    });
+    if (!r.ok) return;
+    ({ messages } = (await r.json()) as { messages: ServerMsg[] });
+  } catch {
+    return;
+  }
+  const m = messages.find((f) => f.seq === seq);
+  if (m) enrichStored(m);
 }
 
 // --- failed sends (iMessage): the bubble STAYS, marked by a red !-in-circle
