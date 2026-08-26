@@ -15,6 +15,9 @@ import {
   CLOSE_SLACK_AT_MS,
   EDGE_FRAMES,
   EVT_FRESH_MS,
+  RISE_FRAME_CAP,
+  RISE_TAIL_EVERY,
+  RISE_TRACE_MS,
   TOUCH_FOLLOW_MS,
   anchorFrame,
   domCensus,
@@ -22,6 +25,7 @@ import {
   edgeMark,
   pinRecord,
   pumpFrames,
+  riseKeeps,
   sizeRecord,
   slackRecord,
   slackSample,
@@ -30,7 +34,10 @@ import type { EdgeReader, SlackReader } from "../src/shell";
 
 // one edge frame's geometry reads, as plain numbers
 function reader(over: Partial<Record<keyof EdgeReader, unknown>> = {}): EdgeReader {
-  const base = { padB: 34, shellH: 844, shellTop: 0, pillBot: 800.5, thBot: 760, st: 1200 };
+  const base = {
+    padB: 34, shellH: 844, shellTop: 0, pillBot: 800.5, thBot: 760, st: 1200,
+    sy: 0, vvTop: 0,
+  };
   const ft = "ft" in over ? (over.ft as boolean | undefined) : true;
   const fts = "fts" in over ? (over.fts as number | undefined) : undefined;
   return {
@@ -40,6 +47,8 @@ function reader(over: Partial<Record<keyof EdgeReader, unknown>> = {}): EdgeRead
     pillBot: () => (over.pillBot as number) ?? base.pillBot,
     thBot: () => (over.thBot as number) ?? base.thBot,
     st: () => (over.st as number) ?? base.st,
+    sy: () => (over.sy as number) ?? base.sy,
+    vvTop: () => (over.vvTop as number) ?? base.vvTop,
     fts: () => fts,
     ft: () => ft,
   };
@@ -49,8 +58,24 @@ describe("kb-fall / kb-rise: one record per frame, one builder for both edges", 
   it("carries every field an edge is read from, and nothing else", () => {
     expect(edgeFrame(16.7, reader())).toEqual({
       ms: 17, padB: 34, shellH: 844, shellTop: 0,
-      pillBot: 800.5, thBot: 760, st: 1200, ft: true,
+      pillBot: 800.5, thBot: 760, st: 1200, sy: 0, vvTop: 0, ft: true,
     });
+  });
+
+  it("the two displacement sources of a shove ride every frame, to a tenth of a pixel", () => {
+    // the shoved open under hunt: the window scroll AND the viewport offset
+    // both moved, and the per-frame trail recorded neither of them
+    const shoved = edgeFrame(700, reader({ sy: 411.96, vvTop: 362.04 }));
+    expect(shoved.sy).toBe(412);
+    expect(shoved.vvTop).toBe(362);
+    const rest = edgeFrame(0, reader());
+    expect(rest.sy).toBe(0);
+    expect(rest.vvTop).toBe(0);
+  });
+
+  it("a missing visual viewport reads null, never a zero that reads as at rest", () => {
+    expect(edgeFrame(16, reader({ vvTop: NaN })).vvTop).toBeNull();
+    expect(edgeFrame(16, reader({ sy: NaN })).sy).toBeNull();
   });
 
   it("keeps a tenth of a pixel: the hop under test is sub-pixel at its edges", () => {
@@ -147,6 +172,73 @@ describe("the frame loop is bounded — a probe must not outlive what it probes"
     const { seen, queue } = pump(1);
     expect(seen).toEqual([0]);
     expect(queue.length).toBe(0);
+  });
+});
+
+// The raise's long window. The shove this trace hunts can land well after the
+// glide settles: one open read sx 0 sy 0 at its edge while its own shove clear
+// proved the displacement fired ten ms later, and a probe that stopped with
+// the motion recorded nothing of the yank the screen actually showed. So the
+// raise keeps sampling to RISE_TRACE_MS on a timed stop, dense for the first
+// EDGE_FRAMES callbacks exactly as before and every other callback past them,
+// while the close keeps its unchanged EDGE_FRAMES budget.
+describe("the raise's window: timed to ~1.5s, dense head unchanged, tail thinned", () => {
+  it("the head records every callback: exactly the frames the old budget recorded", () => {
+    for (let i = 0; i < EDGE_FRAMES; i += 1) expect(riseKeeps(i)).toBe(true);
+  });
+
+  it("past the head the tail records every other callback", () => {
+    expect(RISE_TAIL_EVERY).toBe(2);
+    expect(riseKeeps(EDGE_FRAMES)).toBe(true);
+    expect(riseKeeps(EDGE_FRAMES + 1)).toBe(false);
+    expect(riseKeeps(EDGE_FRAMES + 2)).toBe(true);
+    expect(riseKeeps(EDGE_FRAMES + 3)).toBe(false);
+  });
+
+  it("the timed stop ends the run at the window, well short of the callback cap", () => {
+    // pump on a fake 60fps clock: the run must outlive the settle window by a
+    // second, so a late shove and its correction land in recorded frames
+    let clock = 0;
+    const seen: number[] = [];
+    pumpFrames(
+      RISE_FRAME_CAP,
+      (i) => seen.push(i),
+      (cb) => { clock += 16.7; cb(); },
+      () => clock >= RISE_TRACE_MS,
+    );
+    expect(seen.length).toBe(90); // ~1500ms of 16.7ms frames
+    expect(seen.length).toBeLessThan(RISE_FRAME_CAP);
+    expect(seen.length).toBeGreaterThan(EDGE_FRAMES); // the old budget saw none of this
+  });
+
+  it("about sixty records per raise: the tail is thinned, the ring is not flooded", () => {
+    const recorded: number[] = [];
+    let clock = 0;
+    pumpFrames(
+      RISE_FRAME_CAP,
+      (i) => { if (riseKeeps(i)) recorded.push(i); },
+      (cb) => { clock += 16.7; cb(); },
+      () => clock >= RISE_TRACE_MS,
+    );
+    expect(recorded.length).toBe(60); // 30 dense + 30 thinned, not 90
+    // the thinned tail still reaches the window's far end, where the late
+    // shove and its correction land
+    expect(recorded[recorded.length - 1] * 16.7).toBeGreaterThan(1400);
+    // and no two kept callbacks are ever further apart than the stride
+    for (let k = 1; k < recorded.length; k += 1) {
+      expect(recorded[k] - recorded[k - 1]).toBeLessThanOrEqual(RISE_TAIL_EVERY);
+    }
+  });
+
+  it("a done that never fires defers to the budget, the close's unchanged behavior", () => {
+    const seen: number[] = [];
+    pumpFrames(5, (i) => seen.push(i), (cb) => cb(), () => false);
+    expect(seen).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("the cap outlives the window even at 120Hz, so the clock is the stopper", () => {
+    expect(RISE_TRACE_MS).toBe(1500);
+    expect(RISE_FRAME_CAP * (1000 / 120)).toBeGreaterThan(RISE_TRACE_MS);
   });
 });
 
@@ -314,6 +406,30 @@ describe("wiring: read-only, and each read on the right side of the writes", () 
     // off the same element costs one measurement, not one each
     expect(body.match(/getBoundingClientRect\(\)/g)?.length).toBe(3);
     expect(body).toMatch(/shellH: \(\) => shell\?\.height[\s\S]{0,80}shellTop: \(\) => shell\?\.top/);
+  });
+
+  it("the frame's scroll reads are the already-computed values, not layout-forcing ones", () => {
+    const body = shell.match(
+      /function edgeSample\(ms: number, fts: number \| undefined\): EdgeFrame \{[\s\S]*?\n\}/,
+    )?.[0] ?? "";
+    expect(body).toMatch(/sy: \(\) => window\.scrollY,/);
+    expect(body).toMatch(/vvTop: \(\) => window\.visualViewport\?\.offsetTop \?\? NaN,/);
+  });
+
+  it("only the raise runs the long window; the close keeps its unchanged budget", () => {
+    expect(shell).toMatch(/const rise = edgeChannel === "kb-rise";/);
+    expect(shell).toMatch(/rise \? RISE_FRAME_CAP : EDGE_FRAMES,/);
+    expect(shell).toMatch(
+      /rise \? \(\) => run !== edgeRun \|\| performance\.now\(\) - t0 >= RISE_TRACE_MS : undefined,/,
+    );
+    // the thinning runs through the one predicate, after the stale-run guard
+    expect(shell).toMatch(/if \(run !== edgeRun\) return;[\s\S]{0,260}if \(!riseKeeps\(i\)\) return;/);
+  });
+
+  it("the shove clear names its edge: en is the counter the kb-edge record carries as n", () => {
+    expect(shell).toMatch(/holdDiagRecord\("kb-shove", \{ act: "clear", n: shoveClears, en: edgeRun/);
+    expect(shell).toMatch(/holdDiagRecord\("kb-shove", \{ act: "yield", n: shoveClears, en: edgeRun/);
+    expect(shell).toMatch(/n: edgeRun,/); // the edge record's own counter, unchanged
   });
 
   it("the rAF wrapper hands the frame its own start time and does nothing else", () => {

@@ -184,8 +184,10 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   //
   // "kb-edge" is IN, and it is the one that makes the frame trails arrive
   // WHOLE. It fires from the edge's first frame, about 20ms in, so the post it
-  // arms lands ~620ms after the edge, past the last of the thirty frames at
-  // 60fps. kb-close and kb-glide fire at the edge itself and would settle at
+  // arms lands ~620ms after the edge, past the last close frame at 60fps; the
+  // raise's longer thinned tail outruns that post, and its late frames simply
+  // ride the next armed mark (a shove clear or the close), whole-ring as
+  // below. kb-close and kb-glide fire at the edge itself and would settle at
   // ~600ms, which is the tighter window of the two. A slower phone simply
   // posts mid-run and the rest rides the next post: the payload is the whole
   // ring buffer, not a delta, so nothing is ever lost, only later.

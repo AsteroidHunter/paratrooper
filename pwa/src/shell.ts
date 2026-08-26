@@ -662,13 +662,17 @@ export function reconcile(): void {
     const y = Math.round(window.scrollY);
     const heightChanged = appliedHeight === null || Math.round(t.vvHeight) !== appliedHeight;
     const verdict = shoveVerdict(wasUp, t.kb, x, y, heightChanged, shoveClears);
+    // TEMP DIAGNOSTIC (kb-rise, block at the bottom): en on both records below
+    // is the edge counter the kb-edge record carries as n, so a clear names the
+    // open it landed inside and frames, edge summary and clears join on one
+    // timeline. It goes when that block goes.
     if (verdict === "clear" && appliedTop !== null && appliedHeight !== null) {
       shoveClears += 1;
       window.scrollTo(0, 0);
       target = { kb: t.kb, vvTop: appliedTop, vvHeight: appliedHeight };
-      holdDiagRecord("kb-shove", { act: "clear", n: shoveClears, x, y, top: Math.round(t.vvTop) });
+      holdDiagRecord("kb-shove", { act: "clear", n: shoveClears, en: edgeRun, x, y, top: Math.round(t.vvTop) });
     } else if (verdict === "yield") {
-      holdDiagRecord("kb-shove", { act: "yield", n: shoveClears, x, y, top: Math.round(t.vvTop) });
+      holdDiagRecord("kb-shove", { act: "yield", n: shoveClears, en: edgeRun, x, y, top: Math.round(t.vvTop) });
     }
     // The edges stay the shell's own business, and they still resize with the
     // viewport: only the TOP an edge writes is held back, and only when the
@@ -916,11 +920,21 @@ export function currentFileInput(): HTMLInputElement | null {
 //                 RAISE was never sampled at all (only the close ran a probe),
 //                 and neither edge recorded the shell's rendered TOP, which is
 //                 the coordinate the shrink-and-pan mode moves by hundreds of
-//                 pixels. Both edges now run ONE probe, on one budget, through
-//                 one record builder, so the two motions are comparable line
-//                 for line; only the channel name differs. shell-size samples
-//                 once per viewport event, which is far too slow to catch
-//                 either shape.
+//                 pixels. Both edges now run ONE probe through one record
+//                 builder, so the two motions are comparable line for line;
+//                 only the channel name differs. shell-size samples once per
+//                 viewport event, which is far too slow to catch either shape.
+//                 Every frame also carries sy and vvTop now: a shoved open
+//                 moved BOTH displacement sources (window scroll 412 with the
+//                 viewport offset at 362 or 412) while the frames recorded
+//                 neither, and the edge summary's one read can land before the
+//                 shove does (one open read sx 0 sy 0 with its own clear ten
+//                 ms later). And the raise keeps sampling to RISE_TRACE_MS on
+//                 a timed stop, thinned past the dense head (riseKeeps),
+//                 because that late shove and its correction land after the
+//                 glide settles, where the old budget had already stopped; the
+//                 close keeps its unchanged budget, since every observed shove
+//                 rode an open.
 //   kb-edge     : one record per keyboard edge, and the reason this session
 //                 exists. The close trail says the bar's first painted frame
 //                 lands 6 to 45ms after the edge, so its first visible move is
@@ -980,7 +994,8 @@ export function currentFileInput(): HTMLInputElement | null {
 // DIAGNOSTIC (the atEdge flag, the two edge samples and the seeding-reflow mark
 // in applyShell, the shell-size and shell-pin records in the same function, the
 // census in correctionPass, the probe start in keyboardClosed and the mirror
-// one in reconcile, the anchor record in the picker's present effect plus the
+// one in reconcile, the en field on reconcile's two kb-shove records, the
+// anchor record in the picker's present effect plus the
 // held swallow's record in pickerTapOpen, the two
 // markViewportEvent listeners and the safe-area probe in initShell), the
 // watchFollowTail wiring in main.ts, "pick-anchor" and "kb-edge" in hold.ts's
@@ -997,6 +1012,39 @@ export function currentFileInput(): HTMLInputElement | null {
  * unchanged, so trails recorded either side of this read against each other.
  */
 export const EDGE_FRAMES = 30;
+
+/**
+ * The raise keeps sampling until about this long after its edge. The shove
+ * this trace hunts can land AFTER the glide settles: one open read sx 0 sy 0
+ * at its edge while its own shove clear proved the displacement fired ten ms
+ * later, so a run that stops with the motion can miss the yank and its
+ * correction entirely. The close keeps the plain EDGE_FRAMES window: every
+ * observed shove rode an open.
+ */
+export const RISE_TRACE_MS = 1500;
+
+/**
+ * Callback cap on the raise's run, a backstop behind the timed stop: about
+ * 180 callbacks cover the window at 120Hz, so the cap can only bite if the
+ * clock misbehaves.
+ */
+export const RISE_FRAME_CAP = 200;
+
+/** past the dense head the raise records every this-many callbacks */
+export const RISE_TAIL_EVERY = 2;
+
+/**
+ * Whether callback i of a raise run records a frame: the first EDGE_FRAMES
+ * record every callback, exactly the frames the old budget recorded, so old
+ * and new trails read against each other; the tail then thins to every other
+ * callback. The tail is there to place a late shove and its correction, which
+ * are steps of hundreds of pixels, so half rate still names their frames and
+ * a raise stays near sixty records instead of ninety against hold.ts's
+ * six-hundred-event ring.
+ */
+export function riseKeeps(i: number): boolean {
+  return i < EDGE_FRAMES || (i - EDGE_FRAMES) % RISE_TAIL_EVERY === 0;
+}
 
 /** a viewport-event stamp older than this cannot be the event that carried an edge */
 export const EVT_FRESH_MS = 100;
@@ -1024,6 +1072,12 @@ export const CENSUS_SELECTORS: Record<string, string> = {
 // work sat between the frame starting and the probe getting to run. A close
 // whose ms values are 33ms apart is a dropped frame if fts moved with them and
 // a starved callback if it did not, and the trail could not tell those apart.
+//
+// sy and vvTop are the two displacement sources a shove moves: the window
+// scroll and the visual viewport's own offset. The edge summary samples them
+// once, at the edge, and that read can land before the shove does, so they
+// ride every frame; both are plain reads of state the engine already
+// computed, so neither can force a layout.
 export type EdgeFrame = {
   ms: number;
   fts?: number;
@@ -1033,6 +1087,8 @@ export type EdgeFrame = {
   pillBot: number | null;
   thBot: number | null;
   st: number | null;
+  sy: number | null;
+  vvTop: number | null;
   ft?: boolean;
 };
 
@@ -1044,6 +1100,8 @@ export interface EdgeReader {
   pillBot(): number;
   thBot(): number;
   st(): number;
+  sy(): number; // window.scrollY: one displacement source of a shove
+  vvTop(): number; // visualViewport.offsetTop: the other one
   fts(): number | undefined; // absent on the edge sample, which is not in a frame
   ft(): boolean | undefined; // absent when nothing registered a follow reader
 }
@@ -1080,6 +1138,8 @@ export function edgeFrame(ms: number, r: EdgeReader): EdgeFrame {
     pillBot: px(r.pillBot()),
     thBot: px(r.thBot()),
     st: px(r.st()),
+    sy: px(r.sy()),
+    vvTop: px(r.vvTop()),
   };
   const fts = r.fts();
   if (fts !== undefined) frame.fts = Math.round(fts);
@@ -1184,19 +1244,23 @@ export function domCensus(
 /**
  * Run exactly `budget` frames through `raf`, then stop. Split out from the DOM
  * reader so a test can pump it on a fake clock and prove the loop ends on its
- * budget instead of rescheduling itself for the life of the session.
+ * budget instead of rescheduling itself for the life of the session. `done`,
+ * when given, is asked after each frame and ends the run early: the raise's
+ * long tail stops on the clock, not on a count, so its budget is only a
+ * backstop.
  */
 export function pumpFrames(
   budget: number,
   onFrame: (i: number) => void,
   raf: (cb: () => void) => void,
+  done?: () => boolean,
 ): void {
   if (budget <= 0) return;
   let i = 0;
   const step = (): void => {
     onFrame(i);
     i += 1;
-    if (i < budget) raf(step);
+    if (i < budget && !done?.()) raf(step);
   };
   raf(step);
 }
@@ -1258,6 +1322,10 @@ function edgeSample(ms: number, fts: number | undefined): EdgeFrame {
     pillBot: () => pill?.bottom ?? NaN,
     thBot: () => thread?.bottom ?? NaN,
     st: () => edgeThread?.scrollTop ?? NaN,
+    // the two displacement sources of a shove, already computed by the
+    // engine, so neither read can force a layout
+    sy: () => window.scrollY,
+    vvTop: () => window.visualViewport?.offsetTop ?? NaN,
     fts: () => fts,
     ft: () => readFollowTail?.(),
   });
@@ -1333,14 +1401,21 @@ function recordShellPin(top: number | null, h: number | null): void {
 function startEdgeProbe(): void {
   if (!appEl || typeof requestAnimationFrame !== "function") return;
   const run = edgeRun;
+  const t0 = edgeT0;
+  // the raise runs the long window (see RISE_TRACE_MS); the close keeps the
+  // plain EDGE_FRAMES budget it always had
+  const rise = edgeChannel === "kb-rise";
   // the app has finished this edge's bookkeeping: on the close that is
   // applyShell plus the correction pass, on the raise applyShell alone
   const armed = performance.now() - edgeT0;
   let fts = -1; // the running frame's own start, handed over by the rAF callback
   pumpFrames(
-    EDGE_FRAMES,
+    rise ? RISE_FRAME_CAP : EDGE_FRAMES,
     (i) => {
       if (run !== edgeRun) return; // a newer edge is recording; leave its trail clean
+      // the raise's tail thins through the one predicate; the dense head and
+      // the whole close record every callback, exactly as before
+      if (!riseKeeps(i)) return;
       const read = performance.now() - edgeT0;
       const started = fts >= 0 ? fts - edgeT0 : undefined;
       const frame = edgeSample(read, started);
@@ -1359,6 +1434,9 @@ function startEdgeProbe(): void {
         cb();
       });
     },
+    // the raise stops on the clock; a superseded run stops rescheduling too,
+    // instead of pumping empty callbacks to its cap
+    rise ? () => run !== edgeRun || performance.now() - t0 >= RISE_TRACE_MS : undefined,
   );
 }
 

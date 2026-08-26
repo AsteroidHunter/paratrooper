@@ -78,7 +78,7 @@ import "./scrolljank";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.29"; // every scroll gesture now reports its frame timing and what ran inside the long frames
+const APP_VERSION = "0.3.30"; // keyboard edge frames now carry the window scroll and viewport offset, and the raise trace runs long enough to catch a late shove
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
