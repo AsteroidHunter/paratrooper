@@ -237,6 +237,26 @@ export function focusingActive(
   return editorFocused && !kb && sinceFocusMs < FOCUSING_MAX_MS;
 }
 
+// The document-root height override (html.kbdoc, styles.css): while this is
+// true, html/body take height:100% instead of 100vh, so the document is
+// exactly the layout viewport. In window-shrink mode 100vh keeps the full
+// screen while innerHeight drops to the keyboard's top, leaving hundreds of px
+// of scrollable document; iOS's caret reveal spends exactly that overflow
+// (every recorded shove's sy read it to the pixel), and the overflow:hidden and
+// touch-action already on html/body demonstrably do not stop it. Zero
+// scrollable overflow does: window scroll clamps to 0 and there is nothing to
+// shove, leaving the shove clear and the edge's held top as second nets.
+// Scoped by the session's own signals, nothing invented: `keyboard` is the
+// applied kb-or-focusing edge (on with the focus tap itself, ahead of the
+// keyboard's first vv event), `closePending` is the close retry still owed,
+// because vv values land late after a close and restoring 100vh mid-dismissal
+// would hand that room straight back. Both false is rest AND the keyboard-less
+// focus that lapsed: there the layout viewport is the full screen, 100% and
+// 100vh resolve to the same px, so the toggle can never move anything visible.
+export function kbdocActive(keyboard: boolean, closePending: boolean): boolean {
+  return keyboard || closePending;
+}
+
 // Keyboard open/close glide: WebKit can publish a keyboard's whole geometry
 // change as ONE vv event, and a shell box applied in one write is a jump cut.
 // Box writes landing inside this window after a .kb edge animate (styles.css
@@ -389,6 +409,9 @@ let glideTimer: ReturnType<typeof setTimeout> | null = null;
 // edges only (applyShell runs on every viewport event).
 let appliedKeyboard = false;
 let onKeyboard: ((up: boolean) => void) | null = null;
+// the document-root override as applied (html.kbdoc, styles.css): html/body
+// ride the layout viewport for the whole session, so the window cannot scroll
+let appliedKbdoc = false;
 
 // Register the one listener for that edge. The jump chevron uses it: it must
 // never be visible while the keyboard is up (downbtn.ts owns the rule).
@@ -535,6 +558,17 @@ function applyShell(t: ShellTarget, settling: boolean): void {
   }
 }
 
+// THE one writer of the document-root class (kbdocActive owns the decision;
+// styles.css owns what it means). Converges at the end of every reconcile,
+// plus once when the close retry resolves: that resolution is the only
+// transition of its inputs no event carries.
+function applyKbdoc(): void {
+  const on = kbdocActive(appliedKeyboard, closeRetry !== null);
+  if (on === appliedKbdoc) return;
+  appliedKbdoc = on;
+  document.documentElement.classList.toggle("kbdoc", on);
+}
+
 // --- close-time correction + heal: the only fights, and only after close ------
 // One conditional pass on the close edge (that event's own numbers) and one
 // re-read shortly after: visual-viewport values land late after a close
@@ -587,6 +621,7 @@ function keyboardClosed(): void {
     closeRetry = null;
     if (kbUp) return; // a new keyboard session owns the geometry now
     correctionPass("retry");
+    applyKbdoc(); // the session provably ends here: 100vh may come back
   }, CLOSE_RETRY_MS);
 }
 
@@ -669,6 +704,11 @@ export function reconcile(): void {
   // `armed` therefore reads applyShell's work here against applyShell plus the
   // correction pass on the close.
   if (!wasUp && t.kb) startEdgeProbe();
+  // the document-root class last, off the applied signals the lines above just
+  // settled: the close edge reads the retry keyboardClosed only just armed, so
+  // the override holds through the close's late vv values, and the focusin
+  // that starts a session turns it on inside the focus tap's own dispatch
+  applyKbdoc();
 }
 
 const picker = createPickerLifecycle({

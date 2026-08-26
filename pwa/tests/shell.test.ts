@@ -18,6 +18,7 @@ import {
   focusingActive,
   healNeeded,
   holdsBarTap,
+  kbdocActive,
   keyboardInset,
   preservesFocus,
   shellBox,
@@ -515,6 +516,81 @@ describe("focusingActive — the tap-time choreography signal (the pop-then-expa
   it("blur ends it whatever the clock says", () => {
     expect(focusingActive(false, false, 10)).toBe(false);
     expect(focusingActive(false, true, 10)).toBe(false);
+  });
+});
+
+// The document-root height override: html.kbdoc swaps html/body from 100vh to
+// 100% for exactly the keyboard session, so in window-shrink mode the document
+// IS the shrunken layout viewport and iOS's caret reveal has zero scrollable
+// slack to spend (the kb-edge records' sy must read 0 on device). The decision
+// rides the session's own signals: the applied kb-or-focusing edge, and the
+// close retry still owed.
+describe("kbdocActive: the document-root override's session scope", () => {
+  it("on while the keyboard is provably up: the document must not out-grow the viewport", () => {
+    expect(kbdocActive(true, false)).toBe(true);
+  });
+
+  it("on from the focus tap itself: the focusing half of the applied signal counts", () => {
+    // the same ORed signal the chevron watches (applyShell's `keyboard`), so
+    // the override is in force before the keyboard's first vv event lands
+    expect(kbdocActive(focusingActive(true, false, 0), false)).toBe(true);
+  });
+
+  it("held through the close pass: vv values land late, so 100vh waits for the retry", () => {
+    expect(kbdocActive(false, true)).toBe(true);
+  });
+
+  it("off once the retry has resolved: the session provably over on its own signal", () => {
+    expect(kbdocActive(false, false)).toBe(false);
+  });
+
+  it("a keyboard-less focus that lapses drops it: focusing expired, no close pass ever armed", () => {
+    expect(kbdocActive(focusingActive(true, false, FOCUSING_MAX_MS), false)).toBe(false);
+  });
+
+  it("off at rest, and rest is where 100% and 100vh agree, so the edges cannot jump", () => {
+    expect(kbdocActive(false, false)).toBe(false);
+  });
+});
+
+// Wiring and presentation pins for the override: one writer on the document
+// root, deciding off the applied signals alone; on inside the focusin's own
+// reconcile; off only after the close retry has run; and the sheet holds the
+// rest rule at 100vh (the cold-start letterbox guard) with the session rule
+// carrying height and nothing else.
+describe("wiring: html.kbdoc rides the session's own signals", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+
+  it("one writer, on the document root, off the applied signal and the pending retry", () => {
+    expect(shell).toMatch(
+      /function applyKbdoc\(\): void \{\n  const on = kbdocActive\(appliedKeyboard, closeRetry !== null\);/,
+    );
+    expect(shell).toMatch(/document\.documentElement\.classList\.toggle\("kbdoc", on\);/);
+    expect(shell.match(/classList\.toggle\("kbdoc"/g)).toHaveLength(1);
+    expect(shell).toMatch(/let appliedKbdoc = false;/); // boots off: rest carries no class
+  });
+
+  it("converges at the end of every reconcile, after keyboardClosed has armed the retry", () => {
+    // so the focusin that starts a session flips it on inside the focus tap's
+    // dispatch, and the close edge reads closePending true instead of a gap
+    expect(shell).toMatch(
+      /if \(wasUp && !t\.kb\) keyboardClosed\(\);[\s\S]{0,900}applyKbdoc\(\);\n\}/,
+    );
+  });
+
+  it("off only after the close retry has run; a live new session never reaches the drop", () => {
+    expect(shell).toMatch(
+      /if \(kbUp\) return; \/\/ a new keyboard session owns the geometry now\n\s*correctionPass\("retry"\);\n\s*applyKbdoc\(\);/,
+    );
+  });
+
+  it("the session rule swaps html AND body to 100%, and carries height alone", () => {
+    expect(css).toMatch(/\nhtml\.kbdoc,\nhtml\.kbdoc body \{\n  height: 100%;\n\}/);
+  });
+
+  it("the rest rule keeps 100vh: the cold-start letterbox guard is untouched", () => {
+    expect(css).toMatch(/\nhtml, body \{[^{}]*height: 100vh;/);
   });
 });
 
