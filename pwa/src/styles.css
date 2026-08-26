@@ -99,10 +99,7 @@ html, body {
   /* 100vh, NOT 100% or 100dvh: in iOS standalone mode height:100% defeats
      viewport-fit=cover (the webview letterboxes and paints a white bar under
      the app) and 100dvh misreports on cold start; standalone has no toolbar,
-     so 100vh is exact once the viewport settles. All of that is the REST
-     state: while a keyboard session is live, html.kbdoc (next rule, shell.ts)
-     overrides to 100% so the document cannot out-grow a keyboard-shrunken
-     layout viewport. */
+     so 100vh is exact once the viewport settles */
   height: 100vh;
   overflow: hidden;
   background: var(--bg);
@@ -125,24 +122,6 @@ html, body {
      CREATE a programmatic scroller.) */
   overscroll-behavior: none;
   touch-action: none;
-}
-
-/* Keyboard session (html.kbdoc, shell.ts applyKbdoc): html/body at the layout
-   viewport's own height instead of 100vh. When iOS presents the keyboard by
-   shrinking the window, 100vh keeps the full-screen height (812 against an
-   innerHeight of ~400), leaving ~412px of scrollable document for the
-   programmatic caret reveal to spend: every recorded shove displaced exactly
-   that slack, and the overflow/touch-action lockdown above demonstrably does
-   not stop it. Zero scrollable overflow does; at 100% the document IS the
-   shrunken viewport, window scroll clamps to 0, and the shove clear (shell.ts
-   shoveVerdict) becomes the second net instead of the only one. The class
-   spans focusin through the close retry, and at both edges the viewport is
-   full-screen, where 100% resolves to the very px 100vh does, so the toggle
-   itself never moves anything and the cold-start letterbox above stays a
-   rest-state concern the override never meets. */
-html.kbdoc,
-html.kbdoc body {
-  height: 100%;
 }
 
 /* Fixed app shell pinned by inset alone — pinning both edges needs no viewport

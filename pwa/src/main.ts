@@ -72,7 +72,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.26"; // a photo send keeps its strip lit, starts its glide at zero, never freezes, and carries its stamp
+const APP_VERSION = "0.3.27"; // the keyboard height override is reverted; it destabilized every scroll
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
