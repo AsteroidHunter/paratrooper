@@ -189,6 +189,12 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // "shell-pin" stays out for the opposite reason: it fires ~470ms after the
   // close, inside a window some earlier mark already armed, and arming there
   // would only push that post later.
+  //
+  // "close-slack" is IN for kb-edge's reason at longer range: the record is
+  // built when its run ends, about four seconds after the close, past every
+  // window an earlier mark could have armed, so without arming here it would
+  // sit until some unrelated mark happened by. At most two records per close
+  // (the batched timeline, and a touch pair landing after it), so no churn.
   if (
     ev === "held" || ev === "release" || ev === "pass" || ev === "reset" ||
     ev === "snapback" || ev === "followtail" || ev === "flight" ||
@@ -197,7 +203,7 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "boot-motion" || ev === "boot-repin" || ev === "boot-blank" ||
     ev === "grow-blink" || ev === "kb-shove" ||
     ev === "kb-focusing" || ev === "kb-glide" || ev === "kb-edge" ||
-    ev === "pick-anchor" || ev === "tail-gap"
+    ev === "pick-anchor" || ev === "tail-gap" || ev === "close-slack"
   ) {
     diagPost();
   }

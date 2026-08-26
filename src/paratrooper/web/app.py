@@ -709,6 +709,14 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         ke = [e for e in events if isinstance(e, dict) and e.get("ev") == "kb-edge"]
         if ke:
             _diag.info("holddiag edge events=%d tail=%s", len(ke), json.dumps(ke[-24:]))
+        # close-slack timelines, their own line: one record batches a whole
+        # close's samples (the empty band after the last message, timed out to
+        # four seconds plus the first touch), so records are wide and few. A
+        # sixteen-record tail holds at least eight closes whole; on the shared
+        # viewport tail a handful of closes would clip everything else off it.
+        cs = [e for e in events if isinstance(e, dict) and e.get("ev") == "close-slack"]
+        if cs:
+            _diag.info("holddiag slack events=%d tail=%s", len(cs), json.dumps(cs[-16:]))
         return {"ok": True}
 
     @app.get("/api/debug/holddiag")

@@ -12,10 +12,12 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   CENSUS_SELECTORS,
+  CLOSE_SLACK_AT_MS,
   EDGE_FRAMES,
   EVT_FRESH_MS,
   PICK_VIA_PLUS,
   PICK_VIA_PROBE,
+  TOUCH_FOLLOW_MS,
   anchorFrame,
   anchorRecord,
   domCensus,
@@ -24,8 +26,10 @@ import {
   pinRecord,
   pumpFrames,
   sizeRecord,
+  slackRecord,
+  slackSample,
 } from "../src/shell";
-import type { EdgeReader } from "../src/shell";
+import type { EdgeReader, SlackReader } from "../src/shell";
 
 // one edge frame's geometry reads, as plain numbers
 function reader(over: Partial<Record<keyof EdgeReader, unknown>> = {}): EdgeReader {
@@ -707,5 +711,231 @@ describe("pick-probe: one open, two triggers, one label to tell them apart", () 
     const cssBlock = css.slice(cssFrom, cssTo + cssEnd.length);
     expect(cssBlock).toContain(".pickprobe {");
     expect(css.split(".pickprobe").length).toBe(cssBlock.split(".pickprobe").length);
+  });
+});
+
+// The close-slack probe: the transient empty band after a keyboard close. What
+// a record must do is reconstruct one close as a timeline (which box held the
+// extra height, and when it gave it back), and what it must never do is invent
+// the band (no zero where an element is missing) or disturb the heal it is
+// timing (reads only, pinned below). The builder is pure and tested directly;
+// the wiring is pinned by source read, the same split the rest of this file
+// uses.
+
+// one close-slack sample's geometry reads, as plain numbers. The base IS the
+// failure shape this channel hunts: scrollHeight carrying a band in his 386 to
+// 402px range past the last row, on an 812pt shell at rest (bar 56 + compose
+// 54 leave the thread 702).
+function slackReaderOf(over: Partial<Record<keyof SlackReader, unknown>> = {}): SlackReader {
+  const base = {
+    sh: 4386, ch: 702, st: 3684, thH: 702, lastB: 3987.5, maxB: 3987.5,
+    rows: 42, padT: 12, padB: 12, appT: 0, appH: 812, barH: 56, pendH: 0,
+    compH: 54, cpb: 34,
+  };
+  const low = "low" in over ? (over.low as string | null) : "div.row.user > div.msg.user.text";
+  return {
+    sh: () => (over.sh as number) ?? base.sh,
+    ch: () => (over.ch as number) ?? base.ch,
+    st: () => (over.st as number) ?? base.st,
+    thH: () => (over.thH as number) ?? base.thH,
+    lastB: () => (over.lastB as number) ?? base.lastB,
+    maxB: () => (over.maxB as number) ?? base.maxB,
+    low: () => low,
+    rows: () => (over.rows as number) ?? base.rows,
+    padT: () => (over.padT as number) ?? base.padT,
+    padB: () => (over.padB as number) ?? base.padB,
+    appT: () => (over.appT as number) ?? base.appT,
+    appH: () => (over.appH as number) ?? base.appH,
+    barH: () => (over.barH as number) ?? base.barH,
+    pendH: () => (over.pendH as number) ?? base.pendH,
+    compH: () => (over.compH as number) ?? base.compH,
+    cpb: () => (over.cpb as number) ?? base.cpb,
+  };
+}
+
+describe("close-slack: the band after the last message, one timeline per close", () => {
+  it("carries every field a close is read from, and nothing else on a timed sample", () => {
+    expect(slackSample(0, null, false, slackReaderOf())).toEqual({
+      ms: 0, sh: 4386, ch: 702, st: 3684, thH: 702,
+      slack: 398.5, lastB: 3987.5, maxB: 3987.5, rows: 42,
+      padT: 12, padB: 12, appT: 0, appH: 812, barH: 56, pendH: 0,
+      compH: 54, cpb: 34,
+    });
+  });
+
+  it("the failure shape reads off one sample: a band no row reaches, already subtracted", () => {
+    const sick = slackSample(250, null, false, slackReaderOf());
+    // his 386 to 402px, the thread's own padding included (padB says how much)
+    expect(sick.slack).toBe(398.5);
+    // the floors agree, so nothing lays out in the band: the box, not a row
+    expect("low" in sick).toBe(false);
+  });
+
+  it("a row reaching past the last one's floor is named as the carrier", () => {
+    // a still-translated row inflates scrollHeight (the engine counts
+    // transformed overflow), and maxB reads transforms LEFT IN so it shows
+    const s = slackSample(0, null, false, slackReaderOf({ maxB: 4374 }));
+    expect(s.maxB).toBe(4374);
+    expect(s.low).toBe("div.row.user > div.msg.user.text");
+  });
+
+  it("the name stays off while the floors agree to a pixel: absence is the finding", () => {
+    expect("low" in slackSample(0, null, false, slackReaderOf({ maxB: 3988 }))).toBe(false);
+  });
+
+  it("src rides the touch samples alone, and kb only once the keyboard is back", () => {
+    const timed = slackSample(2000, null, false, slackReaderOf());
+    expect("src" in timed).toBe(false);
+    expect("kb" in timed).toBe(false);
+    const touch = slackSample(6120.4, "touchstart", false, slackReaderOf());
+    expect(touch.src).toBe("touchstart");
+    expect(touch.ms).toBe(6120);
+    expect(slackSample(3000, null, true, slackReaderOf()).kb).toBe(true);
+  });
+
+  it("a missing element reads null, and the slack refuses to guess with one", () => {
+    const s = slackSample(500, null, false, slackReaderOf({ sh: NaN, lastB: NaN, maxB: NaN, cpb: NaN }));
+    expect(s.sh).toBeNull();
+    expect(s.lastB).toBeNull();
+    expect(s.slack).toBeNull();
+    expect(s.maxB).toBeNull();
+    expect(s.cpb).toBeNull();
+    expect("low" in s).toBe(false); // no floors, no carrier claim
+  });
+
+  it("keeps a tenth of a pixel, and the sample's own clock rounds to the millisecond", () => {
+    const s = slackSample(249.6, null, false, slackReaderOf({ lastB: 3987.44 }));
+    expect(s.ms).toBe(250);
+    expect(s.lastB).toBe(3987.4);
+    expect(s.slack).toBe(398.6); // 4386 - 3987.44, subtracted before rounding
+  });
+
+  it("the ladder outlives the reported heal, and the touch pair straddles one it causes", () => {
+    // "healing within seconds": the last rung must sit past that window, and
+    // the settle read lands one frame-batch after the touch it pairs with
+    expect([...CLOSE_SLACK_AT_MS]).toEqual([250, 500, 1000, 2000, 4000]);
+    expect(TOUCH_FOLLOW_MS).toBe(150);
+  });
+
+  it("one record per close, and the run number joins a late touch pair to its timeline", () => {
+    const a = slackSample(0, null, false, slackReaderOf());
+    const b = slackSample(250, null, false, slackReaderOf());
+    expect(slackRecord(9, [a, b], false)).toEqual({ n: 9, samples: [a, b] });
+    // a run the next close cut short says so, instead of reading as complete
+    expect(slackRecord(9, [a], true)).toEqual({ n: 9, cut: true, samples: [a] });
+  });
+});
+
+describe("close-slack wiring: reads only, hooked at the close's own bookkeeping", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+  const hold = readFileSync(new URL("../src/hold.ts", import.meta.url), "utf8");
+
+  it("starts from the same close signal as the fall probe, after the same bookkeeping", () => {
+    expect(shell).toMatch(
+      /correctionPass\("close"\);\n\s*startEdgeProbe\(\);[\s\S]{0,300}startCloseSlack\(\);/,
+    );
+    // and ms 0 is taken inside the hook itself, before the ladder is armed
+    expect(shell).toMatch(/slackRead\(null\); \/\/ ms 0/);
+  });
+
+  it("the sample body only reads: no write of any kind, no lookup per sample", () => {
+    const body = shell.match(
+      /function slackRead\(src: string \| null\): void \{[\s\S]*?\n\}/,
+    )?.[0] ?? "";
+    expect(body).toContain("slackSamples.push(");
+    expect(body).not.toMatch(/classList|setProperty|removeProperty|scrollTo\(|scrollTop =|\.style\.|appendChild|innerHTML/);
+    // the lookups happened once at the close; a sample re-walks only the rows,
+    // which content landing mid-run can genuinely change
+    expect(body).not.toMatch(/querySelector|getElementById/);
+    // one rect per element per sample: the thread, the four shell pieces, the
+    // last row, and one per row in the lowest-edge scan
+    expect(body.match(/getBoundingClientRect\(\)/g)?.length).toBe(7);
+  });
+
+  it("the element lookups and live styles are resolved once, at the close itself", () => {
+    const body = shell.match(/function startCloseSlack\(\): void \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(body).toMatch(/slackThread = document\.getElementById\("thread"\);/);
+    expect(body).toMatch(/document\.querySelector\("\.compose"\)/);
+    expect(body).toMatch(/document\.querySelector\("\.bar"\)/);
+    expect(body).toMatch(/document\.getElementById\("pending"\)/);
+    expect(body).toMatch(/slackThreadStyle = slackThread \? getComputedStyle\(slackThread\) : null;/);
+  });
+
+  it("a newer close ships the cut run before clearing its timers, so nothing is lost", () => {
+    expect(shell).toMatch(
+      /emitCloseSlack\(true\);[\s\S]{0,200}while \(slackTimers\.length\) clearTimeout\(slackTimers\.pop\(\)\);/,
+    );
+  });
+
+  it("the touch listeners are user-signal only, capture-phase, passive, spent once per close", () => {
+    // not the thread's scroll event: the close's own re-pin fires scrolls
+    // within milliseconds and would spend the one shot on itself
+    expect(shell).toMatch(/for \(const type of \["pointerdown", "touchstart", "wheel"\]\) \{/);
+    expect(shell).toMatch(
+      /document\.addEventListener\(type, slackTouch, \{ capture: true, passive: true \}\);/,
+    );
+    const body = shell.match(/function slackTouch\(e: Event\): void \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(body).toMatch(/if \(slackRun === 0 \|\| slackTouchSpent\) return;/);
+    expect(body).toMatch(/slackTouchSpent = true;/);
+    expect(body).toMatch(/slackRead\(e\.type\);/); // read inside the signal's own dispatch
+    expect(body).toMatch(/slackRead\("touch-settle"\);/); // and the after half of the pair
+    expect(body).not.toMatch(/preventDefault|stopPropagation/);
+  });
+
+  it("the record is emitted through one builder at one call site", () => {
+    expect(shell.match(/holdDiagRecord\("close-slack"/g)?.length).toBe(1);
+    expect(shell).toMatch(/holdDiagRecord\("close-slack", slackRecord\(slackRun, fresh, cut\)\);/);
+  });
+
+  it("close-slack is in hold.ts's post-now list: its record lands past every armed window", () => {
+    expect(hold).toMatch(/ev === "close-slack"/);
+  });
+
+  it("removable as one block: the code outside it is the import and the hook, no more", () => {
+    const START = "// ===================== TEMP DIAGNOSTIC (remove after the close-slack session)";
+    const END = "// =================== END TEMP DIAGNOSTIC (remove after the close-slack session)";
+    const from = shell.indexOf(START);
+    const to = shell.indexOf(END);
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    const block = shell.slice(from, to + END.length);
+    for (const name of [
+      "CLOSE_SLACK_AT_MS",
+      "TOUCH_FOLLOW_MS",
+      "slackSample",
+      "slackRecord",
+      "slackRead",
+      "slackTouch",
+      "emitCloseSlack",
+      "startCloseSlack",
+    ]) {
+      expect([name, block.includes(name)]).toEqual([name, true]);
+    }
+    const outside = shell.slice(0, from) + shell.slice(to + END.length);
+    const sites = outside
+      .split("\n")
+      .filter((l) =>
+        /close-slack|CloseSlack|CLOSE_SLACK|Slack|slack|laidOutRows|rowName/.test(l),
+      )
+      .map((l) => l.trim());
+    expect(sites).toEqual([
+      "// TEMP DIAGNOSTIC (close-slack, block at the bottom): the tail-gap probe's row",
+      'import { laidOutRows, rowName } from "./viewport";',
+      "// TEMP DIAGNOSTIC (close-slack, block at the bottom): the band after the last",
+      "startCloseSlack();",
+    ]);
+    // and the note names every call site outside this file, so deleting the
+    // probe is reading rather than hunting
+    const note = /TO REMOVE, every call site:[\s\S]*?refers to any of it\./.exec(block)?.[0] ?? "";
+    for (const named of [
+      "startCloseSlack()",
+      "laidOutRows",
+      "hold.ts",
+      "web/app.py",
+      "test_holddiag.py",
+      "shelldiag.test.ts",
+    ]) {
+      expect([named, note.includes(named)]).toEqual([named, true]);
+    }
   });
 });
