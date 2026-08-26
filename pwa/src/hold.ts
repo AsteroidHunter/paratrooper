@@ -18,6 +18,10 @@
 // Same shape as the shell/splash modules: a pure state machine (unit-tested,
 // injectable clock, no DOM) beneath a one-line wiring in main.ts.
 
+// TEMP DIAGNOSTIC (scroll-jank, scrolljank.ts owns the banner): one stamped
+// span in diagPost below, so an upload that lands mid-scroll names itself
+import { jankSpan } from "./jankledger";
+
 export const QUIET_MS = 7000;
 
 export interface ReplyHold<T> {
@@ -195,6 +199,12 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // window an earlier mark could have armed, so without arming here it would
   // sit until some unrelated mark happened by. At most two records per close
   // (the batched timeline, and a touch pair landing after it), so no churn.
+  //
+  // "scroll-jank" is IN for close-slack's reason at gesture range: its one
+  // record is built about a second after the last scroll of a gesture, past
+  // any window an earlier mark could have armed, and one record per gesture
+  // means arming here cannot churn. TEMP DIAGNOSTIC (scroll-jank): remove
+  // this entry and this paragraph with the scrolljank.ts block.
   if (
     ev === "held" || ev === "release" || ev === "pass" || ev === "reset" ||
     ev === "snapback" || ev === "followtail" || ev === "flight" ||
@@ -203,7 +213,8 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "boot-motion" || ev === "boot-repin" || ev === "boot-blank" ||
     ev === "grow-blink" || ev === "kb-shove" ||
     ev === "kb-focusing" || ev === "kb-glide" || ev === "kb-edge" ||
-    ev === "pick-anchor" || ev === "tail-gap" || ev === "close-slack"
+    ev === "pick-anchor" || ev === "tail-gap" || ev === "close-slack" ||
+    ev === "scroll-jank"
   ) {
     diagPost();
   }
@@ -215,6 +226,7 @@ function diagPost(): void {
   // short settle: one release posts once, not once per rendered frame
   diagPostTimer = setTimeout(() => {
     diagPostTimer = null;
+    const jankT0 = performance.now(); // TEMP DIAGNOSTIC (scroll-jank): the upload's sync cost starts here
     const payload = {
       ts: new Date().toISOString(),
       build: typeof __BUILT_AT__ === "string" ? __BUILT_AT__ : "unknown",
@@ -227,6 +239,7 @@ function diagPost(): void {
     }).catch(() => {
       /* diagnostic only: a failed post must never disturb the app */
     });
+    jankSpan("diag-post", jankT0); // TEMP DIAGNOSTIC (scroll-jank): copy, stringify and send-off spanned
   }, 600);
 }
 

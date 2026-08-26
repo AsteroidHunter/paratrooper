@@ -380,6 +380,42 @@ def test_holddiag_close_slack_gets_its_own_line(client, caplog):
     assert '"kb-close"' in vp[0]
 
 
+def test_holddiag_scroll_jank_gets_its_own_line(client, caplog):
+    """scroll-jank batches one gesture's whole verdict (both frame cadences,
+    the worst gaps with what ran inside them) into one wide record, so it rides
+    its own line like close-slack does, and the shared viewport tail never
+    carries or clips it. TEMP DIAGNOSTIC (scroll-jank): remove with the
+    pwa/src/scrolljank.ts block."""
+    record = {
+        "n": 2, "t0": 5200, "dur": 1240, "raf": 41, "sc": 96, "long": 3,
+        "ltMs": 180,
+        "worst": [
+            {"ms": 87, "at": 310, "clock": "raf", "led": ["slack-read"], "lt": 71},
+            {"ms": 52, "at": 640, "clock": "sc", "led": ["cache-put"]},
+            {"ms": 41, "at": 1290, "clock": "raf"},
+        ],
+    }
+    trail = {"build": "b", "events": [
+        {"t": 1, "ev": "followtail", "d": {"to": False, "trigger": "scroll-away"}},
+        {"t": 2, "ev": "scroll-jank", "d": record},
+    ]}
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    jank = [r.message for r in caplog.records if "holddiag jank" in r.message]
+    assert len(jank) == 1
+    assert "events=1" in jank[0]
+    # the attribution survives the digest: the gap, its clock, and the names
+    assert '"ms": 87' in jank[0] and '"clock": "raf"' in jank[0]
+    assert '"slack-read"' in jank[0] and '"cache-put"' in jank[0]
+    assert '"ltMs": 180' in jank[0]
+    # the wide record stays off the shared viewport tail entirely, and the
+    # scroll mark beside it still rides that tail as before
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"scroll-jank"' not in vp[0]
+    assert '"followtail"' in vp[0]
+
+
 def test_relay_logs_persist_and_superseded_drop(tmp_path, monkeypatch, caplog):
     """One line per delivery decision: a live done logs persist with its seq and
     terminal flag; a superseded run's output logs drop with the reason."""

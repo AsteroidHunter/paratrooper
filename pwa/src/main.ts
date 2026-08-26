@@ -68,11 +68,17 @@ import {
   get as cacheGet,
   put as cachePut,
 } from "./threadcache";
+// TEMP DIAGNOSTIC (scroll-jank, scrolljank.ts owns the banner): the recorder
+// wires itself on import (clock-only listeners plus the longtask observer),
+// and jankSpan stamps the two heavier jobs this file owns so a long frame can
+// name them. TO REMOVE: both imports and the two stamped pairs below.
+import { jankSpan } from "./jankledger";
+import "./scrolljank";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.28"; // the picker menu can no longer open credited to the bar, and the plus tap area is a real square
+const APP_VERSION = "0.3.29"; // every scroll gesture now reports its frame timing and what ran inside the long frames
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -172,8 +178,10 @@ const bootGate = createBootGate();
 // visible path (bootFromCache below); logout deletes it.
 function writeThreadCache(): void {
   if (!token || store.size === 0) return; // an empty snapshot must never clobber a good one
+  const jankT0 = performance.now(); // TEMP DIAGNOSTIC (scroll-jank): the snapshot build is sync main-thread work
   const seqs = [...store.keys()].sort((a, b) => a - b).slice(-CACHE_FRAMES);
   void cachePut({ id: THREAD_ID, lastSeq, frames: seqs.map((s) => store.get(s)!) });
+  jankSpan("cache-write", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
 }
 const cacheWrites = createWriteScheduler(writeThreadCache);
 
@@ -3052,6 +3060,7 @@ function prepareShot(url: string): Shot {
   img.src = url;
   const started = performance.now();
   const drawn = whenDrawn(img, DRAW_NO_DEADLINE).then((why) => {
+    const jankT0 = performance.now(); // TEMP DIAGNOSTIC (scroll-jank): the pixels' landing runs main-thread work here
     // the mark comes off wherever the element now stands, tray or thread: this
     // is the one moment a picked photo stops being a placeholder in both places
     img.classList.remove(WAIT_CLASS);
@@ -3064,6 +3073,7 @@ function prepareShot(url: string): Shot {
       ms: Math.round(performance.now() - started),
       seat: img.closest(".msg") ? "thread" : "tray",
     });
+    jankSpan("shot-drawn", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
     return why;
   });
   return { img, drawn };

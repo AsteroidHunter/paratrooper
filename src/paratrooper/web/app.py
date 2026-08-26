@@ -717,6 +717,15 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         cs = [e for e in events if isinstance(e, dict) and e.get("ev") == "close-slack"]
         if cs:
             _diag.info("holddiag slack events=%d tail=%s", len(cs), json.dumps(cs[-16:]))
+        # scroll-jank records, their own line for the slack line's reason: one
+        # record batches a whole gesture (both frame cadences, the ten worst
+        # gaps with what ran inside them), so records are wide and few, and a
+        # twelve-record tail holds a whole test drive of gestures whole.
+        # TEMP DIAGNOSTIC (scroll-jank, pwa/src/scrolljank.ts owns the banner):
+        # remove this block and its test in tests/test_holddiag.py with it.
+        sj = [e for e in events if isinstance(e, dict) and e.get("ev") == "scroll-jank"]
+        if sj:
+            _diag.info("holddiag jank events=%d tail=%s", len(sj), json.dumps(sj[-12:]))
         return {"ok": True}
 
     @app.get("/api/debug/holddiag")

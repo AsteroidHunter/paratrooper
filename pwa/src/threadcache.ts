@@ -16,6 +16,10 @@
 // shape must never reach applyEvent. Every read and write swallows its own
 // errors: iOS can refuse IndexedDB entirely in private mode.
 
+// TEMP DIAGNOSTIC (scroll-jank, scrolljank.ts owns the banner): one stamped
+// span in put below, around the store call where the frames are cloned
+import { jankSpan } from "./jankledger";
+
 const DB_NAME = "paratrooper-threadcache";
 const DB_VERSION = 1;
 const STORE = "thread";
@@ -122,7 +126,9 @@ export async function put(snapshot: ThreadSnapshot): Promise<void> {
     frames: snapshot.frames.slice(-CACHE_FRAMES),
   };
   await write(db, (store) => {
+    const jankT0 = performance.now(); // TEMP DIAGNOSTIC (scroll-jank): the put clones every frame synchronously here
     store.put(record);
+    jankSpan("cache-put", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
   });
 }
 

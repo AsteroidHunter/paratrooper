@@ -61,6 +61,10 @@
 //   stale rect); from idle it must NOT (or iOS swallows the next focus tap).
 
 import { holdDiagRecord } from "./hold";
+// TEMP DIAGNOSTIC (scroll-jank, scrolljank.ts owns the banner): activity
+// stamps for jank attribution; both uses sit inside the probe block at the
+// bottom of this file, a two-line span around each stamped job
+import { jankSpan } from "./jankledger";
 // TEMP DIAGNOSTIC (close-slack, block at the bottom): the tail-gap probe's row
 // helpers; pure functions, so the no-DOM-at-import property below still holds
 import { laidOutRows, rowName } from "./viewport";
@@ -1582,6 +1586,7 @@ let slackListenersOn = false;
 function slackRead(src: string | null): void {
   const t = slackThread;
   if (!t || !t.isConnected) return; // shell torn down mid-run
+  const jankT0 = performance.now(); // TEMP DIAGNOSTIC (scroll-jank): this read burst is a prime suspect, so it stamps itself
   const ms = performance.now() - slackT0;
   const tRect = t.getBoundingClientRect();
   const appRect = appEl?.getBoundingClientRect();
@@ -1637,6 +1642,7 @@ function slackRead(src: string | null): void {
       cpb: () => (slackComposeStyle ? parseFloat(slackComposeStyle.paddingBottom) : NaN),
     }),
   );
+  jankSpan("slack-read", jankT0); // TEMP DIAGNOSTIC (scroll-jank): end of the read burst
 }
 
 // ships everything not yet shipped; a run cut short by the next close still
@@ -1645,7 +1651,9 @@ function emitCloseSlack(cut: boolean): void {
   const fresh = slackSamples.slice(slackSent);
   if (fresh.length === 0) return;
   slackSent = slackSamples.length;
+  const jankT0 = performance.now(); // TEMP DIAGNOSTIC (scroll-jank): the record build and push, spanned
   holdDiagRecord("close-slack", slackRecord(slackRun, fresh, cut));
+  jankSpan("slack-emit", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
 }
 
 // the touch half: one read inside the first user signal's own dispatch, before
