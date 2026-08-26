@@ -852,12 +852,9 @@ export function initShell(el: HTMLElement): void {
   recordSafeArea();
 }
 
-// The ＋'s two tap handlers, lifted out of the listener bodies and given names.
-// Nothing about the ＋ changed: the shield prevents the focus grab under the
-// same rule as before, and the click still refuses to reach open() inside the
-// teardown window. Naming them is what lets a SECOND trigger run this very
-// code instead of a copy of it, and a copy is worth nothing here: two triggers
-// that do not share their lines cannot be compared with each other.
+// The ＋'s two tap handlers: the shield prevents the pointerdown's focus grab
+// under preservesFocus's rule, and the click refuses to reach open() inside
+// the teardown window.
 function pickerTapShield(e: Event): void {
   if (preservesFocus(readWorld())) e.preventDefault();
 }
@@ -879,13 +876,7 @@ export function bindPicker(input: HTMLInputElement, button: HTMLElement, pick: (
   onPick = pick;
   bindInputSignals(input);
   button.addEventListener("pointerdown", pickerTapShield);
-  button.addEventListener("click", () => {
-    markPickVia(PICK_VIA_PLUS); // TEMP DIAGNOSTIC (pick-probe, block at the bottom)
-    pickerTapOpen();
-  });
-  // TEMP DIAGNOSTIC (pick-probe, block at the bottom): the far trigger, wired
-  // to the same two handlers the ＋ just took
-  mountPickProbe();
+  button.addEventListener("click", pickerTapOpen);
 }
 
 // The in-pill ↑ send button gets the same pointerdown shield as the ＋: its
@@ -1372,13 +1363,11 @@ function pickAnchorRecord(fresh: boolean): void {
   if (!fileEl || !plusEl) return;
   holdDiagRecord(
     "pick-anchor",
-    // anchorRecord is anchorFrame plus the trigger's name (pick-probe block)
-    anchorRecord(
+    anchorFrame(
       fileEl.getBoundingClientRect(),
       plusEl.getBoundingClientRect(),
       fresh,
       performance.now(), // ms since the page began loading = how long the app has run
-      pickVia,
     ),
   );
 }
@@ -1407,107 +1396,6 @@ function recordSafeArea(): void {
   holdDiagRecord("safe-area", { insetB: px(insetB) });
 }
 // =================== END TEMP DIAGNOSTIC (remove after the keyboard-fall session) ===================
-
-// ===================== TEMP DIAGNOSTIC (remove after the pick-probe session) =====================
-// A second trigger for the picker, put as far from the ＋ as the chrome allows,
-// to settle which of two accounts of the misplaced panel is the true one. They
-// predict opposite screens, so one tap decides it.
-//
-//   the rect account:   iOS anchors WKFileUploadPanel to the file INPUT's
-//                       rendered rect. This is what the pick-anchor block
-//                       above states as fact and why .filepick is parked
-//                       invisibly on top of the ＋. If it holds, the panel
-//                       opens down by the ＋ no matter where the tap landed.
-//   the finger account: the request WebKit sends carries no rect and no
-//                       element at all; the panel uses the view's last
-//                       interaction point and the bounds of whatever an
-//                       asynchronous hit test at that point finds, which is
-//                       also a way for a stale point to be used. If it holds,
-//                       the panel opens where the finger was, so a tap up top
-//                       opens the panel up top.
-//
-// The probe runs the ＋'s own handlers, pickerTapShield and pickerTapOpen, and
-// therefore the same picker.open() on the same module-level fileEl: it makes no
-// input of its own and knows nothing about how a present works. Two triggers
-// that did not share their lines would settle nothing, because a difference on
-// screen could then be a difference in the code.
-//
-// The only thing that differs is the label each marks before calling it. The
-// label rides the pick-anchor record as `via`, so a trail holding both taps can
-// be read apart; without it the two are indistinguishable in the log. It is
-// marked before the teardown guard rather than after, which is harmless: a tap
-// the guard refuses writes no record at all, and every tap that does open marks
-// its own label one call earlier.
-//
-// It sits on document.body rather than inside #app because a render rewrites
-// #app's markup wholesale and would take the probe with it, and it is
-// deliberately loud and unlike anything the app ships so it cannot be read as a
-// feature or hit by accident.
-//
-// One honest difference from the ＋: the capture-phase tap hold (holdsBarTap)
-// recognises the ＋ by element identity, so it does not hold a probe tap during
-// the teardown window. The decision is unchanged, since pickerTapOpen's own
-// isTearing guard refuses the open either way; only the preventDefault is
-// missing, and a button has no focus to protect.
-//
-// TO REMOVE, every call site: delete this block; delete the
-// markPickVia(PICK_VIA_PLUS) line inside the ＋'s click listener in bindPicker;
-// delete the mountPickProbe() call at the end of bindPicker; in
-// pickAnchorRecord call anchorFrame again instead of anchorRecord and drop the
-// pickVia argument; delete the matching block in styles.css; delete the
-// pick-probe describe in tests/shelldiag.test.ts. Nothing else refers to any of
-// it, and what is left compiles as it did before.
-
-/** the probe's element id, so a re-render cannot mount a second one */
-export const PICK_PROBE_ID = "pickprobe";
-
-/** what the ＋ passes, and what the probe passes: the two values `via` can hold */
-export const PICK_VIA_PLUS = "plus";
-export const PICK_VIA_PROBE = "probe";
-
-// which trigger opened the present being recorded. Set on the tap, read one
-// call later inside the same gesture by pickAnchorRecord, so there is no window
-// in which it can go stale.
-let pickVia: string = PICK_VIA_PLUS;
-
-function markPickVia(via: string): void {
-  pickVia = via;
-}
-
-/**
- * The anchor record with the trigger's name on it. A separate builder rather
- * than a field inside anchorFrame, so the rect record keeps the exact shape the
- * session before this one was read in and this block stays deletable on its own.
- */
-export function anchorRecord(
-  file: AnchorRect,
-  plus: AnchorRect,
-  fresh: boolean,
-  upMs: number,
-  via: string,
-): Record<string, unknown> {
-  return { ...anchorFrame(file, plus, fresh, upMs), via };
-}
-
-// Mounted from bindPicker, which runs on every render, so the id guard is what
-// keeps there being exactly one.
-function mountPickProbe(): void {
-  if (typeof document === "undefined" || !document.body) return;
-  if (document.getElementById(PICK_PROBE_ID)) return;
-  const el = document.createElement("button");
-  el.type = "button";
-  el.id = PICK_PROBE_ID;
-  el.className = "pickprobe";
-  el.textContent = "PICK?";
-  el.title = "temporary probe: opens the picker from up here";
-  el.addEventListener("pointerdown", pickerTapShield);
-  el.addEventListener("click", () => {
-    markPickVia(PICK_VIA_PROBE);
-    pickerTapOpen();
-  });
-  document.body.appendChild(el);
-}
-// =================== END TEMP DIAGNOSTIC (remove after the pick-probe session) ===================
 
 // ===================== TEMP DIAGNOSTIC (remove after the close-slack session) =====================
 // The transient band after a keyboard close. On some closes roughly 386 to
