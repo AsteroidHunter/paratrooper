@@ -19,6 +19,7 @@ import {
   healNeeded,
   holdsBarTap,
   keyboardInset,
+  plusClickVerdict,
   preservesFocus,
   shellBox,
   shoveVerdict,
@@ -246,6 +247,22 @@ describe("picker lifecycle — the WebKit teardown window", () => {
     expect(p.teardownComplete()).toBe("completed");
     expect(p.open()).toBe("presented");
     expect(present).toHaveBeenLastCalledWith(false);
+  });
+
+  it("the comeback tap: down under the hold, refocus completes teardown before its click, nothing presents (the full-width menu, 2026-08-26)", () => {
+    const { p, present, past } = lifecycle();
+    p.open();
+    past();
+    p.settle(); // the dismissing tap leaks into the page and settles the session
+    const downHeld = p.isTearing(); // the fast re-tap's pointerdown, under the hold
+    p.teardownComplete(); // the refocus signal lands between that down and its click
+    // the click arrives with the window closed, but the PHYSICAL touch was
+    // held, so the engine's anchor credit never went to the plus: swallow
+    expect(plusClickVerdict(p.isTearing(), downHeld)).toBe("held");
+    expect(present).toHaveBeenCalledTimes(1); // the swallowed click presents nothing
+    // the next tap runs idle end to end and opens anchored on the plus
+    expect(plusClickVerdict(p.isTearing(), false)).toBe("open");
+    expect(p.open()).toBe("presented");
   });
 
   it("dismiss effects run exactly once under duplicate settle signals", () => {
@@ -630,5 +647,109 @@ describe("holdsBarTap — the settling-window tap hold (the eaten ＋ tap and th
   });
   it("never holds the rest of the page — send and thread taps ride through the window", () => {
     expect(holdsBarTap(true, false, false)).toBe(false);
+  });
+});
+
+// iOS centres the picker menu on whatever element its own hit test credited
+// the last PHYSICAL touch to, and the credit is fixed at the touch. A tap
+// whose pointerdown was held mid-teardown therefore must never present, even
+// when teardown-complete slips in between that down and its click: the menu
+// would open centred on the last credited full-width element (his 2026-08-26
+// screenshot, 64pt in from each screen edge) instead of on the plus.
+describe("plusClickVerdict: never open from a tap the engine did not credit to the plus", () => {
+  it("a clean tap opens: down and click both outside the teardown window", () => {
+    expect(plusClickVerdict(false, false)).toBe("open");
+  });
+
+  it("still tearing at click time: swallowed, whatever the down said (the shipped 0/6 refusal)", () => {
+    expect(plusClickVerdict(true, false)).toBe("tearing");
+    expect(plusClickVerdict(true, true)).toBe("tearing");
+  });
+
+  it("the comeback window, down held but the window closed by click time: swallowed, not presented", () => {
+    expect(plusClickVerdict(false, true)).toBe("held");
+  });
+});
+
+// Wiring pins for the credit rule. The shield must stamp the down-time phase
+// (the capture-path hold runs first, so isTearing() there is the phase the
+// hold decided on), the click must consume that stamp through the verdict,
+// no verdict but "open" may reach open(), and the one open() call site is the
+// click handler, so no other path can present from an uncredited tap.
+describe("wiring: the plus click opens only from a tap credited to the plus", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+
+  it("the shield stamps the down-time phase before the focus rule runs", () => {
+    expect(shell).toMatch(
+      /function pickerTapShield\(e: Event\): void \{\n(?:\s*\/\/[^\n]*\n)*\s*plusDownHeld = picker\.isTearing\(\);\n\s*if \(preservesFocus\(readWorld\(\)\)\) e\.preventDefault\(\);\n\}/,
+    );
+  });
+
+  it("the click consumes the stamp, and only the open verdict reaches open()", () => {
+    expect(shell).toMatch(
+      /const verdict = plusClickVerdict\(picker\.isTearing\(\), plusDownHeld\);\n\s*plusDownHeld = false;/,
+    );
+    expect(shell).toMatch(/if \(verdict === "tearing"\) return;/);
+    expect(shell).toMatch(/if \(verdict === "held"\) \{/);
+    expect(shell.match(/picker\.open\(\)/g)).toHaveLength(1); // pickerTapOpen alone presents
+  });
+
+  it("the swallowed comeback tap records on the pick-anchor channel, distinguished by `held`", () => {
+    expect(shell).toMatch(
+      /holdDiagRecord\("pick-anchor", \{ held: true, upMs: Math\.round\(performance\.now\(\)\) \}\);/,
+    );
+  });
+
+  it("the document hold is untouched: settle first, then the two held bar targets", () => {
+    expect(shell).toMatch(
+      /picker\.settle\(\);\n\s*if \(holdsBarTap\(picker\.isTearing\(\), isEditable\(e\.target\), e\.target === plusEl\)\) \{\n\s*e\.preventDefault\(\);/,
+    );
+  });
+});
+
+// Presentation pins for the plus's squared tap target. border-radius clips
+// the button's own hit area to the circle, so the corners of its 34px box
+// never registered and a tap grazing one was credited to the full-width bar
+// behind it, the element iOS then centres the picker menu on. The square is
+// a transparent unrounded pseudo, at least the platform's 44pt minimum, and
+// the button must stay unclipped or the clip takes the square with it.
+describe("presentation: the plus's 44pt hit square", () => {
+  const bare = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const attach = bare.match(/\n\.attach \{([^}]*)\}/)?.[1] ?? "";
+  const attachKb =
+    bare.match(/\n#app\.kb \.compose \.attach,\n#app\.focusing \.compose \.attach \{([^}]*)\}/)?.[1] ?? "";
+  const square = bare.match(/\n\.attach::after \{([^}]*)\}/)?.[1] ?? "";
+
+  it("a transparent unrounded pseudo squares the target to the 44pt minimum", () => {
+    expect(square).toContain('content: ""');
+    expect(square).toContain("position: absolute");
+    expect(attach).toContain("position: relative"); // the square's seat
+    const inset = Number(square.match(/inset: (-[\d.]+)px/)?.[1]);
+    expect(34 - 2 * inset).toBeGreaterThanOrEqual(44); // 34px circle plus the flanks
+    expect(square).not.toContain("border-radius"); // a radius would shave the corners back off
+    expect(square).not.toContain("background"); // invisible: no paint, no visual change
+  });
+
+  it("the button stays unclipped (a clip would take the square with it), the circle look untouched", () => {
+    expect(attach).not.toContain("overflow");
+    expect(attach).toContain("width: 34px");
+    expect(attach).toContain("border-radius: 50%");
+  });
+
+  it("the collapsed keyboard-time plus still takes no taps, square included", () => {
+    // pseudos ride the button's pointer-events, so this one line covers both
+    expect(attachKb).toContain("pointer-events: none");
+  });
+
+  it("the clip could go because the fade and the width move never overlap, either direction", () => {
+    // keyboard-DOWN (base rule): width moves first, opacity waits out the whole move
+    const down = attach.match(/width ([\d.]+)s ease, margin-right [\d.]+s ease, opacity ([\d.]+)s ease ([\d.]+)s/);
+    expect(down).not.toBeNull();
+    expect(Number(down![3])).toBeGreaterThanOrEqual(Number(down![1]));
+    // keyboard-UP (.kb rule): opacity fades first, width waits for it to land
+    const up = attachKb.match(/opacity ([\d.]+)s ease, width [\d.]+s ease ([\d.]+)s/);
+    expect(up).not.toBeNull();
+    expect(Number(up![2])).toBeGreaterThanOrEqual(Number(up![1]));
   });
 });

@@ -263,6 +263,27 @@ export function holdsBarTap(
   return tearing && (targetEditable || targetPlus);
 }
 
+// The ＋ click's gate, deciding off the tap's own DOWN as well as the phase
+// at click time. iOS places the picker menu centred on whatever element its
+// own hit test credited the LAST PHYSICAL TOUCH to; the credit is fixed at
+// the touch, and no JS after the fact can re-aim it (WebKit source, pinned in
+// an earlier session). The plus stays hit-testable through the whole
+// teardown, but a touch landing inside the window is HELD (holdsBarTap
+// preventDefaults it), and teardown-complete (the refocus signal) can slip in
+// between that touch and its click. A click-time phase check alone then let
+// the comeback tap present: touch begun under the hold, click arriving right
+// as the bar re-enables, menu centred on the full-width element the engine
+// last credited, 64pt in from each screen edge on his 2026-08-26 screenshot,
+// instead of on the ＋. So a tap whose down was held is swallowed whole,
+// whatever the phase says by click time; the user's NEXT tap is credited to
+// the ＋ and opens anchored there.
+export type PlusClickVerdict = "open" | "tearing" | "held";
+
+export function plusClickVerdict(tearing: boolean, downHeld: boolean): PlusClickVerdict {
+  if (tearing) return "tearing";
+  return downHeld ? "held" : "open";
+}
+
 // Picker lifecycle:
 //   presented --settle()--> tearing --teardownComplete()--> idle
 // settle() = "the native UI is gone from the screen" (page tap, refocus, …);
@@ -813,17 +834,31 @@ export function initShell(el: HTMLElement): void {
 }
 
 // The ＋'s two tap handlers: the shield prevents the pointerdown's focus grab
-// under preservesFocus's rule, and the click refuses to reach open() inside
-// the teardown window.
+// under preservesFocus's rule and stamps the down-time phase, and the click
+// refuses to reach open() for any tap the engine did not credit to the ＋
+// (plusClickVerdict carries the whole rule).
+let plusDownHeld = false; // the ＋ tap's own pointerdown phase, remembered to its click
+
 function pickerTapShield(e: Event): void {
+  // the capture-path hold has already run (document capture precedes this
+  // target listener), so isTearing() here is the phase the hold decided on
+  plusDownHeld = picker.isTearing();
   if (preservesFocus(readWorld())) e.preventDefault();
 }
 
 function pickerTapOpen(): void {
+  const verdict = plusClickVerdict(picker.isTearing(), plusDownHeld);
+  plusDownHeld = false; // one gesture, one verdict; a pointerless click reads a clean flag
   // a held tap still delivers its click (device-proven); during the window it
   // must not reach open(), which would present straight into the dropped-click
   // zone — the falsified fresh-input path, 0/6 on device
-  if (picker.isTearing()) return;
+  if (verdict === "tearing") return;
+  if (verdict === "held") {
+    // TEMP DIAGNOSTIC (pick-anchor, block at the bottom): the comeback tap,
+    // swallowed; `held` tells it apart from the presents on the same channel
+    holdDiagRecord("pick-anchor", { held: true, upMs: Math.round(performance.now()) });
+    return;
+  }
   picker.open();
 }
 
@@ -914,7 +949,10 @@ export function currentFileInput(): HTMLInputElement | null {
 //                 the picker presents. iOS anchors WKFileUploadPanel to the
 //                 INPUT's rendered rect, and .filepick is parked invisibly on
 //                 top of the ＋ precisely so the two agree; a panel opening
-//                 off to the right means on that tap they did not.
+//                 off to the right means on that tap they did not. A record
+//                 carrying `held: true` instead of rects is a comeback tap
+//                 the ＋ click swallowed (plusClickVerdict): no present
+//                 happened, so there are no rects to compare.
 //   dom-census  : how many #app / .compose / .bar / .thread / mirror twins the
 //                 document holds at each close. A screenshot showed what
 //                 looked like two compose bars; a census that always reads 1
@@ -938,7 +976,8 @@ export function currentFileInput(): HTMLInputElement | null {
 // DIAGNOSTIC (the atEdge flag, the two edge samples and the seeding-reflow mark
 // in applyShell, the shell-size and shell-pin records in the same function, the
 // census in correctionPass, the probe start in keyboardClosed and the mirror
-// one in reconcile, the anchor record in the picker's present effect, the two
+// one in reconcile, the anchor record in the picker's present effect plus the
+// held swallow's record in pickerTapOpen, the two
 // markViewportEvent listeners and the safe-area probe in initShell), the
 // watchFollowTail wiring in main.ts, "pick-anchor" and "kb-edge" in hold.ts's
 // post-now list, and the kb-fall/kb-rise/kb-edge/shell-pin/dom-census/

@@ -724,6 +724,7 @@ html, body {
 .attach {
   display: grid;
   place-items: center;
+  position: relative; /* seats the ::after hit square */
   width: 34px;
   height: 34px;
   /* the UA's default button padding (6px/side) floors a border-box width at
@@ -746,12 +747,30 @@ html, body {
      but the single-line pill (39px borderless) is 5px taller than the ＋ —
      half of that lifts the ＋ onto the pill's optical centerline */
   margin-bottom: 2.5px;
-  overflow: hidden; /* the glyph must not paint outside a mid-collapse box */
+  /* no overflow clip here: it would take the ::after hit square below with it
+     (clipped away, and rounded to this circle). The glyph still cannot paint
+     outside a mid-collapse box: this transition and the .kb one below both
+     sequence the opacity fade strictly apart from the width move, so the
+     glyph sits at opacity 0 whenever the box is between its resting widths. */
   /* keyboard-DOWN direction: the editor hands the space back first, then the
      ＋ fades in — the mirror of the keyboard-up choreography below. The filter
      entry is the settling window's RE-ENABLE fade (going off stays instant). */
   transition: width 0.13s ease, margin-right 0.13s ease, opacity 0.1s ease 0.13s,
     filter 0.3s ease;
+}
+/* The ＋'s tap target, squared (his own proposal). border-radius clips the
+   button's hit area to the circle, so the corners of its 34px box never
+   registered, and a tap grazing one fell through to the full-width bar
+   behind: the element iOS then credits the touch to, and centres the picker
+   menu on. The pseudo is its own unrounded box, inset -5px, squaring the
+   target to 44x44 (the platform minimum) around the untouched 34px circle:
+   it paints nothing, joins no layout, and a hit anywhere on it targets the
+   ＋ itself. It rides the button's pointer-events, so the collapsed
+   keyboard-time ＋ stays untappable, square included. */
+.attach::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
 }
 
 /* The ＋ and the keyboard never coexist. From the focus tap itself (.focusing,

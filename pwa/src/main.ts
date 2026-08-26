@@ -72,7 +72,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.27"; // the keyboard height override is reverted; it destabilized every scroll
+const APP_VERSION = "0.3.28"; // the picker menu can no longer open credited to the bar, and the plus tap area is a real square
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
