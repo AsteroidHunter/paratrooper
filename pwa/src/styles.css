@@ -1035,6 +1035,19 @@ html.kbdoc body {
   border-radius: 50%;
   animation: oldspin 0.8s linear infinite; /* the history spinner's ring, one vocabulary */
 }
+/* The square a send leaves behind (main.ts dismissSent). The img is the one
+   drawn element and the send carries it into the bubble, so the square paints
+   the same pixels as its own background for the length of the close, and the
+   box the img used to size becomes the square's own. A square still waiting
+   keeps .undrawn, whose face and ring paint over this background, so a photo
+   with no pixels yet closes under the same mark it was already wearing. */
+.pthumb.sent {
+  width: 64px;
+  height: 64px;
+  border-radius: 12px;
+  background-size: cover;
+  background-position: center;
+}
 .pthumb-x {
   position: absolute;
   top: -6px;

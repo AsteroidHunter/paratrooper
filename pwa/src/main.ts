@@ -25,6 +25,7 @@ import {
   ENTER_RISE_PX,
   FLIGHT_EASE,
   FLIGHT_MS,
+  FLIGHT_SLACK_MS,
   accentAlpha,
   barTextAlpha,
   bubbleTextAlpha,
@@ -33,6 +34,7 @@ import {
   morphCorners,
   newbornEnter,
   shiftParticipates,
+  stampRidesFlight,
 } from "./shift";
 import type { MorphBox } from "./shift";
 import { zoomClipCuts, zoomClipInset, zoomClipRest, zoomFit, zoomReturn } from "./zoom";
@@ -70,7 +72,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.25"; // the pink corner picker trigger is gone; its question was settled
+const APP_VERSION = "0.3.26"; // a photo send keeps its strip lit, starts its glide at zero, never freezes, and carries its stamp
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -664,9 +666,9 @@ interface Pick {
 
 const picks = new Map<File, Pick>();
 
-// the tray's close-down while it runs (dismissPick). A pick landing mid-close
-// has to call it off: an animation still holding the box at zero height would
-// keep the new thumbnail clipped out of sight (showPending).
+// the tray's close-down while it runs (dismissPick, dismissSent). A pick
+// landing mid-close has to call it off: an animation still holding the box at
+// zero height would keep the new thumbnail clipped out of sight (showPending).
 let trayClosing: Animation | null = null;
 
 function renderPending(): void {
@@ -708,6 +710,9 @@ function showPending(): void {
     trayClosing?.cancel();
     trayClosing = null;
     box.classList.remove("closing");
+    // a send's close parks the box on a fixed rect (dismissSent); a tray that
+    // is opening again belongs back in the flex column, not floating on it
+    box.removeAttribute("style");
   }
   box.style.display = open ? "flex" : "none";
 }
@@ -748,6 +753,81 @@ function dismissPick(file: File, pick: Pick): void {
   };
   drop.addEventListener("finish", gone);
   drop.addEventListener("cancel", gone);
+}
+
+// The SEND's tray teardown. The ✕ above already says what a leaving square
+// looks like: the square drops while the strip eases its own height down, one
+// beat, and only the DOM teardown waits for the motion. A send used to skip
+// all of that; renderPending's prune deleted the thumbnail and switched the
+// strip off inside the tap's frame, so the photo vanished an instant before
+// its strip did and an emptied strip sat over the compose bar for the close.
+// The send closes like the ✕ now, with every square aboard for the ride.
+//
+// One part of the ✕'s close must not be copied: its height animation runs IN
+// the flex column, so the thread absorbs it frame by frame through the
+// threadObserver re-pin. During a send that re-pin is poison, because the
+// flight's translate inflates scrollHeight and a pin landing mid-flight
+// overshoots by the inflation and drags the landing seat (the mid-flight drag
+// send()'s two-rAF wait exists to prevent). So the strip leaves the LAYOUT on
+// the tap: fixed at its own rect, it hands the thread its room in one hop
+// exactly where the old display:none did, and the close is pure paint over a
+// thread that never resizes under the flight.
+//
+// The squares stay lit without their img: the send takes the one drawn
+// element into the bubble (takeShot), so a square that has its pixels paints
+// the same blob as its own background for the close (styles.css .pthumb.sent
+// keeps the box the img used to size), and a square still waiting keeps the
+// grey face and ring it was already wearing. At no point is an emptied strip
+// on screen.
+function dismissSent(): void {
+  const box = document.getElementById("pending");
+  const sent = [...picks.values()];
+  // out of the ledger on the tap, like the ✕: renderPending cannot prune what
+  // it cannot see, the reveal wait reads the same absence and stands down,
+  // and the teardown below owns the wraps outright
+  picks.clear();
+  if (!box || sent.length === 0 || box.style.display === "none") {
+    renderPending(); // nothing staged, or no strip on screen: the plain teardown
+    return;
+  }
+  refreshSend(); // the ↑ answers the tap; the strip answers over the beat below
+  const rect = box.getBoundingClientRect();
+  const padTop = parseFloat(getComputedStyle(box).paddingTop) || 0;
+  // anchored by its bottom edge so the top edge glides down, which is the way
+  // the in-flow close moves (the thread grows and the strip's top descends)
+  box.style.position = "fixed";
+  box.style.left = `${rect.left}px`;
+  box.style.width = `${rect.width}px`;
+  box.style.bottom = `${window.innerHeight - rect.bottom}px`;
+  box.classList.add("closing"); // clips the full-size squares while the box goes past them
+  const beat: KeyframeAnimationOptions = {
+    duration: FLIGHT_MS,
+    easing: FLIGHT_EASE,
+    fill: "forwards", // the squares stay gone and the box stays shut until the teardown below
+  };
+  const closing = box.animate(trayClose(rect.height, padTop), beat);
+  trayClosing = closing;
+  const done = (): void => {
+    box.classList.remove("closing");
+    box.removeAttribute("style"); // the fixed rect goes; the display write below re-decides
+    // display:none only once the height has actually gone, and it re-reads the
+    // staging list, so a pick that arrived mid-close finds the tray open
+    showPending();
+  };
+  closing.addEventListener("finish", done);
+  closing.addEventListener("cancel", done);
+  for (const pick of sent) {
+    // no url is revoked here: takeShot blanked every one on the way in, and
+    // the thread is reading the photos through them right now
+    if (!pick.wrap.classList.contains("undrawn")) {
+      pick.wrap.style.backgroundImage = `url("${pick.img.src}")`;
+    }
+    pick.wrap.classList.add("sent");
+    const drop = pick.wrap.animate(thumbDrop(), beat);
+    const gone = (): void => pick.wrap.remove();
+    drop.addEventListener("finish", gone);
+    drop.addEventListener("cancel", gone);
+  }
 }
 
 function stagePick(file: File, box: HTMLElement): Pick {
@@ -2449,6 +2529,9 @@ function flyFromField(wrapper: HTMLElement, morph: FieldMorph | null = null): vo
     return;
   }
   const start = field.getBoundingClientRect();
+  let flips = 0; // FLIP flights launched (the morph's text row is not one)
+  let rideDx = 0; // the first FLIP row's travel, for the stamp below
+  let rideDy = 0;
   msgs.forEach((msg, i) => {
     if (morph && msg.classList.contains("text")) {
       morph.launch(msg);
@@ -2457,14 +2540,23 @@ function flyFromField(wrapper: HTMLElement, morph: FieldMorph | null = null): vo
     const end = msg.getBoundingClientRect();
     const dx = start.right - end.right;
     const dy = start.top - end.top;
+    if (!flips) {
+      rideDx = dx;
+      rideDy = dy;
+    }
+    flips++;
     // Web Animations API, not a transition: the start state lives inside the
     // animation itself, so WebKit cannot coalesce the two style writes into
     // one and silently skip the motion (which is what killed the old
     // transition + double-rAF version on iOS). The beat and ease are shared
     // with the sibling shift (shift.ts) — one motion, no overshoot.
+    // The clock gets FLIGHT_SLACK_MS of runway (shift.ts holds the
+    // measurement): armed here mid-task, a zero-delay animation is already
+    // two frames old at its first paint, and the backwards fill keeps the
+    // true start on screen through the slack instead of skipping it.
     const anim = msg.animate(
       [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }],
-      { duration: FLIGHT_MS, easing: FLIGHT_EASE },
+      { duration: FLIGHT_MS, easing: FLIGHT_EASE, delay: FLIGHT_SLACK_MS, fill: "backwards" },
     );
     flightsUp++;
     // this translate holds the bubble below the content edge for the whole
@@ -2488,6 +2580,30 @@ function flyFromField(wrapper: HTMLElement, morph: FieldMorph | null = null): vo
       },
     );
   });
+  // The newborn gap stamp above a flying photo row rides that row's own
+  // travel, fading from zero on the same clock and slack, in place of the
+  // 10px newborn fade parked at its final seat: a stamp holding still over an
+  // empty seat while its row crosses hundreds of pixels read as the stamp
+  // arriving early, a fifth visible on its first frame. play() stands down
+  // for it (stampRidesFlight, shift.ts), so this is its one entrance; the
+  // wrapper is built by this send, so any stamp in it was born with it. Pure
+  // presentation, like the ride itself: no flightsUp, no airborneRows (the
+  // row beneath it already registers the deeper translate).
+  const stamp = flips ? wrapper.querySelector<HTMLElement>(":scope > .stamp") : null;
+  if (stamp) {
+    stamp.animate(
+      [
+        { opacity: 0, transform: `translate(${rideDx}px, ${rideDy}px)` },
+        { opacity: 1, transform: "none" },
+      ],
+      { duration: FLIGHT_MS, easing: FLIGHT_EASE, delay: FLIGHT_SLACK_MS, fill: "backwards" },
+    );
+    holdDiagRecord("flight", {
+      phase: "stamp-ride",
+      dx: Math.round(rideDx * 10) / 10,
+      dy: Math.round(rideDy * 10) / 10,
+    });
+  }
   if (morph && !morph.launched()) morph.cancel(); // no text row rendered: no seat to morph into
   recordSendMotion(msgs[msgs.length - 1]);
   recordTailGap(msgs[msgs.length - 1]);
@@ -2765,6 +2881,20 @@ function enterNewborn(el: HTMLElement): void {
   );
 }
 
+// whether a newborn stamp stands over a photo row born with the same send:
+// that row is about to fly and the flight carries the stamp with it
+// (flyFromField), so the newborn enter must leave it alone. Newborn means
+// absent from the measure pass, which only ever happens to elements this
+// send's own insert created.
+function stampOverNewbornShot(el: HTMLElement, before: Map<HTMLElement, number>): boolean {
+  if (!el.classList.contains("stamp")) return false;
+  const wrapper = el.parentElement;
+  if (!wrapper) return false;
+  return Array.from(wrapper.querySelectorAll<HTMLElement>(":scope > .row")).some(
+    (row) => !before.has(row) && row.querySelector(".msg.shot") !== null,
+  );
+}
+
 function beginSiblingShift(): { play(): void } {
   // eligibility is the pre-send view: pinned (or near) the bottom. A send from
   // deep in history pins with an intentional jump cut — animating THAT would
@@ -2795,7 +2925,16 @@ function beginSiblingShift(): { play(): void } {
       // everything unseen at measure time was born with this send
       for (const el of laidOutTail()) {
         const beforeTop = before.get(el);
-        const carriesFlight = el.classList.contains("msg") || el.querySelector(".msg") !== null;
+        // flight cargo: the flying rows themselves, and the newborn stamp a
+        // photo flight carries with it (stampRidesFlight, shift.ts)
+        const carriesFlight =
+          el.classList.contains("msg") ||
+          el.querySelector(".msg") !== null ||
+          stampRidesFlight(
+            beforeTop !== undefined,
+            el.classList.contains("stamp"),
+            stampOverNewbornShot(el, before),
+          );
         if (newbornEnter(beforeTop !== undefined, carriesFlight)) {
           enterNewborn(el); // born with this send: it fades up on the same beat
           entered++;
@@ -2901,6 +3040,15 @@ function prepareShot(url: string): Shot {
   // square or a bubble the send has already built around it — paints the grey
   // face and the shared ring over it instead of showing a blank (styles.css)
   img.classList.add(WAIT_CLASS);
+  // Decode off the main thread, always. A send seats this element in the
+  // thread while its pixels may still be cooking, and WebKit's default there
+  // is to decode AT the paint, synchronously: on device the attach froze the
+  // main thread 220-240ms mid-flight (the attach's own pixel work, not the
+  // network). The placeholder above stands until whenDrawn settles either
+  // way, so async decoding changes which thread does the work and nothing
+  // about what shows: the seat is reserved, the mark says coming, and the
+  // pixels land exactly when they always did.
+  img.decoding = "async";
   img.src = url;
   const started = performance.now();
   const drawn = whenDrawn(img, DRAW_NO_DEADLINE).then((why) => {
@@ -2965,7 +3113,7 @@ async function send(): Promise<void> {
     textEl.value = "";
     autosize();
     pendingFiles = [];
-    renderPending();
+    dismissSent(); // the strip closes on the flight's beat, squares aboard, out of the layout
   };
 
   // WHEN the bar collapses is the mid-flight drag fix. On a FRESH launch it

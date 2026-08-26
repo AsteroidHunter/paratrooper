@@ -16,6 +16,7 @@ import {
   FLIGHT_EASE,
   FLIGHT_EASE_POINTS,
   FLIGHT_MS,
+  FLIGHT_SLACK_MS,
   MORPH_TEXT_IN,
   MORPH_TEXT_OUT,
   accentAlpha,
@@ -26,6 +27,7 @@ import {
   morphCorners,
   newbornEnter,
   shiftParticipates,
+  stampRidesFlight,
 } from "../src/shift";
 
 describe("flight motion constants", () => {
@@ -49,6 +51,22 @@ describe("flight motion constants", () => {
 
   it("the CSS string and the solved curve share the same control points", () => {
     expect(FLIGHT_EASE).toBe(`cubic-bezier(${FLIGHT_EASE_POINTS.join(", ")})`);
+  });
+});
+
+// The two lost frames. An animation armed mid-task starts its clock before
+// the next paint, and this front-loaded ease turns that frame or two into
+// 43-60px of a 244px flight already spent on the first frame anyone sees.
+// The slack is the measured cure: on device the loss went to exactly zero
+// with two frames of runway, held on screen by a backwards fill.
+describe("FLIGHT_SLACK_MS: the first painted frame is the true start", () => {
+  it("covers the arm-to-paint gap: two 60Hz frames, and not much more", () => {
+    expect(FLIGHT_SLACK_MS).toBeGreaterThanOrEqual(33); // two frames at 60Hz
+    expect(FLIGHT_SLACK_MS).toBeLessThanOrEqual(50); // a held start, never a felt pause
+  });
+
+  it("stays a sliver of the beat, so the flight still reads as one motion", () => {
+    expect(FLIGHT_SLACK_MS).toBeLessThanOrEqual(FLIGHT_MS / 8);
   });
 });
 
@@ -173,6 +191,24 @@ describe("newbornEnter — content born with the send rides the same beat", () =
   });
 });
 
+describe("stampRidesFlight: the send's stamp belongs to the flight, not the enter", () => {
+  it("a newborn stamp over a newborn photo row rides", () => {
+    expect(stampRidesFlight(false, true, true)).toBe(true);
+  });
+
+  it("a text send's stamp still enters: no shot row, no ride", () => {
+    expect(stampRidesFlight(false, true, false)).toBe(false);
+  });
+
+  it("only stamps ride this rule; rows have their own owners", () => {
+    expect(stampRidesFlight(false, false, true)).toBe(false);
+  });
+
+  it("anything the measure pass saw is the FLIP's, as everywhere else", () => {
+    expect(stampRidesFlight(true, true, true)).toBe(false);
+  });
+});
+
 // --- main.ts wiring pins (source-read, like flight.test.ts) -------------------
 
 const src = readFileSync(
@@ -222,11 +258,13 @@ describe("sibling shift wiring — the order that kills the white strip", () => 
     const grace = send.indexOf("composerWroteAt = performance.now()");
     const clear = send.indexOf('textEl.value = ""');
     const collapse = send.indexOf("autosize()");
-    const tray = send.indexOf("renderPending()");
+    const tray = send.indexOf("dismissSent()");
     expect(grace).toBeGreaterThan(-1);
     expect(grace).toBeLessThan(clear); // the grace mark still covers the clear
     expect(clear).toBeLessThan(collapse); // clear, then the height re-derive
-    expect(collapse).toBeLessThan(tray); // the tray collapse is geometry too
+    // the tray's exit is geometry too: dismissSent takes the strip out of the
+    // flow in this same frame, and its close is pure paint after that
+    expect(collapse).toBeLessThan(tray);
     const freshCollapse = send.indexOf("collapseBar();");
     const measure = send.indexOf("beginSiblingShift()");
     expect(freshCollapse).toBeGreaterThan(-1);
@@ -337,5 +375,60 @@ describe("live-arrival stamps — the receive side of the same enter", () => {
 
   it("records the live enter on the trail", () => {
     expect(dec).toContain('src: "live"');
+  });
+});
+
+describe("flight slack wiring: the armed clock waits for the first paint", () => {
+  const fly = fnBody("flyFromField");
+
+  it("the photo row's FLIP carries the slack and holds its start through it", () => {
+    expect(fly).toContain(
+      '{ duration: FLIGHT_MS, easing: FLIGHT_EASE, delay: FLIGHT_SLACK_MS, fill: "backwards" }',
+    );
+  });
+
+  it("the stamp rides the same options, so the pair cannot start apart", () => {
+    expect(fly.match(/delay: FLIGHT_SLACK_MS, fill: "backwards"/g)).toHaveLength(2);
+  });
+});
+
+// The sent photo's date stamp. It entered as a newborn (the 10px fade above),
+// which parked it at its final seat, about a fifth visible on its first
+// painted frame, drifting 10px while its own row crossed hundreds: a stamp
+// hovering over an empty box for the whole flight. It rides its row now.
+describe("stamp-ride wiring: the stamp moves with its row, fading from zero", () => {
+  const fly = fnBody("flyFromField");
+  const begin = fnBody("beginSiblingShift");
+
+  it("the flight animates the wrapper's own stamp on the first row's travel", () => {
+    expect(fly).toContain(':scope > .stamp');
+    expect(fly).toContain('translate(${rideDx}px, ${rideDy}px)');
+    expect(fly).toContain('{ opacity: 1, transform: "none" }');
+  });
+
+  it("fades from nothing, and the slack makes the nothing actually paint", () => {
+    expect(fly).toContain("opacity: 0");
+    expect(fly.indexOf("delay: FLIGHT_SLACK_MS", fly.indexOf(":scope > .stamp")))
+      .toBeGreaterThan(-1);
+  });
+
+  it("the enter stands down for it: one element, one owner", () => {
+    expect(begin).toContain("stampRidesFlight(");
+    expect(begin).toContain("stampOverNewbornShot(el, before)");
+    // and the rule reads the row kind, so a text send's stamp still enters
+    expect(fnBody("stampOverNewbornShot")).toContain(".msg.shot");
+  });
+
+  it("stays pure presentation: no receipt gate, no at-bottom inflation entry", () => {
+    // the ride ends with its row and moves nothing the ledgers watch; the row
+    // beneath it already registers the deeper translate for nearBottom
+    const stampAt = fly.indexOf(":scope > .stamp");
+    expect(fly.indexOf("flightsUp++", stampAt)).toBe(-1);
+    expect(fly.indexOf("airborneRows.add", stampAt)).toBe(-1);
+  });
+
+  it("records the ride on the flight channel with its travel", () => {
+    expect(fly).toContain('phase: "stamp-ride"');
+    expect(fly).toMatch(/phase: "stamp-ride",\s*dx:.*dy:/s);
   });
 });

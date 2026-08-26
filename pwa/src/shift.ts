@@ -26,6 +26,18 @@ export const FLIGHT_EASE_POINTS = [0.22, 1, 0.36, 1] as const;
 
 export const FLIGHT_EASE = `cubic-bezier(${FLIGHT_EASE_POINTS.join(", ")})`;
 
+// The runway between arming a flight and its first painted frame. A WAAPI
+// animation's zero is the instant it is armed, which is mid-task: the browser
+// paints one to two frames later, and this ease-out spends its steepest
+// stretch first, so the first frame anyone SAW was already 43-60px into a
+// 244px flight on device (about a quarter of the travel: two lost frames,
+// amplified roughly fourfold by the curve). Two frames of delay put the true
+// start on screen, and fill:"backwards" holds the first keyframe through the
+// wait, so the runway shows the start rather than a hole. Measured to zero
+// the loss at exactly two 60Hz frames; a 120Hz screen merely holds the true
+// start a frame or two longer, far below anything an eye can read.
+export const FLIGHT_SLACK_MS = 34; // two frames at 60Hz, rounded up
+
 // The curve, solved numerically for the morph's rAF loop (main.ts
 // armFieldMorph): a declarative animation cannot re-aim at a seat that moves
 // mid-flight, so the shell drives its own frames and needs the browser's
@@ -133,4 +145,20 @@ export const ENTER_RISE_PX = 10; // kin to the pop-in's 8px, inside the 8-12 ban
 
 export function newbornEnter(seenAtMeasure: boolean, carriesFlight: boolean): boolean {
   return !seenAtMeasure && !carriesFlight;
+}
+
+// The send's gap stamp is born WITH the flying photo row, and it used to take
+// the newborn enter above: a 10px fade parked at its final seat while its row
+// crossed hundreds of pixels beneath it, so the stamp hovered over an empty
+// seat for the whole flight. A newborn stamp standing over a newborn photo
+// row belongs to the flight instead (flyFromField rides it on the row's own
+// translate, fading it from zero on the same clock), and the enter must leave
+// it alone: one element, one owner, exactly the rule that already excludes
+// the flying rows themselves.
+export function stampRidesFlight(
+  seenAtMeasure: boolean,
+  isStamp: boolean,
+  overNewbornShotRow: boolean,
+): boolean {
+  return !seenAtMeasure && isStamp && overNewbornShotRow;
 }

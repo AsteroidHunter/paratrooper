@@ -744,3 +744,126 @@ describe("cancel wiring: the square drops while the strip eases down under it", 
     expect(src).toContain("if (followTail) scrollToBottom(true);");
   });
 });
+
+// The send's own close. It used to be renderPending's prune: thumbnail gone
+// and strip switched off inside the tap's frame, so the photo vanished an
+// instant before its strip and an emptied strip sat over the compose bar for
+// a beat. The send closes like the ✕ now (same two motions, same one beat),
+// with two send-only differences, each pinned below: the strip leaves the
+// LAYOUT on the tap so its easing height cannot resize the thread under the
+// flight, and the squares keep painting their photo after the send takes the
+// img element into the bubble.
+describe("send teardown: the strip closes on the beat with its squares aboard", () => {
+  const dismiss = (): string => fnBody("dismissSent");
+
+  it("the send routes the tray through dismissSent, never the instant prune", () => {
+    const send = fnBody("send");
+    expect(send).toContain("dismissSent()");
+    expect(send).not.toContain("renderPending()");
+    // and the plain teardown survives for a send with nothing staged
+    expect(dismiss()).toContain("renderPending()");
+  });
+
+  it("both halves ride the one beat, and it is the app's own", () => {
+    const body = dismiss();
+    expect(body).toContain("duration: FLIGHT_MS");
+    expect(body).toContain("easing: FLIGHT_EASE");
+    // one options object for both, so the squares and the strip cannot drift apart
+    expect(body.match(/duration: FLIGHT_MS/g)).toHaveLength(1);
+    expect(body).toContain("box.animate(trayClose(rect.height, padTop), beat)");
+    expect(body).toContain("pick.wrap.animate(thumbDrop(), beat)");
+    expect(body).toContain('fill: "forwards"');
+  });
+
+  it("the strip leaves the flex column on the tap, so the close resizes nothing", () => {
+    // an in-flow height animation resizes the thread every frame, and the
+    // threadObserver re-pin then lands on a scrollHeight the flight's
+    // translate has inflated: the exact mid-flight drag send()'s two-rAF wait
+    // exists to prevent. Fixed at its own rect, the strip hands the thread its
+    // room in one hop with the old display:none timing, and the close is pure
+    // paint over a thread that never resizes under the flight.
+    const body = dismiss();
+    const fix = body.indexOf('box.style.position = "fixed"');
+    const anim = body.indexOf("box.animate(");
+    expect(fix).toBeGreaterThan(-1);
+    expect(fix).toBeLessThan(anim);
+    // bottom-anchored, so the top edge glides down the way the in-flow close moves
+    expect(body).toContain("window.innerHeight - rect.bottom");
+  });
+
+  it("the squares leave the ledger on the tap, and the teardown owns them", () => {
+    const body = dismiss();
+    const forget = body.indexOf("picks.clear()");
+    expect(forget).toBeGreaterThan(-1);
+    expect(forget).toBeLessThan(body.indexOf("animate(")); // before either motion starts
+    expect(body).toContain('drop.addEventListener("finish", gone)');
+    expect(body).toContain('drop.addEventListener("cancel", gone)');
+  });
+
+  it("a drawn square keeps its photo; a waiting one keeps its mark", () => {
+    // the img is the one drawn element and the send takes it (takeShot), so
+    // the square paints the same blob as its own background for the close; a
+    // square still under .undrawn keeps the grey face and ring instead, and
+    // never asks the engine to paint pixels that do not exist yet
+    const body = dismiss();
+    expect(body).toContain('classList.contains("undrawn")');
+    expect(body).toContain("pick.wrap.style.backgroundImage");
+    expect(body).toContain("pick.img.src");
+    expect(body).toContain('pick.wrap.classList.add("sent")');
+  });
+
+  it("the sent square is its own 64px box: the img left, the seat must not", () => {
+    expect(css).toMatch(/\.pthumb\.sent \{[^}]*\bwidth: 64px;[^}]*\bheight: 64px;/);
+    expect(css).toMatch(/\.pthumb\.sent \{[^}]*background-size: cover;/);
+    expect(css).toMatch(/\.pthumb\.sent \{[^}]*border-radius: 12px;/);
+  });
+
+  it("the box is switched off only once its height has actually gone", () => {
+    const body = dismiss();
+    const anim = body.indexOf("box.animate(");
+    const hide = body.indexOf("showPending()");
+    expect(anim).toBeGreaterThan(-1);
+    expect(anim).toBeLessThan(hide);
+    expect(body).toContain('closing.addEventListener("finish", done)');
+    expect(body).toContain('closing.addEventListener("cancel", done)');
+  });
+
+  it("no url is revoked here: takeShot blanked them and the thread reads them", () => {
+    expect(dismiss()).not.toContain("revokeObjectURL");
+  });
+
+  it("a reopen mid-close puts the strip back in the flow, not just back on", () => {
+    const show = fnBody("showPending");
+    const unfix = show.indexOf('box.removeAttribute("style")');
+    const display = show.indexOf("box.style.display = open");
+    expect(unfix).toBeGreaterThan(-1);
+    expect(unfix).toBeLessThan(display);
+  });
+
+  it("adds no wait to the send: the close is armed and left behind", () => {
+    expect(dismiss()).not.toMatch(/\bawait\b/);
+  });
+});
+
+// The send freeze. Seating a still-decoding img in the thread let WebKit
+// decode it synchronously at the next paint, and a 12MP camera photo held the
+// main thread 220-240ms in the middle of the flight: the attach doing pixel
+// work, not the network. decoding="async" takes that work off the paint; the
+// reserved seat and the waiting mark already cover the box until whenDrawn
+// settles, so nothing visible changes except that the freeze is gone.
+describe("the attach never blocks on undecoded pixels", () => {
+  it("the one picked-photo element is marked for async decode at birth", () => {
+    const prepare = fnBody("prepareShot");
+    const mark = prepare.indexOf('img.decoding = "async"');
+    const source = prepare.indexOf("img.src = url");
+    expect(mark).toBeGreaterThan(-1);
+    expect(mark).toBeLessThan(source); // marked before any bytes can arrive
+  });
+
+  it("the seat and the placeholder still stand while the pixels cook", () => {
+    // the pair is what makes the async decode invisible: the bubble is full
+    // size from the insert and plainly says a photo is coming
+    expect(fnBody("send")).toContain("photoBox(nat[0], nat[1], rowW)");
+    expect(fnBody("prepareShot")).toContain("img.classList.add(WAIT_CLASS)");
+  });
+});
