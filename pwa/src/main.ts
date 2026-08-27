@@ -56,7 +56,10 @@ import {
   giveUpTarget,
   laidOutRows,
   nearBottomOf,
+  needsSettle,
   rowName,
+  settleBottom,
+  settleMark,
   tailGapFrame,
 } from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
@@ -78,7 +81,7 @@ import "./scrolljank";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.32"; // the app's first page is its own loading scene now, a ringed planet with a moon going round it, and it stays up until the thread has stopped growing, scrolling and resizing rather than merely finished arriving
+const APP_VERSION = "0.3.33"; // the conversation now owns its own scroll whenever the room under it changes, so neither a keyboard leaving nor a cancelled photo drawer can leave a band of empty white below the last message
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -162,8 +165,21 @@ const downBtn = createDownButton((show) =>
 // the keyboard gate (shell.ts owns the edge, downbtn.ts the rule): up takes
 // the chevron down, and the down edge is one nudge with the same followTail
 // verdict the scroll handler feeds it, so the ordinary stillness window
-// decides whether it comes back
-watchKeyboard((up) => downBtn.keyboard(up, followTail));
+// decides whether it comes back.
+//
+// The same edge is also the loudest bottom-geometry change the app has, so it
+// settles the scroll (settleTail below). The edge is delivered from inside the
+// visual-viewport resize that carries it, which is the event this has to run
+// in; the next frame runs it again because iOS can still be reporting the old
+// numbers at event time, and that is one frame of looking, not a delay. Every
+// frame between the two belongs to the shell's own box glide, and those reach
+// the same place through the thread's resize observer.
+watchKeyboard((up) => {
+  downBtn.keyboard(up, followTail);
+  const via = up ? "kb-open" : "kb-close";
+  settleTail(via);
+  requestAnimationFrame(() => settleTail(via));
+});
 
 // boot-replay ledger (bootgate.ts owns it): the honest replay marker. Every
 // socket frame at or below the server's tail-at-connect is backlog and must
@@ -459,6 +475,16 @@ function renderChat(): void {
     lastGestureAt = performance.now();
   });
   thread.addEventListener("scroll", () => {
+    // The watchdog. Safari hands back an out-of-range scrollTop rather than
+    // clamping it, so a position past the end of the range stays readable, and
+    // stays on screen as a band of white under the last message, until
+    // something writes over it. Asked on the scroller's own events, it costs
+    // one subtraction while nothing is wrong and covers staleness on the
+    // engine's side that the app never caused. Its own write lands inside the
+    // range, so the scroll event it fires reads clean and it cannot loop.
+    if (needsSettle({ sh: thread.scrollHeight, st: thread.scrollTop, ch: thread.clientHeight })) {
+      settleTail("scroll-watchdog");
+    }
     // the ONE place following flips: away from the bottom = reading history,
     // back at the bottom = following again (programmatic pins land here too).
     // While the composer is focused, an away reading needs a real gesture to
@@ -723,6 +749,12 @@ function showPending(): void {
     box.removeAttribute("style");
   }
   box.style.display = open ? "flex" : "none";
+  // The tray's height is the thread's: the room it takes on the tap and the
+  // room it gives back at the end of a close both move the scroller's bottom
+  // edge, so the scroll is re-established on this same frame. Reading the box
+  // inside the settle flushes the display write above, so the numbers it works
+  // from are the ones this line just produced, not the previous frame's.
+  settleTail(open ? "drawer-open" : "drawer-close");
 }
 
 // The ✕. Everything the tap DECIDES lands on the tap — the file leaves the
@@ -749,6 +781,13 @@ function dismissPick(file: File, pick: Pick): void {
     const padTop = parseFloat(getComputedStyle(box).paddingTop) || 0;
     box.classList.add("closing"); // clips the full-size square while the box goes past it
     trayClosing = box.animate(trayClose(box.offsetHeight, padTop), beat);
+    // This close runs IN the flex column, so the thread takes the drawer's
+    // height back frame by frame and the scroller's end walks up with it. That
+    // is the band he sees when a pick is cancelled, and it never heals on its
+    // own because nothing else here writes the scroll again. Each of those
+    // frames settles through the resize observer; this names the start of the
+    // run on the trail, and the finish below closes it through showPending.
+    settleTail("drawer-close");
   }
   const drop = pick.wrap.animate(thumbDrop(), beat);
   const gone = (): void => {
@@ -808,6 +847,9 @@ function dismissSent(): void {
   box.style.width = `${rect.width}px`;
   box.style.bottom = `${window.innerHeight - rect.bottom}px`;
   box.classList.add("closing"); // clips the full-size squares while the box goes past them
+  // the strip has just left the layout, so the thread has its room back in one
+  // hop: the scroll answers for that hop here, in the hop's own frame
+  settleTail("drawer-close");
   const beat: KeyframeAnimationOptions = {
     duration: FLIGHT_MS,
     easing: FLIGHT_EASE,
@@ -953,13 +995,22 @@ function userScrollIntent(): boolean {
   return threadTouching || performance.now() - lastGestureAt < USER_SCROLL_INTENT_MS;
 }
 
-// re-pin when the THREAD BOX resizes (keyboard up/down, compose growth);
-// content growth inside it re-pins via applyEvent and image onload hooks
+// Re-establish when the THREAD BOX resizes (keyboard up/down, compose growth,
+// the photo drawer's height); content growth inside it re-pins via applyEvent
+// and the image onload hooks. This used to re-pin the bottom while following
+// and do nothing at all otherwise, which left the one case that shows as white:
+// a box that GREW under a scroll position sitting at the old end. Routed
+// through the settle, the follow arm is the same instant pin it always was and
+// the other arm clamps, so an out-of-range position cannot survive a resize
+// whichever way following happens to be pointing.
+//
+// This is also the only signal that sees every FRAME of a box that changes over
+// a beat rather than in one hop: the shell's glide home after a keyboard close
+// and the drawer's own height easing both move the edge frame by frame, and the
+// observer is delivered on each of those frames, before it paints.
 const threadObserver =
   "ResizeObserver" in window
-    ? new ResizeObserver(() => {
-        if (followTail) scrollToBottom(true);
-      })
+    ? new ResizeObserver(() => settleTail("box", true))
     : null;
 
 // Rows the send flight has in the air, each one translated down toward the
@@ -1013,6 +1064,59 @@ function cancelGlide(): void {
   glide = null;
   if (glideRaf) cancelAnimationFrame(glideRaf);
   glideRaf = 0;
+}
+
+// --- the one place the bottom geometry lands ----------------------------------
+// "The room under the conversation just changed": the keyboard arriving or
+// leaving, the photo drawer opening or collapsing, every in-between frame of
+// the box animations those two ride, and the watchdog on the scroller's own
+// scroll events. All of them come here, and two things happen in the caller's
+// own frame, in this order.
+//
+// First, whatever scroll the app still has in the air stops counting. A smooth
+// scroll aims at a target measured when it was ASKED for, and the engine keeps
+// that target across a viewport change: the pin the send flight asks for as it
+// lands, asked for while the keyboard was still up, is exactly the write that
+// puts the thread past its own end once the keyboard has gone. An instant
+// write cancels a smooth one, so the re-establish below IS that cancellation,
+// and it is unconditional for that reason even when it lands on the value
+// already there. That leans on one thing staying true: nothing in styles.css
+// gives the thread a scroll-behavior, so the write below really is instant and
+// not the stylesheet's smooth one under another name (scrollToBottom's forced
+// pin has always leaned on the same). The app's own animated ride is cancelled
+// outright, but only when this pass has real work to do, because that ride
+// re-reads the geometry every frame and lands on the true bottom by itself.
+//
+// Second, the scroll is re-established from numbers read HERE, never from
+// anything carried in: pinned to the fresh end while following the tail, and
+// only clamped while the reader is up in the history (viewport.ts settleBottom
+// owns that rule, and why a reader is never yanked down).
+//
+// Every caller is a state signal. Nothing here waits on a clock.
+let tailGen = 0; // bumped by every settle: a write deferred before it is stale
+
+/** cancel the app's own animated ride; true if one was actually running */
+function cancelTailRide(): boolean {
+  const riding = glide !== null || glideRaf !== 0;
+  cancelGlide();
+  return riding;
+}
+
+/**
+ * @param via   the signal that called, as the trail carries it
+ * @param quiet a per-frame caller: leave a record only when there was work
+ */
+function settleTail(via: string, quiet = false): void {
+  const t = document.getElementById("thread");
+  if (!t) return; // no shell yet, or torn down under a deferred call
+  tailGen++;
+  const g = { sh: t.scrollHeight, st: t.scrollTop, ch: t.clientHeight };
+  const plan = settleBottom(g, followTail);
+  const cut = plan.moved ? cancelTailRide() : false;
+  t.scrollTo({ top: plan.top, behavior: "auto" });
+  if (!quiet || plan.over > 0 || cut) {
+    holdDiagRecord("tail-settle", settleMark(via, g, plan, cut, flightsUp));
+  }
 }
 
 function startGlide(): void {
@@ -3768,11 +3872,14 @@ async function bootFromCache(): Promise<void> {
     suppressAnim = prevSuppress;
     if (cached.lastSeq > lastSeq) lastSeq = cached.lastSeq; // a retracted tail still advances the cursor
     scrollToBottom(true);
+    const armed = tailGen; // a settle between here and the next frame wins
     requestAnimationFrame(() => {
       const el = document.getElementById("thread");
       // the swallowed-first-write re-assert, from live geometry: writing the
-      // captured value back re-pinned a frame iOS had already re-sized under it
-      if (el) el.scrollTop = el.scrollHeight;
+      // captured value back re-pinned a frame iOS had already re-sized under
+      // it. A bottom-geometry settle landing in between has already answered
+      // for the fresh box, so this stands down rather than pinning over it.
+      if (el && armed === tailGen) el.scrollTop = el.scrollHeight;
     });
     holdDiagRecord("cache-applied", { lastSeq, ms: Math.round(performance.now() - t0) });
     void settleLoadingScreen(); // the cached thread is the first paint: the wait for quiet starts here

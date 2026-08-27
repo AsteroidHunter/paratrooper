@@ -230,7 +230,10 @@ describe("boot order — shell, cached frames in one task, pin, THEN the socket"
     // the re-assert re-pins from LIVE geometry (the Safari swallowed-first-
     // write quirk, minus the stale captured value that re-pinned a frame iOS
     // had already re-sized) — never a fresh smooth scroll
-    expect(boot).toMatch(/requestAnimationFrame[\s\S]{0,300}scrollTop = el\.scrollHeight/);
+    expect(boot).toMatch(/requestAnimationFrame[\s\S]{0,600}scrollTop = el\.scrollHeight/);
+    // and it stands down entirely if a bottom-geometry settle has answered for
+    // a fresher box in between (main.ts settleTail, tailsettle.test.ts)
+    expect(boot).toContain("armed === tailGen");
     expect(boot).not.toContain("scrollTop = pinned");
   });
 

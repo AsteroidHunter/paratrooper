@@ -91,6 +91,119 @@ export function nearBottomOf(
   return scrollHeight - overflow - scrollTop - clientHeight < NEAR_BOTTOM_PX;
 }
 
+// The bottom geometry moved: where the scroll has to land now.
+//
+// The scroller's usable range is its content less its box, so anything that
+// changes the BOX changes the end of the range. Two of those changes leave a
+// band of empty white under the last message, and they are one bug wearing two
+// coats:
+//
+//   the keyboard leaving. While it is up iOS gives the thread a much shorter
+//   box, so the end of the range sits far lower in the content; a position
+//   that was the end then is past the end once the full box comes back. The
+//   device trail measured it: 4329 of content in a 624 box ends at 3705, and
+//   the stuck position was 4091, which is that same content less the 238 of
+//   box the keyboard had left it.
+//
+//   the photo drawer collapsing. It hands its own height back to the thread,
+//   which lowers the end of the range by exactly the drawer, and the position
+//   that was correct while the drawer stood is past the end the moment it goes.
+//
+// So the rule below is written once for both, and for anything else that moves
+// that edge. Following the tail pins to the end computed from the numbers read
+// on this frame, never from a target carried over from the old box. Away from
+// the tail the position is only CLAMPED: a reader who has deliberately scrolled
+// up keeps his place, and is pulled back only when his place no longer exists.
+//
+// Pure, so the arithmetic is pinned without a DOM, the same split the
+// compensation decision above uses; main.ts holds the reads, the write, and the
+// signals that call it.
+
+export type SettleMode = "follow" | "clamp";
+
+/** the scroller's three numbers, exactly as the engine reports them */
+export interface BottomGeometry {
+  sh: number; // scrollHeight
+  st: number; // scrollTop
+  ch: number; // clientHeight
+}
+
+export type TailSettle = {
+  mode: SettleMode;
+  top: number; // where scrollTop has to be
+  over: number; // how far past the end it was, in pixels
+  moved: boolean; // whether that is a different place from where it is
+};
+
+/** anything past this is rounding, not a band */
+export const SETTLE_SLOP_PX = 1;
+
+/** the last position the scroller can hold: content less box, never negative */
+export function maxScrollTop(scrollHeight: number, clientHeight: number): number {
+  return Math.max(0, scrollHeight - clientHeight);
+}
+
+/** how far past its own end the scroller is sitting */
+export function tailOverhang(g: BottomGeometry): number {
+  return Math.max(0, g.st - maxScrollTop(g.sh, g.ch));
+}
+
+/**
+ * The watchdog's question, asked on the scroller's own scroll events. Safari
+ * reports an out-of-range scrollTop instead of clamping it, so a position past
+ * the end stays readable (and stays visible as white) until something writes
+ * over it. Costs one subtraction when nothing is wrong.
+ */
+export function needsSettle(g: BottomGeometry): boolean {
+  return tailOverhang(g) >= SETTLE_SLOP_PX;
+}
+
+export function settleBottom(g: BottomGeometry, follow: boolean): TailSettle {
+  const max = maxScrollTop(g.sh, g.ch);
+  const over = Math.max(0, g.st - max);
+  const top = follow ? max : Math.max(0, Math.min(g.st, max));
+  return { mode: follow ? "follow" : "clamp", top, over, moved: top !== g.st };
+}
+
+// One settle, as the trail carries it: which signal called, what it corrected,
+// whether it took a scroll animation down on the way, and how many send flights
+// were still in the air when it ran. That last one is what told the failing
+// closes from the healthy ones on device, and a flight is also the thing that
+// asks for the stale scroll this pass exists to take back, so the two belong on
+// the same line. An alias rather than an interface for tailGapFrame's reason,
+// so it hands straight to holdDiagRecord's Record without a cast.
+export type SettleMark = {
+  via: string;
+  mode: SettleMode;
+  from: number;
+  to: number;
+  over: number; // the band that would have been left, in pixels
+  sh: number;
+  ch: number;
+  cut: boolean; // an animation the app was running was cancelled by this pass
+  air: number; // send flights still airborne
+};
+
+export function settleMark(
+  via: string,
+  g: BottomGeometry,
+  plan: TailSettle,
+  cut: boolean,
+  air = 0,
+): SettleMark {
+  return {
+    via,
+    mode: plan.mode,
+    from: Math.round(g.st),
+    to: Math.round(plan.top),
+    over: Math.round(plan.over),
+    sh: Math.round(g.sh),
+    ch: Math.round(g.ch),
+    cut,
+    air,
+  };
+}
+
 // ===================== TEMP DIAGNOSTIC (remove after the tail-gap session) =====================
 // The room under the last message, as one number.
 //

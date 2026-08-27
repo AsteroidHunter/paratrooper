@@ -600,7 +600,10 @@ describe("presentation — the seat rides the pill's live height", () => {
   });
 
   it("the keyboard edge feeds the gate: shell.ts's edge, downbtn.ts's rule", () => {
-    expect(main).toContain("watchKeyboard((up) => downBtn.keyboard(up, followTail))");
+    // the edge callback also settles the thread's scroll from the fresh box
+    // (tailsettle.test.ts pins that half); the gate's own line is this one
+    expect(main).toContain("watchKeyboard((up) => {");
+    expect(main).toContain("downBtn.keyboard(up, followTail);");
     expect(shell).toContain("const keyboard = t.kb || focusing;"); // the tap AND the proven keyboard
     expect(shell).toContain("if (keyboard !== appliedKeyboard)"); // edges only, never per event
   });

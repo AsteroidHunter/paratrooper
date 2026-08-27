@@ -207,6 +207,13 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // any window an earlier mark could have armed, and one record per gesture
   // means arming here cannot churn. TEMP DIAGNOSTIC (scroll-jank): remove
   // this entry and this paragraph with the scrolljank.ts block.
+  //
+  // "tail-settle" is IN because one of the two moments it exists for arms
+  // nothing else at all: cancelling a picked photo is a tap on a tray button,
+  // with no keyboard edge and no send anywhere near it, so without this the
+  // whole correction would sit in the ring until something unrelated happened
+  // by. A box that changes over a beat writes a short burst of them and the
+  // settle below folds a burst into one post, so this cannot churn either.
   if (
     ev === "held" || ev === "release" || ev === "pass" || ev === "reset" ||
     ev === "snapback" || ev === "followtail" || ev === "flight" ||
@@ -216,7 +223,7 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "grow-blink" || ev === "kb-shove" ||
     ev === "kb-focusing" || ev === "kb-glide" || ev === "kb-edge" ||
     ev === "pick-anchor" || ev === "tail-gap" || ev === "close-slack" ||
-    ev === "scroll-jank"
+    ev === "scroll-jank" || ev === "tail-settle"
   ) {
     diagPost();
   }
