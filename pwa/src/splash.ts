@@ -13,7 +13,12 @@
 //
 // Same shape as the shell module: a pure geometry core (unit-tested, no DOM)
 // beneath a thin canvas/DOM layer.
-import { SPLASH_LOGO_H, SPLASH_LOGO_W } from "./splashlogo";
+//
+// The second half of this file is the app's OWN loading page, which is a
+// different picture on the same white and is described in index.html. The two
+// live together because they are the same event seen from both sides: the phone
+// holds the screen until it hands the page over, and the page holds it from
+// there until the conversation has finished moving.
 
 // ===================== TEMP DIAGNOSTIC (remove after the cold-open session) =====================
 // The white gap, measured instead of reasoned about. On a cold open the phone
@@ -27,29 +32,29 @@ import { SPLASH_LOGO_H, SPLASH_LOGO_W } from "./splashlogo";
 //     so it carries the fetch and the parse and none of the work the app does
 //     afterwards. Nothing earlier is reachable from here: no timing API says
 //     when a script BEGINS executing, only when its bytes finished arriving.
-//   coverUpMs: the instant the app took the cover OVER, read where the adoption
-//     below returns. It used to be when the cover appeared, back when this
-//     module built it; now the cover is markup in index.html and is on screen
-//     long before this runs, so the stretch from the paint mark to here is time
-//     the user spends looking at a cover that is already right.
+//   coverUpMs: the instant the app took the loading page OVER, read where the
+//     adoption below returns. It used to be when a panel appeared, back when
+//     this module built one; now the page is markup in index.html and is on
+//     screen long before this runs, so the stretch from the paint mark to here
+//     is time the user spends looking at a page that is already right.
 //   htmlDoneMs: the navigation entry's responseEnd, the last byte of the HTML
 //     document. Splits that first stretch again, into waiting for the page and
 //     then fetching plus parsing the bundle the page asks for.
 //   firstPaintMs: the browser's own first-contentful-paint mark, and since the
-//     cover moved into the document, the moment the cover appeared. This is the
-//     number the move is judged on. It is a browser mark rather than one of
-//     ours because the page cannot see its own first paint from inside itself,
-//     and it degrades to null wherever paint timing is not reported.
+//     loading page moved into the document, the moment that page appeared. This
+//     is the number the move is judged on. It is a browser mark rather than one
+//     of ours because the page cannot see its own first paint from inside
+//     itself, and it degrades to null wherever paint timing is not reported.
 //
 // main.ts lands all four on the holddiag boot channel as one boot-blank
 // record. TO REMOVE: delete this block, the one assignment inside
-// installSplashCover below, the boot-blank record in main.ts, the matching
-// block at the end of tests/splash.test.ts, and the "boot-blank" names in
+// installLoadingScreen below, the boot-blank record in main.ts, the matching
+// block at the end of tests/loading.test.ts, and the "boot-blank" names in
 // hold.ts and web/app.py.
 const CODE_START_MS = performance.now();
 
-// set once, when the cover enters the document, and left null wherever no
-// cover mounts at all: a browser tab had no launch image to hand over from,
+// set once, when the loading page is taken over, and left null wherever none
+// is adopted at all: a browser tab had no launch image to hand over from,
 // so there is no blank stretch of this kind to report on one
 let coverUpMs: number | null = null;
 
@@ -113,11 +118,9 @@ export interface SplashLayout {
   canvasW: number; // device px
   canvasH: number; // device px
   // The screen this layout was built for, carried back out in the CSS pixels it
-  // came in as. Two things need it and neither can go and read it for itself:
-  // the cover's own restatement of this picture (coverLogoRect and
-  // coverHandleBox below), and the credit line the launch image paints, which
-  // has to be asked for in the cover's unit rather than the canvas's for the
-  // reason paintSplash gives.
+  // came in as. The credit line needs it and cannot go and read it for itself:
+  // that line has to be asked for in the screen's unit rather than the canvas's
+  // for the reason paintSplash gives.
   screenW: number; // CSS px, as handed in
   screenH: number; // CSS px, as handed in
   logoX: number; // device px, logo's left edge
@@ -187,21 +190,19 @@ export interface DrawTarget {
   scale(x: number, y: number): void;
 }
 
-// The launch image's background. The in-page cover is a panel of this same
-// white, and the inlined art the cover shows is flattened onto it, so the
-// handoff between the two is one continuous colour. The cover states its own
-// copy of this in index.html, because it has to be right before any of this
-// file has arrived; the suite is what keeps the two saying the same thing.
+// The launch image's background. The app's own loading page stands on this same
+// white, so the phone's dissolve lands on the colour it left and the only thing
+// that changes across the handover is what is drawn on it. index.html states
+// its own copy of this, because it has to be right before any of this file has
+// arrived; the suite is what keeps the two saying the same thing.
 export const SPLASH_BG = "#ffffff";
 
-// The chat's own family list, restated (styles.css sets the same one on body,
-// and index.html sets it on the cover). It has to live here as a string because
-// the canvas needs it in JS and reading it back off a stylesheet would mean a
-// computed-style read, which is exactly the kind of waiting the cover exists to
-// avoid. Every name in it is a system face, so there is nothing to fetch and
-// nothing to load-check on any side: the canvas can draw the moment it is asked
-// to and the cover has its font from the first frame. Keep the three in step if
-// that list ever moves.
+// The chat's own family list, restated (styles.css sets the same one on body).
+// It has to live here as a string because the canvas needs it in JS and reading
+// it back off a stylesheet would mean a computed-style read, which is exactly
+// the kind of waiting a launch must not do. Every name in it is a system face,
+// so there is nothing to fetch and nothing to load-check: the canvas can draw
+// the moment it is asked to. Keep the two in step if that list ever moves.
 export const SPLASH_FONT_FAMILY =
   '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif';
 
@@ -216,10 +217,9 @@ export const SPLASH_FONT_LADDER = [SPLASH_FONT_FAMILY, "system-ui", "sans-serif"
 
 // A quiet credit, not a label: Apple's systemGray2, one step fainter than the
 // grey the app's own secondary text uses (--muted, #8e8e93). Written out rather
-// than taken from that CSS variable because the cover is styled before any of
-// the app's own CSS has landed, and because both splashes are white in either
-// colour scheme while --muted flips with the scheme. index.html restates it for
-// the same reason it restates the white above.
+// than taken from that CSS variable because the launch image is painted before
+// any of the app's own CSS has landed, and because it is white in either colour
+// scheme while --muted flips with the scheme.
 export const SPLASH_HANDLE_COLOR = "#aeaeb2";
 
 // Put the credit line's font on a 2D context and hand back what the context
@@ -246,25 +246,20 @@ export function applySplashFont(ctx: Pick<DrawTarget, "font">, px: number): stri
   return ctx.font;
 }
 
-// THE ONE ROUTINE THAT DRAWS THE CREDIT LINE, for either splash.
+// THE ROUTINE THAT DRAWS THE CREDIT LINE onto the launch image.
 //
-// Both pictures now come out of this. The launch image gets it through
-// paintSplash below; the cover gets it through the hand copy index.html carries
-// in its head, which rasterizes the same line into a small canvas and shows it
-// as the cover's background. That is why the cover no longer sets the line as
-// live text: two rasterizers drawing one string do not agree, and no amount of
-// matching metrics makes them, because a stylesheet and a canvas do not share a
-// smoothing setting or a baseline rounding rule. Measured on this app before
-// the change, on eight screen shapes in both engines available: the same glyph
-// run to within a pixel of width, but the cover carrying 15 to 25 percent less
-// ink and sitting up to three device pixels off vertically. One rasterizer
-// leaves nothing to differ.
-//
-// The point is drawn in DEVICE pixels and the type is asked for in the COVER's
+// The point is drawn in DEVICE pixels and the type is asked for in SCREEN
 // pixels, through a scale of the canvas-to-screen ratio per axis. paintSplash's
 // own comment carries the why of that split; the short version is that the
 // system face spaces small type looser than large type, so the size the font
-// engine is ASKED for has to be the cover's size, whatever pixels it lands on.
+// engine is ASKED for has to be the size the line occupies on the screen,
+// whatever device pixels it lands on.
+//
+// The split is left exactly as it was when the app's first page was a hand copy
+// of this picture and the two had to agree glyph for glyph. That page is gone
+// and there is no second rasterizer left to match, but every pixel of the
+// launch image is decided here, and changing how the type is asked for would
+// change the picture the phone stores. So it stays.
 export function drawSplashHandle(
   ctx: DrawTarget,
   text: string,
@@ -291,7 +286,7 @@ export function paintSplash(ctx: DrawTarget, logo: CanvasImageSource, g: SplashL
   ctx.fillStyle = SPLASH_BG;
   ctx.fillRect(0, 0, g.canvasW, g.canvasH);
   ctx.drawImage(logo, g.logoX, g.logoY, g.logoW, g.logoH);
-  // THE CREDIT LINE IS ASKED FOR IN THE COVER'S PIXELS, NOT THE CANVAS'S.
+  // THE CREDIT LINE IS ASKED FOR IN SCREEN PIXELS, NOT THE CANVAS'S.
   //
   // Everything else on this canvas is a rectangle, and a rectangle drawn at
   // three times the size and shown at a third of it is the same picture. Type
@@ -308,37 +303,67 @@ export function paintSplash(ctx: DrawTarget, logo: CanvasImageSource, g: SplashL
   // sizes are the same number, which is why nothing but a real measurement on a
   // real screen would have found it.
   //
-  // So the line is asked for at the size the COVER will ask for, which is what
-  // coverHandleBox states, and the canvas is scaled to put it on the device
-  // pixels the launch image needs. The font engine picks its spacing off the
-  // size it is asked for and the scale is applied afterwards, so the two
-  // splashes now set the same string at the same tracking. The scale is the
-  // canvas-to-screen ratio per axis, inverted, for the same reason
-  // coverLogoRect takes it per axis rather than as the device pixel ratio: the
-  // canvas is rounded to whole device pixels and the screen is stretched onto
-  // exactly that, so this is the stretch the phone itself will apply.
+  // So the line is asked for at the size it occupies on the SCREEN, which is
+  // what splashHandleBox states, and the canvas is scaled to put it on the
+  // device pixels the launch image needs. The font engine picks its spacing off
+  // the size it is asked for and the scale is applied afterwards. The scale is
+  // the canvas-to-screen ratio per axis, inverted, rather than the device pixel
+  // ratio: the canvas is rounded to whole device pixels and the screen is
+  // stretched onto exactly that, so this is the stretch the phone itself will
+  // apply.
   //
   // The anchor is the layout's own, handed over in device pixels for
   // drawSplashHandle to put through the scale, so it lands on the very same
   // device pixel it always did. "middle" is the point half the font's
   // ascent-minus-descent above the baseline, which is the same point CSS puts
   // at the middle of a line box.
-  //
-  // The drawing itself moved out to drawSplashHandle above, because the cover
-  // draws this same line now instead of setting it as text, and one routine is
-  // the only way two pictures come out identical. Nothing here changed with it:
-  // the calls, their order and the numbers they carry are what they were.
   const sx = g.screenW / g.canvasW;
   const sy = g.screenH / g.canvasH;
   drawSplashHandle(
     ctx,
     SPLASH_HANDLE,
-    coverHandleBox(g).fontPx,
+    splashHandleBox(g).fontPx,
     sx,
     sy,
     g.handleCenterX,
     g.handleCenterY,
   );
+}
+
+export interface SplashHandleBox {
+  top: number; // CSS px from the screen's top edge to the line box's top
+  height: number; // CSS px, the line box
+  fontPx: number; // CSS px
+}
+
+// pure: the launch image's device-pixel credit line, restated in the SCREEN's
+// own CSS pixels. Only the vertical axis converts: the canvas centers the text
+// on canvasW/2, so the horizontal answer is "the middle" and needs no number.
+//
+// The canvas draws from the text's middle and CSS measures a box from its top,
+// so the middle is handed back as top-plus-half-a-line-box, which is the point
+// a line box's middle sits at.
+//
+// This is where the size the launch image sets the line in is decided, and
+// paintSplash is the only caller. It reads as a CSS answer because it once was
+// one: the app's first page used to restate this picture as live text, and the
+// size had to be the size that page would ask a stylesheet for, since the
+// system face spaces small type looser than large type. That page is gone. The
+// arithmetic stays because it is what the shipped launch image is built from,
+// and a launch image that changed size under the user is exactly the artifact
+// the change was made to be rid of.
+//
+// The conversion is the canvas-to-screen ratio rather than a bare 1/dpr:
+// splashLayout() rounds the canvas to whole device pixels, which can leave the
+// two axes a hair apart, and copying the ratio it actually produced is what
+// keeps the line where the phone's own picture puts it. The screen defaults to
+// the one the layout was built for, which is the only screen any caller has
+// ever passed; naming it stays allowed so the pairing is visible at the call
+// site.
+export function splashHandleBox(g: SplashLayout, screenH: number = g.screenH): SplashHandleBox {
+  const sy = screenH / g.canvasH;
+  const fontPx = g.handleFont * sy;
+  return { top: g.handleCenterY * sy - fontPx / 2, height: fontPx, fontPx };
 }
 
 // --- DOM/canvas layer ---------------------------------------------------------
@@ -392,47 +417,47 @@ export function installStartupImage(logoSrc: string): void {
   }
 }
 
-// --- the in-page copy of that launch image: the lift rule (pure) --------------
+// --- the app's own loading page: the lift rule (pure) -------------------------
 //
 // The image above is the PHONE's, and it is gone the instant the web view is
 // handed the page, which is well before the thread has laid out, so the
-// handoff shows a bare or half-drawn frame for the rest of the boot. The page
-// therefore carries its OWN copy of that same image, as markup and styles in
-// index.html, over the app's first frames. This is when that copy lifts, and
+// handover would show a bare or half-drawn frame for the rest of the boot. The
+// document therefore carries a loading page of its own, as markup and styles in
+// index.html, over the app's first frames. This is when that page lifts, and
 // nothing here knows about the DOM: two conditions and a cap, driven by the
 // environment's timers exactly like the chevron's pause window.
 //
-//   both of these, then fade: a minimum hold has passed (a launch image that
-//   blinks reads as a glitch), and the thread reported itself settled;
+//   both of these, then fade: a minimum hold has passed (a page that blinks
+//   reads as a glitch), and the app underneath reported itself settled;
 //   and above them a hard cap, so a slow or dead network can never strand the
-//   cover on screen.
+//   loading page on screen.
 
-export const COVER_MIN_HOLD_MS = 1000; // held at least this long, however fast the boot
-export const COVER_CAP_MS = 2000; // the ceiling on the whole thing: it always lifts
-export const COVER_FADE_MS = 260; // short and smooth, not a cut
+export const LOAD_MIN_HOLD_MS = 1000; // held at least this long, however fast the boot
+export const LOAD_CAP_MS = 2000; // the ceiling on the whole thing: it always lifts
+export const LOAD_FADE_MS = 260; // short and smooth, not a cut
 
-export type CoverLift = "settled" | "cap";
+export type LiftReason = "settled" | "cap";
 
-export interface SplashCover {
-  /** the boot's messages are laid out and their images have finished loading */
+export interface LoadingScreen {
+  /** the boot's messages are laid out, their images are in, and nothing is moving */
   settled(): void;
   /** the fade has started (either by the rule or by the cap) */
   lifted(): boolean;
 }
 
 // pure: two timers and the settle flag. The lift callback runs exactly once and
-// is told which of the two took the cover down, so the wiring can record it.
-export function createSplashCover(
-  lift: (why: CoverLift) => void,
-  minHoldMs: number = COVER_MIN_HOLD_MS,
-  capMs: number = COVER_CAP_MS,
-): SplashCover {
+// is told which of the two took the page down, so the wiring can record it.
+export function createLoadingGate(
+  lift: (why: LiftReason) => void,
+  minHoldMs: number = LOAD_MIN_HOLD_MS,
+  capMs: number = LOAD_CAP_MS,
+): LoadingScreen {
   let holdPassed = false;
-  let threadSettled = false;
+  let appSettled = false;
   let done = false;
   const timers: Array<ReturnType<typeof setTimeout>> = [];
 
-  function fire(why: CoverLift): void {
+  function fire(why: LiftReason): void {
     if (done) return; // one lift per load: a settle after the cap is a no-op
     done = true;
     for (const t of timers) clearTimeout(t);
@@ -440,7 +465,7 @@ export function createSplashCover(
   }
 
   function maybeLift(): void {
-    if (holdPassed && threadSettled) fire("settled");
+    if (holdPassed && appSettled) fire("settled");
   }
 
   timers.push(
@@ -453,160 +478,137 @@ export function createSplashCover(
 
   return {
     settled(): void {
-      threadSettled = true;
+      appSettled = true;
       maybeLift();
     },
     lifted: () => done,
   };
 }
 
-// --- the in-page copy: where its logo sits (pure) ------------------------------
+// --- when the app underneath has stopped MOVING (pure) ------------------------
+//
+// Settled used to mean the boot's messages were laid out and their images had
+// decoded. That is when the app has finished ARRIVING, and it is not the same
+// instant as when the app has finished MOVING. The boot-motion recorder in
+// main.ts exists because the two came apart on real cold opens: the thread's
+// scrollHeight grew after the cached paint, the bottom pin was re-asserted from
+// fresh geometry a frame later, and the layout viewport grew into its real
+// height as the safe-area insets appeared. Lifting on arrival meant the user
+// watched the tail end of all that, which is the one thing this page exists to
+// stand in front of.
+//
+// So the lift waits for quiet too, and quiet is decided by WATCHING rather than
+// by waiting out a number nobody can justify: a few frames in a row in which
+// the thread's height, the thread's scroll position and the viewport's height
+// all read the same as they did on the frame before, with the scroll sitting
+// where it is meant to come to rest. Anything still growing, gliding or
+// re-pinning fails one of those and the count starts over.
+//
+// Two things this deliberately does NOT have. It has no timeout of its own: the
+// only ceiling is the cap above, which lifts the page whatever this says and is
+// also what ends the watch, since a page that has already gone has nothing left
+// to wait for. And it writes nothing. The rest position is READ and compared,
+// never asserted, because a scroll write from the one thing that is supposed to
+// be proving the app is still would be the app moving again.
+//
+// The rest position is the bottom, because that is where every boot path puts
+// the thread: the cached paint pins it, the first settle of a fresh open pins
+// it again once its images are in, and a thread shorter than its own box is at
+// the bottom by construction. A boot that somehow came to rest anywhere else
+// simply never reports quiet, and the cap takes the page down on time.
 
-export interface CoverLogoRect {
-  left: number; // CSS px from the cover's left edge
-  top: number; // CSS px from the cover's top edge
-  width: number; // CSS px
-  height: number; // CSS px
+export const QUIET_FRAMES = 3; // unchanged frames in a row before the app counts as still
+export const QUIET_SLACK_PX = 1; // this far off the rest position is at rest
+
+export interface QuietFrame {
+  sh: number; // the thread's scrollHeight
+  st: number; // the thread's scrollTop
+  ch: number; // the thread's clientHeight
+  vh: number; // the viewport's height
 }
 
-// pure: the launch image's device-pixel logo rect, restated in the CSS pixels
-// the cover lays out in. The startup image draws that rect into a canvas of
-// canvasW x canvasH device pixels; the cover shows the same rect over a screen
-// of screenW x screenH CSS pixels, so the conversion is the canvas-to-screen
-// ratio per axis. Deliberately not 1/dpr: splashLayout() rounds the canvas to
-// whole device pixels, which can leave the two axes a hair apart, and copying
-// the ratio it actually produced is what keeps the logo on the exact spot the
-// phone's launch image put it rather than a fraction of a pixel off it.
-export function coverLogoRect(g: SplashLayout, screenW: number, screenH: number): CoverLogoRect {
-  const sx = screenW / g.canvasW;
-  const sy = screenH / g.canvasH;
-  return { left: g.logoX * sx, top: g.logoY * sy, width: g.logoW * sx, height: g.logoH * sy };
+export interface QuietWatch {
+  /** feed one frame's reading; true once the app has been still long enough */
+  frame(f: QuietFrame): boolean;
+  /** how many frames were fed, for the record the lift lands on the trail */
+  seen(): number;
 }
 
-export interface CoverHandleBox {
-  top: number; // CSS px from the cover's top edge to the line box's top
-  height: number; // CSS px, the line box: set it as the line-height, nothing else
-  fontPx: number; // CSS px
-}
-
-// pure: the launch image's device-pixel credit line, restated in the cover's
-// CSS pixels, by the same canvas-to-screen ratio coverLogoRect() uses and for
-// the same reason. Only the vertical axis converts: the canvas centers the text
-// on canvasW/2 and the cover spans the same screen, so a full-width box with
-// centered text lands on that column by construction.
-//
-// The canvas draws from the text's middle and CSS draws from a box's top, so
-// the middle is handed over as top-plus-half-a-line-box. That works because a
-// line box's middle sits exactly where the canvas's "middle" baseline sits, so
-// as long as the caller sets BOTH the returned top and the returned height (as
-// line-height, whatever the font's own metrics would have given), the two
-// splashes put the same text on the same row.
-//
-// This is now the ONLY place the credit line's size is decided, for either
-// splash. paintSplash asks it for the size the launch image sets the line in,
-// because type does not survive being drawn large and shown small (the comment
-// there carries the why), so a change here moves both pictures together and
-// there is no second copy of it to fall out of step. The screen defaults to the
-// one the layout was built for, which is the only screen any caller has ever
-// passed; naming it stays allowed so the pairing is visible at the call site.
-export function coverHandleBox(g: SplashLayout, screenH: number = g.screenH): CoverHandleBox {
-  const sy = screenH / g.canvasH;
-  const fontPx = g.handleFont * sy;
-  return { top: g.handleCenterY * sy - fontPx / 2, height: fontPx, fontPx };
-}
-
-// --- the in-page copy: the credit line as PIXELS ------------------------------
-
-// The strip of the launch image the credit line lives in, in ems of that line.
-// Wide enough that a longer handle than this app's own still has slack either
-// side, tall enough that any face's ascenders and descenders are inside it:
-// with the canvas anchoring on the text's middle, half of three ems is a full
-// em and a half of headroom each way, against a system face that needs about
-// two thirds of one. Nothing is cropped and the extra rows are white, which
-// costs a PNG almost nothing to carry.
-export const SPLASH_BAND_EMS = 3; // band height
-export const SPLASH_BAND_PAD_EMS = 1; // slack each side of the measured text
-
-export interface HandleBand {
-  bandW: number; // device px, the raster's own size
-  bandH: number;
-  bandX: number; // device px, where the raster sits on the launch image
-  bandY: number;
-  drawX: number; // device px INSIDE the raster: where the text is anchored
-  drawY: number;
-  left: number; // CSS px, the same rect on the cover
-  top: number;
-  width: number;
-  height: number;
-}
-
-// The device pixels one CSS pixel is worth on an axis, but only where that is a
-// WHOLE number, and 1 otherwise. On every screen whose size times its ratio is
-// an integer, which is every phone, this is the ratio itself; where the canvas
-// had to be rounded it is 1, which snaps nothing and is the honest answer, since
-// no rect on such a screen lands on both grids at once.
-function pixelStep(canvasEdge: number, screenEdge: number): number {
-  const q = canvasEdge / screenEdge;
-  return q > 0 && q === Math.round(q) ? q : 1;
-}
-
-// pure: the small raster the cover shows the credit line as, given how wide the
-// string measures at the cover's own font size.
-//
-// The cover cannot set this line as text, for the reason drawSplashHandle's
-// comment gives, so it shows a picture of it instead, drawn by that same
-// routine into a canvas this names the size and place of. Two things make the
-// two splashes the same PIXELS rather than merely the same instructions.
-//
-// The corner is a whole DEVICE pixel, so the fraction of a pixel the text's
-// anchor sits at inside the band is the very fraction it sits at on the launch
-// image, and the glyphs land on the device grid identically on both sides. Any
-// other rounding leaves a subpixel phase between the two rasters, which reads as
-// a shimmer and passes every measurement of size and position.
-//
-// And every edge is a whole CSS pixel too, wherever the screen allows one. The
-// cover states this rect to a stylesheet, and a stylesheet holds a length at a
-// resolution of its own: 419 device pixels over a ratio of 3 comes back out of
-// a computed style as 139.666672, which is 419.000016 device pixels, and a
-// browser handed a picture to draw a fraction of a pixel wider than the picture
-// is RESAMPLES it. Measured: the two shapes where that happened were the only
-// two of eight that still did not match, and the resampling smeared the line
-// across seven percent more pixels. Widening the band to the next whole CSS
-// pixel and pushing its corner back to one costs at most a device pixel of the
-// slack the padding already carries, and it is what takes those two to exact.
-//
-// left/top/width/height are that same rect in the cover's CSS pixels, by the
-// canvas-to-screen ratio per axis, exactly as coverLogoRect converts the logo's
-// and for the same reason.
-export function splashHandleBand(g: SplashLayout, textWidthCss: number): HandleBand {
-  const sx = g.screenW / g.canvasW;
-  const sy = g.screenH / g.canvasH;
-  const qx = pixelStep(g.canvasW, g.screenW);
-  const qy = pixelStep(g.canvasH, g.screenH);
-  const em = g.handleFont; // one em of the credit line, in device px
-  const wanted = Math.ceil(textWidthCss / sx) + 2 * SPLASH_BAND_PAD_EMS * em;
-  const bandW = Math.min(g.canvasW, Math.ceil(wanted / qx) * qx);
-  const bandH = Math.min(g.canvasH, Math.ceil((SPLASH_BAND_EMS * em) / qy) * qy);
-  const bandX = Math.floor((g.handleCenterX - bandW / 2) / qx) * qx;
-  const bandY = Math.floor((g.handleCenterY - bandH / 2) / qy) * qy;
+// pure: the frame-to-frame comparison, with no clock and no DOM in it.
+export function createQuietWatch(need: number = QUIET_FRAMES): QuietWatch {
+  let prev: QuietFrame | null = null;
+  let still = 0;
+  let seen = 0;
   return {
-    bandW,
-    bandH,
-    bandX,
-    bandY,
-    drawX: g.handleCenterX - bandX,
-    drawY: g.handleCenterY - bandY,
-    left: bandX * sx,
-    top: bandY * sy,
-    width: bandW * sx,
-    height: bandH * sy,
+    frame(f: QuietFrame): boolean {
+      seen += 1;
+      // at the bottom, within the slack a fractional layout leaves behind
+      const atRest = f.sh - f.st - f.ch <= QUIET_SLACK_PX;
+      // and nothing the eye could catch changed since the frame before. The
+      // thread's own box is not compared directly: a box that changed while the
+      // height did not moves the rest position, which fails the line above.
+      const same =
+        prev !== null && f.sh === prev.sh && f.st === prev.st && f.vh === prev.vh;
+      still = same && atRest ? still + 1 : 0;
+      prev = f;
+      return still >= need;
+    },
+    seen: () => seen,
   };
 }
 
-// --- the in-page copy: DOM layer ----------------------------------------------
+// --- when the app underneath has stopped MOVING: the frame loop ---------------
+
+// The three readings the watch takes off the thread, and nothing else. Declared
+// readonly so this path cannot write one back even by accident: the compiler is
+// the cheapest possible proof that the reveal never scrolls anything.
+export interface QuietThread {
+  readonly scrollHeight: number;
+  readonly scrollTop: number;
+  readonly clientHeight: number;
+}
+
+// Watch until the app is still, then call done with the number of frames it
+// took. stop() is the way out that does not depend on the app ever settling:
+// the caller passes the loading page's own lifted(), so the cap ends this loop
+// as surely as it ends the page. Where there is no frame clock at all there is
+// also nothing to watch, so it answers straight away.
+export function watchQuiet(
+  thread: QuietThread,
+  viewportH: () => number,
+  stop: () => boolean,
+  done: (frames: number) => void,
+  need: number = QUIET_FRAMES,
+): void {
+  if (typeof requestAnimationFrame !== "function") {
+    done(0);
+    return;
+  }
+  const watch = createQuietWatch(need);
+  const step = (): void => {
+    if (stop()) {
+      done(watch.seen());
+      return;
+    }
+    const quiet = watch.frame({
+      sh: thread.scrollHeight,
+      st: thread.scrollTop,
+      ch: thread.clientHeight,
+      vh: viewportH(),
+    });
+    if (quiet) {
+      done(watch.seen());
+      return;
+    }
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// --- the app's own loading page: DOM layer ------------------------------------
 
 // A launch image preceded this load only when the app opened as an installed
-// window; a browser tab has no handoff to cover, so the copy stays out of one.
+// window; a browser tab has no handover to hold, so the page stays out of one.
 function isInstalledWindow(nav: Navigator): boolean {
   return (
     (nav as unknown as { standalone?: boolean }).standalone === true ||
@@ -614,47 +616,44 @@ function isInstalledWindow(nav: Navigator): boolean {
   );
 }
 
-// nothing to cover (a browser tab, or no document at all): every call is a
+// nothing to hold up (a browser tab, or no document at all): every call is a
 // no-op, so the caller needs no null checks
-const NO_COVER: SplashCover = { settled: () => {}, lifted: () => true };
+const NO_SCREEN: LoadingScreen = { settled: () => {}, lifted: () => true };
 
-let coverStarted = false; // once per load, like the startup image above
+let loadingStarted = false; // once per load, like the startup image above
 
-// Take over the launch cover the document already carries, and hand back its
+// Take over the loading page the document already carries, and hand back its
 // lift rule. Safe to call unconditionally at boot: it no-ops outside an
 // installed window and after the first call, and swallows its own errors. The
-// lift timers start here, so the cover cannot outlive the cap even if the
-// thread never settles.
+// lift timers start here, so the page cannot outlive the cap even if the app
+// never settles.
 //
-// Nothing here builds the cover any more. It is markup and styles in
-// index.html (the comment at the top of that file carries the why), so it is
-// on screen from the document's first paint instead of from this bundle's
-// first statement, which on a measured cold open was two to six hundred
-// milliseconds later. What is left is the three things a stylesheet cannot do:
-// decide whether there was a launch image to hand over from at all, restate
-// the geometry in the exact numbers splashLayout() computes, and own the lift.
+// Nothing here builds the page and, since the page stopped being a copy of the
+// launch image, nothing here measures it either. It is markup and styles in
+// index.html (the comment at the top of that file carries the why), so it is on
+// screen from the document's first paint instead of from this bundle's first
+// statement, which on a measured cold open was two to six hundred milliseconds
+// later. The old copy needed its geometry rewritten from here as well, because
+// it had to land on the very pixels the phone's stored picture used and iOS
+// reports a short layout viewport on the first frame. The scene the page draws
+// now is its own, every length in it is a fraction of the viewport's shorter
+// edge, and on a phone that edge is the width and does not move. There is
+// nothing left to correct.
 //
-// No cover in the document is a legitimate state, not an error: an old page
-// still in the service worker's cache predates the markup, and a page like that
-// is served with the bundle it shipped with, which builds its own. Nothing is
-// mounted in its place here, because the art that would go in it lives in the
-// document too.
+// What is left is the two things a stylesheet cannot do: decide whether there
+// was a launch image to hand over from at all, and own the lift.
 //
-// logoSrc is the full-res file the startup image is built from. The cover has
-// not read it since the art was inlined and does not read it now; the argument
-// stays only so both install calls at the boot site still name the same
-// picture, and can be dropped whenever that call site is next edited.
-export function installSplashCover(
-  _logoSrc: string,
-  onLift?: (why: CoverLift) => void,
-): SplashCover {
-  if (coverStarted) return NO_COVER;
-  coverStarted = true;
+// No page in the document is a legitimate state, not an error: an old page
+// still in the service worker's cache predates this markup, and a page like
+// that is served with the bundle it shipped with.
+export function installLoadingScreen(onLift?: (why: LiftReason) => void): LoadingScreen {
+  if (loadingStarted) return NO_SCREEN;
+  loadingStarted = true;
   try {
-    if (typeof document === "undefined") return NO_COVER;
-    const el = document.getElementById("splashcover");
-    if (!el) return NO_COVER;
-    // A browser tab has no launch image to hand over from, so the cover comes
+    if (typeof document === "undefined") return NO_SCREEN;
+    const el = document.getElementById("loading");
+    if (!el) return NO_SCREEN;
+    // A browser tab has no launch image to hand over from, so the page comes
     // straight back out of the document rather than merely being hidden: it is
     // a fixed, full-screen panel, and one of those has no business sitting over
     // a page for the rest of its life. The stylesheet already hid it before any
@@ -662,56 +661,19 @@ export function installSplashCover(
     // also catches a browser which does not know that query.
     if (!isInstalledWindow(navigator)) {
       el.remove();
-      return NO_COVER;
-    }
-    // The SAME geometry the startup image is built from, on the same inputs,
-    // written back over the stylesheet's statement of it. index.html says these
-    // numbers as fractions of the VIEWPORT's shorter edge, which is what
-    // splashLayout() means by the screen's shorter edge on every phone this app
-    // is opened on, so on those phones the writes below put back the numbers
-    // already in force and nothing moves. They happen anyway, for three
-    // reasons: the pure functions stay the one place the picture is decided; a
-    // window that is not the whole screen (or a device pixel ratio that rounds)
-    // snaps into agreement with the phone's own launch image instead of
-    // drifting off it; and an inline style cannot be outranked by the app's
-    // stylesheet when that finally lands.
-    const screenW = screen.width;
-    const screenH = screen.height;
-    const layout = splashLayout({
-      screenW,
-      screenH,
-      dpr: window.devicePixelRatio || 1,
-      logoAspect: SPLASH_LOGO_W / SPLASH_LOGO_H,
-    });
-    const rect = coverLogoRect(layout, screenW, screenH);
-    const logo = document.getElementById("splashlogo");
-    if (logo) {
-      logo.style.cssText =
-        `left:${rect.left}px;top:${rect.top}px;` +
-        `width:${rect.width}px;height:${rect.height}px;`;
-    }
-    // the credit line, off the same layout. Only the row and the type size are
-    // restated: being pinned to both side edges with centered text is how this
-    // side says the canvas's canvasW/2, and that needs no number at all.
-    const handleBox = coverHandleBox(layout, screenH);
-    const handle = document.getElementById("splashhandle");
-    if (handle) {
-      handle.style.cssText =
-        `top:${handleBox.top}px;` +
-        `font:${handleBox.fontPx}px/${handleBox.height}px ${SPLASH_FONT_FAMILY};`;
+      return NO_SCREEN;
     }
     // TEMP DIAGNOSTIC (the block at the top of this file owns the why): the
-    // cover has been on screen since the document's first paint, so this mark
+    // page has been on screen since the document's first paint, so this mark
     // is when the app took it over, not when the user first saw it
     coverUpMs = performance.now();
-    const cover = createSplashCover((why) => {
+    return createLoadingGate((why) => {
       el.style.pointerEvents = "none"; // the fade must not eat the first tap
       el.style.opacity = "0"; // index.html states the transition this rides
-      setTimeout(() => el.remove(), COVER_FADE_MS);
+      setTimeout(() => el.remove(), LOAD_FADE_MS);
       onLift?.(why);
     });
-    return cover;
   } catch {
-    return NO_COVER; // cosmetic only: a failed cover must never block boot
+    return NO_SCREEN; // cosmetic only: a failed loading page must never block boot
   }
 }

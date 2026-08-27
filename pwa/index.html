@@ -13,37 +13,54 @@
     <meta name="theme-color" content="#0b0b0c" media="(prefers-color-scheme: dark)" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
-    <!-- The credit line, said where a script in the head can read it: the one
-         below draws THIS string into a picture, and it runs before the parser
-         has reached the cover's own copy in the body. Read rather than written
-         into that script so nothing is hardcoded to one owner; the suite holds
-         the two copies equal. -->
-    <meta name="splash-handle" content="@theonetrueakash" />
     <title>Paratrooper</title>
 
     <!--
-      THE LAUNCH COVER. It lives in this document rather than in the bundle,
-      and src/splash.ts adopts the element below instead of building one.
+      THE LOADING PAGE. It lives in this document rather than in the bundle, and
+      src/splash.ts adopts the element below instead of building one.
 
-      An in-page splash was tried once before and given up on (v0.1.24) with
-      the note that on a standalone cold open the white happens BEFORE this
-      document arrives, so nothing in the page could cover it. That was true
-      then. It is not true now, because the app paints the phone's OWN launch
-      image at runtime and installs it as apple-touch-startup-image (see the
-      top of src/splash.ts), so the phone covers everything up to the moment
-      the web view is handed this page. What is left is the stretch from that
-      handover to the first thing the app draws, and that stretch has been
-      measured on real cold opens rather than reasoned about: the document
-      finished arriving at 109ms and 318ms, while the module bundle only began
-      running at 338ms and 666ms. The cover went up 16ms after that. So the
-      app's own startup was never the problem; fetching and parsing the bundle
-      was, and the cover could not exist any earlier because the bundle was
-      what built it.
+      An in-page panel over the first frames was tried once before and given up
+      on (v0.1.24) with the note that on a standalone cold open the white
+      happens BEFORE this document arrives, so nothing in the page could cover
+      it. That was true then. It is not true now, because the app paints the
+      phone's OWN launch image at runtime and installs it as
+      apple-touch-startup-image (see the top of src/splash.ts), so the phone
+      holds the screen up to the moment the web view is handed this page. What
+      is left is the stretch from that handover to the first thing the app
+      draws, and that stretch has been measured on real cold opens rather than
+      reasoned about: the document finished arriving at 109ms and 318ms, while
+      the module bundle only began running at 338ms and 666ms. So the app's own
+      startup was never the problem; fetching and parsing the bundle was, and a
+      panel could not exist any earlier because the bundle was what built it.
 
-      Hence this. Everything the cover needs is in this one file: the styles
-      below and the logo as a data URI, so there is no request, no
-      service-worker lookup and nothing to decode from a second file. The
-      first frame that carries this document carries the cover.
+      WHAT THIS PAGE IS, AND WHAT IT DELIBERATELY IS NOT.
+
+      Until now this was a hand copy of the phone's launch image: the same logo
+      at the same size on the same white, with the same credit line under it, so
+      that the handover would read as one continuous picture. It could never
+      quite be one. Two rasterizers do not set a line of type the same way, so
+      the credit line blinked on every launch; the geometry had to be recomputed
+      off the screen by a script in this head, because iOS reports a short
+      layout viewport on the first frame; and when the app painted late, the
+      whole thing dipped towards white in plain sight. Every one of those was a
+      cost of pretending to be a picture the app does not own.
+
+      So it stopped pretending. This is now the app's own loading page, and it
+      is meant to look DIFFERENT from the launch image: a planet with a ring,
+      and a moon going round the ring, and that orbit is what says the app is
+      still working. The one thing it keeps from the old page is the white it
+      stands on, which is the very white the launch image is painted on
+      (SPLASH_BG in src/splash.ts), so the phone's dissolve lands on the same
+      colour it left and the planet is simply the new thing that appears. Every
+      transition now reads as something the app meant to do.
+
+      Everything the page needs is in this one file: the shapes are elements and
+      the motion is CSS, so there is no request, no service-worker lookup and
+      nothing to decode from a second file. There is no picture to fetch at all
+      any more, which is what let the head's geometry script and the logo's data
+      URI go: the scene is drawn from lengths, and every length is a fraction of
+      the viewport's SHORTER edge, which on a phone is its width and does not
+      change while the safe-area insets settle.
 
       What this does NOT claim is zero. The handover from the phone's launch
       image to this document's first paint is not observable from inside the
@@ -53,20 +70,18 @@
       the head, and a linked stylesheet stops the browser painting ANYTHING,
       including markup it has already parsed, until that file is back. It is
       folded into the built document now (vite.config.ts), so the served page
-      holds every byte it needs to put this cover up and fetches nothing at all
+      holds every byte it needs to put this page up and fetches nothing at all
       before it does. The bundle below is a module, and a module script is
       deferred, so it cannot hold the paint either.
     -->
     <style>
-      /* The panel the phone's launch image hands over to: the same solid
-         white that image is painted on (SPLASH_BG in src/splash.ts), over
-         everything the app draws (the app's own top layer is 30). The fade is
-         stated here and triggered from there, by setting opacity to 0.
-
-         The script below hangs one more thing on this panel: the credit line
-         drawn as pixels, as a background IMAGE. It is a longhand, so this white
-         stays underneath it rather than being replaced, and both fade as one. */
-      #splashcover {
+      /* The panel the phone's launch image hands over to: the same solid white
+         that image is painted on (SPLASH_BG in src/splash.ts), over everything
+         the app draws (the app's own top layer is 30). The fade is stated here
+         and triggered from src/splash.ts, by setting opacity to 0. Nothing is
+         behind it but the app, and the app is only revealed once it has stopped
+         moving, so this fade is the last motion a launch contains. */
+      #loading {
         position: fixed;
         inset: 0;
         z-index: 40;
@@ -75,261 +90,272 @@
         transition: opacity 260ms ease;
       }
 
-      /* The logo, on the rect splashLayout() centers it at, restated in the
-         only unit a stylesheet can say it in. That function sizes the logo's
-         bounding square at SPLASH_LOGO_FRACTION (0.32) of the SHORTER edge of
-         the screen and centers it; vmin is the viewport's shorter edge, so
-         the square is 32vmin, the width is that times the art's own 280/320
-         ratio (0.28), and the corner is the middle less half of each.
-
-         The one thing a stylesheet cannot check is that the viewport IS the
-         screen, and on iOS it is not on the first frame, which is the whole
-         reason for the script below this block. Two things restate these four
-         numbers in screen pixels afterwards: that script, before the parser
-         has even reached the cover, and splash.ts once the bundle runs. Both
-         write the same numbers, and where the viewport is honest they are the
-         numbers already in force, so nothing moves either way. What is left
-         here is the fallback for a load that cannot run either of them;
-         tests/splash.test.ts is what holds all three in step. */
-      #splashlogo {
+      /* The scene, centred on the panel, arriving rather than being there.
+         The fade in is not decoration: iOS reports a short layout viewport on
+         the first frame and grows it into its real height a moment later
+         (measured on real cold opens: 762 tall at first paint, 812 between 68
+         and 289ms afterwards), and everything below is centred on that box, so
+         the scene settles downward by half of that growth. Coming up from
+         nothing over the same stretch is what makes the settle a non-event, and
+         it costs the page nothing, since the panel's white is the launch
+         image's white and an empty scene is still a finished picture. */
+      #loading .scene {
         position: absolute;
-        display: block;
-        left: calc(50% - 14vmin);
-        top: calc(50% - 16vmin);
-        width: 28vmin;
-        height: 32vmin;
+        inset: 0;
+        animation: ld-appear 620ms ease-out 80ms both;
       }
 
-      /* The credit line, off the same shorter edge for the same reason: type
-         at SPLASH_HANDLE_FRACTION (0.035) of it, and its MIDDLE
-         SPLASH_HANDLE_BOTTOM_FRACTION (0.12) of it up from the bottom. CSS
-         places a box by its top, so the top is those 12vmin plus half the
-         type, and the line-height is pinned to the type size so the box's
-         middle is where the canvas's "middle" baseline sits. Pinned to both
-         side edges with centered text, which is this side's way of saying the
-         canvas's canvasW/2. The font stack is the chat's own (styles.css and
-         SPLASH_FONT_FAMILY), every name in it a face the device already has,
-         so the line costs the cover nothing to wait for.
-
-         The row and the type size are restated in screen pixels by the script
-         below, for the reason the logo's block gives, and the family survives
-         that because the script sets the two longhands rather than the
-         shorthand.
-
-         This is the FALLBACK line now. Live text and a canvas do not rasterize
-         a string the same way, so the script below draws the line with the very
-         routine the launch image uses, hangs that picture on the cover, and
-         turns this text transparent behind it. With no script or no canvas this
-         text stands and the app behaves as it did before, and either way the
-         string stays in the document for anything that reads one. */
-      #splashhandle {
+      /* Every part of the scene is centred on the panel and offset from there
+         by half its own size, so one length says where a thing is and how big
+         it is. All of them are vmin, the viewport's shorter edge, which on a
+         phone is the width: the one dimension that does not move while the
+         safe-area insets settle. */
+      #loading .planet,
+      #loading .ring,
+      #loading .moon {
         position: absolute;
-        left: 0;
-        right: 0;
-        text-align: center;
-        top: calc(100% - 13.75vmin);
-        font: 3.5vmin/3.5vmin -apple-system, BlinkMacSystemFont, "SF Pro Text",
-          "Segoe UI", system-ui, sans-serif;
-        color: #aeaeb2;
+        left: 50%;
+        top: 50%;
+        box-sizing: border-box;
+      }
+
+      /* The planet: one soft disc, lit from up and to the left, in the greys
+         the chat already uses for its received bubbles and its hairlines. No
+         outline, no texture, nothing to read as an icon. */
+      #loading .planet {
+        z-index: 3;
+        width: 22vmin;
+        height: 22vmin;
+        margin: -11vmin 0 0 -11vmin;
+        border-radius: 50%;
+        background: radial-gradient(circle at 36% 30%, #f4f4f6 0%, #e4e4e8 46%, #cfcfd4 100%);
+        box-shadow: 0 0.6vmin 1.8vmin rgba(0, 0, 0, 0.05);
+      }
+
+      /* The ring: one thin ellipse, tilted, drawn TWICE. Both copies are the
+         whole ellipse and both sit at the same place; what differs is which
+         side of the planet they are painted on and, for the front copy, that it
+         is cut down to its near half.
+
+         That is the whole trick of a ringed planet. The back copy paints first,
+         so the planet covers the part of it that passes behind. The front copy
+         paints last, so the part of it that passes in front crosses the disc.
+         Where the two would show the same arc, outside the disc, they are the
+         same pixels, so the seam the cut leaves has the back copy underneath it
+         and cannot open a gap.
+
+         The cut is stated in the ring's OWN frame, before the tilt: clip-path
+         applies to the element and the transform applies to the result, so
+         "the lower half" is the lower half of the untilted ellipse, which is
+         exactly the half that the tilt brings towards the viewer. */
+      #loading .ring {
+        z-index: 1;
+        width: 42vmin;
+        height: 13.6vmin;
+        margin: -6.8vmin 0 0 -21vmin;
+        border: 0.3vmin solid #c7c7cc;
+        border-radius: 50%;
+        transform: rotate(-18deg);
+      }
+
+      #loading .front {
+        z-index: 4;
+        clip-path: inset(50% 0 0 0);
+      }
+
+      /* The moon, also drawn twice, for the same reason and by the same rule:
+         one copy under the planet and one over it, each shown only while the
+         orbit has it on that copy's side. The two are the same dot on the same
+         path at the same instant, so the handover between them happens with
+         both of them on the same pixel and nothing to see.
+
+         The swap is a step, not a fade: two dots cross-fading through each
+         other would read as one dot dimming, which is the one thing an orbit
+         must not do. The half of the path each copy owns is settled by
+         ld-orbit's own parametrisation, which starts at one end of the ring's
+         long axis and passes the far side first.
+
+         The transform stated here is where the dot sits when the orbit is NOT
+         running, which is the reduced-motion case at the bottom of this block:
+         it is ld-orbit's own 75% stop, the near arc's lowest point, so the
+         still scene is a moon resting in front of the planet.
+
+         The two copies are named by class alone rather than by class on top of
+         class, so all three rules weigh the same and the last one written wins.
+         That is what lets one line at the bottom of this block turn the orbit
+         off for both of them. */
+      #loading .moon {
+        z-index: 2;
+        width: 3.2vmin;
+        height: 3.2vmin;
+        margin: -1.6vmin 0 0 -1.6vmin;
+        border-radius: 50%;
+        background: #8e8e93;
+        opacity: 0;
+        transform: translate(2.055vmin, 6.325vmin);
+        will-change: transform;
+      }
+
+      #loading .far {
+        animation:
+          ld-orbit 2600ms linear infinite,
+          ld-far 2600ms step-end infinite;
+      }
+
+      #loading .near {
+        z-index: 5;
+        opacity: 1;
+        animation:
+          ld-orbit 2600ms linear infinite,
+          ld-near 2600ms step-end infinite;
+      }
+
+      @keyframes ld-appear {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+
+      /* Which copy of the moon is showing. The far one owns the first half of
+         the orbit and the near one the second, and step-end holds each value
+         until the next stop rather than sliding towards it. */
+      @keyframes ld-far {
+        0% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0;
+        }
+      }
+
+      @keyframes ld-near {
+        0% {
+          opacity: 0;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      /*
+        THE ORBIT: the ring's own ellipse, sampled.
+
+        The dot has to travel the line the ring is drawn on, and it has to do it
+        without the main thread, which during a boot is the busiest it ever is.
+        That rules out anything that runs per frame in script, and it rules out
+        squashing a circular spin into an ellipse, because a dot squashed by one
+        transform and stretched back by another is rasterized at the squashed
+        size and comes out soft. What is left is the plainest thing there is: a
+        translate, which every engine hands to the compositor.
+
+        So the ellipse is written out as points. Each stop is
+
+          x = RX * cos(t) * cos(TILT) - RY * sin(t) * sin(TILT)
+          y = RX * cos(t) * sin(TILT) + RY * sin(t) * cos(TILT)
+          t = 180deg + 360deg * (the stop's own fraction)
+
+        with TILT the ring's own -18deg, and RX and RY the ring's CENTRE line
+        rather than its outer edge: the ring is a 42 by 13.6 box with a 0.3
+        border drawn inside it, so the line itself is 20.85 by 6.65 and that is
+        what the dot rides. Thirty six stops leave the straight run between two
+        of them under a tenth of a vmin inside the true curve, which is well
+        under one device pixel on any phone.
+
+        Starting at t = 180deg puts the first stop on one end of the long axis,
+        which is where the far side of the ring meets the near side. So the
+        first half of the animation is the arc that passes behind the planet and
+        the second half is the arc that passes in front, which is what the two
+        opacity tracks above are cut against.
+
+        tests/loading.test.ts recomputes every stop from the ring's own
+        declarations and compares, so the numbers cannot drift away from the
+        shape they are supposed to be riding.
+      */
+      @keyframes ld-orbit {
+        0% { transform: translate(-19.83vmin, 6.443vmin); }
+        2.78% { transform: translate(-19.885vmin, 5.247vmin); }
+        5.56% { transform: translate(-19.337vmin, 3.891vmin); }
+        8.33% { transform: translate(-18.2vmin, 2.418vmin); }
+        11.11% { transform: translate(-16.511vmin, 0.87vmin); }
+        13.89% { transform: translate(-14.32vmin, -0.703vmin); }
+        16.67% { transform: translate(-11.694vmin, -2.256vmin); }
+        19.44% { transform: translate(-8.713vmin, -3.739vmin); }
+        22.22% { transform: translate(-5.467vmin, -5.11vmin); }
+        25% { transform: translate(-2.055vmin, -6.325vmin); }
+        27.78% { transform: translate(1.42vmin, -7.347vmin); }
+        30.56% { transform: translate(4.851vmin, -8.147vmin); }
+        33.33% { transform: translate(8.135vmin, -8.699vmin); }
+        36.11% { transform: translate(11.172vmin, -8.986vmin); }
+        38.89% { transform: translate(13.869vmin, -9.001vmin); }
+        41.67% { transform: translate(16.145vmin, -8.742vmin); }
+        44.44% { transform: translate(17.931vmin, -8.218vmin); }
+        47.22% { transform: translate(19.171vmin, -7.443vmin); }
+        50% { transform: translate(19.83vmin, -6.443vmin); }
+        52.78% { transform: translate(19.885vmin, -5.247vmin); }
+        55.56% { transform: translate(19.337vmin, -3.891vmin); }
+        58.33% { transform: translate(18.2vmin, -2.418vmin); }
+        61.11% { transform: translate(16.511vmin, -0.87vmin); }
+        63.89% { transform: translate(14.32vmin, 0.703vmin); }
+        66.67% { transform: translate(11.694vmin, 2.256vmin); }
+        69.44% { transform: translate(8.713vmin, 3.739vmin); }
+        72.22% { transform: translate(5.467vmin, 5.11vmin); }
+        75% { transform: translate(2.055vmin, 6.325vmin); }
+        77.78% { transform: translate(-1.42vmin, 7.347vmin); }
+        80.56% { transform: translate(-4.851vmin, 8.147vmin); }
+        83.33% { transform: translate(-8.135vmin, 8.699vmin); }
+        86.11% { transform: translate(-11.172vmin, 8.986vmin); }
+        88.89% { transform: translate(-13.869vmin, 9.001vmin); }
+        91.67% { transform: translate(-16.145vmin, 8.742vmin); }
+        94.44% { transform: translate(-17.931vmin, 8.218vmin); }
+        97.22% { transform: translate(-19.171vmin, 7.443vmin); }
+        100% { transform: translate(-19.83vmin, 6.443vmin); }
+      }
+
+      /* Asked for no motion: the scene stands still. The orbit stops, the far
+         copy of the moon stays hidden and the near one sits at the resting
+         point its own rule states, so what is left is a finished picture of a
+         ringed planet with its moon in front. The panel still fades in and
+         still fades out, because a change of opacity is not movement and the
+         alternative is the page appearing and vanishing as cuts. */
+      @media (prefers-reduced-motion: reduce) {
+        #loading .moon {
+          animation: none;
+        }
       }
 
       /* A browser tab had no launch image to hand over from, so there is no
-         handoff to cover and the panel would just be a white flash of its
-         own. splash.ts takes the element out of the document entirely in that
-         case; this is the half of the pair that acts before any code runs. It
-         is written as "hide it in a tab" rather than "show it in an installed
-         window" on purpose: a browser that does not know the display-mode
-         query then errs towards showing the cover, which is the right way
-         round for the one place it matters. */
+         handover to hold and the panel would just be a flash of its own.
+         splash.ts takes the element out of the document entirely in that case;
+         this is the half of the pair that acts before any code runs. It is
+         written as "hide it in a tab" rather than "show it in an installed
+         window" on purpose: a browser that does not know the display-mode query
+         then errs towards showing the page, which is the right way round for
+         the one place it matters. */
       @media (display-mode: browser) {
-        #splashcover {
+        #loading {
           display: none;
         }
       }
     </style>
-
-    <!--
-      WHERE THE LOGO GOES, decided off the SCREEN rather than off the viewport.
-
-      The rules above put it in the middle of the cover, and the cover is fixed
-      at inset 0, so that middle is the middle of the LAYOUT VIEWPORT. On iOS
-      the layout viewport is reported short on the first frame and grows a
-      moment later, as the safe-area insets appear. Measured on real cold
-      opens: 762 tall at first paint, 812 between 68 and 289ms afterwards. So
-      those rules resolve to 321 on the frame the user is handed and to 346
-      once the viewport settles, while the phone's own launch image, which is
-      built from the SCREEN, had the logo at 346 the whole time. The logo
-      therefore jumps 25px up on the handover and drops back a quarter of a
-      second later. The credit line moves twice as far, because its rule is a
-      whole percentage of that same height rather than half of one.
-
-      screen.width and screen.height do not have that problem. They are the
-      device's own numbers, they are right on the first frame, and they are
-      what splashLayout() is fed. So this computes the very same rect off the
-      very same inputs and states it in CSS pixels. A classic script with no
-      src runs where it is parsed, which is before the parser has reached the
-      cover, so the style it appends is in force for the first paint. There is
-      nothing to fetch and nothing to decode.
-
-      It is a hand copy of arithmetic that lives in src/splash.ts, because a
-      script that must not fetch anything cannot import it. Two things stop the
-      copies drifting. installSplashCover writes the function's own answer over
-      these declarations once the bundle runs, so a disagreement would show as
-      a jump rather than as a quietly wrong picture; and tests/splash.test.ts
-      executes THIS script's own text against splashLayout() on every screen
-      shape in its list and fails on any gap at all.
-
-      Where the layout viewport is honest from the first frame, every number
-      below is the number the rules above already resolved to, so it changes
-      nothing. Where the screen cannot be read it writes nothing and those
-      rules stand, which is also what happens with scripting off.
-
-      It has a second job, and the comment inside it carries the why: it also
-      DRAWS the credit line, into a picture the cover shows in place of the live
-      text, so that line is the same pixels on both splashes rather than the
-      same instructions to two rasterizers.
-    -->
-    <script>
-      (function () {
-        try {
-          var scr = window.screen;
-          var w = scr && scr.width;
-          var h = scr && scr.height;
-          var d = window.devicePixelRatio;
-          // two real edges and a real ratio, or leave the rules above alone
-          if (!(w > 0) || !(h > 0) || !(d > 0)) return;
-          var cw = Math.round(w * d); // the launch image's canvas, in device px
-          var ch = Math.round(h * d);
-          var sx = w / cw; // canvas back to screen, per axis, after that rounding
-          var sy = h / ch;
-          var edge = cw < ch ? cw : ch;
-          var box = edge * 0.32; // SPLASH_LOGO_FRACTION: the logo's bounding square
-          var a = 280 / 320; // SPLASH_LOGO_W / SPLASH_LOGO_H
-          var lw = a >= 1 ? box : box * a; // contain-fit the art inside that square
-          var lh = a >= 1 ? box / a : box;
-          var hf = Math.round(edge * 0.035); // SPLASH_HANDLE_FRACTION, device px
-          var font = hf * sy; // and the same type in the cover's own pixels
-          var mid = ch - edge * 0.12; // SPLASH_HANDLE_BOTTOM_FRACTION: the text's MIDDLE
-          // CSS places a box by its top, so hand over top-plus-half-the-type
-          var row = mid * sy - font / 2;
-          var css =
-            "#splashlogo{" +
-            "left:" + ((cw - lw) / 2) * sx + "px;" +
-            "top:" + ((ch - lh) / 2) * sy + "px;" +
-            "width:" + lw * sx + "px;" +
-            "height:" + lh * sy + "px}" +
-            "#splashhandle{" +
-            "top:" + row + "px;" +
-            "font-size:" + font + "px;" +
-            "line-height:" + font + "px}";
-          /*
-            AND THE CREDIT LINE AS PIXELS, so the cover shows the same raster
-            the phone's launch image carries rather than setting the same string
-            again as live text. drawSplashHandle in src/splash.ts carries what
-            was measured and why two rasterizers cannot be made to agree.
-
-            It is drawn here, not in the bundle, for the reason the block above
-            gives: the bundle runs hundreds of milliseconds late, and a line
-            that arrives late is the same flash by another route. So this is a
-            hand copy of drawSplashHandle and splashHandleBand, held to them by
-            tests/splash.test.ts, which runs this script's own text against a
-            recording canvas and compares every call.
-
-            The band's corner is rounded to whole DEVICE pixels on purpose: that
-            keeps the fraction of a pixel the anchor sits at inside the band
-            equal to the fraction it sits at on the launch image, so the glyphs
-            land on the same grid both times. Any other anchoring leaves a
-            subpixel phase between the two rasters, which reads as a shimmer and
-            passes every measurement of size and position.
-
-            Its own try, below the CSS the geometry already built: no handle to
-            read or no canvas to draw on leaves the line as text, which is what
-            it was before any of this.
-          */
-          try {
-            var meta = document.querySelector('meta[name="splash-handle"]');
-            var text = meta && meta.content;
-            var cv = text && document.createElement("canvas");
-            var g = cv && cv.getContext && cv.getContext("2d");
-            if (g) {
-              // the font ladder from src/splash.ts: a context throws away a
-              // shorthand it cannot parse and silently keeps the one it had, so
-              // every rung is read back and the size coming back is the proof
-              var fam = [
-                '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif',
-                "system-ui",
-                "sans-serif",
-              ];
-              var face = function () {
-                for (var i = 0; i < fam.length; i++) {
-                  g.font = font + "px " + fam[i];
-                  var back = /(\d+(?:\.\d+)?)px/.exec(g.font);
-                  if (back && Math.abs(+back[1] - font) < 0.05) break;
-                }
-              };
-              face();
-              // The band, in device px: SPLASH_BAND_PAD_EMS of slack each side
-              // of the measured string, SPLASH_BAND_EMS tall around its middle,
-              // every edge grown or pushed back to a whole CSS pixel where the
-              // screen has one. splashHandleBand's comment carries why both
-              // roundings are needed and what each one is worth.
-              var qx = cw / w === Math.round(cw / w) ? cw / w : 1;
-              var qy = ch / h === Math.round(ch / h) ? ch / h : 1;
-              var bw = Math.ceil(g.measureText(text).width / sx) + 2 * hf;
-              bw = Math.ceil(bw / qx) * qx;
-              if (bw > cw) bw = cw;
-              var bh = Math.ceil((3 * hf) / qy) * qy;
-              if (bh > ch) bh = ch;
-              var bx = Math.floor((cw / 2 - bw / 2) / qx) * qx;
-              var by = Math.floor((mid - bh / 2) / qy) * qy;
-              if (bw > 0 && bh > 0) {
-                cv.width = bw; // sizing a canvas clears it, so the face goes on after
-                cv.height = bh;
-                g.fillStyle = "#ffffff"; // SPLASH_BG, the white both splashes stand on
-                g.fillRect(0, 0, bw, bh);
-                g.save();
-                g.scale(1 / sx, 1 / sy);
-                face();
-                g.textAlign = "center";
-                g.textBaseline = "middle";
-                g.fillStyle = "#aeaeb2"; // SPLASH_HANDLE_COLOR
-                g.fillText(text, (cw / 2 - bx) * sx, (mid - by) * sy);
-                g.restore();
-                var pic = cv.toDataURL && cv.toDataURL("image/png");
-                // the picture goes on the COVER, not on the line's own box: the
-                // cover spans the viewport from its top left corner, so the
-                // band is placed in plain screen pixels and nothing clips it
-                if (pic && pic.slice(0, 15) === "data:image/png;") {
-                  css +=
-                    "#splashcover{" +
-                    "background-image:url(" + pic + ");" +
-                    "background-repeat:no-repeat;" +
-                    "background-size:" + bw * sx + "px " + bh * sy + "px;" +
-                    "background-position:" + bx * sx + "px " + by * sy + "px}" +
-                    "#splashhandle{color:transparent}";
-                }
-              }
-            }
-          } catch (e) {
-            /* the picture is the better half, not the only one: leave the text */
-          }
-          var tag = document.createElement("style");
-          tag.id = "splashfit";
-          tag.appendChild(document.createTextNode(css));
-          document.head.appendChild(tag);
-        } catch (e) {
-          /* cosmetic only: a launch must never fail over where a logo sits */
-        }
-      })();
-    </script>
   </head>
   <body>
-    <!-- First in the body so the parser reaches it first. The logo carries its
-         own art inline, and decoding="sync" tells the browser not to present
-         the element on one frame and the picture on a later one. -->
-    <div id="splashcover">
-      <img id="splashlogo" alt="" decoding="sync" src="data:image/webp;base64,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" />
-      <div id="splashhandle">@theonetrueakash</div>
+    <!-- First in the body so the parser reaches it first. Nothing in here is a
+         picture and nothing in here is text: the whole scene is five empty
+         boxes and the rules above, so the frame that carries this markup
+         carries the finished page. The parts are in painting order, which is
+         also depth order: the ring's far side, the moon while it is out there,
+         the planet, the ring's near side, and the moon while it is in front. -->
+    <div id="loading">
+      <div class="scene">
+        <div class="ring back"></div>
+        <div class="moon far"></div>
+        <div class="planet"></div>
+        <div class="ring front"></div>
+        <div class="moon near"></div>
+      </div>
     </div>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>

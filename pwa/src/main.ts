@@ -47,7 +47,7 @@ import {
   watchFollowTail,
   watchKeyboard,
 } from "./shell";
-import { bootBlankGap, installSplashCover, installStartupImage } from "./splash";
+import { bootBlankGap, installLoadingScreen, installStartupImage, watchQuiet } from "./splash";
 import {
   USER_SCROLL_INTENT_MS,
   compensationFor,
@@ -78,7 +78,7 @@ import "./scrolljank";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.31"; // a picker session now ends only at the attention hand-back or the expiry backstop, never at the instant cancel, and every guard-window plus tap is swallowed with its mark
+const APP_VERSION = "0.3.32"; // the app's first page is its own loading scene now, a ringed planet with a moon going round it, and it stays up until the thread has stopped growing, scrolling and resizing rather than merely finished arriving
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -2251,7 +2251,7 @@ async function bootSettlePin(): Promise<void> {
     new Promise((r) => setTimeout(r, 1200)),
   ]);
   scrollToBottom(true); // a settled layout must not glide
-  void settleSplashCover(); // a cacheless boot's first paint is this one
+  void settleLoadingScreen(); // a cacheless boot's first paint is this one
 }
 
 function connect(): void {
@@ -3614,14 +3614,20 @@ if ("serviceWorker" in navigator) {
 // top-bar logo centered on white, sized to the current screen. No-ops off iOS.
 installStartupImage("/splash-logo.png"); // full-res cut-out; the 140px topbar file pixelates at splash size
 
-// The app's OWN copy of that launch image, over its own first frames. The
-// phone's image dies the moment the web view takes the page, which is before
-// the thread has laid out, so the copy (same splashLayout, same paintSplash,
-// identical by construction) covers the handoff and fades once the thread has
-// settled. splash.ts owns the lift rule and the cap; this side only reports the
-// settle below and lands the lift on the diagnostic trail.
-const splashCover = installSplashCover("/splash-logo.png", (why) =>
-  holdDiagRecord("splash-cover", { lift: why }),
+// The app's OWN loading page, over its own first frames. The phone's image dies
+// the moment the web view takes the page, which is before the thread has laid
+// out, so the document carries a page of its own (a ringed planet with a moon
+// going round it; index.html draws it) and that holds the handover until the
+// thread has stopped moving. splash.ts owns the lift rule and the cap; this
+// side reports the settle below and lands the lift on the diagnostic trail.
+
+// How many frames the quiet watch below read before it answered, carried on the
+// lift record. A cap lift with none of these read is a deploy log saying the app
+// never went still on its own and the page came down over the top of it.
+let quietFrames = 0;
+
+const loadingScreen = installLoadingScreen((why) =>
+  holdDiagRecord("splash-cover", { lift: why, frames: quietFrames }),
 );
 
 // ===================== TEMP DIAGNOSTIC (remove after the cold-open session) =====================
@@ -3637,23 +3643,53 @@ const splashCover = installSplashCover("/splash-logo.png", (why) =>
 holdDiagRecord("boot-blank", bootBlankGap());
 // =================== END TEMP DIAGNOSTIC (remove after the cold-open session) ===================
 
-// The cover's settle signal: the boot's messages have been laid out for a frame
-// and every image the thread painted has finished loading. Called from the
-// cached paint and, on a cacheless boot, from the socket's first settle; the
-// cover ignores every call after the first, and its own cap lifts it whatever
-// happens here.
-async function settleSplashCover(): Promise<void> {
-  if (splashCover.lifted()) return;
+// The loading page's settle signal, in three steps, because the page has to
+// come down onto an app that is not going to move afterwards.
+//
+//   ARRIVED: the boot's messages have been laid out for a frame and every image
+//   the thread painted has finished loading. This is what "settled" used to
+//   mean on its own, and it is the point at which everything the app was going
+//   to fetch is in.
+//   STILL: and then a few frames in a row in which the thread's height, its
+//   scroll position and the viewport's height all read what they read the frame
+//   before, with the scroll sitting at the bottom. splash.ts owns that rule and
+//   the reasons for it; the short version is that arriving and holding still
+//   are different instants, and the boot-motion recorder above is the record of
+//   how far apart they were.
+//   AND ONLY THEN the page is told, which starts its fade if its minimum hold
+//   has passed.
+//
+// Called from the cached paint and, on a cacheless boot, from the socket's
+// first settle; the page ignores every call after the first, and its own cap
+// lifts it whatever happens here. That cap is also the way out of the watch:
+// nothing in this path has a clock of its own.
+//
+// Nothing here writes a scroll position. The pins this waits on are made
+// elsewhere, by the paths that own them; watching for stillness by nudging the
+// thread would be the reveal causing the very motion it is there to rule out.
+async function settleLoadingScreen(): Promise<void> {
+  if (loadingScreen.lifted()) return;
   const t = document.getElementById("thread");
   if (!t) {
-    splashCover.settled(); // no thread to wait on (the token gate)
+    loadingScreen.settled(); // no thread to wait on (the token gate)
     return;
   }
   await new Promise<void>((r) => requestAnimationFrame(() => r())); // laid out and painted
   const pending = Array.from(t.querySelectorAll<HTMLImageElement>("img"))
     .filter((img) => !img.complete);
   await Promise.allSettled(pending.map((img) => img.decode()));
-  splashCover.settled();
+  await new Promise<void>((resolve) =>
+    watchQuiet(
+      t,
+      () => window.visualViewport?.height ?? window.innerHeight,
+      () => loadingScreen.lifted(),
+      (frames) => {
+        quietFrames = frames;
+        resolve();
+      },
+    ),
+  );
+  loadingScreen.settled();
 }
 
 // Launch frame settle (the 4-of-5 cold-open drop): iOS standalone can publish
@@ -3739,7 +3775,7 @@ async function bootFromCache(): Promise<void> {
       if (el) el.scrollTop = el.scrollHeight;
     });
     holdDiagRecord("cache-applied", { lastSeq, ms: Math.round(performance.now() - t0) });
-    void settleSplashCover(); // the cached thread is the first paint: the cover can go
+    void settleLoadingScreen(); // the cached thread is the first paint: the wait for quiet starts here
   } else {
     holdDiagRecord("cache-read", { frames: 0, ms: readMs });
   }
@@ -3751,6 +3787,6 @@ if (token) {
   void bootFromCache(); // the cached thread paints first, then the socket connects
 } else {
   renderTokenGate();
-  void settleSplashCover(); // no thread on this path: the cover holds its minimum and goes
+  void settleLoadingScreen(); // no thread on this path: the page holds its minimum and goes
 }
 
