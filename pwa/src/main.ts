@@ -79,11 +79,23 @@ import {
 // name them. TO REMOVE: both imports and the two stamped pairs below.
 import { jankSpan } from "./jankledger";
 import "./scrolljank";
+// TEMP DIAGNOSTIC (pick-timing, picktiming.ts owns the banner): the pick clock's
+// steps. shell.ts starts the clock at the file input's change event and every
+// stamp below is one step of what this file then does with the file, out to the
+// frame the picture is painted in. TO REMOVE: this import and the calls named in
+// that banner's list.
+import {
+  pickTimingDims,
+  pickTimingFile,
+  pickTimingLaid,
+  pickTimingPainted,
+  pickTimingStep,
+} from "./picktiming";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.34"; // a photo landing further back in the conversation no longer walks the screen: its box is decided once, any change to it above what you are reading is handed straight back to the scroll, and the size it turns out to be is remembered so it never has to be guessed twice
+const APP_VERSION = "0.3.35"; // the wait between picking a photo and seeing it in the tray is now timed step by step, so the slow part of it can be named instead of guessed at
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -424,10 +436,21 @@ function renderChat(): void {
   // app concern: collect picks into the tray. Read the CURRENT input rather
   // than the one bound above — shell.ts replaces the element between presents.
   bindPicker(filesEl, document.getElementById("attach")!, () => {
+    // TEMP DIAGNOSTIC (pick-timing, picktiming.ts owns the banner): the handler
+    // step, so the hop from the change event into the app is its own number, and
+    // one activity stamp around the whole synchronous pick so a long frame here
+    // can name itself. Both are number writes and change nothing below.
+    pickTimingStep("handler");
+    const jankT0 = performance.now();
     const el = currentFileInput();
     pendingFiles.push(...Array.from(el?.files ?? []));
     if (el) el.value = ""; // allow re-picking the same file
     renderPending();
+    // TEMP DIAGNOSTIC (pick-timing): the synchronous work is done here, and the
+    // frame that carries its layout is stamped from a frame callback
+    jankSpan("pick-sync", jankT0);
+    pickTimingStep("sync");
+    pickTimingLaid();
   });
   document.getElementById("compose")!.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -738,6 +761,11 @@ function renderPending(): void {
 function showPending(): void {
   const box = document.getElementById("pending");
   if (!box) return;
+  // TEMP DIAGNOSTIC (pick-timing/scroll-jank, picktiming.ts and scrolljank.ts
+  // own the banners): the drawer's own switch-on and the tail settle behind it,
+  // spanned for the ledger and stamped at the end as the "open" step. Taken
+  // after the early return, so a run with no tray on screen stamps nothing.
+  const jankT0 = performance.now();
   const open = pendingFiles.length > 0;
   // a pick landing mid-close calls the close off: the tray owes the new square
   // its full height this very frame, and the closing animation is still holding
@@ -757,6 +785,8 @@ function showPending(): void {
   // inside the settle flushes the display write above, so the numbers it works
   // from are the ones this line just produced, not the previous frame's.
   settleTail(open ? "drawer-open" : "drawer-close");
+  jankSpan("pick-open", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
+  pickTimingStep("open"); // TEMP DIAGNOSTIC (pick-timing)
 }
 
 // The ✕. Everything the tap DECIDES lands on the tap — the file leaves the
@@ -883,7 +913,12 @@ function dismissSent(): void {
 }
 
 function stagePick(file: File, box: HTMLElement): Pick {
+  // TEMP DIAGNOSTIC (pick-timing, picktiming.ts owns the banner): the file's own
+  // facts (type, name, byte size) and then a step at each thing this function
+  // does with them. Reading those three costs nothing and touches no layout.
+  pickTimingFile(file);
   const url = URL.createObjectURL(file);
+  pickTimingStep("url"); // TEMP DIAGNOSTIC (pick-timing)
   const wrap = document.createElement("div");
   // undrawn is about the PICTURE now, never the seat: the square is on screen
   // from this line, wearing the same placeholder the thread's unarrived photos
@@ -894,6 +929,7 @@ function stagePick(file: File, box: HTMLElement): Pick {
   // photo once for both places instead of racing two copies of the same work
   // against each other (photobox.ts has the device numbers).
   const shot = prepareShot(url);
+  pickTimingStep("elem"); // TEMP DIAGNOSTIC (pick-timing): src assigned, pixel wait armed
   const img = shot.img;
   const pick: Pick = { url, wrap, img };
   const x = document.createElement("button");
@@ -911,6 +947,7 @@ function stagePick(file: File, box: HTMLElement): Pick {
   });
   wrap.append(img, x);
   box.appendChild(wrap); // seated now; renderPending opens the tray around it
+  pickTimingStep("seat"); // TEMP DIAGNOSTIC (pick-timing)
   const staged = performance.now();
   // The picture's arrival, and nothing else's — the same one wait prepareShot
   // already started on this element, joined a second time rather than begun
@@ -922,8 +959,22 @@ function stagePick(file: File, box: HTMLElement): Pick {
   // rejects the odd large photo that then paints perfectly well, and a square
   // stuck under a spinner forever is the worse of the two wrong answers.
   void shot.drawn.then((why) => {
+    // TEMP DIAGNOSTIC (pick-timing, picktiming.ts owns the banner): the pixel
+    // wait has settled. Stamped before the early return, because a square that
+    // left the tray mid-decode still tells us how long the decode took; the
+    // record itself never ships for that pick, since no picture is ever painted.
+    pickTimingStep("decode");
+    // the photo's own pixel size, handed to the recorder as two plain numbers so
+    // that it never touches a node. This re-reads the pair prepareShot's landing
+    // read a moment ago rather than plumbing them through: naturalWidth and
+    // naturalHeight are the decoded image's own intrinsic values, not layout, so
+    // reading them forces nothing and costs nothing measurable.
+    const drawnAt = naturalSize(img);
+    if (drawnAt) pickTimingDims(drawnAt[0], drawnAt[1]);
     if (picks.get(file) !== pick) return; // removed or sent while it was drawing
     wrap.classList.remove("undrawn");
+    pickTimingStep("reveal"); // TEMP DIAGNOSTIC (pick-timing): placeholder off
+    pickTimingPainted(); // TEMP DIAGNOSTIC (pick-timing): closes the pick, ships its record
     // the entrance starts HERE, on the pixels: it moves a square that has its
     // picture, inside a tray that has been open since the tap. Started on the
     // old deadline instead, it spent its whole beat on an empty box.

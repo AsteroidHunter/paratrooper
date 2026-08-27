@@ -416,6 +416,45 @@ def test_holddiag_scroll_jank_gets_its_own_line(client, caplog):
     assert '"followtail"' in vp[0]
 
 
+def test_holddiag_pick_timing_gets_its_own_line(client, caplog):
+    """pick-timing batches one photo pick's whole timeline (every step from the
+    file input's change event out to the frame the picture is painted in, the
+    file's kind and size, and what held the main thread meanwhile) into one wide
+    record, so it rides its own line like scroll-jank does. The tail is twenty
+    records, which is the ten picks the session needs with room to spare. TEMP
+    DIAGNOSTIC (pick-timing): remove with the pwa/src/picktiming.ts block."""
+    record = {
+        "n": 3, "from": "input-change", "t0": 51230, "total": 732,
+        "s": {"handler": 2, "meta": 2, "url": 3, "elem": 4, "seat": 5,
+              "open": 9, "sync": 11, "laid": 33, "decode": 700, "reveal": 701,
+              "paint": 732},
+        "nf": 1,
+        "f": [{"kind": "heic", "bytes": 2481923, "w": 4032, "h": 3024}],
+        "blk": {"lt": 210, "long": 3, "ledMs": 224,
+                "led": [["pick-open", 180], ["shot-drawn", 44]]},
+    }
+    trail = {"build": "b", "events": [
+        {"t": 1, "ev": "pick-anchor", "d": {"end": "focus", "upMs": 51100}},
+        {"t": 2, "ev": "pick-timing", "d": record},
+    ]}
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    pick = [r.message for r in caplog.records if "holddiag pick" in r.message]
+    assert len(pick) == 1
+    assert "events=1" in pick[0]
+    # the whole verdict survives the digest: the total, the slowest step, what
+    # kind of photo it was, and what held the thread while it came
+    assert '"total": 732' in pick[0] and '"decode": 700' in pick[0]
+    assert '"kind": "heic"' in pick[0] and '"w": 4032' in pick[0]
+    assert '"pick-open"' in pick[0] and '"lt": 210' in pick[0]
+    # the wide record stays off the shared viewport tail entirely, and the
+    # picker mark beside it still rides that tail as before
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"pick-timing"' not in vp[0]
+    assert '"pick-anchor"' in vp[0]
+
+
 def test_relay_logs_persist_and_superseded_drop(tmp_path, monkeypatch, caplog):
     """One line per delivery decision: a live done logs persist with its seq and
     terminal flag; a superseded run's output logs drop with the reason."""

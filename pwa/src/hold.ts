@@ -208,6 +208,14 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // means arming here cannot churn. TEMP DIAGNOSTIC (scroll-jank): remove
   // this entry and this paragraph with the scrolljank.ts block.
   //
+  // "pick-timing" is IN so the channel does not depend on some other mark
+  // happening to fire near it. Its one record is built a frame after the picked
+  // photo appears, and nothing on the pick path is guaranteed to arm a post
+  // there, so without this entry a whole pick's timeline could sit in the ring
+  // until something unrelated came along. One record per pick means arming here
+  // cannot churn. TEMP DIAGNOSTIC (pick-timing): remove this entry and this
+  // paragraph with the picktiming.ts block.
+  //
   // "tail-settle" is IN because one of the two moments it exists for arms
   // nothing else at all: cancelling a picked photo is a tap on a tray button,
   // with no keyboard edge and no send anywhere near it, so without this the
@@ -223,7 +231,7 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "grow-blink" || ev === "kb-shove" ||
     ev === "kb-focusing" || ev === "kb-glide" || ev === "kb-edge" ||
     ev === "pick-anchor" || ev === "tail-gap" || ev === "close-slack" ||
-    ev === "scroll-jank" || ev === "tail-settle"
+    ev === "scroll-jank" || ev === "tail-settle" || ev === "pick-timing"
   ) {
     diagPost();
   }

@@ -726,6 +726,18 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         sj = [e for e in events if isinstance(e, dict) and e.get("ev") == "scroll-jank"]
         if sj:
             _diag.info("holddiag jank events=%d tail=%s", len(sj), json.dumps(sj[-12:]))
+        # pick-timing records, their own line for the jank line's reason: one
+        # record batches a whole photo pick (every step's offset from the file
+        # input's change event out to the frame the picture is painted in, the
+        # file's kind and size, and the blocked-time summary), so records are
+        # wide and few. A twenty-record tail holds ten picks whole, which is the
+        # sample the session needs, and on the shared viewport tail a couple of
+        # picks would clip everything else off it.
+        # TEMP DIAGNOSTIC (pick-timing, pwa/src/picktiming.ts owns the banner):
+        # remove this block and its test in tests/test_holddiag.py with it.
+        pt = [e for e in events if isinstance(e, dict) and e.get("ev") == "pick-timing"]
+        if pt:
+            _diag.info("holddiag pick events=%d tail=%s", len(pt), json.dumps(pt[-20:]))
         return {"ok": True}
 
     @app.get("/api/debug/holddiag")

@@ -72,6 +72,9 @@ import { holdDiagRecord } from "./hold";
 // stamps for jank attribution; both uses sit inside the probe block at the
 // bottom of this file, a two-line span around each stamped job
 import { jankSpan } from "./jankledger";
+// TEMP DIAGNOSTIC (pick-timing, picktiming.ts owns the banner): the pick
+// clock's zero. One call, at the top of the change listener in bindInputSignals
+import { pickTimingStart } from "./picktiming";
 // TEMP DIAGNOSTIC (close-slack, block at the bottom): the tail-gap probe's row
 // helpers; pure functions, so the no-DOM-at-import property below still holds
 import { laidOutRows, rowName } from "./viewport";
@@ -774,6 +777,13 @@ function bindInputSignals(input: HTMLInputElement): void {
   };
   input.addEventListener("cancel", sessionDone);
   input.addEventListener("change", () => {
+    // TEMP DIAGNOSTIC (pick-timing, picktiming.ts owns the banner): zero for the
+    // whole pick clock, taken before anything else in this handler runs. This is
+    // the app's earliest possible sight of the picker's confirm; everything
+    // before it belongs to iOS and is invisible from here. A stamp only: it
+    // assigns numbers and returns, so the session and pick paths below run
+    // exactly as they did.
+    pickTimingStart();
     sessionDone();
     onPick?.();
   });
