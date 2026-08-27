@@ -239,6 +239,22 @@ describe("picker lifecycle — the WebKit teardown window", () => {
     expect(p.isTearing()).toBe(true);
   });
 
+  it("the dismissal signal alone never ends the session: tearing holds until a completion signal or the clock", () => {
+    // the guard design: the input's cancel is a settle and nothing more, so
+    // the machine stays tearing (and the bar stays visually off) for the
+    // whole native teardown, not just the instant the signal fired
+    const { p, past, clock } = lifecycle();
+    p.open();
+    past();
+    p.settle(); // the cancel, demoted to a settle
+    p.settle(); // and however many duplicates arrive, the same
+    clock.t += TEARDOWN_MAX_MS - 1;
+    expect(p.expireTearing()).toBe("noop"); // the clock has not run out
+    expect(p.isTearing()).toBe(true); // so the guarded stretch persists
+    expect(p.teardownComplete()).toBe("completed"); // the hand-back ends it
+    expect(p.isTearing()).toBe(false);
+  });
+
   it("tap AFTER teardown completes presents normally on the existing input", () => {
     const { p, present, past } = lifecycle();
     p.open();
@@ -689,12 +705,15 @@ describe("wiring: the plus click opens only from a tap credited to the plus", ()
     expect(shell).toMatch(
       /const verdict = plusClickVerdict\(picker\.isTearing\(\), plusDownHeld\);\n\s*plusDownHeld = false;/,
     );
-    expect(shell).toMatch(/if \(verdict === "tearing"\) return;/);
-    expect(shell).toMatch(/if \(verdict === "held"\) \{/);
+    // both swallow verdicts take ONE path now: a guard-window tap is
+    // swallowed whole whether the window was still open at click time or
+    // only at the down (a deferred present was falsified twice on device,
+    // 0/7 queued and the centred menu of the stale anchor credit)
+    expect(shell).toMatch(/if \(verdict !== "open"\) \{/);
     expect(shell.match(/picker\.open\(\)/g)).toHaveLength(1); // pickerTapOpen alone presents
   });
 
-  it("the swallowed comeback tap records on the pick-anchor channel, distinguished by `held`", () => {
+  it("every swallowed guard-window tap records on the pick-anchor channel, distinguished by `held`", () => {
     expect(shell).toMatch(
       /holdDiagRecord\("pick-anchor", \{ held: true, upMs: Math\.round\(performance\.now\(\)\) \}\);/,
     );
@@ -704,6 +723,75 @@ describe("wiring: the plus click opens only from a tap credited to the plus", ()
     expect(shell).toMatch(
       /picker\.settle\(\);\n\s*if \(holdsBarTap\(picker\.isTearing\(\), isEditable\(e\.target\), e\.target === plusEl\)\) \{\n\s*e\.preventDefault\(\);/,
     );
+  });
+});
+
+// The guard change (the centred-menu fix): the picker session counts as over
+// only when attention comes back (window focus, or its page-level siblings)
+// or when the expiry backstop fires, never at the input's own cancel/change.
+// Those land at the dismissing tap while the native panel keeps tearing down
+// for seconds, and completing there un-greyed the bar inside the dead window
+// and invited the tap whose spoiled anchor credit centred the menu on the
+// screen. These pins hold the wiring to that rule: which handlers may call
+// teardownComplete, which may not, and that no new clock was smuggled in.
+describe("wiring: the session ends at the hand-back or the expiry, never at the instant signals", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+
+  it("cancel and change only settle: the input's handler cannot complete the teardown", () => {
+    expect(shell).toMatch(
+      /const sessionDone = \(\): void => \{\n\s*picker\.settle\(\);\n\s*reconcile\(\);\n\s*\};/,
+    );
+    const bind = shell.match(/function bindInputSignals[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(bind.length).toBeGreaterThan(0);
+    expect(bind).not.toContain("teardownComplete");
+    expect(bind).not.toContain("releaseParkedEditor"); // release belongs to completion alone
+    expect(bind).toContain('input.addEventListener("cancel", sessionDone)');
+    expect(bind).toContain("onPick?.();"); // the pick handler still fires at change
+  });
+
+  it("the window refocus completes, records its word, and releases parked focus", () => {
+    expect(shell).toMatch(
+      /window\.addEventListener\("focus", \(\) => \{\n\s*picker\.settle\(\);\n\s*const done = picker\.teardownComplete\(\) === "completed";\n\s*if \(done\) pickEndRecord\("focus"\);[^\n]*\n\s*reconcile\(\);\n\s*if \(done\) releaseParkedEditor\(\);/,
+    );
+  });
+
+  it("pageshow and visibility-to-visible stay completion signals: the same hand-back, other paths", () => {
+    expect(shell).toMatch(
+      /window\.addEventListener\("pageshow", \(\) => \{\n\s*picker\.settle\(\);\n\s*if \(picker\.teardownComplete\(\) === "completed"\) \{\n\s*pickEndRecord\("pageshow"\);/,
+    );
+    expect(shell).toMatch(
+      /document\.visibilityState === "visible"[\s\S]{0,120}if \(picker\.teardownComplete\(\) === "completed"\) \{\n\s*pickEndRecord\("visible"\);/,
+    );
+  });
+
+  it("the expiry backstop completes like the refocus does: record, reconcile, release", () => {
+    expect(shell).toMatch(
+      /if \(picker\.expireTearing\(\) === "expired"\) \{\n\s*pickEndRecord\("expiry"\);[^\n]*\n\s*reconcile\(\);\n\s*releaseParkedEditor\(\);/,
+    );
+  });
+
+  it("no new clock anywhere: the one backstop timer, armed only by settle's dismiss effect", () => {
+    expect(shell.match(/TEARDOWN_MAX_MS \+ 50/g)).toHaveLength(1); // the existing expiry alone
+    expect(shell.match(/armTeardownExpiry\(\);/g)).toHaveLength(1); // called from dismiss, nowhere else
+  });
+
+  it("the grey rides the machine's own phases, so it now lasts the whole guarded stretch", () => {
+    // settling derives from presented-or-tearing on every reconcile; with
+    // completion moved to the hand-back, the un-grey moves with it for free,
+    // and the moment the row visibly re-arms IS the moment a tap is safe
+    expect(shell).toMatch(/applyShell\(target, picker\.isOpen\(\) \|\| picker\.isTearing\(\)\);/);
+  });
+
+  it("the completion diagnostic is one tiny record: the signal's word and the uptime", () => {
+    expect(shell).toMatch(
+      /function pickEndRecord\(signal: string\): void \{\n\s*holdDiagRecord\("pick-anchor", \{ end: signal, upMs: Math\.round\(performance\.now\(\)\) \}\);\n\}/,
+    );
+    // one word per signal, and only these four: the demoted instant signals
+    // must never appear as completers
+    for (const sig of ["focus", "pageshow", "visible", "expiry"]) {
+      expect(shell).toContain(`pickEndRecord("${sig}")`);
+    }
+    expect(shell.match(/pickEndRecord\("/g)).toHaveLength(4);
   });
 });
 

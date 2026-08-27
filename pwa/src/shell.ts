@@ -56,6 +56,13 @@
 //   stale element is what the dying panel is bound to (widely-reported iOS
 //   workaround). Trailing signals from the old session are then ignored by a
 //   guard window, since a real dismissal cannot arrive that fast.
+//   And the input's own cancel/change events fire at the DISMISSING TAP, not
+//   at the teardown's end, so treating either as the session's end re-armed
+//   the bar inside the dead window: the un-greyed ＋ invited a tap whose
+//   anchor credit was already spoiled, and the menu opened centred on the
+//   screen (the 2026-08-26 screenshot). The session therefore counts as over
+//   only when attention comes back (the window refocus family below) or when
+//   the expiry backstop fires; the input's events merely settle it.
 // - While an editable is focused, a ＋ tap must preventDefault on pointerdown
 //   (or the keyboard collapses mid-presentation and the menu anchors to a
 //   stale rect); from idle it must NOT (or iOS swallows the next focus tap).
@@ -292,6 +299,10 @@ export function plusClickVerdict(tearing: boolean, downHeld: boolean): PlusClick
 //   presented --settle()--> tearing --teardownComplete()--> idle
 // settle() = "the native UI is gone from the screen" (page tap, refocus, …);
 // teardownComplete() = "WebKit finished tearing the panel down".
+// Only the hand-back signals (the window refocus family in initShell) and
+// expireTearing's clock ever drive teardownComplete: the input's own
+// cancel/change land at the dismissing tap itself, seconds before WebKit is
+// done, and completing there is the centred-menu bug (see the header).
 // A ＋ tap during "tearing" presents on a FRESH input inside its own gesture
 // rather than queueing — see the header note; the queue-and-replay design
 // graded 0/7 on device.
@@ -716,14 +727,18 @@ const picker = createPickerLifecycle({
   },
 });
 
-// The window's end normally arrives as a signal (refocus/cancel/change), but a
-// dropped present produces none — without a clock the bar would stay held until
+// The window's end normally arrives as the refocus hand-back, but a dropped
+// present produces none, and without a clock the bar would stay held until
 // some unrelated signal happened by. expireTearing() carries the real check, so
 // this timer can fire stale, duplicated, or into a later session, harmlessly.
+// An expiry IS a completion, so it runs the same parked-focus release the
+// refocus path runs; the release itself refuses to touch a live keyboard.
 function armTeardownExpiry(): void {
   setTimeout(() => {
     if (picker.expireTearing() === "expired") {
+      pickEndRecord("expiry"); // TEMP DIAGNOSTIC (pick-anchor, block at the bottom)
       reconcile();
+      releaseParkedEditor();
     }
   }, TEARDOWN_MAX_MS + 50);
 }
@@ -745,13 +760,17 @@ function swapFileInput(): void {
   void next.offsetWidth; // flush layout: iOS anchors the menu to the rendered rect
 }
 
-// the input's own signals end the session AND mark teardown finished
+// The input's own signals only SETTLE the session. Both fire at the
+// dismissing tap while the native panel keeps tearing down for seconds, so
+// completing here is what un-greyed the bar inside the dead window and
+// produced the centred menu (the header's picker bullet). settle()'s dismiss
+// effect arms the expiry backstop; completion itself waits for the hand-back
+// signals in initShell or for that clock. The pick handler still runs at
+// change, since the chosen files are ready the moment the event says so.
 function bindInputSignals(input: HTMLInputElement): void {
   const sessionDone = (): void => {
     picker.settle();
-    const done = picker.teardownComplete() === "completed";
-    reconcile(); // the settling window ends HERE; the bar must un-grey now
-    if (done) releaseParkedEditor();
+    reconcile();
   };
   input.addEventListener("cancel", sessionDone);
   input.addEventListener("change", () => {
@@ -800,22 +819,32 @@ export function initShell(el: HTMLElement): void {
   // Picker signals, page-level and permanent (they survive renderChat
   // re-renders). Window refocus is the one teardown-complete marker present
   // in every observed trace; the guard window inside settle() keeps it from
-  // tearing down a session that opened microseconds earlier.
+  // tearing down a session that opened microseconds earlier. pageshow and
+  // visibility-to-visible are the SAME hand-back delivered through other
+  // lifecycle paths (a restore from history, a return from another app), so
+  // they stay completion signals alongside the refocus; these three and the
+  // expiry backstop are now the ONLY completers, since the input's own
+  // events land seconds before WebKit is done (bindInputSignals).
   window.addEventListener("focus", () => {
     picker.settle();
     const done = picker.teardownComplete() === "completed";
+    if (done) pickEndRecord("focus"); // TEMP DIAGNOSTIC (pick-anchor, block at the bottom)
     reconcile();
     if (done) releaseParkedEditor();
   });
   window.addEventListener("pageshow", () => {
     picker.settle();
-    picker.teardownComplete();
+    if (picker.teardownComplete() === "completed") {
+      pickEndRecord("pageshow"); // TEMP DIAGNOSTIC (pick-anchor, block at the bottom)
+    }
     reconcile();
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
       picker.settle();
-      picker.teardownComplete();
+      if (picker.teardownComplete() === "completed") {
+        pickEndRecord("visible"); // TEMP DIAGNOSTIC (pick-anchor, block at the bottom)
+      }
       reconcile();
     }
   });
@@ -857,13 +886,17 @@ function pickerTapShield(e: Event): void {
 function pickerTapOpen(): void {
   const verdict = plusClickVerdict(picker.isTearing(), plusDownHeld);
   plusDownHeld = false; // one gesture, one verdict; a pointerless click reads a clean flag
-  // a held tap still delivers its click (device-proven); during the window it
-  // must not reach open(), which would present straight into the dropped-click
-  // zone — the falsified fresh-input path, 0/6 on device
-  if (verdict === "tearing") return;
-  if (verdict === "held") {
-    // TEMP DIAGNOSTIC (pick-anchor, block at the bottom): the comeback tap,
-    // swallowed; `held` tells it apart from the presents on the same channel
+  // Every guard-window tap is swallowed whole, both swallow verdicts alike.
+  // A held tap still delivers its click (device-proven), but presenting from
+  // it cannot work twice over: the click lands in the zone where WebKit
+  // drops it (the falsified fresh-input path, 0/6 on device), and the
+  // engine's anchor credit for the touch never went to the plus, so a
+  // deferred present would centre the menu off the button (the shipped
+  // defer-to-signal design graded 0/7). The user's next tap, once the bar
+  // visibly re-arms at true completion, opens anchored on the plus.
+  if (verdict !== "open") {
+    // TEMP DIAGNOSTIC (pick-anchor, block at the bottom): the swallowed tap;
+    // `held` tells it apart from the presents on the same channel
     holdDiagRecord("pick-anchor", { held: true, upMs: Math.round(performance.now()) });
     return;
   }
@@ -968,9 +1001,13 @@ export function currentFileInput(): HTMLInputElement | null {
 //                 INPUT's rendered rect, and .filepick is parked invisibly on
 //                 top of the ＋ precisely so the two agree; a panel opening
 //                 off to the right means on that tap they did not. A record
-//                 carrying `held: true` instead of rects is a comeback tap
-//                 the ＋ click swallowed (plusClickVerdict): no present
-//                 happened, so there are no rects to compare.
+//                 carrying `held: true` instead of rects is a guard-window
+//                 tap the ＋ click swallowed (plusClickVerdict): no present
+//                 happened, so there are no rects to compare. And a record
+//                 carrying `end` is a session's completion, named by the one
+//                 signal that delivered it (focus, pageshow, visible or
+//                 expiry), so a trail states whether real dismissals ride
+//                 the refocus hand-back or fall to the backstop clock.
 //   dom-census  : how many #app / .compose / .bar / .thread / mirror twins the
 //                 document holds at each close. A screenshot showed what
 //                 looked like two compose bars; a census that always reads 1
@@ -996,7 +1033,8 @@ export function currentFileInput(): HTMLInputElement | null {
 // census in correctionPass, the probe start in keyboardClosed and the mirror
 // one in reconcile, the en field on reconcile's two kb-shove records, the
 // anchor record in the picker's present effect plus the
-// held swallow's record in pickerTapOpen, the two
+// held swallow's record in pickerTapOpen, the four pickEndRecord calls (the
+// three hand-back handlers in initShell and the expiry backstop), the two
 // markViewportEvent listeners and the safe-area probe in initShell), the
 // watchFollowTail wiring in main.ts, "pick-anchor" and "kb-edge" in hold.ts's
 // post-now list, and the kb-fall/kb-rise/kb-edge/shell-pin/dom-census/
@@ -1451,6 +1489,14 @@ function pickAnchorRecord(fresh: boolean): void {
       performance.now(), // ms since the page began loading = how long the app has run
     ),
   );
+}
+
+// which signal COMPLETED a picker session, on the same channel as the
+// presents. The guard change moved completion off the input's own events, so
+// the trail must say what really ends sessions on device: the refocus
+// hand-back, one of its page-level siblings, or the expiry backstop.
+function pickEndRecord(signal: string): void {
+  holdDiagRecord("pick-anchor", { end: signal, upMs: Math.round(performance.now()) });
 }
 
 function censusRecord(): void {
