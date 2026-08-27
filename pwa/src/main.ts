@@ -19,6 +19,8 @@ import {
   whenDrawn,
 } from "./photobox";
 import type { DrawWhy } from "./photobox";
+import { GUESS_H, GUESS_RATIO, GUESS_W, learnDims, scrollFix } from "./photofit";
+import type { Dims } from "./photofit";
 import { WAIT_CLASS, createPhotoQueue, nearMargin } from "./photolazy";
 import { receiptFor } from "./receipts";
 import {
@@ -81,7 +83,7 @@ import "./scrolljank";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.33"; // the conversation now owns its own scroll whenever the room under it changes, so neither a keyboard leaving nor a cancelled photo drawer can leave a band of empty white below the last message
+const APP_VERSION = "0.3.34"; // a photo landing further back in the conversation no longer walks the screen: its box is decided once, any change to it above what you are reading is handed straight back to the scroll, and the size it turns out to be is remembered so it never has to be guessed twice
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1119,6 +1121,45 @@ function settleTail(via: string, quiet = false): void {
   }
 }
 
+// The other half of the scroll's ownership, and the opposite case to the one
+// above. settleTail is for the room UNDER the conversation changing, where the
+// answer is to re-establish the end of the range. This is for a row INSIDE the
+// conversation changing height, where the answer is the reverse: leave the
+// range alone and move the position, by exactly what the change cost, so the
+// content the reader is looking at does not move by a single pixel.
+//
+// It only matters because this is an inner scroller on iOS, where the browser
+// anchors nothing (photofit.ts has the full reason). A photo four screens back
+// finishing its decode grows its row, every row below it slides down by that
+// much, and the reader watching a message near the top of his screen sees the
+// whole screen walk. That is the jank he reported while scrolling photo
+// history, and the recorder that went looking for it found the main thread
+// idle and the frame rate steady, which is exactly what a layout shift looks
+// like from inside a frame timer.
+//
+// Both reads happen either side of the change with no paint in between, so
+// they describe one frame: the box's bottom edge as it stood, and the height it
+// gained. photofit.ts decides whether that change is one the reader could feel,
+// and answers zero while the view is following the tail, where the settle above
+// already owns the position.
+function keepView(row: HTMLElement, change: () => void): void {
+  const t = document.getElementById("thread");
+  if (!t) {
+    change();
+    return;
+  }
+  const fold = t.getBoundingClientRect().top; // the reader's top edge
+  const before = row.getBoundingClientRect();
+  change();
+  const fix = scrollFix(before.bottom, fold, row.getBoundingClientRect().height - before.height,
+    followTail);
+  if (fix === 0) return;
+  t.scrollTop += fix; // same frame as the change, so the two paint as one
+  holdDiagRecord("keep-view", {
+    fix: Math.round(fix), bot: Math.round(before.bottom), fold: Math.round(fold),
+  });
+}
+
 function startGlide(): void {
   cancelGlide();
   const run = createGlide(performance.now());
@@ -1830,17 +1871,27 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
     // without a size only when its stored bytes will not decode at all, in
     // which case no pixels are ever coming and the guessed frame is a box for
     // a placeholder rather than a box for a photo. Same condition sends a null
-    // blurhash, so that box keeps the flat grey face. Kept, not deleted: the
-    // guess is still the only thing standing between an undecodable photo and
-    // a 0-tall row that shoves the scroll under the reader.
+    // blurhash, so that box keeps the flat grey face. The synthesized ACK frame
+    // a send writes reaches here without dims too, until the healed re-delivery
+    // catches up with it. Kept, not deleted: the guess is still the only thing
+    // standing between an undecodable photo and a 0-tall row that shoves the
+    // scroll under the reader.
+    //
+    // Either way the box is decided HERE and only here, and it holds for this
+    // whole render. The known branch lays the photo out at its own size and the
+    // arriving pixels agree with it. The guessed branch pins an explicit ratio,
+    // which is not the natural one, so the arriving pixels have no say in it
+    // either. The only thing that can reshape either box is adoptPhotoBox on the
+    // load below, deliberately, once, and paying the scroll back as it goes.
     const dims = m.attachment_dims?.[i];
+    const guessed = !dims; // this render has to invent the box, and say so later
     if (dims) {
       img.width = dims[0];
       img.height = dims[1];
     } else {
-      img.width = 240;
-      img.height = 180;
-      img.style.aspectRatio = "4 / 3"; // lock the box even after decode
+      img.width = GUESS_W;
+      img.height = GUESS_H;
+      img.style.aspectRatio = GUESS_RATIO; // lock the box even after decode
       img.style.objectFit = "cover";
     }
     // the photo's own colours in the box, in place of the grey rectangle, from
@@ -1851,15 +1902,25 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
     img.alt = "photo";
     img.onload = () => {
       photoQueue.arrived(img); // the grey box comes off with the first pixels
+      // a photo that had to guess its box now has its own pixels to measure:
+      // the box takes their shape in this same task, the scroll is handed back
+      // whatever that costs, and the size is written down so no later render
+      // of this photo ever guesses again
+      if (guessed) adoptPhotoBox(img, div, m.seq, i);
       // decoded height lands late; re-pin INSTANTLY — a layout completion must
       // never glide (the opening-scroll motion he flagged came from these)
       if (followTail) scrollToBottom(true);
     };
     img.onerror = () => {
       photoQueue.arrived(img); // no pixels are coming; the chip replaces the box
-      div.classList.replace("shot", "text");
-      div.appendChild(chip("📎 photo"));
-      img.remove();
+      // the reserved box gives way to a one-line chip, which on old history is
+      // hundreds of pixels leaving the thread at once; through keepView so a
+      // reader further down the conversation never feels it
+      keepView(div, () => {
+        div.classList.replace("shot", "text");
+        div.appendChild(chip("📎 photo"));
+        img.remove();
+      });
     };
     img.addEventListener("click", () => openLightbox(img.src, img));
     // the url is PARKED, not fetched (photolazy.ts): a photo far from the
@@ -1869,6 +1930,71 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
     div.appendChild(img);
   });
   if (value) rowEl(wrapper, "user", "text", at).textContent = value;
+}
+
+// The one moment a photo's box changes shape, and the last time this photo
+// ever needs one.
+//
+// Only a photo that had no size to lay out from gets here. It has been
+// standing in the guessed 4:3 box, which carries an explicit ratio, so nothing
+// that has decoded in the meantime has touched its layout: the height read
+// below is still the guessed height, and the height read after the write is
+// the shape the photo actually is. Both reads and the write sit in this one
+// task, so the change and the scroll that pays for it paint together.
+//
+// The change is deliberate on purpose. Left in the guessed box a portrait photo
+// stays cropped into a landscape frame for as long as the app is open, which is
+// the squish, and the alternative to changing it is keeping a picture the
+// reader can see is wrong. So it changes, once, in the same frame its first
+// pixels appear in, and keepView makes sure that costs the reader nothing when
+// it happens above what he is reading.
+//
+// A photo whose pixels never reported a size keeps the guess and takes no
+// branch at all, which is the behaviour that has always been there: the guess
+// is the only thing standing between an undecodable photo and a zero tall row.
+function adoptPhotoBox(
+  img: HTMLImageElement,
+  row: HTMLElement,
+  seq: number | undefined,
+  index: number,
+): void {
+  const nat = naturalSize(img);
+  if (!nat) return; // nothing to measure: the guessed box stands, as it always has
+  keepView(row, () => {
+    img.style.aspectRatio = ""; // back to the photo's own ratio
+    img.style.objectFit = "";
+    img.width = nat[0];
+    img.height = nat[1];
+  });
+  learnPhotoDims(seq, index, nat);
+}
+
+// Write a measured size into the stored frame, so the next render starts at the
+// right box instead of guessing it again.
+//
+// The store is the display truth and the cold-open snapshot is copied straight
+// out of it, so one write here reaches every later drawing of this photo: an
+// in-place re-render, a fresh shell, and the next cold open. That is what makes
+// the change above a once-per-photo event rather than something that happens on
+// every scroll past it.
+//
+// It lands in the same attachment_dims the server fills, at the same index, in
+// the same shape, so the record that comes out is indistinguishable from one the
+// server sized. Nothing about the cached frame's shape changes and no era is
+// crossed, which is why this needs no schema bump: a frame the client sized and
+// a frame the server sized are the same frame. A slot that already holds a size
+// is left alone (photofit.ts holds that rule), so this can only ever fill a gap.
+// True when the store changed.
+function learnPhotoDims(seq: number | undefined, index: number, dims: Dims): boolean {
+  if (!seq) return false;
+  const cur = store.get(seq);
+  if (!cur) return false;
+  const next = learnDims(cur.attachment_dims, (cur.attachments ?? []).length, index, dims);
+  if (!next) return false;
+  store.set(seq, { ...cur, attachment_dims: next });
+  cacheWrites.bump(); // the learned box must reach the cold-open snapshot
+  holdDiagRecord("photo-learned", { seq, i: index, w: dims[0], h: dims[1] });
+  return true;
 }
 
 function renderSystemLine(_m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
@@ -1900,6 +2026,14 @@ function renderScreenshot(_m: ServerMsg, wrapper: HTMLElement, at: number, value
   const div = rowEl(wrapper, "agent", "shot", at);
   const img = document.createElement("img");
   // reserve the box before decode — the last unsized images shoving the scroll
+  //
+  // Nothing here needs the guess-and-adopt the photo rows carry, because this
+  // box cannot change shape: the numbers below are read out of the picture's own
+  // header, so they ARE the size the pixels decode to, and every stored preview
+  // is a png this can read. A preview that somehow is not leaves the row unsized
+  // and takes its height on decode, which is the one case left in the app, and
+  // giving it a guessed box would trade a shape nobody has ever seen for a crop
+  // everybody would.
   const dims = pngDims(value);
   if (dims) {
     img.width = dims[0];

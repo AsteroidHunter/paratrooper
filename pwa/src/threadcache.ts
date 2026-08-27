@@ -28,6 +28,14 @@ const STORE = "thread";
 // records are dropped wholesale on read
 // 2: attachment_dims/attachment_blurhashes joined the frame shape; era-1
 //    records lack them and render photos squished with no blur preview
+//
+// Era 2 also covers photo sizes the CLIENT measured. main.ts writes a size it
+// had to read off the pixels back into the same attachment_dims slot, in the
+// same shape, so that photo starts at the right box on the next cold open
+// instead of guessing it again. A frame the client sized and a frame the server
+// sized are the same frame, so no era is crossed and no reader has to tell them
+// apart. Bumping for it would only throw away every cached thread on the device
+// to store nothing new.
 export const SCHEMA_VERSION = 2;
 
 // mirrors the server's fresh-login replay window (web/app.py limit=50), so a
