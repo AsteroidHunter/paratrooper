@@ -471,3 +471,36 @@ def test_batching_logs_reconstruct_the_burst(caplog):
     assert any(f"supersede thread=d job={enqueued[0]['job']}" in ln for ln in lines)
     assert any(f"fire thread=d job={enqueued[1]['job']} msgs=2" in ln for ln in lines)
     assert any("finished thread=d" in ln for ln in lines)
+
+
+def test_holddiag_photo_box_marks_get_their_own_line(client, caplog):
+    """A photo the app was never told the size of gets a guessed box, and that
+    box reshapes when the pixels land, shoving everything under it down the page.
+    The guess, the real size arriving, and the view being held still across the
+    correction only mean anything read together, so they ride one line of their
+    own. This test exists because all three were being posted by the phone and
+    dropped here: a mark no block claims never reaches the logs, so its absence
+    reads as "never happened" when it means "never carried". TEMP DIAGNOSTIC
+    (photo boxes): remove with the pwa/src/main.ts blocks."""
+    trail = {"build": "b", "events": [
+        {"t": 1, "ev": "guessed-box",
+         "d": {"seq": 412, "i": 0, "n": 3, "keys": 2, "dims": None, "hash": 1}},
+        {"t": 2, "ev": "photo-learned", "d": {"seq": 412, "i": 0, "w": 3024, "h": 4032}},
+        {"t": 3, "ev": "keep-view", "d": {"seq": 412, "fix": 268.5}},
+        {"t": 4, "ev": "tail-gap", "d": {"when": "photo"}},
+    ]}
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    photo = [r.message for r in caplog.records if "holddiag photo" in r.message]
+    assert len(photo) == 1
+    assert "events=3" in photo[0]
+    # the whole story survives: which photo guessed and how many have, the real
+    # size when it arrived, and whether anything compensated for the reshape
+    assert '"seq": 412' in photo[0] and '"n": 3' in photo[0]
+    assert '"dims": null' in photo[0] and '"hash": 1' in photo[0]
+    assert '"w": 3024' in photo[0] and '"fix": 268.5' in photo[0]
+    # they stay off the shared viewport tail, which still carries its own marks
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"guessed-box"' not in vp[0]
+    assert '"tail-gap"' in vp[0]

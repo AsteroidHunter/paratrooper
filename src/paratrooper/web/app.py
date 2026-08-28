@@ -739,6 +739,21 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         pt = [e for e in events if isinstance(e, dict) and e.get("ev") == "pick-timing"]
         if pt:
             _diag.info("holddiag pick events=%d tail=%s", len(pt), json.dumps(pt[-20:]))
+        # photo-box records, their own line: a photo the app was never told the
+        # size of gets a guessed box that reshapes when the pixels land, which
+        # shoves everything below it down the page. The three marks are the whole
+        # story of that — the guess being made, the real size arriving, and the
+        # view being held still across the correction — and they only mean
+        # anything read together, so they share one line and no other. Note that
+        # every mark below has to be named here or it is silently dropped: a
+        # record the client posts but no block claims never reaches the logs at
+        # all, which is exactly how this channel went missing.
+        # TEMP DIAGNOSTIC (photo boxes, pwa/src/main.ts owns the banners):
+        # remove this block and its test in tests/test_holddiag.py with it.
+        pb = [e for e in events if isinstance(e, dict)
+              and e.get("ev") in ("guessed-box", "photo-learned", "keep-view")]
+        if pb:
+            _diag.info("holddiag photo events=%d tail=%s", len(pb), json.dumps(pb[-30:]))
         return {"ok": True}
 
     @app.get("/api/debug/holddiag")
