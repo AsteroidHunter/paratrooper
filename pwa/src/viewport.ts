@@ -135,9 +135,6 @@ export type TailSettle = {
   moved: boolean; // whether that is a different place from where it is
 };
 
-/** anything past this is rounding, not a band */
-export const SETTLE_SLOP_PX = 1;
-
 /** the last position the scroller can hold: content less box, never negative */
 export function maxScrollTop(scrollHeight: number, clientHeight: number): number {
   return Math.max(0, scrollHeight - clientHeight);
@@ -148,15 +145,13 @@ export function tailOverhang(g: BottomGeometry): number {
   return Math.max(0, g.st - maxScrollTop(g.sh, g.ch));
 }
 
-/**
- * The watchdog's question, asked on the scroller's own scroll events. Safari
- * reports an out-of-range scrollTop instead of clamping it, so a position past
- * the end stays readable (and stays visible as white) until something writes
- * over it. Costs one subtraction when nothing is wrong.
- */
-export function needsSettle(g: BottomGeometry): boolean {
-  return tailOverhang(g) >= SETTLE_SLOP_PX;
-}
+// There was a needsSettle() here, asked on every one of the scroller's own
+// scroll events, and it is gone on purpose. Sitting past the end is not only
+// the fault it was built for: it is also what the engine reports throughout a
+// rubber band stretch and as one of our own glides lands, so clamping on it cut
+// normal motion and shipped as a regression. Overhang is corrected where it is
+// actually created, from the geometry signals, and nothing asks this question
+// on a scroll event again.
 
 export function settleBottom(g: BottomGeometry, follow: boolean): TailSettle {
   const max = maxScrollTop(g.sh, g.ch);

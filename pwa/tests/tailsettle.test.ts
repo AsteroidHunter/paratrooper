@@ -29,9 +29,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
-  SETTLE_SLOP_PX,
   maxScrollTop,
-  needsSettle,
   settleBottom,
   settleMark,
   tailOverhang,
@@ -177,23 +175,11 @@ describe("a reader up in the history is clamped, never yanked", () => {
   });
 });
 
-describe("the scroll watchdog", () => {
-  it("an out-of-range position is work; the same position in range is not", () => {
-    expect(needsSettle({ sh: CONTENT, st: STUCK, ch: REST_BOX })).toBe(true);
-    expect(needsSettle({ sh: CONTENT, st: TRUE_END, ch: REST_BOX })).toBe(false);
-    expect(needsSettle({ sh: CONTENT, st: 1200, ch: REST_BOX })).toBe(false);
-  });
-
-  it("sub-pixel rounding is not a band", () => {
-    expect(SETTLE_SLOP_PX).toBe(1);
-    expect(needsSettle({ sh: CONTENT, st: TRUE_END + 0.4, ch: REST_BOX })).toBe(false);
-    expect(needsSettle({ sh: CONTENT, st: TRUE_END + 1, ch: REST_BOX })).toBe(true);
-  });
-
-  it("its own correction reads clean, so it cannot fire itself again", () => {
+describe("the settle corrects itself in one pass", () => {
+  it("a corrected position has no overhang left to correct", () => {
     const g = { sh: CONTENT, st: STUCK, ch: REST_BOX };
     const plan = settleBottom(g, false);
-    expect(needsSettle({ ...g, st: plan.top })).toBe(false);
+    expect(tailOverhang({ ...g, st: plan.top })).toBe(0);
   });
 });
 
@@ -300,12 +286,15 @@ describe("the signals that call it", () => {
     expect(fnBody("dismissSent")).toContain('settleTail("drawer-close")');
   });
 
-  it("the scroller's own scroll events carry the watchdog", () => {
+  it("the scroller's own scroll events carry no clamp of any kind", () => {
+    // A clamp asked on every scroll event cannot tell the fault from a rubber
+    // band stretch or from one of our own glides landing, and cutting those was
+    // a shipped regression. The geometry signals own this instead.
     const handler = src.indexOf('thread.addEventListener("scroll"');
     expect(handler).toBeGreaterThan(-1);
     const body = src.slice(handler, handler + 1200);
-    expect(body).toContain("needsSettle({");
-    expect(body).toContain('settleTail("scroll-watchdog")');
+    expect(body).not.toContain("needsSettle({");
+    expect(body).not.toContain("settleTail(");
   });
 
   it("nothing here waits on a clock", () => {

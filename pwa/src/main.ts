@@ -58,7 +58,6 @@ import {
   giveUpTarget,
   laidOutRows,
   nearBottomOf,
-  needsSettle,
   rowName,
   settleBottom,
   settleMark,
@@ -95,7 +94,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.36"; // nothing the app does changes here: the notes about why the photo menu sometimes opened in the middle of the screen now carry the explanation that was proven, instead of the guess that was later ruled out
+const APP_VERSION = "0.3.37"; // the jump-down glide runs the whole way again and the stretch at the bottom eases back instead of snapping: the clamp that was cutting both of them is gone
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -500,16 +499,17 @@ function renderChat(): void {
     lastGestureAt = performance.now();
   });
   thread.addEventListener("scroll", () => {
-    // The watchdog. Safari hands back an out-of-range scrollTop rather than
-    // clamping it, so a position past the end of the range stays readable, and
-    // stays on screen as a band of white under the last message, until
-    // something writes over it. Asked on the scroller's own events, it costs
-    // one subtraction while nothing is wrong and covers staleness on the
-    // engine's side that the app never caused. Its own write lands inside the
-    // range, so the scroll event it fires reads clean and it cannot loop.
-    if (needsSettle({ sh: thread.scrollHeight, st: thread.scrollTop, ch: thread.clientHeight })) {
-      settleTail("scroll-watchdog");
-    }
+    // No watchdog here, deliberately, and it must not come back. A pass that
+    // clamped the scroll whenever it read past the end shipped once and was a
+    // regression: sitting past the end is also exactly what the engine does
+    // while a rubber band stretch is on screen and while one of our own glides
+    // is landing, so the clamp read normal motion as the fault and cut it, which
+    // showed as the jump-down glide hanging part way and as the stretch at the
+    // bottom snapping shut instead of easing back. The position is re-derived
+    // where it is actually invalidated instead: both keyboard edges, the
+    // drawer's open and close, and the thread's own resize, which sees every
+    // frame of a box that eases. Those are what closed the white band, and none
+    // of them fires while a finger is on the glass.
     // the ONE place following flips: away from the bottom = reading history,
     // back at the bottom = following again (programmatic pins land here too).
     // While the composer is focused, an away reading needs a real gesture to
