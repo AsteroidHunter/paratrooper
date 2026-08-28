@@ -102,7 +102,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.45"; // cancelling one of several picked photos gives its place back on the tap and the others slide into it, instead of a hole standing there and then everything jumping
+const APP_VERSION = "0.3.46"; // the white band under the last message is now measured at the keyboard close too, which is where he sees it and where nothing has ever been recorded
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -200,6 +200,14 @@ watchKeyboard((up) => {
   const via = up ? "kb-open" : "kb-close";
   settleTail(via);
   requestAnimationFrame(() => settleTail(via));
+  // TEMP DIAGNOSTIC (tail-gap, block at the foot of this file): the band under
+  // the last message, read at the edge he actually sees it at. Every reading in
+  // the trail so far is taken on a SEND, and all of them come back healthy,
+  // while his screenshots show 408px and 270px of white standing after a
+  // keyboard close. So the failing state has never once been measured, and
+  // guessing into that hole has been wrong twice. This reads it where he sees
+  // it, and names what is sitting below the last message when it happens.
+  if (!up) recordTailGapNow("kb-close");
 });
 
 // boot-replay ledger (bootgate.ts owns it): the honest replay marker. Every
@@ -3477,6 +3485,41 @@ function firstBelow(t: HTMLElement, rows: HTMLElement[], sent: number): string |
     if (seatBottom(t, row) > sent + 1) return rowName(row);
   }
   return null;
+}
+
+// The same reading, taken at a moment nothing was sent: the band is measured
+// from the LAST row rather than from a bubble this send just landed, which is
+// the only difference. Timed the same way, so a close is described over the
+// same stretch a send is and the two can be read side by side.
+function recordTailGapNow(when: string): void {
+  while (tailGapTimers.length) clearTimeout(tailGapTimers.pop());
+  TAIL_GAP_AT_MS.forEach((delay, i) => {
+    tailGapTimers.push(
+      window.setTimeout(() => {
+        const t = document.getElementById("thread");
+        if (!t) return; // shell torn down
+        const rows = laidOutRows(t).filter((el): el is HTMLElement => el instanceof HTMLElement);
+        const last = rows[rows.length - 1];
+        if (!last) return; // nothing to measure a band from
+        const floor = seatBottom(t, last);
+        holdDiagRecord(
+          "tail-gap",
+          tailGapFrame(i === 0 ? when : `${when}-late`, {
+            sh: () => t.scrollHeight,
+            st: () => t.scrollTop,
+            ch: () => t.clientHeight,
+            pad: () => parseFloat(getComputedStyle(t).paddingBottom),
+            air: () => flightInflation(t),
+            lastBottom: () => floor,
+            rows: () => rows.length,
+            // measured from the last row's own floor, so "below" names anything
+            // standing under it rather than under a bubble that was just sent
+            below: () => firstBelow(t, rows, floor),
+          }),
+        );
+      }, delay),
+    );
+  });
 }
 
 function recordTailGap(msg: HTMLElement): void {
