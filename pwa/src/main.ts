@@ -110,15 +110,14 @@ import {
   pickTimingStep,
 } from "./picktiming";
 // TEMP DIAGNOSTIC (blank-thread, blankprobe.ts owns the banner): the readings
-// either side of a photo cancel taken mid-glide, which is the one gesture the
-// blank message area has ever been reported after. TO REMOVE: this import and
-// the three calls named in that banner's list.
-import { blankProbeFollow, blankProbeSettle, blankProbeTap } from "./blankprobe";
+// either side of a drawer height change that begins mid-glide, whichever edge
+// moved it. TO REMOVE: this import and the calls named in that banner's list.
+import { blankProbeEdge, blankProbeFollow, blankProbeSettle } from "./blankprobe";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.55"; // the scroll writes a closing photo drawer makes now leave a mark instead of vanishing, and cancelling a photo mid-glide takes readings either side of the blank so the next one cannot be argued about
+const APP_VERSION = "0.3.56"; // the blank-screen readings are taken whenever the photo strip changes height mid-glide, opening as well as cancelling, since the one report is a memory and the opening moves the same edge, and the reading now finds the part of the conversation being looked at instead of counting its way down to it and giving up first
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -777,6 +776,13 @@ let trayClosing: Animation | null = null;
 // then take the old motions off, instead of stacking one translate on another.
 let gapSlides: Animation[] = [];
 
+// TEMP DIAGNOSTIC (blank-thread, blankprobe.ts owns the banner): how many
+// squares the strip was last left holding, so showPending can tell a pass that
+// really moves its height from one that re-renders a tray standing exactly as
+// it was. A count, never a measurement. TO REMOVE: this and the two lines in
+// showPending that read and write it.
+let drawerSeats = 0;
+
 function renderPending(): void {
   refreshSend(); // staged files count toward "something to send"
   const box = document.getElementById("pending");
@@ -814,6 +820,18 @@ function showPending(): void {
   // after the early return, so a run with no tray on screen stamps nothing.
   const jankT0 = performance.now();
   const open = pendingFiles.length > 0;
+  // TEMP DIAGNOSTIC (blank-thread, blankprobe.ts owns the banner): whether the
+  // strip is standing right now, read off the style attribute rather than off
+  // layout, so it costs nothing and so it survives the removeAttribute below
+  // that is about to wipe it. It names the edge for the probe further down.
+  const wasOpen = box.style.display === "flex";
+  // Not every pass through here moves the strip: a picker dismissed with
+  // nothing chosen re-renders a tray that is already standing exactly as it
+  // was. Arming on that would spend the one run a gesture gets on a frame where
+  // nothing happened, and the run holds its slot for seconds. The display flip
+  // and the seat count answer it between them, and both are free.
+  const drawerMoved = wasOpen !== open || pendingFiles.length !== drawerSeats;
+  drawerSeats = pendingFiles.length;
   // a pick landing mid-close calls the close off: the tray owes the new square
   // its full height this very frame, and the closing animation is still holding
   // the box at zero with the clip that goes with it
@@ -824,6 +842,16 @@ function showPending(): void {
     // a send's close parks the box on a fixed rect (dismissSent); a tray that
     // is opening again belongs back in the flex column, not floating on it
     box.removeAttribute("style");
+  }
+  // TEMP DIAGNOSTIC (blank-thread, blankprobe.ts owns the banner): the strip
+  // appearing, growing a square, or going, whichever this pass is. It sits
+  // ahead of the write so the reading it takes is the before-picture, and a
+  // cancel or a send that is already inside a run refuses it there.
+  if (drawerMoved) {
+    blankProbeEdge(
+      open ? (wasOpen ? "grow" : "open") : "shut",
+      performance.now() - lastScrollAt,
+    );
   }
   box.style.display = open ? "flex" : "none";
   // The tray's height is the thread's: the room it takes on the tap and the
@@ -976,6 +1004,11 @@ function dismissSent(): void {
     renderPending(); // nothing staged, or no strip on screen: the plain teardown
     return;
   }
+  // TEMP DIAGNOSTIC (blank-thread, blankprobe.ts owns the banner): the send's
+  // own edge. The strip leaves the layout in one hop here rather than easing
+  // inside the column, so this is the drawer edge that hands the thread its
+  // room fastest, and it is taken before the three writes that do it.
+  blankProbeEdge("sent", performance.now() - lastScrollAt);
   refreshSend(); // the ↑ answers the tap; the strip answers over the beat below
   const rect = box.getBoundingClientRect();
   const padTop = parseFloat(getComputedStyle(box).paddingTop) || 0;
@@ -1119,7 +1152,7 @@ function stagePick(file: File, box: HTMLElement): Pick {
     // TEMP DIAGNOSTIC (blank-thread, blankprobe.ts owns the banner): the
     // before-picture, taken here because everything below this line changes
     // something. It arms nothing unless the conversation was still gliding.
-    blankProbeTap(performance.now() - lastScrollAt);
+    blankProbeEdge("cancel", performance.now() - lastScrollAt);
     pendingFiles.splice(at, 1);
     refreshSend(); // the ↑ answers the tap; the tray answers over the beat below
     dismissPick(file, pick);

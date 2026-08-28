@@ -559,15 +559,17 @@ def test_holddiag_thread_blank_gets_its_own_line(client, caplog):
     with the pwa/src/blankprobe.ts block."""
     def frame(w, ms, vis, sc):
         return {"w": w, "ms": ms, "st": 2180, "sh": 4329, "ch": 700, "over": 0,
-                "kids": 168, "rows": 41, "vis": vis, "top1": -22, "botN": 690,
-                "h1": 44, "scan": 96, "cap": False, "pendH": 76, "pendD": "flex",
+                "kids": 656, "rows": 11, "vis": vis, "bw": "ok", "look": 24,
+                "top1": -22, "botN": 690, "h1": 44,
+                "nearT": -66, "nearB": None, "nearH": 44,
+                "pendH": 76, "pendD": "flex",
                 "anA": 0, "anT": 0, "app": "", "thr": "", "peek": "0px",
                 "ft": False, "sc": sc, "set": 0, "setMoved": 0}
 
     record = {
-        "n": 1, "t0": 51230, "paired": True,
+        "n": 1, "why": "open", "t0": 51230, "paired": True,
         "f": [
-            frame("tap", 0, 9, 0),
+            frame("edge", 0, 9, 0),
             frame("frame", 16, 9, 1),
             frame("mid", 132, 9, 4),
             frame("beat", 401, 9, 7),
@@ -589,13 +591,22 @@ def test_holddiag_thread_blank_gets_its_own_line(client, caplog):
     assert "events=1" in blank[0]
     # every moment of the run reaches the line, the pair included: a record that
     # arrived without its two halves cannot answer anything
-    for moment in ("tap", "frame", "mid", "beat", "rest", "touch", "after"):
+    for moment in ("edge", "frame", "mid", "beat", "rest", "touch", "after"):
         assert f'"w": "{moment}"' in blank[0]
     assert '"paired": true' in blank[0]
+    # and which of the drawer's edges armed the run, without which an open and
+    # a cancel read back as the same event
+    assert '"why": "open"' in blank[0]
     # and the readings that decide it: rows standing in the band, the list still
     # being in the document, where the scroll was, and whether the walk was clipped
-    assert '"vis": 9' in blank[0] and '"kids": 168' in blank[0]
-    assert '"st": 2180' in blank[0] and '"cap": false' in blank[0]
+    assert '"vis": 9' in blank[0] and '"kids": 656' in blank[0]
+    assert '"st": 2180' in blank[0]
+    # the verdict beside the count, without which a zero cannot be told apart
+    # from a search that never reached the band — the fault that made this
+    # channel's first device record worthless
+    assert '"bw": "ok"' in blank[0]
+    # and the neighbourhood, which is what makes a genuine zero readable
+    assert '"nearT": -66' in blank[0] and '"nearH": 44' in blank[0]
     # the wide record stays off both the shared viewport tail and the settle line
     vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
     assert vp == [] or '"thread-blank"' not in vp[0]
