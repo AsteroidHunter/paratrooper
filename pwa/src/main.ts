@@ -110,7 +110,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.49"; // the loading screen carries a proper wire globe now, and a smaller one, so the ring around it has room
+const APP_VERSION = "0.3.50"; // the white band is now measured OUTSIDE the conversation too, between where its box ends and where the compose bar starts, which is the only place left for it
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -3560,6 +3560,33 @@ function recordTailGapNow(when: string): void {
             below: () => firstBelow(t, rows, floor),
           }),
         );
+        // The band OUTSIDE the conversation. Every reading above describes the
+        // room under the last message INSIDE the scroller, and across his whole
+        // reproduction every one of them came back at three tenths of a pixel
+        // while he was looking at hundreds of pixels of white. So the white is
+        // not in there, and the only place left for it is between where the
+        // scroller's own box ends on screen and where the compose bar begins.
+        // Nothing has ever measured that, which is why the app keeps insisting
+        // it is fine: it is telling the truth about the wrong thing.
+        const bar = document.querySelector<HTMLElement>(".bar");
+        const box = t.getBoundingClientRect();
+        const barBox = bar?.getBoundingClientRect() ?? null;
+        const one = (n: number): number | null =>
+          Number.isFinite(n) ? Math.round(n * 10) / 10 : null;
+        holdDiagRecord("tail-gap", {
+          when: `${when}-edges`,
+          // the white he can see, if this is where it is
+          white: barBox ? one(barBox.top - box.bottom) : null,
+          threadTop: one(box.top),
+          threadBot: one(box.bottom),
+          barTop: barBox ? one(barBox.top) : null,
+          barBot: barBox ? one(barBox.bottom) : null,
+          // and what the screen itself says, so a shell sitting in the wrong
+          // place is told apart from a shell that is right and short
+          vvH: one(window.visualViewport?.height ?? NaN),
+          vvTop: one(window.visualViewport?.offsetTop ?? NaN),
+          ih: window.innerHeight,
+        });
       }, delay),
     );
   });
