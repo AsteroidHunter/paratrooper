@@ -45,6 +45,15 @@
 //   own resize at an EDGE, where the shove decision does not apply. It is
 //   refused in the same spirit and by the same standard: the edge writes the
 //   fresh height and holds its top (edgeBoxTop below, 2026-08-21).
+// - That caret-reveal scroll has a THIRD way in, the focusing tap itself, and
+//   it is the only one no correction can reach: iOS paints the reveal through
+//   part of the keyboard animation, before the app is given a turn at all
+//   (about two opens in ten, 412px of document scroll under a 362px pan). The
+//   one refusal the engine honours is preventScroll on the focus call, and it
+//   never grants a tap that flag, so the app takes the focusing tap over and
+//   makes the call itself. Only where a hand-made focus cannot lose the caret,
+//   though: an empty box that does not already hold focus, and nothing else
+//   (composerTapVerdict below).
 // - Dismissing the picker menu only LOOKS instant: WKFileUploadPanel keeps
 //   tearing down natively for another ~0.5–2s, and a files.click() forwarded
 //   inside that window is silently DROPPED by WebKit — the dead-＋-tap bug.
@@ -230,6 +239,60 @@ export function healNeeded(baseline: number, innerHeight: number): boolean {
 // re-presents instead of the tap dying as a blur). Never from idle.
 export function preservesFocus(w: World): boolean {
   return w.editorFocused || w.fileFocused;
+}
+
+// The composer's FOCUSING tap, and the one thing iOS does with it that the app
+// cannot undo afterwards.
+//
+// When WebKit hands a text box focus from a tap it also runs its caret reveal:
+// the UI process centres the focused box in the band above the keyboard, and
+// for a composer at the bottom of an 812 tall document that clamps to the whole
+// 412px there is to give (812 minus the 400 band). It is painted through part
+// of the keyboard animation, before any script runs, so the shove clear above
+// cannot get in front of it and stays what it is, a backstop. Roughly two
+// keyboard opens in ten arrived shoved this way, and that is WITH the
+// composer's focus blink already in place (styles.css, one opacity-0 frame at
+// focus): this is a second lock on the same door rather than a replacement,
+// and the blink stays because it also covers the per-keystroke reveals, which
+// no focus call can reach.
+//
+// focus({ preventScroll: true }) is the one prevention the engine honours: the
+// flag rides the focused element information into the UI process and the reveal
+// returns on it before computing any geometry (WebKit bug 236584, Safari 15.5).
+// A tap can never carry the flag, because the engine's own tap path focuses
+// with default options, so the only way to get it onto the focusing tap is to
+// refuse the engine's focus and do the focusing here.
+//
+// What that costs is everything else the engine's focus tap does, and the part
+// that matters is the CARET: a refused tap places none, so the box would open
+// with the caret wherever a scripted focus leaves it rather than where the
+// finger landed. Reading a character offset back out of a tap point is not
+// reliable in a text control (the caret-from-point reads do not cross a form
+// control's internal tree, and a measured guess off the ruler twin would be a
+// guess on every tap), so the interception is narrowed to the taps where the
+// question cannot arise at all:
+//   - the box must not already hold focus. The reveal rides the focusing tap
+//     alone, so a tap inside a focused box is left completely alone, and with
+//     it every caret move, long press and selection drag.
+//   - the box must be EMPTY. An empty box has exactly one caret position, so
+//     focusing it by hand lands the caret exactly where the tap would have. A
+//     box with text keeps today's behaviour, shove and all: a caret that jumps
+//     to the end when he taps into the middle of a half written message would
+//     be a worse bug than the one this fixes.
+//   - the tap must be the primary button, so a right or middle click keeps
+//     whatever the platform does with it.
+// Nothing that focuses the composer without a tap reaches this decision, so a
+// hardware keyboard and assistive technology are untouched by it.
+export type ComposerTapVerdict = "intercept" | "focused" | "text" | "aux";
+
+export function composerTapVerdict(
+  alreadyFocused: boolean,
+  empty: boolean,
+  primary: boolean,
+): ComposerTapVerdict {
+  if (!primary) return "aux";
+  if (alreadyFocused) return "focused";
+  return empty ? "intercept" : "text";
 }
 
 // Tap-time choreography signal (the pop-then-expand fix): .kb latches only
@@ -793,6 +856,79 @@ function bindInputSignals(input: HTMLInputElement): void {
   });
 }
 
+/**
+ * The tapped box, as the interception needs it: the two facts the verdict is
+ * read from and the one effect it has. Injectable for the same reason the
+ * picker lifecycle's effects are, so the path an iPhone runs is the path the
+ * tests run, minus a DOM.
+ */
+export interface TapTarget {
+  focused: boolean;
+  value: string;
+  focus(options: { preventScroll: boolean }): void;
+}
+
+/**
+ * Do what the verdict says, and say what was done. The order is the whole
+ * point: the refusal and the focus are the same turn of the same trusted
+ * gesture, with nothing between them, so the keyboard still rises from the
+ * user's tap and the reveal never gets a focus to hang itself off.
+ *
+ * The record comes last, after the focus rather than before it: it is what
+ * names the path the composer was focused by, and it must not sit between the
+ * tap and the keyboard on the one interaction the whole app turns on.
+ */
+export function focusComposerTap(
+  target: TapTarget,
+  primary: boolean,
+  prevent: () => void,
+): ComposerTapVerdict {
+  const verdict = composerTapVerdict(target.focused, target.value.length === 0, primary);
+  if (verdict === "intercept") {
+    prevent(); // the engine's own focus, and the caret reveal that rides it
+    target.focus({ preventScroll: true });
+  }
+  // Both focusing taps are on the trail: the one this took over, and the one it
+  // declined. A kb-focusing focus edge with no tap record before it was focused
+  // by something that is not a tap, and a shove landing after a `text` record is
+  // a shove on a tap this rule deliberately left to the engine.
+  if (verdict === "intercept" || verdict === "text") {
+    holdDiagRecord("kb-focusing", { tap: verdict });
+  }
+  return verdict;
+}
+
+// The DOM half: which event carries the interception, and why that one.
+//
+// mousedown is the event that grants focus. The engine dispatches it, and only
+// if no listener prevented it does it then focus the element under the finger
+// and place the caret from that same hit test, so preventing it here stops the
+// focus while the focus() call takes its place inside the same gesture. iOS
+// only synthesises a mousedown for a gesture it has ALREADY ruled a tap, so a
+// scroll, a long press and a selection drag never arrive here at all.
+// touchstart was not used: preventing it takes the whole synthetic gesture with
+// it. pointerdown was not used either: it fires when the finger lands, before
+// the engine has decided what the gesture is.
+//
+// On the document and in the capture phase, like the keystroke listeners: the
+// composer is rebuilt by every chat render, and a listener on the element
+// itself would have to be rebound with it. The picker's tap hold sits ahead of
+// this on pointerdown, and a prevented pointerdown produces no mousedown at
+// all, so a tap held through a picker teardown still never focuses anything.
+function composerTapListener(e: MouseEvent): void {
+  const t = e.target;
+  if (!(t instanceof HTMLTextAreaElement) || t.id !== "text") return;
+  focusComposerTap(
+    {
+      focused: document.activeElement === t,
+      value: t.value,
+      focus: (options) => t.focus(options),
+    },
+    e.button === 0,
+    () => e.preventDefault(),
+  );
+}
+
 export function initShell(el: HTMLElement): void {
   appEl = el;
   document.addEventListener("focusin", (e) => {
@@ -807,6 +943,10 @@ export function initShell(el: HTMLElement): void {
   });
   // one frame's grace on focusout: focus may be hopping between editables
   document.addEventListener("focusout", () => requestAnimationFrame(reconcile));
+  // the composer's focusing tap, focused here with preventScroll instead of by
+  // the engine, so iOS never runs the caret reveal that shoves the page
+  // (composerTapVerdict owns which taps this may touch)
+  document.addEventListener("mousedown", composerTapListener, true);
   // every keystroke in an editable re-opens the shove correction budget
   for (const type of ["beforeinput", "keydown"]) {
     document.addEventListener(

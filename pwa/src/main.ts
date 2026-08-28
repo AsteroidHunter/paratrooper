@@ -98,7 +98,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.41"; // the loading screen is now a flat black globe with a small dot going round it on a thin ring, and that revolution slows down rather than stopping dead when the phone is set to reduce motion
+const APP_VERSION = "0.3.42"; // tapping the empty compose box now hands it focus itself, with the one flag that tells iOS not to scroll the page to show the caret, so the keyboard can no longer open onto a shoved picture; a box with text already in it is still left entirely to the browser, so the caret keeps landing exactly where the finger did
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

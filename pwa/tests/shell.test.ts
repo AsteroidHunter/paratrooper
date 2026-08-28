@@ -3,7 +3,8 @@
 // These run without a DOM — the decision functions take World data and return
 // targets, so each iOS lie is encoded as plain inputs.
 import { readFileSync } from "node:fs";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { holdDiagEvents, holdDiagReset } from "../src/hold";
 import {
   FOCUSING_MAX_MS,
   HEAL_THRESHOLD_PX,
@@ -12,9 +13,11 @@ import {
   SETTLE_GUARD_MS,
   TEARDOWN_MAX_MS,
   closeCorrectionNeeded,
+  composerTapVerdict,
   computeShell,
   createPickerLifecycle,
   edgeBoxTop,
+  focusComposerTap,
   focusingActive,
   healNeeded,
   holdsBarTap,
@@ -839,5 +842,169 @@ describe("presentation: the plus's 44pt hit square", () => {
     const up = attachKb.match(/opacity ([\d.]+)s ease, width [\d.]+s ease ([\d.]+)s/);
     expect(up).not.toBeNull();
     expect(Number(up![2])).toBeGreaterThanOrEqual(Number(up![1]));
+  });
+});
+
+// The composer's focusing tap (the caret-reveal shove, about two keyboard opens
+// in ten). iOS focuses a tapped box with default focus options and reveals the
+// caret by centring the box above the keyboard, which on a bottom composer
+// clamps to the whole 412px an 812 tall document has to give, painted before
+// the app gets a turn. The only refusal the engine honours is preventScroll on
+// the focus call itself, and a tap cannot carry it, so the app takes the focus
+// over inside the tap. What every pin below is really about is how NARROW that
+// take-over is kept: it may only ever touch a tap that cannot carry a caret
+// position of its own.
+describe("composerTapVerdict: which taps the app may focus itself", () => {
+  it("the focusing tap on an empty box is taken over: one caret position, so none to lose", () => {
+    expect(composerTapVerdict(false, true, true)).toBe("intercept");
+  });
+
+  it("a tap inside an already-focused box is left alone, whatever it holds", () => {
+    // the reveal rides the focusing tap alone, and this is the tap that moves
+    // the caret, extends a selection, or ends a long press
+    expect(composerTapVerdict(true, true, true)).toBe("focused");
+    expect(composerTapVerdict(true, false, true)).toBe("focused");
+  });
+
+  it("a box with text in it is left alone: the caret must land where the finger did", () => {
+    expect(composerTapVerdict(false, false, true)).toBe("text");
+  });
+
+  it("only the primary button, so a right or middle click keeps the platform's behaviour", () => {
+    expect(composerTapVerdict(false, true, false)).toBe("aux");
+    expect(composerTapVerdict(true, false, false)).toBe("aux");
+  });
+});
+
+describe("focusComposerTap: the take-over, and everything it must not touch", () => {
+  function tapped(over: { focused?: boolean; value?: string } = {}) {
+    const calls: string[] = [];
+    const options: { preventScroll: boolean }[] = [];
+    const target = {
+      focused: over.focused ?? false,
+      value: over.value ?? "",
+      focus: (o: { preventScroll: boolean }): void => {
+        calls.push("focus");
+        options.push(o);
+      },
+    };
+    return { target, calls, options, prevent: (): void => void calls.push("prevent") };
+  }
+
+  const taps = (): unknown[] =>
+    holdDiagEvents().filter((e) => e.ev === "kb-focusing").map((e) => e.d);
+
+  beforeEach(() => {
+    holdDiagReset();
+  });
+
+  it("refuses the engine's focus and takes it with preventScroll, in that order, one turn", () => {
+    const t = tapped();
+    expect(focusComposerTap(t.target, true, t.prevent)).toBe("intercept");
+    // the refusal first, the focus immediately after it: the flag only reaches
+    // the UI process on a focus the app made, and the keyboard only rises from
+    // one made inside the tap
+    expect(t.calls).toEqual(["prevent", "focus"]);
+    expect(t.options).toEqual([{ preventScroll: true }]);
+  });
+
+  it("a tap inside a focused box is not prevented and not refocused: the caret is the engine's", () => {
+    const t = tapped({ focused: true, value: "half a sentence" });
+    expect(focusComposerTap(t.target, true, t.prevent)).toBe("focused");
+    expect(t.calls).toEqual([]); // nothing happened at all, so nothing can break
+    expect(taps()).toEqual([]);
+  });
+
+  it("a tap into existing text is left to the engine, caret placement and all", () => {
+    const t = tapped({ value: "half a sentence" });
+    expect(focusComposerTap(t.target, true, t.prevent)).toBe("text");
+    expect(t.calls).toEqual([]);
+  });
+
+  it("a non-primary button does nothing and records nothing", () => {
+    const t = tapped();
+    expect(focusComposerTap(t.target, false, t.prevent)).toBe("aux");
+    expect(t.calls).toEqual([]);
+    expect(taps()).toEqual([]);
+  });
+
+  it("both focusing taps land on the keyboard channel, named by what was decided", () => {
+    // the take-over, so a device session shows the interception firing...
+    const own = tapped();
+    focusComposerTap(own.target, true, own.prevent);
+    // ...and the one it declined, so a shove recorded after it is explained
+    const left = tapped({ value: "x" });
+    focusComposerTap(left.target, true, left.prevent);
+    expect(holdDiagEvents().map((e) => e.ev)).toEqual(["kb-focusing", "kb-focusing"]);
+    expect(taps()).toEqual([{ tap: "intercept" }, { tap: "text" }]);
+  });
+
+  it("the record comes after the focus, never between the tap and the keyboard", () => {
+    const order: string[] = [];
+    const target = {
+      focused: false,
+      value: "",
+      focus: (): void => void order.push("focus"),
+    };
+    focusComposerTap(target, true, () => order.push("prevent"));
+    order.push(...holdDiagEvents().map((e) => e.ev));
+    expect(order).toEqual(["prevent", "focus", "kb-focusing"]);
+  });
+});
+
+// Wiring pins for the take-over: which event carries it, what may reach it, and
+// that nothing else in the shell's focus handling moved to make room for it.
+describe("wiring: the focusing tap is intercepted on mousedown and nowhere else", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+  const handler = shell.match(/function composerTapListener[\s\S]*?\n\}/)?.[0] ?? "";
+  const takeover = shell.match(/export function focusComposerTap[\s\S]*?\n\}/)?.[0] ?? "";
+
+  it("mousedown carries it: the event that grants focus, and the last one before it", () => {
+    // iOS synthesises a mousedown only for a gesture it has already ruled a
+    // tap, so a scroll, a long press and a selection drag never arrive here
+    expect(shell).toMatch(
+      /document\.addEventListener\("mousedown", composerTapListener, true\);/,
+    );
+    expect(shell.match(/composerTapListener/g)).toHaveLength(2); // the function and its one listener
+    // touchstart and pointerdown were both turned down (see the header there)
+    expect(handler).not.toContain("touchstart");
+    expect(handler).not.toContain("pointerdown");
+  });
+
+  it("only the composer's own textarea can reach the decision", () => {
+    expect(handler).toMatch(
+      /if \(!\(t instanceof HTMLTextAreaElement\) \|\| t\.id !== "text"\) return;/,
+    );
+  });
+
+  it("the tap's own facts decide, read at the tap: focus state, contents, button", () => {
+    expect(handler).toContain("focused: document.activeElement === t");
+    expect(handler).toContain("value: t.value");
+    expect(handler).toContain("e.button === 0");
+    expect(handler).toContain("() => e.preventDefault()");
+  });
+
+  it("no clock and no wait anywhere on the path: the focus is the tap's own turn", () => {
+    for (const body of [handler, takeover]) {
+      expect(body).not.toMatch(/setTimeout|setInterval|requestAnimationFrame|await|then\(/);
+    }
+  });
+
+  it("the verdict has one caller and the take-over has one, so no other path can focus", () => {
+    expect(shell.match(/composerTapVerdict\(/g)).toHaveLength(2); // its definition and the one call
+    expect(shell.match(/focusComposerTap\(/g)).toHaveLength(2);
+    // the composer is focused in exactly one place in the shell, and it is this
+    expect(shell.match(/\.focus\(\{ preventScroll: true \}\)/g)).toHaveLength(1);
+  });
+
+  it("focus that arrives without a tap is untouched: focusin still only stamps and reconciles", () => {
+    // a hardware keyboard, assistive technology, anything that is not a finger
+    expect(shell).toMatch(
+      /document\.addEventListener\("focusin", \(e\) => \{\n\s*if \(isEditable\(e\.target\)\) \{\n\s*focusStartAt = performance\.now\(\);/,
+    );
+  });
+
+  it("the shove clear stays exactly where it was: the take-over is a prevention, not a swap", () => {
+    expect(shell).toMatch(/shoveClears \+= 1;\n\s*window\.scrollTo\(0, 0\);/);
   });
 });
