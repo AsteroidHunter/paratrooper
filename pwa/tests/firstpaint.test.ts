@@ -99,7 +99,10 @@ describe("the built page blocks its first paint on nothing", () => {
     // head's <style> out into a file would leave the page painting a bare white
     // panel until that file came back, which is the flash the whole arrangement
     // exists to remove.
-    for (const part of ["ring", "orbit", "dot", "globe", "equator", "meridian"]) {
+    for (const part of [
+      "ring", "orbit", "dot", "globe",
+      "line equator", "line lat lat-n", "line lat lat-s", "meridian", "line axis",
+    ]) {
       expect([part, PAGE.includes(`class="${part}"`)]).toEqual([part, true]);
     }
     for (const sel of [

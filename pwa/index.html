@@ -143,51 +143,68 @@
         box-sizing: border-box;
       }
 
-      /* The globe: a thin circle with an equator and a meridian in it, which is
-         the least a globe can be and still read as a globe rather than as a
-         plain disc. Hollow on purpose, since a filled disc would swallow both
-         lines. */
+      /* The globe: a wire globe rather than a circle with two lines in it. A
+         hollow circle carrying an equator, a line of latitude either side of
+         it, one line of longitude seen as an ellipse, and the axis line seen
+         edge on. That is the drawing everyone already reads as a globe, and it
+         needs every one of those five to do it. Hollow on purpose: a filled
+         disc would swallow all of them.
+
+         Smaller than it was, at his word, so the ring around it has room and
+         the globe stops being the whole picture. Everything inside is stated
+         in percentages of the globe's own inner box, so the drawing holds
+         together at whatever size the circle is set to and one number moves
+         all of it. */
       #loading .globe {
-        width: 20vmin;
-        height: 20vmin;
-        margin: -10vmin 0 0 -10vmin;
+        width: 14vmin;
+        height: 14vmin;
+        margin: -7vmin 0 0 -7vmin;
         border: 0.4vmin solid #000000;
         border-radius: 50%;
       }
 
-      /* Its two lines, both stated against the globe's own inner box, so each
-         one ends exactly where the circle's stroke begins and the three read as
-         one drawing. The equator is the horizontal diameter. The meridian is an
-         ellipse as tall as the globe and half as wide, which is what a line of
-         longitude looks like from here.
-
-         The equator is stated at HALF the width the two curves are, because it
-         is the only straight line in the picture and a straight horizontal line
-         lands square on the screen's own rows: every one of them comes out
-         solid. A curve of the same width is spread across those rows and most
-         of it is only partly covered, so it reads lighter. Drawn at the same
-         number the equator came out as a bar across a pair of hairlines, which
-         was checked on a rendered page rather than reasoned about. */
-      #loading .equator {
+      /* The straight lines are drawn THINNER than the curves on purpose, and
+         the reason was found on a rendered page rather than reasoned about: a
+         straight horizontal line lands square on the screen's own rows and
+         every one of them comes out solid, while a curve of the same width is
+         spread across those rows and most of it is only partly covered, so it
+         reads lighter. Drawn at the same number the straight lines came out as
+         bars across a set of hairlines. */
+      #loading .line {
         position: absolute;
-        left: 0;
-        right: 0;
-        top: 50%;
-        height: 0.2vmin;
-        margin-top: -0.1vmin;
         background: #000000;
       }
+      #loading .equator,
+      #loading .lat {
+        height: 0.2vmin;
+        margin-top: -0.1vmin;
+      }
+      /* the equator is the full diameter; the two latitudes are chords, so each
+         is the width the circle actually has at its own height (a quarter of
+         the radius up or down leaves it just under nine tenths as wide) */
+      #loading .equator { left: 0; right: 0; top: 50%; }
+      #loading .lat-n { left: 6.7%; right: 6.7%; top: 25%; }
+      #loading .lat-s { left: 6.7%; right: 6.7%; top: 75%; }
 
+      /* the one line of longitude that is not edge on, which is what gives the
+         drawing its roundness, and the axis, which is the same line seen flat */
       #loading .meridian {
         position: absolute;
-        left: 50%;
+        left: 25%;
+        right: 25%;
         top: 0;
         bottom: 0;
-        width: 9.6vmin;
-        margin-left: -4.8vmin;
         box-sizing: border-box;
         border: 0.4vmin solid #000000;
         border-radius: 50%;
+      }
+      #loading .axis {
+        left: 50%;
+        top: 0;
+        bottom: 0;
+        width: 0.2vmin;
+        margin-left: -0.1vmin;
+        background: #000000;
       }
 
       /* The ring: one true circle, drawn once. Seen from above there is no near
@@ -312,14 +329,17 @@
          and the rules above, so the frame that carries this markup carries the
          finished page. The scene is flat, so this is not a depth order, just
          the order it reads in: the ring the dot travels, the dot on its turning
-         arm, and the globe in the middle with its two lines. -->
+         arm, and the globe in the middle with its five lines. -->
     <div id="loading">
       <div class="scene">
         <div class="ring"></div>
         <div class="orbit"><div class="dot"></div></div>
         <div class="globe">
-          <div class="equator"></div>
+          <div class="line equator"></div>
+          <div class="line lat lat-n"></div>
+          <div class="line lat lat-s"></div>
           <div class="meridian"></div>
+          <div class="line axis"></div>
         </div>
       </div>
     </div>

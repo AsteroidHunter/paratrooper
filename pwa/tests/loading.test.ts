@@ -158,6 +158,11 @@ function vmin(value: string): number {
 }
 
 // a hair, for comparing two float routes to the same number
+/** a percentage as its number, for the two latitudes' symmetry */
+function pct(value: string): number {
+  return parseFloat(value);
+}
+
 function near(a: number, b: number, slack = 1e-6): boolean {
   return Math.abs(a - b) < slack;
 }
@@ -223,13 +228,17 @@ describe("the loading page lives in the document, not in the bundle", () => {
     expect(text).toBe("");
   });
 
-  it("is six empty boxes and the scene that holds them, in the order they read in", () => {
+  it("is empty boxes and the scene that holds them, in the order they read in", () => {
     // the scene is flat, so this is not a painting order and nothing depends on
     // it: the ring the dot travels, the dot on its turning arm, then the globe
+    // and the five lines that make it read as one
     const parts = [...MARKUP.matchAll(/<div class="([^"]*)">/g)].map((m) => m[1]);
-    expect(parts).toEqual(["scene", "ring", "orbit", "dot", "globe", "equator", "meridian"]);
+    expect(parts).toEqual([
+      "scene", "ring", "orbit", "dot", "globe",
+      "line equator", "line lat lat-n", "line lat lat-s", "meridian", "line axis",
+    ]);
     // and every tag in there is one of those boxes: no picture, no svg, no text
-    expect([...MARKUP.matchAll(/<(\w+)/g)].map((m) => m[1])).toEqual(Array(8).fill("div"));
+    expect([...MARKUP.matchAll(/<(\w+)/g)].map((m) => m[1])).toEqual(Array(11).fill("div"));
   });
 
   it("gets its styles from the document too, in the head, before the markup", () => {
@@ -315,30 +324,49 @@ describe("the scene: a globe with a ring round it, seen from straight above", ()
     expect(STYLE_SRC).not.toMatch(/gradient|box-shadow|rgba?\(/);
   });
 
-  it("is a globe rather than a plain disc: a circle with two lines in it", () => {
+  it("is a wire globe: a circle carrying an equator, two latitudes, a meridian and an axis", () => {
     const stroke = vmin(GLOBE.border);
     expect(vmin(GLOBE.width)).toBe(vmin(GLOBE.height)); // a circle, not an oval
     expect(GLOBE["border-radius"]).toBe("50%");
-    expect(GLOBE.background).toBeUndefined(); // hollow, or the lines would not show
-    // the equator is the horizontal diameter, run from one side of the globe's
-    // inner box to the other. It is stated at half the width the curves are,
-    // because a straight horizontal line lands square on the screen's rows and
-    // comes out solid where a curve of the same width is spread across them and
-    // reads lighter. Drawn at the same number it was a bar across two hairlines.
-    const eq = styleOf("#loading .equator");
-    expect([eq.left, eq.right, eq.top]).toEqual(["0", "0", "50%"]);
-    expect(near(vmin(eq.height), stroke / 2)).toBe(true);
-    expect(near(vmin(eq["margin-top"]), -vmin(eq.height) / 2)).toBe(true);
-    expect(eq.background).toBe(APP_INK);
-    // the meridian is an ellipse as tall as that box and half as wide, which is
-    // what a line of longitude looks like from here
+    expect(GLOBE.background).toBeUndefined(); // hollow, or none of the lines would show
+    // the straight lines are drawn at half the width the curves are, because a
+    // straight horizontal line lands square on the screen's rows and comes out
+    // solid where a curve of the same width is spread across them and reads
+    // lighter. Drawn at the same number they were bars across a set of hairlines.
+    expect(styleOf("#loading .line").background).toBe(APP_INK); // one ink, said once
+    const straight = styleOf("#loading .equator"); // the shared straight-line rule
+    expect(near(vmin(straight.height), stroke / 2)).toBe(true);
+    expect(near(vmin(straight["margin-top"]), -vmin(straight.height) / 2)).toBe(true);
+    // the equator is the full diameter; each latitude is the chord the circle
+    // actually has at its own height, which a quarter of the radius up or down
+    // leaves just under nine tenths as wide
+    expect(styleOf("#loading .equator").left).toBe("0");
+    expect(styleOf("#loading .equator").right).toBe("0");
+    expect(styleOf("#loading .equator").top).toBe("50%");
+    const north = styleOf("#loading .lat-n");
+    const south = styleOf("#loading .lat-s");
+    expect([north.left, north.right, north.top]).toEqual(["6.7%", "6.7%", "25%"]);
+    expect([south.left, south.right, south.top]).toEqual(["6.7%", "6.7%", "75%"]);
+    // and they sit the same distance either side of the equator, or the globe
+    // reads as leaning
+    expect(pct(north.top) + pct(south.top)).toBe(100);
+    // the meridian is the one line of longitude that is not edge on, an ellipse
+    // half the width of the box and all of its height; the axis is that same
+    // line seen flat, so it is straight and drawn at the straight weight
     const mer = styleOf("#loading .meridian");
-    expect([mer.top, mer.bottom, mer.left]).toEqual(["0", "0", "50%"]);
+    expect([mer.top, mer.bottom, mer.left, mer.right]).toEqual(["0", "0", "25%", "25%"]);
     expect(mer["border-radius"]).toBe("50%");
     expect(vmin(mer.border)).toBe(stroke);
-    const inner = vmin(GLOBE.height) - 2 * stroke;
-    expect(near(vmin(mer.width), inner / 2)).toBe(true);
-    expect(near(vmin(mer["margin-left"]), -vmin(mer.width) / 2)).toBe(true);
+    const axis = styleOf("#loading .axis");
+    expect([axis.top, axis.bottom, axis.left]).toEqual(["0", "0", "50%"]);
+    expect(near(vmin(axis.width), stroke / 2)).toBe(true);
+    expect(near(vmin(axis["margin-left"]), -vmin(axis.width) / 2)).toBe(true);
+  });
+
+  it("leaves the ring room: the globe is well inside the circle the dot travels", () => {
+    // he asked for it smaller, and the point of smaller is that the ring stops
+    // being a collar on it
+    expect(vmin(GLOBE.width) * 2).toBeLessThan(vmin(RING.width));
   });
 
   it("is flat: a true circle for a ring, nothing tilted, nothing cut, no depth", () => {
