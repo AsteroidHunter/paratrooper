@@ -32,6 +32,7 @@ import {
   GUESS_W,
   learnDims,
   scrollFix,
+  servedShape,
 } from "../src/photofit";
 import type { Dims } from "../src/photofit";
 
@@ -249,6 +250,55 @@ describe("learnDims: a size measured once is a size never guessed again", () => 
   });
 });
 
+// TEMP DIAGNOSTIC (served-shape): remove with the photofit.ts section and the
+// main.ts block these pin.
+//
+// The one assumption the whole file rests on, put where it can be checked. A
+// photo laid out from the size its frame carries is supposed to be laid out at
+// the shape its own pixels are, and the eyewitness account is of that branch
+// standing photos up from landscape into portrait as they land. It could: the
+// attributes resolve to `aspect-ratio: auto W/H`, which hands the box to the
+// image's own ratio at load. So the question is only ever whether the bytes
+// that arrive are the size the frame promised, and these are its four answers.
+describe("servedShape: the picture that arrived against the size promised", () => {
+  it("says nothing at all when the pixels are exactly what was promised", () => {
+    // the expected answer, and the reason a quiet trail can be read as one:
+    // a record per agreeing photo would be a whole history of noise saying yes
+    expect(servedShape([3024, 4032], [3024, 4032])).toBeNull();
+    expect(servedShape([1, 1], [1, 1])).toBeNull();
+  });
+
+  it("catches the transposition: told landscape, served the portrait picture", () => {
+    // exactly what he describes — a wide box that stands up as the photo lands
+    const off = servedShape([4032, 3024], [3024, 4032])!;
+    expect(off.swap).toBe(1);
+    expect(off.r).toBeCloseTo(1.778, 3); // 4:3 told over 3:4 served
+  });
+
+  it("reads a mismatch that is no transposition as a ratio, not a flag", () => {
+    // a 4:3 frame served a 16:9 picture reshapes the box just as silently, and
+    // the flag alone would call it agreement
+    const off = servedShape([4032, 3024], [4032, 2268])!;
+    expect(off.swap).toBe(0);
+    expect(off.r).toBeCloseTo(0.75, 3);
+  });
+
+  it("counts the same shape at another size as a mismatch, and says so with 1", () => {
+    // this one cannot reshape anything, and the pair of numbers says which it
+    // is: a ratio of 1 with the sizes disagreeing is a scale, not a shape
+    const off = servedShape([3024, 4032], [1512, 2016])!;
+    expect(off.swap).toBe(0);
+    expect(off.r).toBe(1);
+  });
+
+  it("says nothing about a pair it cannot compare", () => {
+    // a picture that never decoded has no shape, so its box was never wrong
+    expect(servedShape([3024, 4032], [0, 0])).toBeNull();
+    expect(servedShape([0, 0], [3024, 4032])).toBeNull();
+    expect(servedShape([3024, 4032], [Number.NaN, 4032])).toBeNull();
+  });
+});
+
 // main.ts's own branch, as a value: which box a stored frame renders in
 interface PhotoFrame {
   seq: number;
@@ -377,6 +427,83 @@ describe("adoptPhotoBox: the one reshape, and the last guess", () => {
 
   it("writes the size down, so this is the last render that ever guesses", () => {
     expect(adopt()).toContain("learnPhotoDims(seq, index, nat)");
+  });
+});
+
+// TEMP DIAGNOSTIC (served-shape): remove with the main.ts block these pin.
+describe("checkServedShape: the other branch's pixels, finally looked at", () => {
+  const check = (): string => fnBody("checkServedShape");
+  const render = (): string => fnBody("renderUser");
+
+  it("runs on the load of the photo that did NOT guess", () => {
+    // the branch every measurement so far says his history is made of, and the
+    // one nothing has ever compared against its own pixels
+    const load = render().slice(render().indexOf("img.onload"));
+    expect(load).toContain("else if (dims) checkServedShape(img, m.seq, i, dims)");
+    // and it runs on its own; the guessing branch keeps its correction alone
+    expect(check()).not.toContain("adoptPhotoBox");
+  });
+
+  it("asks photofit whether there is anything to report, and reports only that", () => {
+    expect(check()).toContain("const off = servedShape(told, nat)");
+    expect(check()).toContain("if (!off) return");
+    // silence is the finding when they agree, so nothing may be written above
+    // the question: the record has to sit under that early return
+    const body = check();
+    expect(body.indexOf("if (!off) return")).toBeLessThan(
+      body.indexOf('holdDiagRecord("served-shape"'),
+    );
+  });
+
+  it("carries what the argument needs: told, served, transposed, and the ratio", () => {
+    const body = check();
+    expect(body).toContain("seq,\n    i: index,");
+    expect(body).toContain("w: told[0]");
+    expect(body).toContain("h: told[1]");
+    expect(body).toContain("nw: nat[0]");
+    expect(body).toContain("nh: nat[1]");
+    expect(body).toContain("swap: off.swap");
+    expect(body).toContain("r: off.r");
+    expect(body).toContain("n: servedOff"); // how many distinct photos are wrong
+  });
+
+  it("records once per photo, so a scroll cannot bury its own evidence", () => {
+    // the same key the two neighbouring marks dedupe on, and the same rule:
+    // a re-render of a photo already looked at writes nothing at all
+    const body = check();
+    expect(body).toContain("const mark = `${seq}:${index}`");
+    expect(body).toContain("if (servedSeen.has(mark)) return");
+    expect(body).toContain("servedSeen.add(mark)");
+    expect(body.indexOf("if (servedSeen.has(mark)) return")).toBeLessThan(
+      body.indexOf('holdDiagRecord("served-shape"'),
+    );
+    expect(src).toContain("const servedSeen = new Set<string>()");
+  });
+
+  it("counts what it CHECKED on the record that always fires", () => {
+    // zero mismatches has to be told apart from zero photos looked at, and the
+    // mismatch record cannot do it: it is the record that is missing. So the
+    // running count rides sized-box, which fires for every photo of this kind
+    // whether or not anything later disagrees.
+    expect(render()).toContain("ck: servedSeen.size");
+    const known = render().slice(render().indexOf("if (dims) {"), render().indexOf("} else {"));
+    expect(known).toContain('holdDiagRecord("sized-box"');
+    expect(known).toContain("ck: servedSeen.size");
+    // and a photo with no pixels to read is not a photo that was checked
+    expect(check()).toContain("if (!nat) return");
+    expect(check().indexOf("if (!nat) return")).toBeLessThan(
+      check().indexOf("servedSeen.add(mark)"),
+    );
+  });
+
+  it("observes only: two properties the image already knows, and no layout", () => {
+    const body = check();
+    expect(body).toContain("const nat = naturalSize(img)");
+    expect(body).not.toContain("getBoundingClientRect");
+    expect(body).not.toContain("offsetHeight");
+    expect(body).not.toContain("keepView");
+    expect(body).not.toContain("img.style");
+    expect(body).not.toMatch(/img\.(width|height) =/);
   });
 });
 

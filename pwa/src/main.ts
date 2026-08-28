@@ -35,7 +35,7 @@ import {
   whenDrawn,
 } from "./photobox";
 import type { DrawWhy, SmallDrawHost, SmallShot, ThumbSeat } from "./photobox";
-import { GUESS_H, GUESS_RATIO, GUESS_W, learnDims, scrollFix } from "./photofit";
+import { GUESS_H, GUESS_RATIO, GUESS_W, learnDims, scrollFix, servedShape } from "./photofit";
 import type { Dims } from "./photofit";
 import { WAIT_CLASS, createPhotoQueue, nearMargin } from "./photolazy";
 import { receiptFor } from "./receipts";
@@ -117,7 +117,7 @@ import { blankProbeEdge, blankProbeFollow, blankProbeSettle } from "./blankprobe
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.56"; // the blank-screen readings are taken whenever the photo strip changes height mid-glide, opening as well as cancelling, since the one report is a memory and the opening moves the same edge, and the reading now finds the part of the conversation being looked at instead of counting its way down to it and giving up first
+const APP_VERSION = "0.3.57"; // every photo in the history now compares the picture it was actually served against the size it was promised as the pixels land, and says so only when the two disagree, with a count of how many it looked at so a quiet trail cannot be mistaken for a trail nobody wrote to
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -763,6 +763,13 @@ const guessedSeen = new Set<string>();
 // drawn at a size the app already knew, counted for the same reason and in the
 // same way as the guessing ones, so that neither channel's silence is ambiguous.
 const sizedSeen = new Set<string>();
+
+// TEMP DIAGNOSTIC (served-shape, recorded in checkServedShape): the photos of
+// that same known-size kind whose real pixels have since been read, and how many
+// of those turned out not to be the shape the app was promised. Distinct photos
+// in both, like the two sets above, so that a re-render can inflate neither.
+const servedSeen = new Set<string>();
+let servedOff = 0;
 
 const picks = new Map<File, Pick>();
 
@@ -2278,6 +2285,13 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
           w: dims[0],
           h: dims[1],
           tall: dims[1] > dims[0] ? 1 : 0, // the portrait ones are the complaint
+          // and how many photos the served-shape check below has managed to
+          // look at by now. It rides here, on the record that always fires,
+          // because that check writes nothing at all when the pixels agree: on
+          // its own, a channel with no records on it reads exactly like a
+          // channel nobody ever wrote to, and that ambiguity has already sent
+          // this session down the wrong branch twice.
+          ck: servedSeen.size,
         });
       }
     } else {
@@ -2321,6 +2335,10 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
       // whatever that costs, and the size is written down so no later render
       // of this photo ever guesses again
       if (guessed) adoptPhotoBox(img, div, m.seq, i);
+      // and a photo that did NOT guess has its own pixels here too, which is the
+      // first chance anything has had to check whether they are the shape the
+      // frame promised (checkServedShape). Reads only, changes nothing.
+      else if (dims) checkServedShape(img, m.seq, i, dims);
       // decoded height lands late; re-pin INSTANTLY — a layout completion must
       // never glide (the opening-scroll motion he flagged came from these)
       if (followTail) scrollToBottom(true);
@@ -2409,6 +2427,60 @@ function learnPhotoDims(seq: number | undefined, index: number, dims: Dims): boo
   cacheWrites.bump(); // the learned box must reach the cold-open snapshot
   holdDiagRecord("photo-learned", { seq, i: index, w: dims[0], h: dims[1] });
   return true;
+}
+
+// TEMP DIAGNOSTIC (served-shape, dedupe set at servedSeen, rule in photofit.ts).
+//
+// He watched photos in his history come up landscape and then stand up into
+// portrait, shoving everything under them down the page, and reports it as
+// something he saw rather than something he inferred. Everything measured so
+// far contradicts him from a distance: the marks say almost every photo back
+// there took the known-size branch, which is the branch that is not supposed to
+// be able to change shape, and reading the server's code says the size it stores
+// and the thumbnail bytes it serves cannot disagree. Two indirect readings
+// against one direct one, and no measurement anywhere of the only thing that
+// would settle it — the shape of the pixels that actually arrive.
+//
+// It would settle it because of how the known-size box is written. The width and
+// height attributes under `height: auto` are `aspect-ratio: auto W/H`, and that
+// keyword hands the box to the image's own natural ratio the moment the image
+// loads. So pixels of a different shape than the frame promised DO reshape the
+// box, at load, in silence, and adoptPhotoBox above never sees it: that
+// correction is wired to the guessing branch and pays the scroll back only
+// there. This is exactly the shape of what he describes.
+//
+// Records nothing when the two agree, so quiet is the answer that clears the
+// mechanism — which is only readable because the sized-box record carries how
+// many photos got this far (ck). One record per photo, never per render, or one
+// scroll back through the history would bury its own evidence.
+//
+// Costs two properties the image already holds. No geometry is read here and
+// nothing is written to the page.
+function checkServedShape(
+  img: HTMLImageElement,
+  seq: number | undefined,
+  index: number,
+  told: Dims,
+): void {
+  const mark = `${seq}:${index}`;
+  if (servedSeen.has(mark)) return;
+  const nat = naturalSize(img);
+  if (!nat) return; // no pixels to have a shape: nothing was checked, so say nothing
+  servedSeen.add(mark);
+  const off = servedShape(told, nat);
+  if (!off) return; // the box it was drawn at is the box the picture is
+  servedOff += 1;
+  holdDiagRecord("served-shape", {
+    seq,
+    i: index,
+    n: servedOff, // distinct photos served a shape other than the promised one
+    w: told[0],
+    h: told[1],
+    nw: nat[0],
+    nh: nat[1],
+    swap: off.swap, // told W×H and served H×W: the landscape-into-portrait case
+    r: off.r, // told aspect over served aspect, for the mismatches that are not that
+  });
 }
 
 function renderSystemLine(_m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {

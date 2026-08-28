@@ -123,3 +123,53 @@ export function learnDims(
   out[index] = [dims[0], dims[1]];
   return out;
 }
+
+// --- TEMP DIAGNOSTIC (served-shape) --------------------------------------------
+// Every rule above rests on one thing being true: that a photo laid out at the
+// size its frame carries is laid out at the shape its own pixels turn out to
+// be. If that ever fails, the first rule fails with it — the box IS free to
+// change shape after all, and the app neither knows nor corrects it.
+//
+// It is worth doubting because of how the box is written. Width and height
+// attributes under `height: auto` resolve to `aspect-ratio: auto W/H`, and the
+// `auto` in that keyword is not decoration: the attribute ratio holds the box
+// only UNTIL the image loads, and the image's own natural ratio holds it from
+// then on. So bytes of a different shape than the frame promised reshape the
+// box silently at load, and the one correction in this file's story is wired to
+// the guessing branch alone and never sees it.
+//
+// The comparison is here rather than at the DOM because it is arithmetic, and
+// because arithmetic can be pinned with a test. main.ts holds the reads.
+//
+// TO REMOVE: this section, checkServedShape and its counters in main.ts, the
+// "served-shape" name in the app.py photo digest, and the tests naming them.
+
+/** how the pixels that arrived differ in shape from the size the frame promised */
+export interface ServedShape {
+  /** told W×H and served H×W: the transposition, the one that stands a box up */
+  swap: 0 | 1;
+  /** told aspect over served aspect; 1 is the same shape at a different size */
+  r: number;
+}
+
+/**
+ * Null when the served pixels are exactly the size the frame promised, because
+ * agreement is what this expects to find and a record per agreeing photo would
+ * be a whole history's worth of noise saying nothing.
+ *
+ * A pair that cannot be compared answers null as well. A zero or a NaN on
+ * either side is a picture that never decoded, and its box was never the shape
+ * of anything.
+ */
+export function servedShape(told: Dims, nat: Dims): ServedShape | null {
+  const [w, h] = told;
+  const [nw, nh] = nat;
+  if (!(w > 0) || !(h > 0) || !(nw > 0) || !(nh > 0)) return null;
+  if (w === nw && h === nh) return null;
+  // the ratio is carried as well as the flag because a mismatch that is not a
+  // clean transposition still reshapes the box, and a number says how far
+  return {
+    swap: w === nh && h === nw ? 1 : 0,
+    r: Math.round((w / h / (nw / nh)) * 1000) / 1000,
+  };
+}

@@ -478,7 +478,8 @@ def test_holddiag_photo_box_marks_get_their_own_line(client, caplog):
     box reshapes when the pixels land, shoving everything under it down the page.
     The guess, the real size arriving, and the view being held still across the
     correction only mean anything read together, so they ride one line of their
-    own. This test exists because all three were being posted by the phone and
+    own, and so does the served-shape check on the photos that never guessed at
+    all. This test exists because those marks were being posted by the phone and
     dropped here: a mark no block claims never reaches the logs, so its absence
     reads as "never happened" when it means "never carried". TEMP DIAGNOSTIC
     (photo boxes): remove with the pwa/src/main.ts blocks."""
@@ -488,17 +489,32 @@ def test_holddiag_photo_box_marks_get_their_own_line(client, caplog):
         {"t": 2, "ev": "photo-learned", "d": {"seq": 412, "i": 0, "w": 3024, "h": 4032}},
         {"t": 3, "ev": "keep-view", "d": {"seq": 412, "fix": 268.5}},
         {"t": 4, "ev": "sized-box",
-         "d": {"seq": 413, "i": 0, "n": 1, "w": 3024, "h": 4032, "tall": 1}},
-        {"t": 5, "ev": "tail-gap", "d": {"when": "photo"}},
+         "d": {"seq": 413, "i": 0, "n": 1, "w": 3024, "h": 4032, "tall": 1, "ck": 2}},
+        # the eyewitness case, if it is real: a photo that never guessed, laid
+        # out landscape from the size the frame carried and served the portrait
+        # picture that stands its box back up
+        {"t": 5, "ev": "served-shape",
+         "d": {"seq": 414, "i": 0, "n": 1, "w": 4032, "h": 3024,
+               "nw": 3024, "nh": 4032, "swap": 1, "r": 1.778}},
+        {"t": 6, "ev": "tail-gap", "d": {"when": "photo"}},
     ]}
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
         assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
     photo = [r.message for r in caplog.records if "holddiag photo" in r.message]
     assert len(photo) == 1
-    assert "events=4" in photo[0]
+    assert "events=5" in photo[0]
     # the twin channel rides the same line: without it, silence from the guessing
     # side cannot be told apart from no photo having been drawn at all
     assert '"sized-box"' in photo[0] and '"tall": 1' in photo[0]
+    # and the same trap one level down: the served-shape check writes nothing
+    # when the pixels agree, so the count of photos it managed to look at rides
+    # the record that always fires, and has to arrive with it
+    assert '"ck": 2' in photo[0]
+    # the disagreement itself, in the only terms that settle the argument: what
+    # the app was told, what it was served, and that the two are transposed
+    assert '"served-shape"' in photo[0] and '"seq": 414' in photo[0]
+    assert '"nw": 3024' in photo[0] and '"nh": 4032' in photo[0]
+    assert '"swap": 1' in photo[0] and '"r": 1.778' in photo[0]
     # the whole story survives: which photo guessed and how many have, the real
     # size when it arrived, and whether anything compensated for the reshape
     assert '"seq": 412' in photo[0] and '"n": 3' in photo[0]
