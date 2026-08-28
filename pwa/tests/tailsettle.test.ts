@@ -152,6 +152,152 @@ describe("photo drawer cancelled: the band that never heals", () => {
     expect(open.top).toBe(TRUE_END + DRAWER);
     expect(roomUnderLast(open.top, withDrawer.ch)).toBe(PAD);
   });
+
+  // The close does not happen in one hop: the strip eases its height down over a
+  // beat, IN the flex column, so the thread's box grows a little on each of those
+  // frames and each one is delivered to the thread's ResizeObserver after layout
+  // and before paint. Walking those frames is what the settle actually does now
+  // that nothing corrects up front.
+  describe("the close as it really runs: frame by frame, nothing up front", () => {
+    // the strip's height on each frame the observer is delivered; the tap's own
+    // frame is not among them, because on it nothing has moved yet
+    const EASE = [70, 56, 41, 27, 14, 5, 0];
+
+    const walk = (from: number, follow: boolean): { st: number; ch: number }[] => {
+      const out: { st: number; ch: number }[] = [];
+      let st = from;
+      for (const h of EASE.slice(1)) {
+        const ch = REST_BOX - h;
+        st = settleBottom({ sh: CONTENT, st, ch }, follow).top;
+        out.push({ st, ch });
+      }
+      return out;
+    };
+
+    it("the view never moves up on any frame: every step gives room back", () => {
+      // the up-jump he reported can only come from a write that RAISES scrollTop,
+      // and the close's own frames only ever lower it
+      const steps = walk(seated, true);
+      let prev = seated;
+      for (const f of steps) {
+        expect(f.st).toBeLessThanOrEqual(prev);
+        prev = f.st;
+      }
+    });
+
+    it("the last message keeps exactly the same room under it, all the way down", () => {
+      for (const f of walk(seated, true)) {
+        expect(roomUnderLast(f.st, f.ch)).toBe(PAD);
+      }
+    });
+
+    it("and the walk ends on the true end, with no band left under the message", () => {
+      const end = walk(seated, true).at(-1)!;
+      expect(end.ch).toBe(REST_BOX);
+      expect(end.st).toBe(TRUE_END);
+      expect(tailOverhang({ sh: CONTENT, st: end.st, ch: REST_BOX })).toBe(0);
+      expect(roomUnderLast(end.st, REST_BOX)).toBe(PAD);
+    });
+
+    it("a reader up in the history rides it out without being pulled to the tail", () => {
+      const steps = walk(1200, false);
+      for (const f of steps) expect(f.st).toBe(1200);
+      // and he still has no band: his place was never near the end to begin with
+      expect(tailOverhang({ sh: CONTENT, st: 1200, ch: REST_BOX })).toBe(0);
+    });
+
+    it("a reader sitting on the OLD end is clamped down, never left past it", () => {
+      const steps = walk(seated, false);
+      expect(steps.at(-1)!.st).toBe(TRUE_END);
+      expect(tailOverhang({ sh: CONTENT, st: steps.at(-1)!.st, ch: REST_BOX })).toBe(0);
+    });
+  });
+});
+
+// The other half of the same band: the CONVERSATION shrinks rather than the box.
+// The typing dots are appended at the tail, the view is pinned to the bottom
+// while they show, and their removal takes their height out from under that
+// position. No box moves, so no ResizeObserver anywhere sees it, and until the
+// settle was wired to the removal nothing wrote the scroll again, so the dots'
+// height stayed on screen as white under the last message.
+describe("the conversation's own content shrinks: the dots leaving", () => {
+  const DOTS = 44; // the typing row: three blinking spans in a bubble
+  const withDots = CONTENT;
+  const withoutDots = CONTENT - DOTS;
+  const pinned = maxScrollTop(withDots, REST_BOX); // following, so sitting on the end
+
+  it("the dots' own height is left past the end the moment they go", () => {
+    expect(tailOverhang({ sh: withoutDots, st: pinned, ch: REST_BOX })).toBe(DOTS);
+  });
+
+  it("the box never changed, which is why nothing else could have caught it", () => {
+    // same clientHeight either side: a ResizeObserver on the thread watches this
+    // number and it did not move
+    expect(maxScrollTop(withDots, REST_BOX) - maxScrollTop(withoutDots, REST_BOX)).toBe(DOTS);
+  });
+
+  it("following the tail, the view comes back by exactly the dots", () => {
+    const plan = settleBottom({ sh: withoutDots, st: pinned, ch: REST_BOX }, true);
+    expect(plan.mode).toBe("follow");
+    expect(plan.top).toBe(pinned - DOTS);
+    expect(plan.over).toBe(DOTS);
+    expect(tailOverhang({ sh: withoutDots, st: plan.top, ch: REST_BOX })).toBe(0);
+  });
+
+  it("a reader up in the history is not yanked down to the dots' absence", () => {
+    const plan = settleBottom({ sh: withoutDots, st: 1200, ch: REST_BOX }, false);
+    expect(plan.mode).toBe("clamp");
+    expect(plan.top).toBe(1200);
+    expect(plan.moved).toBe(false);
+  });
+
+  it("and is clamped only by the part of his place that stopped existing", () => {
+    const plan = settleBottom({ sh: withoutDots, st: pinned, ch: REST_BOX }, false);
+    expect(plan.mode).toBe("clamp");
+    expect(plan.top).toBe(maxScrollTop(withoutDots, REST_BOX));
+    expect(plan.over).toBe(DOTS);
+  });
+
+  it("content GROWING needs nothing: a bigger range cannot strand a position", () => {
+    // why the named sites are the shrinks and not every content change
+    const plan = settleBottom({ sh: withDots + 200, st: pinned, ch: REST_BOX }, false);
+    expect(plan.moved).toBe(false);
+    expect(plan.over).toBe(0);
+  });
+});
+
+describe("the content settle's wiring", () => {
+  it("goes through the one settle, so it obeys the one follow-versus-clamp rule", () => {
+    expect(fnBody("settleContent")).toContain("settleTail(`content-${what}`)");
+  });
+
+  it("hides the dots and settles, in that order, and only when there were dots", () => {
+    const hide = fnBody("hideTyping");
+    expect(hide).toContain('const dots = document.getElementById("typing")');
+    expect(hide).toContain("if (!dots) return");
+    expect(hide.indexOf("dots.remove()")).toBeLessThan(hide.indexOf('settleContent("typing")'));
+  });
+
+  it("showTyping's pin has an answer on the way out now", () => {
+    expect(fnBody("showTyping")).toContain("if (followTail) scrollToBottom()");
+    expect(fnBody("hideTyping")).toContain("settleContent(");
+  });
+
+  it("the other two whole-block removals settle as well", () => {
+    expect(fnBody("applyRetract")).toContain('settleContent("retract")');
+    expect(fnBody("deleteFailed")).toContain('settleContent("delete")');
+  });
+
+  it("every content settle carries its own trigger name onto the trail", () => {
+    const names = [...src.matchAll(/settleContent\("([a-z]+)"\)/g)].map((m) => m[1]);
+    expect(names.sort()).toEqual(["delete", "retract", "typing"]);
+  });
+
+  it("nothing here waits on a clock, and nothing reads a scroll event", () => {
+    expect(fnBody("settleContent")).not.toContain("setTimeout");
+    expect(fnBody("settleContent")).not.toContain("requestAnimationFrame");
+    expect(fnBody("hideTyping")).not.toContain("setTimeout(settleContent");
+  });
 });
 
 describe("a reader up in the history is clamped, never yanked", () => {
@@ -281,9 +427,37 @@ describe("the signals that call it", () => {
     );
   });
 
-  it("the drawer's cancel and its send close both name their collapse", () => {
-    expect(fnBody("dismissPick")).toContain('settleTail("drawer-close")');
-    expect(fnBody("dismissSent")).toContain('settleTail("drawer-close")');
+  it("the send's close names its collapse, because it really is one hop", () => {
+    // the strip leaves the LAYOUT on the tap (position: fixed), so the thread
+    // has the whole drawer's room back in this frame and the settle answers a
+    // change that has already happened
+    const sent = fnBody("dismissSent");
+    expect(sent).toContain('box.style.position = "fixed"');
+    expect(sent.indexOf('box.style.position = "fixed"')).toBeLessThan(
+      sent.indexOf('settleTail("drawer-close")'),
+    );
+  });
+
+  it("the ✕'s cancel corrects nothing up front: its drawer is still standing", () => {
+    // The ✕'s close eases IN the flex column over a beat, so on the tap's own
+    // frame the drawer is at full height and there is nothing yet to correct.
+    // A settle here could only pull a following view the last of its slack down
+    // to the exact end, and following holds anywhere within NEAR_BOTTOM_PX. That
+    // pull, followed by the per-frame settles walking the view back down as the
+    // drawer actually went, IS the jump up and the fall he reported.
+    expect(fnBody("dismissPick")).not.toContain("settleTail(");
+    // the per-frame observer carries it instead, and showPending closes the run
+    expect(src).toContain('new ResizeObserver(() => settleTail("box", true))');
+    expect(fnBody("dismissPick")).toContain("showPending()");
+  });
+
+  it("the ✕'s close still eases inside the column, which is what makes it per-frame", () => {
+    // if this close ever left the layout the way the send's does, the thread
+    // would take the drawer back in one hop and there would be no frames for
+    // the observer to ride
+    const pick = fnBody("dismissPick");
+    expect(pick).toContain("trayClosing = box.animate(trayClose(box.offsetHeight, padTop), beat)");
+    expect(pick).not.toContain("box.style.position");
   });
 
   it("the scroller's own scroll events carry no clamp of any kind", () => {

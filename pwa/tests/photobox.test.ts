@@ -18,15 +18,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DRAW_NO_DEADLINE,
   SHOT_MAX_WIDTH,
+  SMALL_SHOT_PX,
   THUMB_DROP_SCALE,
   THUMB_SLIDE_PX,
   photoBox,
+  resizeHonoured,
+  smallShotUrl,
   thumbDrop,
   thumbSlide,
   trayClose,
   whenDrawn,
 } from "../src/photobox";
-import type { Drawable, DrawWhy } from "../src/photobox";
+import type { Drawable, DrawWhy, SmallDrawHost, SmallShot } from "../src/photobox";
 import { WAIT_CLASS } from "../src/photolazy";
 
 // A deadline, spelled out here rather than imported, because the app no longer
@@ -567,13 +570,17 @@ describe("picked-photo preview wiring: the seat lands on the tap, the picture la
     expect(src.match(/whenDrawn\([^)]*\)/g)).toEqual(["whenDrawn(img, DRAW_NO_DEADLINE)"]);
   });
 
-  it("the reveal and the slide both wait for the pixels, in that order", () => {
+  it("the reveal waits for the full pixels, and the slide for whichever came first", () => {
+    // the reveal is still the FULL decode's alone: taking .undrawn off is what
+    // uncovers the one drawn element, and the send morph reads that same flag
     const wait = stage().indexOf("shot.drawn.then");
     const reveal = stage().indexOf('wrap.classList.remove("undrawn")');
-    const slide = stage().indexOf("wrap.animate(thumbSlide()");
     expect(wait).toBeGreaterThan(-1);
     expect(wait).toBeLessThan(reveal);
-    expect(reveal).toBeLessThan(slide);
+    // the entrance belongs to the first picture the square gets, and plays once
+    expect(stage()).toContain("let filled = false");
+    expect(stage().slice(reveal)).toContain("if (!filled) {");
+    expect(stage().match(/wrap\.animate\(thumbSlide\(\)/g)).toHaveLength(2);
     expect(stage()).toContain("{ duration: FLIGHT_MS, easing: FLIGHT_EASE }"); // the app's own beat
   });
 
@@ -604,6 +611,202 @@ describe("picked-photo preview wiring: the seat lands on the tap, the picture la
     expect(stageBody.indexOf("wrap.append(img, x)")).toBeLessThan(wait);
     expect(stageBody.indexOf("box.appendChild(wrap)")).toBeLessThan(wait);
     expect(stageBody).toContain('x.className = "pthumb-x"');
+  });
+});
+
+// --- the small version, first -------------------------------------------------
+// The square is 64px and it was waiting for twelve megapixels. On device the
+// whole wait was 2.8 to 3.6 seconds, of which the app's own work was 29 to 103
+// milliseconds and the rest was the decode. A small version is asked for beside
+// the full one now, and the square wears that until the real pixels land.
+
+describe("smallShotUrl: a picture for the square, without the full decode", () => {
+  const FILE = new Blob([new Uint8Array(8)], { type: "image/jpeg" });
+
+  const shot = (width: number, height: number) => {
+    const closed = { count: 0 };
+    return {
+      shot: { width, height, close: (): void => void closed.count++ },
+      closed,
+    };
+  };
+
+  const host = (
+    bitmap: (blob: Blob, edge: number) => Promise<SmallShot>,
+    paint: (s: SmallShot) => string | null = () => "data:image/jpeg;base64,AA",
+  ): SmallDrawHost => ({ bitmap, paint });
+
+  it("hands back what the surface painted, so the square has a picture to wear", async () => {
+    const url = await smallShotUrl(
+      FILE,
+      host(async () => shot(256, 192).shot, () => "data:image/jpeg;base64,ZZ"),
+    );
+    expect(url).toBe("data:image/jpeg;base64,ZZ");
+  });
+
+  it("asks the engine for a width, which is the whole point of the route", async () => {
+    let asked = -1;
+    await smallShotUrl(FILE, host(async (_b, edge) => {
+      asked = edge;
+      return shot(edge, 100).shot;
+    }));
+    expect(asked).toBe(SMALL_SHOT_PX);
+  });
+
+  it("the width asked for is bigger than the square, so a 3x screen stays sharp", () => {
+    expect(SMALL_SHOT_PX).toBeGreaterThanOrEqual(64 * 3);
+    // and still a fraction of a camera photo: this is a preview, not a copy
+    expect(SMALL_SHOT_PX).toBeLessThanOrEqual(512);
+  });
+
+  it("never waits on the full decode: nothing here touches the img or its promise", async () => {
+    // the only thing awaited is the engine's own small read of the FILE
+    let handedTheFile = false;
+    await smallShotUrl(FILE, host(async (blob) => {
+      handedTheFile = blob === FILE;
+      return shot(256, 192).shot;
+    }));
+    expect(handedTheFile).toBe(true);
+    // and the module the square's wait lives in is not consulted at all
+    const body = readFileSync(join(here, "../src/photobox.ts"), "utf8");
+    const fn = body.slice(body.indexOf("export async function smallShotUrl"));
+    expect(fn.slice(0, fn.indexOf("\n}"))).not.toContain("whenDrawn");
+  });
+
+  it("hands the pixels back afterwards, painted or not", async () => {
+    const made = shot(256, 192);
+    await smallShotUrl(FILE, host(async () => made.shot));
+    expect(made.closed.count).toBe(1);
+    const refused = shot(256, 192);
+    await smallShotUrl(FILE, host(async () => refused.shot, () => null));
+    expect(refused.closed.count).toBe(1);
+  });
+
+  it("an engine with no such call at all simply makes nothing", async () => {
+    expect(await smallShotUrl(FILE, null)).toBeNull();
+  });
+
+  it("a refusal is quiet: the full decode still owns the square", async () => {
+    const rejected = await smallShotUrl(FILE, host(() => Promise.reject(new Error("no"))));
+    expect(rejected).toBeNull();
+    const threw = await smallShotUrl(FILE, host(async () => shot(256, 192).shot, () => {
+      throw new Error("no surface");
+    }));
+    expect(threw).toBeNull();
+  });
+
+  it("an empty url counts as nothing, never as a picture", async () => {
+    expect(await smallShotUrl(FILE, host(async () => shot(256, 192).shot, () => ""))).toBeNull();
+  });
+});
+
+describe("resizeHonoured: catching an engine that read the whole picture anyway", () => {
+  it("a picture no wider than the width asked for was resized on the way", () => {
+    expect(resizeHonoured({ width: 256, height: 192 }, 256)).toBe(true);
+    expect(resizeHonoured({ width: 120, height: 90 }, 256)).toBe(true); // already small
+  });
+
+  it("a picture wider than that means the resize was ignored", () => {
+    // twelve megapixels handed back whole: two full decodes racing, which is the
+    // exact failure the one-element rule was written to end
+    expect(resizeHonoured({ width: 4032, height: 3024 }, 256)).toBe(false);
+  });
+});
+
+describe("the small version's wiring in main.ts", () => {
+  const stage = (): string => fnBody("stagePick");
+
+  it("is asked for before the full-size element exists, so it is not queued behind it", () => {
+    const small = stage().indexOf("const small = smallShotUrl(file, smallDrawHost())");
+    const prepare = stage().indexOf("const shot = prepareShot(url)");
+    expect(small).toBeGreaterThan(-1);
+    expect(small).toBeLessThan(prepare);
+  });
+
+  it("the square is filled from it without joining the full decode's wait", () => {
+    const body = stage();
+    const join = body.indexOf("void small.then(");
+    const wait = body.indexOf("void shot.drawn.then(");
+    expect(join).toBeGreaterThan(-1);
+    expect(join).toBeLessThan(wait); // and it is not nested inside it
+    const branch = body.slice(join, wait);
+    expect(branch).toContain('wrap.style.backgroundImage = `url("${picture}")`');
+    expect(branch).toContain('wrap.classList.add("preview")');
+    expect(branch).not.toContain("shot.drawn");
+    expect(branch).not.toContain("whenDrawn");
+  });
+
+  it("it paints the square's BACKGROUND, never the one element the send carries", () => {
+    const body = stage();
+    const branch = body.slice(body.indexOf("void small.then("), body.indexOf("void shot.drawn"));
+    // the img keeps its full-size blob url and its own natural size
+    expect(branch).not.toContain("img.src");
+    expect(branch).not.toContain("img.width");
+    expect(body).toContain("const shot = prepareShot(url)"); // still the one full decode
+    expect(src.match(/whenDrawn\([^)]*\)/g)).toEqual(["whenDrawn(img, DRAW_NO_DEADLINE)"]);
+  });
+
+  it("the send morph still stands down on a photo whose true shape is unknown", () => {
+    // .undrawn is the morph's own gate and it comes off on the FULL pixels, so a
+    // square wearing only the small version cannot let the morph fly
+    const arm = fnBody("armShotMorph");
+    expect(arm).toContain('if (pick.wrap.classList.contains("undrawn")) return stand("undrawn")');
+    expect(arm).toContain("const nat = naturalSize(pick.img)");
+    expect(arm).toContain('if (!nat) return stand("nodims")');
+    // and nothing in the small branch touches that gate
+    const body = stage();
+    const branch = body.slice(body.indexOf("void small.then("), body.indexOf("void shot.drawn"));
+    expect(branch).not.toContain("undrawn");
+    // the flag really is only ever cleared by the full decode
+    expect(src.match(/classList\.remove\("undrawn"\)/g)).toHaveLength(1);
+    const drawn = body.slice(body.indexOf("void shot.drawn"));
+    expect(drawn).toContain('wrap.classList.remove("undrawn")');
+  });
+
+  it("the morph flies the full-size element's pixels, never the small version's", () => {
+    expect(fnBody("armShotMorph")).toContain("copy.src = pick.img.src");
+  });
+
+  it("nothing waits on a clock: the small version lands when it lands", () => {
+    expect(fnBody("smallDrawHost")).not.toContain("setTimeout");
+    const body = stage();
+    expect(body.slice(body.indexOf("void small.then("))).not.toContain("setTimeout");
+  });
+
+  it("an engine that ignored the width is not asked again, and is never painted", () => {
+    const host = fnBody("smallDrawHost");
+    expect(host).toContain('if (smallDrawOff || typeof createImageBitmap !== "function") return null');
+    expect(host).toContain("resizeWidth: edge");
+    // and the small read honours the file's own rotation, or the square would
+    // wear a sideways picture and snap upright when the real pixels landed
+    expect(host).toContain('imageOrientation: "from-image"');
+    // the size is checked BEFORE anything is drawn, so a full-size picture never
+    // reaches this thread's canvas
+    const paint = host.slice(host.indexOf("paint:"));
+    expect(paint.indexOf("resizeHonoured")).toBeLessThan(paint.indexOf("document.createElement"));
+    expect(paint).toContain("smallDrawOff = true");
+  });
+
+  it("the square's own clock says when the seat stopped being empty", () => {
+    const body = stage();
+    const branch = body.slice(body.indexOf("void small.then("), body.indexOf("void shot.drawn"));
+    expect(branch).toContain('phase: "pick-preview"');
+    expect(branch).toContain("ms: Math.round(performance.now() - staged)");
+  });
+
+  it("the stylesheet puts the picture on the seat and takes the spinner off it", () => {
+    expect(css).toMatch(/\.pthumb\.preview \{[^}]*background-size: cover;/);
+    expect(css).toMatch(/\.pthumb\.preview::before,\s*\n\.pthumb\.preview::after \{ content: none; \}/);
+    // it must stand AFTER .undrawn or it loses the tie and the ring stays on
+    expect(css.indexOf(".pthumb.undrawn::after")).toBeLessThan(css.indexOf(".pthumb.preview"));
+    // and it must not disturb the seat: the 64px box still comes from the img
+    expect(css).not.toMatch(/\.pthumb\.preview \{[^}]*\bwidth:/);
+  });
+
+  it("a square wearing only the small version is dropped without a wait, like any other", () => {
+    // the ✕ path reads the staging list, never the pixels
+    expect(fnBody("dismissPick")).not.toContain("drawn");
+    expect(fnBody("dismissPick")).not.toContain("preview");
   });
 });
 

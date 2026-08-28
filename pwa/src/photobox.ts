@@ -55,8 +55,12 @@ export function photoBox(natW: number, natH: number, rowW: number): PhotoBox {
 // decoding the identical bytes alongside it, ran out of patience and gave up.
 // There is a single element per picked file now (main.ts prepareShot). It stands
 // in the tray while the photo is staged and the send carries that very element
-// into the bubble, so the thread paints pixels the tray already has and no
-// second decode is ever asked for.
+// into the bubble, so the thread paints pixels the tray already has and the
+// photo is never decoded at size twice. The small read below is the one other
+// look this file takes at the same bytes, and it is a fraction of this work
+// rather than a repeat of it: it stops at a couple of hundred pixels, it never
+// becomes an element, and the section there says what it is allowed to be used
+// for.
 //
 // Nothing holds a deadline any more, which is why the default below is to wait
 // as long as the pixels take. A deadline belongs to whatever the wait is HOLDING
@@ -115,6 +119,95 @@ export function whenDrawn(img: Drawable, deadlineMs: number = DRAW_NO_DEADLINE):
     img.addEventListener("load", () => settle("load"), { once: true });
     img.addEventListener("error", () => settle("error"), { once: true });
   });
+}
+
+// --- the small version, first -------------------------------------------------
+// A 64px square does not need twelve megapixels, and on this phone it was
+// waiting for all of them. Measured from the file arriving to the picture
+// standing in the strip: 2.8 to 3.6 seconds, of which the app's own work was 29
+// to 103 milliseconds. The rest, 2.2 to 3.1 seconds, was the decode of a 2 to
+// 4.6 MB camera JPEG, and nothing was blocked on it. The square was simply
+// waiting for a picture two hundred times larger than the box it had to fill.
+//
+// So a small version is asked for alongside it, and the square shows THAT the
+// moment it lands. The full decode is left exactly as it was, because the SEND
+// genuinely needs it: the send carries the one drawn element into the bubble,
+// where the photo really is displayed at size, and the send morph needs the
+// photo's true shape to open its crop onto. Neither of those may ever be handed
+// a preview, so what lands here is a picture for the square to WEAR and never
+// the element the rest of the app reads (main.ts paints it as the square's own
+// background, under an img that is still waiting).
+//
+// The route is a decode that resizes on the way. Asking for a width means the
+// engine may scale the picture down as it reads it rather than after, which on a
+// JPEG is most of the work skipped rather than repeated. An engine that has no
+// such call, or that refuses this file, lands on null and the square waits for
+// the full decode exactly as it used to: this can only ever be earlier than
+// before, never later.
+//
+// The pieces of the platform are handed in rather than reached for, the same
+// split whenDrawn's Drawable uses, so the wait is testable without a canvas.
+
+/** the edge the small version is asked for: 4x the 64px square, so it stays
+    sharp on a 3x screen and still costs a fraction of the full picture */
+export const SMALL_SHOT_PX = 256;
+
+/** a decoded small picture, as much of one as this file touches */
+export interface SmallShot {
+  width: number;
+  height: number;
+  close?: () => void; // the pixels are held outside the heap: hand them back
+}
+
+/** the two platform calls the small draw needs */
+export interface SmallDrawHost {
+  /** decode this blob, resized to the given width on the way if the engine can */
+  bitmap: (blob: Blob, edge: number) => Promise<SmallShot>;
+  /** put it on a surface and hand back something CSS can paint; null if it cannot */
+  paint: (shot: SmallShot) => string | null;
+}
+
+/**
+ * A small version of a picked photo, or null if this engine cannot make one.
+ *
+ * Never throws and never rejects: every caller of this is a square that already
+ * has a placeholder on it and a full decode already running underneath, so the
+ * only thing a failure here may cost is the head start.
+ */
+export async function smallShotUrl(
+  file: Blob,
+  host: SmallDrawHost | null,
+  edge: number = SMALL_SHOT_PX,
+): Promise<string | null> {
+  if (!host) return null;
+  let shot: SmallShot;
+  try {
+    shot = await host.bitmap(file, edge);
+  } catch {
+    return null; // the engine refused this file: the full decode still owns the square
+  }
+  try {
+    return host.paint(shot) || null;
+  } catch {
+    return null;
+  } finally {
+    shot.close?.();
+  }
+}
+
+/**
+ * Did the engine actually resize on the way, or did it read the whole picture
+ * and hand it back whole?
+ *
+ * This matters more than it looks. Two full decodes of the same twelve
+ * megapixels running against each other is the exact failure the one-element
+ * rule above was written to end, and an engine that quietly ignores the width
+ * asked for would put it straight back. The first small draw of a session
+ * answers this from what it got, and main.ts stops asking when the answer is no.
+ * A picture that was already smaller than the edge is not evidence either way.
+ */
+export function resizeHonoured(shot: SmallShot, edge: number): boolean {
+  return shot.width <= edge;
 }
 
 // --- the picked photo's entrance ----------------------------------------------

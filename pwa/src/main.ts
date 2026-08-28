@@ -13,13 +13,16 @@ import { createReplyHold, holdDiagRecord } from "./hold";
 import { composeMirror, fitComposeBox } from "./mirror";
 import {
   DRAW_NO_DEADLINE,
+  SMALL_SHOT_PX,
   photoBox,
+  resizeHonoured,
+  smallShotUrl,
   thumbDrop,
   thumbSlide,
   trayClose,
   whenDrawn,
 } from "./photobox";
-import type { DrawWhy } from "./photobox";
+import type { DrawWhy, SmallDrawHost, SmallShot } from "./photobox";
 import { GUESS_H, GUESS_RATIO, GUESS_W, learnDims, scrollFix } from "./photofit";
 import type { Dims } from "./photofit";
 import { WAIT_CLASS, createPhotoQueue, nearMargin } from "./photolazy";
@@ -95,7 +98,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.39"; // the measuring code that was freezing the first scroll after every keyboard close is gone, along with its half of the server side
+const APP_VERSION = "0.3.40"; // the view is put back when the conversation itself changes height, cancelling a pick no longer jumps the thread up first, and a picked photo fills its square without waiting out the full decode
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -815,12 +818,24 @@ function dismissPick(file: File, pick: Pick): void {
     box.classList.add("closing"); // clips the full-size square while the box goes past it
     trayClosing = box.animate(trayClose(box.offsetHeight, padTop), beat);
     // This close runs IN the flex column, so the thread takes the drawer's
-    // height back frame by frame and the scroller's end walks up with it. That
-    // is the band he sees when a pick is cancelled, and it never heals on its
-    // own because nothing else here writes the scroll again. Each of those
-    // frames settles through the resize observer; this names the start of the
-    // run on the trail, and the finish below closes it through showPending.
-    settleTail("drawer-close");
+    // height back frame by frame and the scroller's end walks up with it. Every
+    // one of those frames settles through the threadObserver, which is delivered
+    // after layout and before paint, so the conversation simply stays where it
+    // is while the drawer closes underneath it and the band never opens.
+    //
+    // There is deliberately NO settle on this line. One used to stand here, and
+    // it ran in the tap's own frame, when the drawer is still standing at its
+    // full height and nothing about the geometry has changed yet. It could not
+    // hand back a height that had not been given up, so what it actually did at
+    // that instant was raise the scroll: following holds anywhere within
+    // NEAR_BOTTOM_PX of the bottom, and the settle's follow arm pins to the
+    // exact end, so it closed however much of that slack the reader had in one
+    // hop. Its write is instant and unconditional too, which takes any glide or
+    // rubber band the engine was in down with it. Both are upward, and the
+    // per-frame settles then walked the view back down as the drawer really
+    // went: the jump up, and the fall after it. Nothing here needs to correct
+    // anything, because nothing here has changed yet; the close's own frames and
+    // showPending's settle below own the whole of it.
   }
   const drop = pick.wrap.animate(thumbDrop(), beat);
   const gone = (): void => {
@@ -889,8 +904,16 @@ function dismissSent(): void {
   box.style.width = `${rect.width}px`;
   box.style.bottom = `${window.innerHeight - rect.bottom}px`;
   box.classList.add("closing"); // clips the full-size squares while the box goes past them
-  // the strip has just left the layout, so the thread has its room back in one
-  // hop: the scroll answers for that hop here, in the hop's own frame
+  // The strip has just left the layout, so the thread has its room back in one
+  // hop: the scroll answers for that hop here, in the hop's own frame.
+  //
+  // This is NOT the up-front correction the ✕ path had to lose. There the
+  // drawer was still standing at full height when the settle ran, so it
+  // answered a change that had not happened yet; here the three writes above
+  // have already happened and reading the thread's numbers below flushes them,
+  // so this settle answers room the thread genuinely has this frame. The ✕'s
+  // close eases inside the column and belongs to the per-frame observer; this
+  // one is a single hop and has no frames for that observer to ride.
   settleTail("drawer-close");
   const beat: KeyframeAnimationOptions = {
     duration: FLIGHT_MS,
@@ -926,11 +949,65 @@ function dismissSent(): void {
   }
 }
 
+// The two platform calls behind the small version of a picked photo; photobox.ts
+// holds the reason, the device numbers and the arithmetic. createImageBitmap is
+// the one decode on this engine that takes the width to decode AT, so the phone
+// reads the picture small instead of reading it whole and shrinking it
+// afterwards. The canvas is here only because CSS cannot paint an ImageBitmap
+// directly, and at 256px the re-encode is a rounding error beside the decode it
+// stands in front of.
+//
+// smallDrawOff latches for the session. An engine that hands back a picture
+// wider than the width asked for read the whole thing anyway, and a second full
+// decode racing the send's own is precisely what the one-element rule exists to
+// prevent, so the first honest answer decides for every pick after it. Painting
+// a picture that size on this thread would be the same mistake twice over, so
+// that answer is read before anything is drawn.
+let smallDrawOff = false;
+
+function smallDrawHost(): SmallDrawHost | null {
+  if (smallDrawOff || typeof createImageBitmap !== "function") return null;
+  return {
+    bitmap: (blob, edge) =>
+      createImageBitmap(blob, {
+        resizeWidth: edge,
+        // the cheapest resample there is: this picture is a stand-in for a
+        // couple of seconds and the decode is the whole cost, not the scaling
+        resizeQuality: "low",
+        // a phone camera writes the picture in the sensor's orientation and the
+        // rotation in the file's own metadata. An img honours that; this call is
+        // asked to as well, or the square would wear a sideways preview and then
+        // snap upright when the real pixels landed.
+        imageOrientation: "from-image",
+      }),
+    paint: (shot: SmallShot): string | null => {
+      if (!resizeHonoured(shot, SMALL_SHOT_PX)) {
+        smallDrawOff = true;
+        holdDiagRecord("flight", {
+          phase: "small-off", w: Math.round(shot.width), h: Math.round(shot.height),
+        });
+        return null; // read whole: this thread is not touching twelve megapixels
+      }
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(shot.width));
+      c.height = Math.max(1, Math.round(shot.height));
+      const ctx = c.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(shot as unknown as ImageBitmap, 0, 0);
+      return c.toDataURL("image/jpeg", 0.72);
+    },
+  };
+}
+
 function stagePick(file: File, box: HTMLElement): Pick {
   // TEMP DIAGNOSTIC (pick-timing, picktiming.ts owns the banner): the file's own
   // facts (type, name, byte size) and then a step at each thing this function
   // does with them. Reading those three costs nothing and touches no layout.
   pickTimingFile(file);
+  // The small version, asked for BEFORE the full-size element below exists so
+  // that the small read is not queued behind the big one it is meant to get in
+  // front of. It never rejects, so this promise is safe to hold and join later.
+  const small = smallShotUrl(file, smallDrawHost());
   const url = URL.createObjectURL(file);
   pickTimingStep("url"); // TEMP DIAGNOSTIC (pick-timing)
   const wrap = document.createElement("div");
@@ -938,10 +1015,12 @@ function stagePick(file: File, box: HTMLElement): Pick {
   // from this line, wearing the same placeholder the thread's unarrived photos
   // wear (styles.css), and only the img inside it is held back
   wrap.className = "pthumb undrawn";
-  // ONE element and ONE decode for this file. It is made here, shown here, and
-  // handed to the send exactly as it stands (takeShot), so the phone draws the
-  // photo once for both places instead of racing two copies of the same work
-  // against each other (photobox.ts has the device numbers).
+  // ONE element and ONE full decode for this file. It is made here, shown here,
+  // and handed to the send exactly as it stands (takeShot), so the phone draws
+  // the photo at size once for both places instead of racing two copies of the
+  // same work against each other (photobox.ts has the device numbers). The small
+  // read above is not a second copy of that work: it is a fraction of it, it
+  // never becomes an element, and it is dropped the moment it has been painted.
   const shot = prepareShot(url);
   pickTimingStep("elem"); // TEMP DIAGNOSTIC (pick-timing): src assigned, pixel wait armed
   const img = shot.img;
@@ -963,6 +1042,31 @@ function stagePick(file: File, box: HTMLElement): Pick {
   box.appendChild(wrap); // seated now; renderPending opens the tray around it
   pickTimingStep("seat"); // TEMP DIAGNOSTIC (pick-timing)
   const staged = performance.now();
+  // Whichever picture reaches the square first owns the entrance: the small
+  // version when the engine made one, and the full decode when it did not. The
+  // entrance has always been about the square getting a picture rather than
+  // about which decode produced it, and it must play once.
+  let filled = false;
+  // The small version lands as the square's own BACKGROUND, under an img that is
+  // still waiting. Nothing downstream can mistake it for the photo, which is the
+  // whole point: .undrawn stays on the wrap until the real pixels arrive, and
+  // that is the flag the send morph reads before it will fly (armShotMorph), so
+  // a photo whose true shape is not known yet still stands the morph down. The
+  // img keeps its full-size blob url and its own natural size for the send. All
+  // this does is take the grey face and the ring off the seat and put a picture
+  // there instead, a beat after the tap rather than a decode later.
+  void small.then((picture) => {
+    if (!picture || filled || picks.get(file) !== pick) return; // gone, or already filled
+    filled = true;
+    wrap.style.backgroundImage = `url("${picture}")`;
+    wrap.classList.add("preview");
+    wrap.animate(thumbSlide(), { duration: FLIGHT_MS, easing: FLIGHT_EASE });
+    // the square's own clock, the same one pick-show carries, stopped at the
+    // moment the seat stopped being empty rather than at the full decode
+    holdDiagRecord("flight", {
+      phase: "pick-preview", ms: Math.round(performance.now() - staged),
+    });
+  });
   // The picture's arrival, and nothing else's — the same one wait prepareShot
   // already started on this element, joined a second time rather than begun
   // again. The tray and this square went up on the tap, so nothing here is held
@@ -989,10 +1093,15 @@ function stagePick(file: File, box: HTMLElement): Pick {
     wrap.classList.remove("undrawn");
     pickTimingStep("reveal"); // TEMP DIAGNOSTIC (pick-timing): placeholder off
     pickTimingPainted(); // TEMP DIAGNOSTIC (pick-timing): closes the pick, ships its record
-    // the entrance starts HERE, on the pixels: it moves a square that has its
-    // picture, inside a tray that has been open since the tap. Started on the
-    // old deadline instead, it spent its whole beat on an empty box.
-    wrap.animate(thumbSlide(), { duration: FLIGHT_MS, easing: FLIGHT_EASE });
+    // the entrance starts on the PICTURE: it moves a square that has one, inside
+    // a tray that has been open since the tap. Started on the old deadline
+    // instead, it spent its whole beat on an empty box. When a small version
+    // already filled the seat this beat has been and gone, and the full pixels
+    // swap in behind it with nothing to announce.
+    if (!filled) {
+      filled = true;
+      wrap.animate(thumbSlide(), { duration: FLIGHT_MS, easing: FLIGHT_EASE });
+    }
     // ms says what a deadline used to say by settling "late", only better: how
     // long the phone actually took, not merely that it took longer than some
     // number (on device every camera photo did, the one screenshot did not).
@@ -1184,6 +1293,44 @@ function settleTail(via: string, quiet = false): void {
   if (!quiet || plan.over > 0 || cut) {
     holdDiagRecord("tail-settle", settleMark(via, g, plan, cut, flightsUp));
   }
+}
+
+// The same settle, asked for the other reason: the CONVERSATION changed height,
+// rather than the room under it.
+//
+// Every signal above is a change to the BOX: the keyboard's edges, the photo
+// drawer opening and closing, and the thread's own ResizeObserver for each frame
+// of a box that eases. A ResizeObserver on the thread watches that box and
+// nothing else, so content growing or shrinking inside it fires none of them.
+// Growth is harmless on its own: taller content raises the end of the range, so
+// a position that was in range stays in range. SHRINKING is the hole. It lowers
+// the end of the range under a position already sitting on the old end, and
+// Safari hands that position back rather than clamping it, which is the band of
+// empty white under the last message this whole area exists to prevent.
+//
+// The typing dots were the confirmed case: they are appended at the tail, the
+// view is pinned to the bottom while they show, and their removal took their
+// height out from under a scroll position that nothing then wrote again.
+//
+// This is a named set of call sites rather than an observer on the content, for
+// a structural reason: there is no content element to observe. #thread is both
+// the scroller and the flex container, .evt wrappers are display:contents, and
+// so every row is a direct flex item of the scroller itself. Giving it an inner
+// wrapper to watch would move every row a box down and change what the peek
+// transforms, the sibling shift, laidOutRows and the row-width read are all
+// looking at, which is a great deal more than this fix. The three sites are the
+// three places a whole block leaves the conversation: hideTyping, applyRetract
+// and deleteFailed. A gap stamp leaving inside decorate() is the one shrink left
+// unnamed, and it is a few pixels that only ever moves while applyEvent or
+// rerender is already writing the scroll around it.
+//
+// The rule is the settle's own, unchanged: pinned to the fresh end while
+// following the tail, and only CLAMPED while the reader is up in the history, so
+// a reader who has deliberately scrolled up keeps his place and is pulled back
+// only when his place no longer exists. The via carries a content- prefix so a
+// device session can tell these from the box signals at a glance.
+function settleContent(what: string): void {
+  settleTail(`content-${what}`);
 }
 
 // The other half of the scroll's ownership, and the opposite case to the one
@@ -2362,7 +2509,13 @@ function showTyping(): void {
 function hideTyping(): void {
   if (typingExpiry) clearTimeout(typingExpiry);
   typingExpiry = null;
-  document.getElementById("typing")?.remove();
+  const dots = document.getElementById("typing");
+  if (!dots) return; // nothing was on screen: the conversation did not change height
+  dots.remove();
+  // showTyping pins the bottom when the dots go up; this is the other half of
+  // that, and without it the view stayed where the taller content had put it and
+  // the dots' height was left on screen as white under the last message
+  settleContent("typing");
 }
 
 // --- networking --------------------------------------------------------------
@@ -2642,6 +2795,7 @@ function applyRetract(seq: number): void {
     w.remove();
     decorate();
     updateReceipt();
+    settleContent("retract"); // a whole bubble left: the end of the range moved up with it
   }
   holdDiagRecord("retract-applied", {
     seq, bubble: w !== null, stored: hadStore, held: wasHeld,
@@ -3984,6 +4138,7 @@ function deleteFailed(w: HTMLElement): void {
   });
   w.remove();
   decorate();
+  settleContent("delete"); // the failed bubble and its badge left from the tail
 }
 
 // --- durable outbox restore: a prior session's failed sends -------------------

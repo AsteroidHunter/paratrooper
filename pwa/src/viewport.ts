@@ -109,11 +109,17 @@ export function nearBottomOf(
 //   which lowers the end of the range by exactly the drawer, and the position
 //   that was correct while the drawer stood is past the end the moment it goes.
 //
-// So the rule below is written once for both, and for anything else that moves
-// that edge. Following the tail pins to the end computed from the numbers read
-// on this frame, never from a target carried over from the old box. Away from
-// the tail the position is only CLAMPED: a reader who has deliberately scrolled
-// up keeps his place, and is pulled back only when his place no longer exists.
+// The same end of the same range also moves when the CONTENT shrinks rather
+// than the box: the typing dots leaving take their height out from under a
+// position sitting on the old end, and there is no box change anywhere for a
+// ResizeObserver to notice. main.ts names those sites (settleContent).
+//
+// So the rule below is written once for all of them, and for anything else that
+// moves that edge. Following the tail pins to the end computed from the numbers
+// read on this frame, never from a target carried over from the old box. Away
+// from the tail the position is only CLAMPED: a reader who has deliberately
+// scrolled up keeps his place, and is pulled back only when his place no longer
+// exists.
 //
 // Pure, so the arithmetic is pinned without a DOM, the same split the
 // compensation decision above uses; main.ts holds the reads, the write, and the

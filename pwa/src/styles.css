@@ -1065,6 +1065,22 @@ html, body {
   border-radius: 50%;
   animation: oldspin 0.8s linear infinite; /* the history spinner's ring, one vocabulary */
 }
+/* The small version of the picture, worn while the full decode runs (main.ts
+   stagePick, photobox.ts has the device numbers: the square used to wait out a
+   two to three second decode of a twelve megapixel photo before it would show a
+   64px picture). It is the square's own background, not its img, so the one
+   drawn element underneath stays hidden and stays the element the send carries;
+   the seat, the box and everything downstream are untouched. The face and the
+   ring come off with it, because there is a picture there now and a spinner over
+   it would be saying the opposite. Written after .undrawn on purpose: they carry
+   the same weight, so this one wins by standing later. */
+.pthumb.preview {
+  background-size: cover;
+  background-position: center;
+  border-radius: 12px; /* the thumbnail's own corner, same as the img wears */
+}
+.pthumb.preview::before,
+.pthumb.preview::after { content: none; }
 /* A square the send flight has taken over (main.ts armShotMorph). A copy of
    its picture is already standing exactly where it stands, in viewport
    coordinates, about to gather and fly, so the square itself must not paint
