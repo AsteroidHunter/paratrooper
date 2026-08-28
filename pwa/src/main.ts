@@ -98,7 +98,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.40"; // the view is put back when the conversation itself changes height, cancelling a pick no longer jumps the thread up first, and a picked photo fills its square without waiting out the full decode
+const APP_VERSION = "0.3.41"; // the loading screen is now a flat black globe with a small dot going round it on a thin ring, and that revolution slows down rather than stopping dead when the phone is set to reduce motion
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -4330,8 +4330,8 @@ installStartupImage("/splash-logo.png"); // full-res cut-out; the 140px topbar f
 
 // The app's OWN loading page, over its own first frames. The phone's image dies
 // the moment the web view takes the page, which is before the thread has laid
-// out, so the document carries a page of its own (a ringed planet with a moon
-// going round it; index.html draws it) and that holds the handover until the
+// out, so the document carries a page of its own (a globe with a dot going
+// round it; index.html draws it) and that holds the handover until the
 // thread has stopped moving. splash.ts owns the lift rule and the cap; this
 // side reports the settle below and lands the lift on the diagnostic trail.
 

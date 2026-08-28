@@ -46,13 +46,15 @@
       cost of pretending to be a picture the app does not own.
 
       So it stopped pretending. This is now the app's own loading page, and it
-      is meant to look DIFFERENT from the launch image: a planet with a ring,
-      and a moon going round the ring, and that orbit is what says the app is
-      still working. The one thing it keeps from the old page is the white it
-      stands on, which is the very white the launch image is painted on
-      (SPLASH_BG in src/splash.ts), so the phone's dissolve lands on the same
-      colour it left and the planet is simply the new thing that appears. Every
-      transition now reads as something the app meant to do.
+      is meant to look DIFFERENT from the launch image: a globe seen flat from
+      straight above, with one small dot going round it on a thin ring, and
+      that revolution is what says the app is still working. The whole picture
+      is drawn in one ink and no other colour. The one thing it keeps from the
+      old page is the white it stands on, which is the very white the launch
+      image is painted on (SPLASH_BG in src/splash.ts), so the phone's dissolve
+      lands on the same colour it left and the globe is simply the new thing
+      that appears. Every transition now reads as something the app meant to
+      do.
 
       Everything the page needs is in this one file: the shapes are elements and
       the motion is CSS, so there is no request, no service-worker lookup and
@@ -105,109 +107,122 @@
         animation: ld-appear 620ms ease-out 80ms both;
       }
 
-      /* Every part of the scene is centred on the panel and offset from there
-         by half its own size, so one length says where a thing is and how big
-         it is. All of them are vmin, the viewport's shorter edge, which on a
-         phone is the width: the one dimension that does not move while the
-         safe-area insets settle. */
-      #loading .planet,
+      /* The three things the scene is built round are centred on the panel and
+         offset from there by half their own size, so one length says where a
+         thing is and how big it is. All of them are vmin, the viewport's
+         shorter edge, which on a phone is the width: the one dimension that
+         does not move while the safe-area insets settle.
+
+         The scene is flat, seen from straight above. Nothing in it passes
+         behind anything else, so there is no depth to state and no z-index
+         anywhere below: the globe sits inside the ring, the dot rides the ring,
+         and the dot never reaches the globe. Everything is drawn in one ink,
+         which is the colour the app's own stylesheet gives its text (--text in
+         src/styles.css). It is written out here rather than read from that
+         custom property, because the panel under it is always the launch
+         image's white while --text turns white in dark mode, and the scene
+         would then be white on white. */
+      #loading .globe,
       #loading .ring,
-      #loading .moon {
+      #loading .orbit {
         position: absolute;
         left: 50%;
         top: 50%;
         box-sizing: border-box;
       }
 
-      /* The planet: one soft disc, lit from up and to the left, in the greys
-         the chat already uses for its received bubbles and its hairlines. No
-         outline, no texture, nothing to read as an icon. */
-      #loading .planet {
-        z-index: 3;
-        width: 22vmin;
-        height: 22vmin;
-        margin: -11vmin 0 0 -11vmin;
+      /* The globe: a thin circle with an equator and a meridian in it, which is
+         the least a globe can be and still read as a globe rather than as a
+         plain disc. Hollow on purpose, since a filled disc would swallow both
+         lines. */
+      #loading .globe {
+        width: 20vmin;
+        height: 20vmin;
+        margin: -10vmin 0 0 -10vmin;
+        border: 0.4vmin solid #000000;
         border-radius: 50%;
-        background: radial-gradient(circle at 36% 30%, #f4f4f6 0%, #e4e4e8 46%, #cfcfd4 100%);
-        box-shadow: 0 0.6vmin 1.8vmin rgba(0, 0, 0, 0.05);
       }
 
-      /* The ring: one thin ellipse, tilted, drawn TWICE. Both copies are the
-         whole ellipse and both sit at the same place; what differs is which
-         side of the planet they are painted on and, for the front copy, that it
-         is cut down to its near half.
+      /* Its two lines, both stated against the globe's own inner box, so each
+         one ends exactly where the circle's stroke begins and the three read as
+         one drawing. The equator is the horizontal diameter. The meridian is an
+         ellipse as tall as the globe and half as wide, which is what a line of
+         longitude looks like from here.
 
-         That is the whole trick of a ringed planet. The back copy paints first,
-         so the planet covers the part of it that passes behind. The front copy
-         paints last, so the part of it that passes in front crosses the disc.
-         Where the two would show the same arc, outside the disc, they are the
-         same pixels, so the seam the cut leaves has the back copy underneath it
-         and cannot open a gap.
+         The equator is stated at HALF the width the two curves are, because it
+         is the only straight line in the picture and a straight horizontal line
+         lands square on the screen's own rows: every one of them comes out
+         solid. A curve of the same width is spread across those rows and most
+         of it is only partly covered, so it reads lighter. Drawn at the same
+         number the equator came out as a bar across a pair of hairlines, which
+         was checked on a rendered page rather than reasoned about. */
+      #loading .equator {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 50%;
+        height: 0.2vmin;
+        margin-top: -0.1vmin;
+        background: #000000;
+      }
 
-         The cut is stated in the ring's OWN frame, before the tilt: clip-path
-         applies to the element and the transform applies to the result, so
-         "the lower half" is the lower half of the untilted ellipse, which is
-         exactly the half that the tilt brings towards the viewer. */
+      #loading .meridian {
+        position: absolute;
+        left: 50%;
+        top: 0;
+        bottom: 0;
+        width: 9.6vmin;
+        margin-left: -4.8vmin;
+        box-sizing: border-box;
+        border: 0.4vmin solid #000000;
+        border-radius: 50%;
+      }
+
+      /* The ring: one true circle, drawn once. Seen from above there is no near
+         arc and no far arc, so there is nothing to cut and nothing to draw a
+         second copy of. It is thinner than the globe's own stroke, so the globe
+         stays the subject and the ring reads as the line the dot travels rather
+         than as a second drawing. */
       #loading .ring {
-        z-index: 1;
-        width: 42vmin;
-        height: 13.6vmin;
-        margin: -6.8vmin 0 0 -21vmin;
-        border: 0.3vmin solid #c7c7cc;
+        width: 40vmin;
+        height: 40vmin;
+        margin: -20vmin 0 0 -20vmin;
+        border: 0.25vmin solid #000000;
         border-radius: 50%;
-        transform: rotate(-18deg);
       }
 
-      #loading .front {
-        z-index: 4;
-        clip-path: inset(50% 0 0 0);
-      }
+      /* The arm the dot rides, which is an empty box that turns. Its top edge
+         is the line the ring draws: the ring is a border-box with its stroke
+         painted inside it, so that line is half a stroke in on every side, and
+         this box is the ring's box less one whole stroke.
 
-      /* The moon, also drawn twice, for the same reason and by the same rule:
-         one copy under the planet and one over it, each shown only while the
-         orbit has it on that copy's side. The two are the same dot on the same
-         path at the same instant, so the handover between them happens with
-         both of them on the same pixel and nothing to see.
-
-         The swap is a step, not a fade: two dots cross-fading through each
-         other would read as one dot dimming, which is the one thing an orbit
-         must not do. The half of the path each copy owns is settled by
-         ld-orbit's own parametrisation, which starts at one end of the ring's
-         long axis and passes the far side first.
-
-         The transform stated here is where the dot sits when the orbit is NOT
-         running, which is the reduced-motion case at the bottom of this block:
-         it is ld-orbit's own 75% stop, the near arc's lowest point, so the
-         still scene is a moon resting in front of the planet.
-
-         The two copies are named by class alone rather than by class on top of
-         class, so all three rules weigh the same and the last one written wins.
-         That is what lets one line at the bottom of this block turn the orbit
-         off for both of them. */
-      #loading .moon {
-        z-index: 2;
-        width: 3.2vmin;
-        height: 3.2vmin;
-        margin: -1.6vmin 0 0 -1.6vmin;
-        border-radius: 50%;
-        background: #8e8e93;
-        opacity: 0;
-        transform: translate(2.055vmin, 6.325vmin);
+         Turning a box is what a true circle buys. The dot has to travel without
+         the main thread, which during a boot is the busiest it ever is, so
+         nothing may run per frame in script. A rotate is a transform and every
+         engine hands it to the compositor, and because the path is a circle
+         there is no path to write out as points and no squashing anywhere: the
+         dot is rasterized at its own size and only turned. It is a circle, so
+         its own turning cannot be seen. */
+      #loading .orbit {
+        width: 39.75vmin;
+        height: 39.75vmin;
+        margin: -19.875vmin 0 0 -19.875vmin;
+        animation: ld-orbit 2600ms linear infinite;
         will-change: transform;
       }
 
-      #loading .far {
-        animation:
-          ld-orbit 2600ms linear infinite,
-          ld-far 2600ms step-end infinite;
-      }
-
-      #loading .near {
-        z-index: 5;
-        opacity: 1;
-        animation:
-          ld-orbit 2600ms linear infinite,
-          ld-near 2600ms step-end infinite;
+      /* The travelling dot, centred on the arm's top edge, so it sits on the
+         ring's line rather than beside it. Filled, and fatter than the line it
+         rides, which is what makes it the thing that is moving. */
+      #loading .dot {
+        position: absolute;
+        left: 50%;
+        top: 0;
+        width: 2.4vmin;
+        height: 2.4vmin;
+        margin: -1.2vmin 0 0 -1.2vmin;
+        border-radius: 50%;
+        background: #000000;
       }
 
       @keyframes ld-appear {
@@ -219,110 +234,48 @@
         }
       }
 
-      /* Which copy of the moon is showing. The far one owns the first half of
-         the orbit and the near one the second, and step-end holds each value
-         until the next stop rather than sliding towards it. */
-      @keyframes ld-far {
-        0% {
-          opacity: 1;
-        }
-        50% {
-          opacity: 0;
-        }
-      }
-
-      @keyframes ld-near {
-        0% {
-          opacity: 0;
-        }
-        50% {
-          opacity: 1;
-        }
-      }
-
-      /*
-        THE ORBIT: the ring's own ellipse, sampled.
-
-        The dot has to travel the line the ring is drawn on, and it has to do it
-        without the main thread, which during a boot is the busiest it ever is.
-        That rules out anything that runs per frame in script, and it rules out
-        squashing a circular spin into an ellipse, because a dot squashed by one
-        transform and stretched back by another is rasterized at the squashed
-        size and comes out soft. What is left is the plainest thing there is: a
-        translate, which every engine hands to the compositor.
-
-        So the ellipse is written out as points. Each stop is
-
-          x = RX * cos(t) * cos(TILT) - RY * sin(t) * sin(TILT)
-          y = RX * cos(t) * sin(TILT) + RY * sin(t) * cos(TILT)
-          t = 180deg + 360deg * (the stop's own fraction)
-
-        with TILT the ring's own -18deg, and RX and RY the ring's CENTRE line
-        rather than its outer edge: the ring is a 42 by 13.6 box with a 0.3
-        border drawn inside it, so the line itself is 20.85 by 6.65 and that is
-        what the dot rides. Thirty six stops leave the straight run between two
-        of them under a tenth of a vmin inside the true curve, which is well
-        under one device pixel on any phone.
-
-        Starting at t = 180deg puts the first stop on one end of the long axis,
-        which is where the far side of the ring meets the near side. So the
-        first half of the animation is the arc that passes behind the planet and
-        the second half is the arc that passes in front, which is what the two
-        opacity tracks above are cut against.
-
-        tests/loading.test.ts recomputes every stop from the ring's own
-        declarations and compares, so the numbers cannot drift away from the
-        shape they are supposed to be riding.
-      */
+      /* One revolution, at a pace meant to read as calm rather than as urgent.
+         Linear, because a turn that eases looks like a turn that keeps starting
+         over. tests/loading.test.ts checks the arm against the ring's own
+         declarations, so the dot cannot drift off the line it is riding. */
       @keyframes ld-orbit {
-        0% { transform: translate(-19.83vmin, 6.443vmin); }
-        2.78% { transform: translate(-19.885vmin, 5.247vmin); }
-        5.56% { transform: translate(-19.337vmin, 3.891vmin); }
-        8.33% { transform: translate(-18.2vmin, 2.418vmin); }
-        11.11% { transform: translate(-16.511vmin, 0.87vmin); }
-        13.89% { transform: translate(-14.32vmin, -0.703vmin); }
-        16.67% { transform: translate(-11.694vmin, -2.256vmin); }
-        19.44% { transform: translate(-8.713vmin, -3.739vmin); }
-        22.22% { transform: translate(-5.467vmin, -5.11vmin); }
-        25% { transform: translate(-2.055vmin, -6.325vmin); }
-        27.78% { transform: translate(1.42vmin, -7.347vmin); }
-        30.56% { transform: translate(4.851vmin, -8.147vmin); }
-        33.33% { transform: translate(8.135vmin, -8.699vmin); }
-        36.11% { transform: translate(11.172vmin, -8.986vmin); }
-        38.89% { transform: translate(13.869vmin, -9.001vmin); }
-        41.67% { transform: translate(16.145vmin, -8.742vmin); }
-        44.44% { transform: translate(17.931vmin, -8.218vmin); }
-        47.22% { transform: translate(19.171vmin, -7.443vmin); }
-        50% { transform: translate(19.83vmin, -6.443vmin); }
-        52.78% { transform: translate(19.885vmin, -5.247vmin); }
-        55.56% { transform: translate(19.337vmin, -3.891vmin); }
-        58.33% { transform: translate(18.2vmin, -2.418vmin); }
-        61.11% { transform: translate(16.511vmin, -0.87vmin); }
-        63.89% { transform: translate(14.32vmin, 0.703vmin); }
-        66.67% { transform: translate(11.694vmin, 2.256vmin); }
-        69.44% { transform: translate(8.713vmin, 3.739vmin); }
-        72.22% { transform: translate(5.467vmin, 5.11vmin); }
-        75% { transform: translate(2.055vmin, 6.325vmin); }
-        77.78% { transform: translate(-1.42vmin, 7.347vmin); }
-        80.56% { transform: translate(-4.851vmin, 8.147vmin); }
-        83.33% { transform: translate(-8.135vmin, 8.699vmin); }
-        86.11% { transform: translate(-11.172vmin, 8.986vmin); }
-        88.89% { transform: translate(-13.869vmin, 9.001vmin); }
-        91.67% { transform: translate(-16.145vmin, 8.742vmin); }
-        94.44% { transform: translate(-17.931vmin, 8.218vmin); }
-        97.22% { transform: translate(-19.171vmin, 7.443vmin); }
-        100% { transform: translate(-19.83vmin, 6.443vmin); }
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
       }
 
-      /* Asked for no motion: the scene stands still. The orbit stops, the far
-         copy of the moon stays hidden and the near one sits at the resting
-         point its own rule states, so what is left is a finished picture of a
-         ringed planet with its moon in front. The panel still fades in and
-         still fades out, because a change of opacity is not movement and the
-         alternative is the page appearing and vanishing as cuts. */
+      /* Asked for reduced motion: the revolution SLOWS. It does not stop.
+
+         It used to stop, and that was the wrong call. This is the one thing on
+         screen that says the app is still working, and a loading indicator
+         holding perfectly still is a loading indicator saying the app has died:
+         the first report of it from a phone with the setting on was that the
+         animation was broken. The phone does not stop this by itself, and the
+         app's other spinners have never stopped under the same setting, so the
+         only thing that ever froze it was this rule.
+
+         The guidance says the same. Motion in a preload phase counts as
+         essential where a still indicator could have someone believe the
+         content is frozen or broken, and the technique that asks for the
+         setting to be honoured covers motion a person starts by doing
+         something, which nobody starts by opening the app. The usual answer
+         elsewhere is to halve the pace rather than take it away, and one
+         well-known component set shipped the freeze, was told a frozen bar
+         looks broken, and went back to slowing it.
+
+         So this is the same turn at half speed. Stating only the duration
+         leaves the name, the easing and the endless count exactly as they are
+         above, so there is one revolution described in one place.
+
+         The panel still fades in and still fades out, because a change of
+         opacity is not movement and the alternative is the page appearing and
+         vanishing as cuts. */
       @media (prefers-reduced-motion: reduce) {
-        #loading .moon {
-          animation: none;
+        #loading .orbit {
+          animation-duration: 5200ms;
         }
       }
 
@@ -343,18 +296,19 @@
   </head>
   <body>
     <!-- First in the body so the parser reaches it first. Nothing in here is a
-         picture and nothing in here is text: the whole scene is five empty
-         boxes and the rules above, so the frame that carries this markup
-         carries the finished page. The parts are in painting order, which is
-         also depth order: the ring's far side, the moon while it is out there,
-         the planet, the ring's near side, and the moon while it is in front. -->
+         picture and nothing in here is text: the whole scene is six empty boxes
+         and the rules above, so the frame that carries this markup carries the
+         finished page. The scene is flat, so this is not a depth order, just
+         the order it reads in: the ring the dot travels, the dot on its turning
+         arm, and the globe in the middle with its two lines. -->
     <div id="loading">
       <div class="scene">
-        <div class="ring back"></div>
-        <div class="moon far"></div>
-        <div class="planet"></div>
-        <div class="ring front"></div>
-        <div class="moon near"></div>
+        <div class="ring"></div>
+        <div class="orbit"><div class="dot"></div></div>
+        <div class="globe">
+          <div class="equator"></div>
+          <div class="meridian"></div>
+        </div>
       </div>
     </div>
     <div id="app"></div>

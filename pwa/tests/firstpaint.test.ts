@@ -99,18 +99,40 @@ describe("the built page blocks its first paint on nothing", () => {
     // head's <style> out into a file would leave the page painting a bare white
     // panel until that file came back, which is the flash the whole arrangement
     // exists to remove.
-    for (const part of ["ring back", "moon far", "planet", "ring front", "moon near"]) {
+    for (const part of ["ring", "orbit", "dot", "globe", "equator", "meridian"]) {
       expect([part, PAGE.includes(`class="${part}"`)]).toEqual([part, true]);
     }
-    for (const sel of ["#loading", ".scene", ".planet", ".ring", ".moon", ".front", ".near"]) {
+    for (const sel of [
+      "#loading",
+      ".scene",
+      ".globe",
+      ".equator",
+      ".meridian",
+      ".ring",
+      ".orbit",
+      ".dot",
+    ]) {
       expect([sel, PAGE.includes(sel)]).toEqual([sel, true]);
     }
-    // the orbit and the two tracks that decide which side of the planet the dot
-    // is on, plus the answer for anyone who asked for no motion
-    for (const name of ["ld-orbit", "ld-far", "ld-near", "ld-appear"]) {
+    // the scene arriving and the dot going round, plus the answer for anyone
+    // who asked for reduced motion, which slows that turn rather than stopping
+    // it: a still loading indicator reads as an app that has died
+    for (const name of ["ld-orbit", "ld-appear"]) {
       expect([name, PAGE.includes(`@keyframes ${name}`)]).toEqual([name, true]);
     }
     expect(PAGE).toContain("prefers-reduced-motion: reduce");
+    // and the slow-down survived the build as a slow-down. The page's own
+    // <style> is the first one in the document (the app's sheet is folded in
+    // after it), and it is the only one this claim is about: the app's bubbles
+    // do stop under the same setting, and should, since a person starts those.
+    const own = PAGE.slice(PAGE.indexOf("<style>"), PAGE.indexOf("</style>"));
+    const full = Number(/animation:\s*ld-orbit\s+(\d+)ms/.exec(own)?.[1]);
+    const slow = Number(
+      /prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?animation-duration:\s*(\d+)ms/.exec(own)?.[1],
+    );
+    expect(full).toBeGreaterThan(0);
+    expect(slow).toBe(full * 2);
+    expect(own).not.toMatch(/animation:\s*none/);
     // and the scene fetches nothing: no picture, no font, no second file
     const scene = PAGE.slice(PAGE.indexOf("#loading"), PAGE.indexOf('<div id="app">'));
     expect(scene).not.toContain("url(");

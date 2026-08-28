@@ -6,9 +6,9 @@
 // read to check it. There is no DOM in this env, but more to the point the
 // whole claim is about what the SERVED document says before a line of the
 // bundle has run, and the file is exactly that. The scene is geometry, so the
-// checks on it are arithmetic: the orbit's keyframes are recomputed from the
-// ring's own declarations and compared stop by stop, which is what stops the
-// dot and the line it is supposed to be riding drifting apart.
+// checks on it are arithmetic: the radius the dot travels is recomputed from
+// the ring's own declarations, which is what stops the dot and the line it is
+// supposed to be riding drifting apart.
 //
 // The lift rule and the quiet watch are pure, so they run on fake timers and a
 // hand-pumped frame clock, and the cases that have to watch the script take the
@@ -150,15 +150,6 @@ function orderOf(selector: string, media = ""): number {
   return hit[hit.length - 1].order;
 }
 
-// a selector's weight, as ids and classes. Nothing in this sheet uses an
-// element name or anything heavier, so those two counts settle every contest.
-function weight(selector: string): [number, number] {
-  return [
-    (selector.match(/#/g) ?? []).length,
-    (selector.match(/\./g) ?? []).length,
-  ];
-}
-
 // the number out of a vmin length
 function vmin(value: string): number {
   const m = /(-?[\d.]+)vmin/.exec(value);
@@ -171,48 +162,25 @@ function near(a: number, b: number, slack = 1e-6): boolean {
   return Math.abs(a - b) < slack;
 }
 
-// --- the ring, and the ellipse the dot has to ride ------------------------------
+// --- the scene's own numbers ----------------------------------------------------
 //
 // Every number below is READ off the shipped stylesheet rather than restated
-// here, so the orbit is compared against the ring the page actually draws. The
-// dot rides the ring's centre line, not its outer edge: the box is a border-box
-// and the stroke is drawn inside it, so the line itself is half a stroke in on
-// each side.
+// here, so the checks are against the picture the page actually draws. The dot
+// rides the ring's centre line, not its outer edge: the box is a border-box and
+// the stroke is drawn inside it, so the line itself is half a stroke in on each
+// side, and the arm that carries the dot is sized to exactly that.
+const GLOBE = styleOf("#loading .globe");
 const RING = styleOf("#loading .ring");
-const RING_RX = vmin(RING.width) / 2;
-const RING_RY = vmin(RING.height) / 2;
+const ORBIT = styleOf("#loading .orbit");
+const DOT = styleOf("#loading .dot");
 const RING_STROKE = vmin(RING.border);
-const RING_TILT = Number(/rotate\((-?[\d.]+)deg\)/.exec(RING.transform)?.[1]);
-const ORBIT_RX = RING_RX - RING_STROKE / 2;
-const ORBIT_RY = RING_RY - RING_STROKE / 2;
+const RING_LINE_R = vmin(RING.width) / 2 - RING_STROKE / 2; // the line the ring draws
+const ARM_R = vmin(ORBIT.width) / 2; // where the dot's centre is carried
 
-// A point on that ellipse, at the parameter one stop of the animation stands
-// for. The parameter starts at half a turn, which puts the first stop on one
-// end of the ring's long axis: that is where the far side of the ring meets the
-// near side, so the animation's first half is one arc and its second half is
-// the other.
-function orbitPoint(p: number): [number, number] {
-  const t = Math.PI + 2 * Math.PI * p;
-  const f = (RING_TILT * Math.PI) / 180;
-  return [
-    ORBIT_RX * Math.cos(t) * Math.cos(f) - ORBIT_RY * Math.sin(t) * Math.sin(f),
-    ORBIT_RX * Math.cos(t) * Math.sin(f) + ORBIT_RY * Math.sin(t) * Math.cos(f),
-  ];
-}
-
-// the same point taken back out of the tilt, whose sign says which side of the
-// ring's long axis it is on: negative is the arc that passes behind the planet
-function ringSide(x: number, y: number): number {
-  const f = (-RING_TILT * Math.PI) / 180;
-  return x * Math.sin(f) + y * Math.cos(f);
-}
-
-// one stop's translate, as a pair of vmin numbers
-function stopXY(value: string): [number, number] {
-  const m = /^translate\((-?[\d.]+)vmin, (-?[\d.]+)vmin\)$/.exec(value);
-  if (!m) throw new Error(`not a plain translate: ${value}`);
-  return [Number(m[1]), Number(m[2])];
-}
+// the app's own ink, off the app's own stylesheet: the scene is drawn in the
+// colour the chat sets its text in, rather than in one invented here
+const APP_CSS = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const APP_INK = (/--text:\s*([^;]+);/.exec(APP_CSS)?.[1] ?? "").trim();
 
 // one animation shorthand, split into its comma-separated parts
 function anims(value: string): Array<{ name: string; ms: number; ease: string; count: string }> {
@@ -255,15 +223,28 @@ describe("the loading page lives in the document, not in the bundle", () => {
     expect(text).toBe("");
   });
 
-  it("is five empty boxes, in the order they are painted in", () => {
-    const parts = [...MARKUP.matchAll(/<div class="([^"]*)"><\/div>/g)].map((m) => m[1]);
-    expect(parts).toEqual(["ring back", "moon far", "planet", "ring front", "moon near"]);
+  it("is six empty boxes and the scene that holds them, in the order they read in", () => {
+    // the scene is flat, so this is not a painting order and nothing depends on
+    // it: the ring the dot travels, the dot on its turning arm, then the globe
+    const parts = [...MARKUP.matchAll(/<div class="([^"]*)">/g)].map((m) => m[1]);
+    expect(parts).toEqual(["scene", "ring", "orbit", "dot", "globe", "equator", "meridian"]);
+    // and every tag in there is one of those boxes: no picture, no svg, no text
+    expect([...MARKUP.matchAll(/<(\w+)/g)].map((m) => m[1])).toEqual(Array(8).fill("div"));
   });
 
   it("gets its styles from the document too, in the head, before the markup", () => {
     expect(INDEX_HTML.indexOf("<style>")).toBeLessThan(INDEX_HTML.indexOf("</head>"));
     expect(INDEX_HTML.indexOf("</style>")).toBeLessThan(INDEX_HTML.indexOf('<div id="loading">'));
-    for (const sel of ["#loading", "#loading .scene", "#loading .planet", "#loading .ring", "#loading .moon"]) {
+    for (const sel of [
+      "#loading",
+      "#loading .scene",
+      "#loading .globe",
+      "#loading .equator",
+      "#loading .meridian",
+      "#loading .ring",
+      "#loading .orbit",
+      "#loading .dot",
+    ]) {
       expect([sel, RULES.some((r) => r.sel.includes(sel))]).toEqual([sel, true]);
     }
   });
@@ -304,47 +285,89 @@ describe("the loading page lives in the document, not in the bundle", () => {
       ["from", { opacity: "0" }],
       ["to", { opacity: "1" }],
     ]);
-    // and it is over well before the page's own minimum hold is, so the planet
+    // and it is over well before the page's own minimum hold is, so the scene
     // is never still arriving when the page is already allowed to leave
     const delay = Number(/(\d+)ms both/.exec(scene.animation)?.[1] ?? 0);
     expect(rise[0].ms + delay).toBeLessThan(LOAD_MIN_HOLD_MS);
   });
 });
 
-describe("the scene: a planet with a ring round it", () => {
-  it("is a disc the ring reaches past on both sides", () => {
-    const planet = styleOf("#loading .planet");
-    const r = vmin(planet.width) / 2;
-    expect(vmin(planet.height) / 2).toBe(r); // a circle, not an oval
-    expect(planet["border-radius"]).toBe("50%");
-    expect(RING_RX).toBeGreaterThan(r); // the ring sticks out past the disc
+describe("the scene: a globe with a ring round it, seen from straight above", () => {
+  it("is drawn in the app's own ink, and in no other colour", () => {
+    // the ink is not invented here: it is the colour the app's stylesheet sets
+    // its text in. It is written out in the page rather than read from that
+    // custom property, because the panel is always the launch image's white
+    // while the property turns white in dark mode.
+    expect(APP_INK).toBe("#000000");
+    const inks = new Set(
+      [...STYLE_SRC.matchAll(/#[0-9a-fA-F]{3,8}/g)].map((m) => m[0].toLowerCase()),
+    );
+    expect([...inks].sort()).toEqual([APP_INK, SPLASH_BG].sort());
+    // and nothing soft anywhere: no gradient, no shadow, no half-transparent
+    // grey. The old scene had all three and that is what was asked to go.
+    expect(STYLE_SRC).not.toMatch(/gradient|box-shadow|rgba?\(/);
   });
 
-  it("is a ring flat enough that both of its arcs cross the disc", () => {
-    // this is the whole look. A ring taller than the planet would clear it
-    // top and bottom and read as a halo; one flatter than it passes behind on
-    // the far side and in front on the near side, which is the shape everyone
-    // knows.
-    const r = vmin(styleOf("#loading .planet").width) / 2;
-    expect(RING_RY).toBeLessThan(r);
-    expect(RING_RY).toBeLessThan(RING_RX); // and it is an ellipse, not a circle
-    expect(RING_TILT).not.toBe(0); // seen at a tilt, or it is a line
+  it("is a globe rather than a plain disc: a circle with two lines in it", () => {
+    const stroke = vmin(GLOBE.border);
+    expect(vmin(GLOBE.width)).toBe(vmin(GLOBE.height)); // a circle, not an oval
+    expect(GLOBE["border-radius"]).toBe("50%");
+    expect(GLOBE.background).toBeUndefined(); // hollow, or the lines would not show
+    // the equator is the horizontal diameter, run from one side of the globe's
+    // inner box to the other. It is stated at half the width the curves are,
+    // because a straight horizontal line lands square on the screen's rows and
+    // comes out solid where a curve of the same width is spread across them and
+    // reads lighter. Drawn at the same number it was a bar across two hairlines.
+    const eq = styleOf("#loading .equator");
+    expect([eq.left, eq.right, eq.top]).toEqual(["0", "0", "50%"]);
+    expect(near(vmin(eq.height), stroke / 2)).toBe(true);
+    expect(near(vmin(eq["margin-top"]), -vmin(eq.height) / 2)).toBe(true);
+    expect(eq.background).toBe(APP_INK);
+    // the meridian is an ellipse as tall as that box and half as wide, which is
+    // what a line of longitude looks like from here
+    const mer = styleOf("#loading .meridian");
+    expect([mer.top, mer.bottom, mer.left]).toEqual(["0", "0", "50%"]);
+    expect(mer["border-radius"]).toBe("50%");
+    expect(vmin(mer.border)).toBe(stroke);
+    const inner = vmin(GLOBE.height) - 2 * stroke;
+    expect(near(vmin(mer.width), inner / 2)).toBe(true);
+    expect(near(vmin(mer["margin-left"]), -vmin(mer.width) / 2)).toBe(true);
   });
 
-  it("draws that one ellipse twice, at the same size and the same tilt", () => {
-    // both copies come off the same rule, and the front one adds only where it
-    // sits and how much of it shows, so the two cannot come apart
+  it("is flat: a true circle for a ring, nothing tilted, nothing cut, no depth", () => {
+    // this is the whole change. A tilted ellipse has a near arc and a far arc,
+    // and every bit of machinery the old scene carried was there to fake which
+    // of them passed in front: two copies of the ring, two copies of the moon,
+    // a clip on one of them and five layer numbers. Seen from above there are
+    // no arcs, so none of it has anything to do.
+    expect(vmin(RING.width)).toBe(vmin(RING.height)); // a circle, not an ellipse
     expect(RING["border-radius"]).toBe("50%");
-    expect(RING.transform).toContain("rotate(");
-    const front = RULES.filter((r) => r.sel.includes("#loading .front"));
-    const said = new Set(front.flatMap((r) => Object.keys(r.decls)));
-    expect([...said].sort()).toEqual(["clip-path", "z-index"]);
-    expect(MARKUP).toContain('class="ring back"');
-    expect(MARKUP).toContain('class="ring front"');
+    expect(RING.transform).toBeUndefined(); // no tilt
+    expect(STYLE_SRC).not.toContain("clip-path"); // nothing cut down to an arc
+    // and nothing in the scene states a layer, because nothing overlaps. The
+    // panel keeps its own, which is where it sits over the app.
+    const inScene = RULES.filter((r) => r.sel.some((s) => s.startsWith("#loading .")));
+    expect(inScene.filter((r) => "z-index" in r.decls).flatMap((r) => r.sel)).toEqual([]);
+    expect(styleOf("#loading")["z-index"]).toBe("40");
+  });
+
+  it("stands the ring well clear of the globe, so the dot never reaches it", () => {
+    const globeR = vmin(GLOBE.width) / 2;
+    expect(RING_LINE_R).toBeGreaterThan(globeR);
+    expect(ARM_R - vmin(DOT.width) / 2).toBeGreaterThan(globeR); // clear air between
+    // the ring is the thinner of the two lines, so the globe stays the subject
+    expect(RING_STROKE).toBeLessThan(vmin(GLOBE.border));
+    // and the traveller is a small filled circle: smaller than the globe, and
+    // fatter than the line it rides, which is what makes it the thing moving
+    expect(vmin(DOT.width)).toBe(vmin(DOT.height));
+    expect(vmin(DOT.width)).toBeLessThan(vmin(GLOBE.width));
+    expect(vmin(DOT.width)).toBeGreaterThan(RING_STROKE);
+    expect(DOT["border-radius"]).toBe("50%");
+    expect(DOT.background).toBe(APP_INK);
   });
 
   it("centres every part on the panel, off the same pair of numbers", () => {
-    for (const sel of ["#loading .planet", "#loading .ring", "#loading .moon"]) {
+    for (const sel of ["#loading .globe", "#loading .ring", "#loading .orbit"]) {
       const s = styleOf(sel);
       expect([sel, s.position, s.left, s.top]).toEqual([sel, "absolute", "50%", "50%"]);
       // and pulled back by half its own size, so one length says both where a
@@ -356,183 +379,92 @@ describe("the scene: a planet with a ring round it", () => {
   });
 });
 
-describe("the far arc passes behind the planet and the near arc in front", () => {
-  it("paints the five parts in depth order", () => {
-    const layers: Array<[string, string]> = [
-      ["the ring's far side", "#loading .ring"],
-      ["the moon while it is out there", "#loading .moon"],
-      ["the planet", "#loading .planet"],
-      ["the ring's near side", "#loading .front"],
-      ["the moon while it is in front", "#loading .near"],
-    ];
-    const zs = layers.map(([, sel]) => Number(styleOf(sel)["z-index"]));
-    expect(zs).toEqual([1, 2, 3, 4, 5]);
-    // and the markup puts them in that order too, so the depth would be right
-    // even if every one of those numbers went away
-    const parts = [...MARKUP.matchAll(/<div class="([^"]*)"><\/div>/g)].map((m) => m[1]);
-    expect(parts.map((p) => p.split(" ")[1] ?? p)).toEqual([
-      "back",
-      "far",
-      "planet",
-      "front",
-      "near",
-    ]);
-  });
-
-  it("cuts the front copy of the ring to its near half and leaves the back whole", () => {
-    // clip-path applies to the element and the transform applies to the result,
-    // so "the lower half" is the lower half of the UNTILTED ellipse, which is
-    // exactly the half the tilt brings towards the viewer. The back copy is not
-    // cut at all: the part of it that would show through the cut is the same
-    // arc the front copy draws, so there is no seam for a gap to open in.
-    expect(styleOf("#loading .front")["clip-path"]).toBe("inset(50% 0 0 0)");
-    expect(styleOf("#loading .ring")["clip-path"]).toBeUndefined();
-  });
-
-  it("shows one copy of the moon per half, and swaps between them as a step", () => {
-    // two dots cross-fading through each other would read as one dot dimming,
-    // which is the one thing an orbit must not do
-    expect(FRAMES["ld-far"]).toEqual([["0%", { opacity: "1" }], ["50%", { opacity: "0" }]]);
-    expect(FRAMES["ld-near"]).toEqual([["0%", { opacity: "0" }], ["50%", { opacity: "1" }]]);
-    for (const sel of ["#loading .far", "#loading .near"]) {
-      const gate = anims(styleOf(sel).animation)[1];
-      expect([sel, gate.ease]).toEqual([sel, "step-end"]);
-    }
-  });
-
-  it("swaps them where the two are on the same pixel, so nothing shows", () => {
-    // the handover happens at one end of the ring's long axis, which both
-    // copies reach at the same instant on the same path
-    const stops = FRAMES["ld-orbit"];
-    const at = (pct: string): [number, number] =>
-      stopXY(stops.find(([head]) => head === pct)?.[1].transform ?? "");
-    expect(at("0%")).toEqual(at("100%"));
-    expect(near(Math.abs(ringSide(...at("0%"))), 0, 1e-3)).toBe(true);
-    expect(near(Math.abs(ringSide(...at("50%"))), 0, 1e-3)).toBe(true);
-  });
-
-  it("gives the half that hides to the copy under the planet, and the other to the one over it", () => {
-    // THE STACKING CLAIM, end to end. The half of the path the far copy is
-    // shown for is the half the front copy of the RING is cut away from, which
-    // is the half that passes behind the disc.
-    const stops = FRAMES["ld-orbit"];
-    for (let i = 1; i < 18; i++) {
-      const side = ringSide(...stopXY(stops[i][1].transform));
-      expect([stops[i][0], side < 0]).toEqual([stops[i][0], true]); // behind
-    }
-    for (let i = 19; i < 36; i++) {
-      const side = ringSide(...stopXY(stops[i][1].transform));
-      expect([stops[i][0], side > 0]).toEqual([stops[i][0], true]); // in front
-    }
-    // the far copy owns the first half, and it is the one painted under the
-    // planet; the near copy owns the second and is painted over it
-    expect(anims(styleOf("#loading .far").animation)[1].name).toBe("ld-far");
-    expect(anims(styleOf("#loading .near").animation)[1].name).toBe("ld-near");
-    expect(Number(styleOf("#loading .moon")["z-index"])).toBeLessThan(
-      Number(styleOf("#loading .planet")["z-index"]),
-    );
-    expect(Number(styleOf("#loading .near")["z-index"])).toBeGreaterThan(
-      Number(styleOf("#loading .front")["z-index"]),
-    );
-  });
-});
-
-describe("the orbit traces the ring's own ellipse", () => {
-  const stops = FRAMES["ld-orbit"];
-
-  it("is sampled evenly, all the way round and back to where it started", () => {
-    expect(stops.length).toBe(37);
-    stops.forEach(([head], i) => {
-      expect([i, near(Number(head.replace("%", "")), (i / 36) * 100, 0.01)]).toEqual([i, true]);
-    });
-    expect(stops[0][1].transform).toBe(stops[36][1].transform);
-  });
-
-  it("puts every stop on the ring's centre line, on the ring's own tilt", () => {
-    // the numbers in the sheet are recomputed here from the ring's declared
-    // box, its stroke and its tilt, so the dot cannot drift off the line it is
-    // meant to be riding without this failing
-    stops.forEach(([head, d], i) => {
-      const [x, y] = stopXY(d.transform);
-      const [wx, wy] = orbitPoint(i / 36);
-      expect([head, near(x, wx, 5e-4), near(y, wy, 5e-4)]).toEqual([head, true, true]);
-    });
-  });
-
-  it("is sampled finely enough that the straight runs between stops read as a curve", () => {
-    // a keyframed path is a polygon inscribed in the ellipse: what matters is
-    // how far inside the true curve the chord between two stops falls
-    let worst = 0;
-    for (let i = 0; i < 36; i++) {
-      const [ax, ay] = orbitPoint(i / 36);
-      const [bx, by] = orbitPoint((i + 1) / 36);
-      const [cx, cy] = orbitPoint((i + 0.5) / 36);
-      worst = Math.max(worst, Math.hypot(cx - (ax + bx) / 2, cy - (ay + by) / 2));
-    }
-    expect(worst).toBeLessThan(0.1); // vmin, which is well under a device pixel
+describe("the revolution: one dot, on the line the ring draws", () => {
+  it("puts the dot on that line rather than beside it", () => {
+    // The arm is an empty box that turns, and the dot sits centred on its top
+    // edge, so the arm's own half-width is the radius the dot travels. The ring
+    // is a border-box with its stroke painted inside it, so the line it draws
+    // is half a stroke in from the box, and the arm is the ring's box less one
+    // whole stroke. This is the check that keeps the two together.
+    expect(near(ARM_R, RING_LINE_R)).toBe(true);
+    expect(vmin(ORBIT.width)).toBe(vmin(ORBIT.height)); // something round to turn
+    expect(ORBIT.border).toBeUndefined(); // the arm draws nothing of its own
+    expect(ORBIT.background).toBeUndefined();
+    expect([DOT.left, DOT.top]).toEqual(["50%", "0"]);
+    const m = DOT.margin.split(" ");
+    expect(near(vmin(m[0]), -vmin(DOT.height) / 2)).toBe(true);
+    expect(near(vmin(m[3]), -vmin(DOT.width) / 2)).toBe(true);
   });
 
   it("goes round once, calmly, and never stops", () => {
-    for (const sel of ["#loading .far", "#loading .near"]) {
-      const [orbit, gate] = anims(styleOf(sel).animation);
-      expect([sel, orbit.name]).toEqual([sel, "ld-orbit"]);
-      expect([sel, orbit.ease, orbit.count]).toEqual([sel, "linear", "infinite"]);
-      expect([sel, gate.count]).toEqual([sel, "infinite"]);
-      // the two tracks on one dot share a period, or the dot would be on the
-      // wrong side of the planet for part of every turn
-      expect([sel, orbit.ms]).toEqual([sel, gate.ms]);
-      expect([sel, orbit.ms >= 2000 && orbit.ms <= 3000]).toEqual([sel, true]);
-    }
-    // and both copies share it with each other, which is what puts them on the
-    // same pixel at the instant they swap
-    expect(anims(styleOf("#loading .far").animation)[0].ms).toBe(
-      anims(styleOf("#loading .near").animation)[0].ms,
-    );
+    const turn = anims(ORBIT.animation);
+    expect(turn.length).toBe(1); // one track: a turn is the whole of it now
+    expect(turn[0].name).toBe("ld-orbit");
+    expect([turn[0].ease, turn[0].count]).toEqual(["linear", "infinite"]);
+    expect(turn[0].ms >= 2000 && turn[0].ms <= 3000).toBe(true);
+    expect(FRAMES["ld-orbit"]).toEqual([
+      ["from", { transform: "rotate(0deg)" }],
+      ["to", { transform: "rotate(360deg)" }],
+    ]);
   });
 
   it("animates nothing but transform and opacity, so no frame needs the layout", () => {
     // the main thread is at its busiest during a boot, which is the whole
-    // reason the scene is drawn this way rather than by script
+    // reason the scene is drawn this way rather than by script. A rotate is a
+    // transform, and there is no scale anywhere, so the dot is rasterized at
+    // its own size and only turned.
     const props = new Set<string>();
     for (const stops of Object.values(FRAMES)) {
       for (const [, d] of stops) for (const p of Object.keys(d)) props.add(p);
     }
     expect([...props].sort()).toEqual(["opacity", "transform"]);
-    // and the moving parts are marked as such, so they get their own layer
-    expect(styleOf("#loading .moon")["will-change"]).toBe("transform");
+    // the whole page has two animations: the scene arriving, and this turn
+    expect(Object.keys(FRAMES).sort()).toEqual(["ld-appear", "ld-orbit"]);
+    // and the moving part is marked as such, so it gets its own layer
+    expect(ORBIT["will-change"]).toBe("transform");
   });
 });
 
-describe("asked for no motion, the scene stands still", () => {
-  it("turns the orbit off for both copies of the moon with one line", () => {
-    const reduce = "(prefers-reduced-motion: reduce)";
-    expect(styleOf("#loading .moon", reduce).animation).toBe("none");
-    // and that one line reaches both, because all three rules weigh the same
-    // and it is written last. A rule aimed at a class on top of a class would
-    // weigh more and quietly keep running.
-    expect(weight("#loading .far")).toEqual(weight("#loading .moon"));
-    expect(weight("#loading .near")).toEqual(weight("#loading .moon"));
-    expect(orderOf("#loading .moon", reduce)).toBeGreaterThan(orderOf("#loading .far"));
-    expect(orderOf("#loading .moon", reduce)).toBeGreaterThan(orderOf("#loading .near"));
+describe("asked for reduced motion, the revolution slows rather than stopping", () => {
+  const reduce = "(prefers-reduced-motion: reduce)";
+
+  it("keeps turning, at half the pace", () => {
+    // It used to stop, and that was wrong. This is the one thing on screen
+    // saying the app is still working, and a loading indicator holding
+    // perfectly still is one saying the app has died: the first report of it
+    // from a phone with the setting on was that the animation was broken. The
+    // guidance agrees, treating motion in a preload phase as essential where a
+    // still indicator could have someone think the content is frozen, and
+    // halving the pace is what is done elsewhere instead.
+    const slow = styleOf("#loading .orbit", reduce);
+    expect(slow.animation).toBeUndefined(); // nothing is turned off
+    expect(Number(slow["animation-duration"].replace("ms", ""))).toBe(
+      anims(ORBIT.animation)[0].ms * 2,
+    );
   });
 
-  it("leaves one dot showing, resting on the ring where the orbit would put it", () => {
-    // with no animation the dot falls back to what the sheet says outright, so
-    // the still picture has to be a finished one: one moon, on the line, in
-    // front of the planet
-    const moon = styleOf("#loading .moon");
-    expect(moon.opacity).toBe("0"); // the copy behind the planet stays hidden
-    expect(styleOf("#loading .near").opacity).toBe("1");
-    const parked = stopXY(moon.transform);
-    const stops = FRAMES["ld-orbit"];
-    expect(moon.transform).toBe(stops.find(([head]) => head === "75%")?.[1].transform);
-    expect(ringSide(...parked)).toBeGreaterThan(0); // the near arc, not the far one
+  it("stops nothing anywhere on the page, which is what the old rule did", () => {
+    // the app's three other spinners have never stopped under this setting
+    // either; the only thing that ever froze the scene was the rule this
+    // replaced
+    expect(STYLE_SRC).not.toMatch(/animation:\s*none/);
+  });
+
+  it("says only the duration, on the one rule that turns, standing after it", () => {
+    // stating just the duration leaves the name, the easing and the endless
+    // count exactly as the rule above says them, so there is one revolution
+    // described in one place. It is written against the very same selector, so
+    // it can only win by standing later in the sheet.
+    expect(Object.keys(styleOf("#loading .orbit", reduce))).toEqual(["animation-duration"]);
+    expect(orderOf("#loading .orbit", reduce)).toBeGreaterThan(orderOf("#loading .orbit"));
+    expect(RULES.filter((r) => r.media === reduce).flatMap((r) => r.sel)).toEqual([
+      "#loading .orbit",
+    ]);
   });
 
   it("still fades, because a change of opacity is not movement", () => {
     // the alternative is the page appearing and vanishing as cuts, which is
     // harsher than the thing reduced motion is asked for to avoid
-    const reduce = "(prefers-reduced-motion: reduce)";
     expect(styleOf("#loading", reduce).transition).toBeUndefined();
     expect(styleOf("#loading .scene", reduce).animation).toBeUndefined();
   });
