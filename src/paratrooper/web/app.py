@@ -547,7 +547,16 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         # re-arm if this message left everything drained (a STOP can discard
         # the only pending batch — the worker must still get to sleep later)
         await _maybe_suspend_worker(state)
-        return {"status": status, "seq": seq}  # seq: client advances its catch-up cursor
+        # The ACK IS the frame: the same wire shape /api/history returns for
+        # this seq, built from the event just stored. The client adopts it
+        # whole instead of inventing a frame and then fetching the real one
+        # back, so a photo send's sizes and blurhashes arrive with the ACK and
+        # every stored row carries the server clock. A text-only send pays
+        # nothing extra for it: with no attachment keys the meta lookup skips
+        # its query and _frame short-circuits. ``status`` and ``seq`` stay
+        # where they were; the frame carries seq too.
+        meta = await asyncio.to_thread(_page_meta, state.store, [(seq, msg)])
+        return {"status": status, **_frame(seq, msg, meta)}
 
     @app.get("/api/thread/{thread_id}", dependencies=[Depends(require_token)])
     async def thread(thread_id: str, since: int = 0) -> dict:

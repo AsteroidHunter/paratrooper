@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { enrichFrame } from "../src/enrich";
+import { ackFrame, enrichFrame } from "../src/enrich";
 
 const dims = [[320, 240]] as [number, number][];
 const hashes = ["LEHV6nWB2yk8"];
@@ -51,16 +51,63 @@ describe("enrichFrame: a richer re-delivery upgrades, anything else drops", () =
     expect(enrichFrame(cur, next)).toEqual(next);
   });
 
-  it("the send path repair: the synthesized ACK frame becomes the server row", () => {
-    // transmit stores this shape on ACK (seq, role, payload, attachments,
-    // client ts) and adoptServerFrame fetches the authoritative row; the merge
-    // must come out as the server's frame, its ts and attachment fields included
+  it("the skew fallback's repair: the synthesized frame becomes the server row", () => {
+    // when the guard below turns a bare ACK down, transmit stores this shape
+    // (seq, role, payload, attachments, client ts) and adoptServerFrame fetches
+    // the authoritative row; the merge must come out as the server's frame, its
+    // ts and attachment fields included, so even the fallback heals a photo send
     const synthesized = { seq: 7, role: "user", payload: "pic",
       attachments: ["k1"], ts: "2026-01-01T00:00:00" };
     const server = { seq: 7, role: "user", payload: "pic", attachments: ["k1"],
       attachment_dims: dims, attachment_blurhashes: hashes,
       ts: "2026-01-01T00:00:02" };
     expect(enrichFrame(synthesized, server)).toEqual(server);
+  });
+});
+
+describe("ackFrame: the ACK's frame is adopted, a bare ACK is turned down", () => {
+  // what /api/send answers with now: the finished frame plus its status
+  const ack = {
+    status: "buffered", seq: 7, thread_id: "d", role: "user", payload: "pic",
+    attachments: ["k1"], attachment_dims: dims, attachment_blurhashes: hashes,
+    ts: "2026-01-01T00:00:02+00:00",
+  };
+
+  it("yields the frame alone: the status is the ACK's, never the frame's", () => {
+    const { status, ...frame } = ack;
+    expect(status).toBe("buffered");
+    expect(ackFrame(ack)).toEqual(frame);
+    expect(ackFrame(ack)).not.toHaveProperty("status");
+  });
+
+  it("the adopted frame is the server's row, its server-clock ts included", () => {
+    const adopted = ackFrame(ack)!;
+    expect(adopted.ts).toBe(ack.ts); // never a client clock
+    expect(adopted.attachment_dims).toEqual(dims);
+    expect(adopted.attachment_blurhashes).toEqual(hashes);
+  });
+
+  it("DEPLOY SKEW: an old server's bare ACK yields null, so nothing is stored", () => {
+    expect(ackFrame({ status: "buffered", seq: 7 })).toBeNull();
+  });
+
+  it("half a frame is not a frame: role without ts, or ts without role", () => {
+    expect(ackFrame({ status: "buffered", seq: 7, ts: ack.ts })).toBeNull();
+    expect(ackFrame({ status: "buffered", seq: 7, role: "user" })).toBeNull();
+  });
+
+  it("an empty or wrongly typed role or ts is turned down as well", () => {
+    expect(ackFrame({ role: "", ts: ack.ts })).toBeNull();
+    expect(ackFrame({ role: "user", ts: "" })).toBeNull();
+    expect(ackFrame({ role: 7, ts: ack.ts })).toBeNull();
+    expect(ackFrame({ role: "user", ts: 1735689600 })).toBeNull();
+    expect(ackFrame({ role: null, ts: null })).toBeNull();
+  });
+
+  it("the guard reads fields only: it never mutates the answer it was given", () => {
+    const before = { ...ack };
+    ackFrame(ack);
+    expect(ack).toEqual(before);
   });
 });
 
@@ -105,11 +152,41 @@ describe("wiring: enrichStored is store-and-snapshot only", () => {
   });
 });
 
-describe("wiring: the send path reads the authoritative frame back", () => {
-  it("a photo send's ACK adoption kicks off the read-back; text-only does not", () => {
-    expect(fnBody("transmit")).toMatch(
-      /cacheWrites\.bump\(\);[\s\S]{0,600}if \(keys\.length\) void adoptServerFrame\(seq\)/,
+describe("wiring: the send path stores the server's own frame", () => {
+  const body = fnBody("transmit");
+
+  it("the whole answer is read, not just its seq, and run past the guard", () => {
+    expect(body).toContain("const ack = (await resp.json())");
+    expect(body).toContain("const served: ServerMsg | null = ackFrame(ack)");
+    expect(body).toContain("if (served) store.set(seq, served)");
+  });
+
+  it("no frame is synthesized unless the guard turned the ACK down", () => {
+    expect(body).toMatch(
+      /if \(served\) store\.set\(seq, served\);\s*\n\s*else \{[\s\S]{0,700}ts: new Date\(\)\.toISOString\(\),/,
     );
+  });
+
+  it("the one surviving client clock is called out where it lives", () => {
+    expect(body).toMatch(/deploy skew:[\s\S]{0,600}CLIENT clock[\s\S]{0,400}new Date\(\)/);
+  });
+
+  it("the ACKed frame still enters the cold-open snapshot", () => {
+    expect(body).toContain("cacheWrites.bump()");
+  });
+});
+
+describe("wiring: the read-back survives only as the skew fallback", () => {
+  const body = fnBody("transmit");
+
+  it("an adopted frame asks for nothing more: no second request on the normal path", () => {
+    expect(body).toContain("if (!served && keys.length) void adoptServerFrame(seq)");
+    expect(body.match(/adoptServerFrame/g)).toHaveLength(1); // that gated one, and no other
+  });
+
+  it("the read-back is the only place the send path touches history", () => {
+    expect(body).not.toContain("api/history");
+    expect(fnBody("adoptServerFrame")).toContain("api/history");
   });
 
   it("the read-back fetches exactly the ACKed row from the history endpoint", () => {

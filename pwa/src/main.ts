@@ -7,7 +7,7 @@ import { caretCountsAsComposing } from "./caret";
 import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
-import { enrichFrame } from "./enrich";
+import { ackFrame, enrichFrame } from "./enrich";
 import { bundleSeats, coverBox, gatherMsFor, shotLeg } from "./gather";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { composeMirror, fitComposeBox } from "./mirror";
@@ -98,7 +98,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.42"; // tapping the empty compose box now hands it focus itself, with the one flag that tells iOS not to scroll the page to show the caret, so the keyboard can no longer open onto a shoved picture; a box with text already in it is still left entirely to the browser, so the caret keeps landing exactly where the finger did
+const APP_VERSION = "0.3.43"; // sending a message now gets the finished message straight back in the reply, so the app keeps the server's own copy of it instead of writing a guess and then fetching the real thing a moment later: a photo lands with its size and its colours already on it, one request where there used to be two, and the time stamped on your own message is the server's clock like every other message rather than the phone's, which used to survive in the cold-open cache and skew the next morning's time labels
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -229,7 +229,7 @@ interface ServerMsg {
   attachments?: string[];
   attachment_dims?: ([number, number] | null)[]; // thumb sizes, index-aligned; null = undecodable preview
   attachment_blurhashes?: (string | null)[]; // ~28-char previews, same index, same null rule
-  ts?: string; // ISO-8601, server clock (live and replay alike)
+  ts?: string; // ISO-8601, server clock (live, replay and the send ACK alike)
 }
 
 const app = document.getElementById("app")!;
@@ -3963,7 +3963,7 @@ async function send(): Promise<void> {
 
 // The network half of a send — uploads, then POST /api/send — shared by the
 // first attempt and every Try Again, so a retry takes the exact same path,
-// ACK/seq adoption included. Any failure marks the wrapper failed (iMessage
+// frame adoption included. Any failure marks the wrapper failed (iMessage
 // treatment below) instead of raising a separate error bubble; the typed text
 // and File objects stay held for the next retry. retractSeqs ride the FIRST
 // attempt only: a retry follows a failure, and the failure path already
@@ -4001,7 +4001,10 @@ async function transmit(
   // and release its tail-pinning marker (it is a real keyed bubble now)
   if (w.dataset.outboxId) void outboxDelete(w.dataset.outboxId);
   w.classList.remove("restored");
-  const { seq } = (await resp.json()) as { seq?: number };
+  // the ACK is the finished frame, the same one history returns for this seq
+  // (enrich.ts holds the guard that says so), with status riding beside it
+  const ack = (await resp.json()) as ServerMsg & { status?: string };
+  const seq = ack.seq;
   if (seq) {
     if (store.has(seq)) {
       w.remove(); // a reconnect replay beat the ACK; the keyed wrapper won
@@ -4009,27 +4012,37 @@ async function transmit(
     } else {
       // upgrade in place: the optimistic wrapper becomes the event's wrapper
       w.dataset.seq = String(seq);
-      store.set(seq, {
-        seq, role: "user", payload: text, attachments: keys,
-        ts: new Date().toISOString(),
-      });
+      // store the server's own row: its attachment_dims and
+      // attachment_blurhashes are already on it, so a photo send needs no
+      // read-back, and its ts is the server clock every other frame is
+      // stamped by, so this row sorts and clusters with them on the next boot
+      const served: ServerMsg | null = ackFrame(ack);
+      if (served) store.set(seq, served);
+      else {
+        // deploy skew: a client kept in the service worker's cache can outlive
+        // the server that grew the frame. A frameless answer is never stored,
+        // so fall back to what this path did before: synthesize the frame and
+        // read the real one back. This is the last CLIENT clock ts in the app,
+        // and only a photo send heals it, because the read-back is a richer
+        // frame and a text-only one has nothing for the merge to gain on.
+        store.set(seq, {
+          seq, role: "user", payload: text, attachments: keys,
+          ts: new Date().toISOString(),
+        });
+      }
       if (seq > lastSeq) lastSeq = seq; // our own message: don't re-replay it
       if (oldestSeq === 0 || seq < oldestSeq) oldestSeq = seq;
       cacheWrites.bump(); // the ACKed send enters the cold-open snapshot like any applied frame
-      // the frame above is synthesized and the ACK carries nothing more than
-      // the seq, so a photo send is missing its attachment_dims and
-      // attachment_blurhashes: read the authoritative row back and let the
-      // enrich rule replace the synthesized copy before it can poison the
-      // cold-open snapshot (text-only sends have nothing to gain)
-      if (keys.length) void adoptServerFrame(seq);
+      if (!served && keys.length) void adoptServerFrame(seq); // skew fallback only
     }
   }
   updateReceipt(); // the server has it: the stored row now derives Delivered
 }
 
-// The read-back half of a photo send. /api/send ACKs with the seq alone, and
-// the socket never echoes your own message (lastSeq already covers it, so no
-// replay ever re-delivers it either): the server's complete frame, attachment
+// The read-back half of a photo send against an OLD server, the only caller
+// left now that the ACK carries the frame. Such a server answers with the seq
+// alone, and the socket never echoes your own message (lastSeq already covers
+// it, so no replay ever re-delivers it either): its complete frame, attachment
 // sizes and blurhashes included, exists only behind the history endpoint the
 // client already pages with. One exact-row fetch, routed through the same
 // enrich rule as any richer re-delivery. Best-effort: on failure the next

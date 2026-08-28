@@ -839,6 +839,47 @@ def test_legacy_photo_frame_heals_through_the_route(client):
     assert junk_hash is None
 
 
+def _history_frame(client, thread_id, seq, auth):
+    """The one row history returns for a seq, the way the client pages it."""
+    rows = client.get(
+        f"/api/history/{thread_id}", headers=auth, params={"before": seq + 1, "limit": 1}
+    ).json()["messages"]
+    return next(m for m in rows if m["seq"] == seq)
+
+
+def test_send_acks_with_the_history_frame(client):
+    """THE contract the client leans on: the ACK is the finished frame, equal
+    field for field to the one history hands back for that same seq. It lets
+    the send path store the server's own row rather than invent one, so no
+    second request is needed and the stored ts is the server clock. ``status``
+    rides beside the frame and is the only key that is not part of it."""
+    auth = {"Authorization": "Bearer tok"}
+    up = client.post(
+        "/api/upload", headers=auth, files={"file": ("p.png", _png_bytes(), "image/png")}
+    )
+    key = up.json()["inbox_key"]
+
+    photo = client.post(
+        "/api/send", headers=auth,
+        json={"thread_id": "ackt", "text": "pic", "attachments": [key]},
+    ).json()
+    text = client.post(
+        "/api/send", headers=auth, json={"thread_id": "ackt", "text": "words only"},
+    ).json()
+
+    for ack in (photo, text):
+        assert ack["status"] == "buffered"  # the transport field stays put
+        frame = {k: v for k, v in ack.items() if k != "status"}
+        assert frame == _history_frame(client, "ackt", ack["seq"], auth)
+
+    # and the photo ACK really carries the fields the client used to fetch back
+    assert photo["attachment_dims"][0] is not None
+    assert isinstance(photo["attachment_blurhashes"][0], str)
+    # a text-only send stays lean: no attachment fields invented for it
+    assert "attachment_dims" not in text and "attachment_blurhashes" not in text
+    assert text["role"] == "user" and text["payload"] == "words only" and text["ts"]
+
+
 def test_thumb_route_serves_persisted_previews(client):
     auth = {"Authorization": "Bearer tok"}
     up = client.post(
