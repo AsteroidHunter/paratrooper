@@ -110,7 +110,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.47"; // a sent photo now leaves the strip on an L, straight up first and across second, with the corner between the two legs rounded instead of square
+const APP_VERSION = "0.3.48"; // tapping back into text you have already typed no longer lets the page shove, and the cursor still lands where your finger did
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

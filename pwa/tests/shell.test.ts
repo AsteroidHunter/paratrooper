@@ -851,44 +851,74 @@ describe("presentation: the plus's 44pt hit square", () => {
 // clamps to the whole 412px an 812 tall document has to give, painted before
 // the app gets a turn. The only refusal the engine honours is preventScroll on
 // the focus call itself, and a tap cannot carry it, so the app takes the focus
-// over inside the tap. What every pin below is really about is how NARROW that
-// take-over is kept: it may only ever touch a tap that cannot carry a caret
-// position of its own.
+// over inside the tap. What every pin below is really about is what the
+// take-over is allowed to touch: a tap that carries no caret position of its
+// own (an empty box), or one whose caret position was MEASURED first. A tap
+// whose caret cannot be measured goes back to the engine unchanged.
 describe("composerTapVerdict: which taps the app may focus itself", () => {
   it("the focusing tap on an empty box is taken over: one caret position, so none to lose", () => {
-    expect(composerTapVerdict(false, true, true)).toBe("intercept");
+    expect(composerTapVerdict(false, true, true, false)).toBe("intercept");
+    // an empty box has nothing to measure, so a measurement cannot change it
+    expect(composerTapVerdict(false, true, true, true)).toBe("intercept");
   });
 
   it("a tap inside an already-focused box is left alone, whatever it holds", () => {
     // the reveal rides the focusing tap alone, and this is the tap that moves
     // the caret, extends a selection, or ends a long press
-    expect(composerTapVerdict(true, true, true)).toBe("focused");
-    expect(composerTapVerdict(true, false, true)).toBe("focused");
+    expect(composerTapVerdict(true, true, true, false)).toBe("focused");
+    expect(composerTapVerdict(true, false, true, false)).toBe("focused");
+    // even with an offset in hand: a focused box is never this rule's business
+    expect(composerTapVerdict(true, false, true, true)).toBe("focused");
   });
 
-  it("a box with text in it is left alone: the caret must land where the finger did", () => {
-    expect(composerTapVerdict(false, false, true)).toBe("text");
+  it("a box with text is taken over once the tapped character is known", () => {
+    expect(composerTapVerdict(false, false, true, true)).toBe("caret");
+  });
+
+  it("a box with text whose character could NOT be measured is left alone", () => {
+    // the shove is the lesser bug: a caret that jumps to the end of a half
+    // written message is the one that must never ship
+    expect(composerTapVerdict(false, false, true, false)).toBe("text");
   });
 
   it("only the primary button, so a right or middle click keeps the platform's behaviour", () => {
-    expect(composerTapVerdict(false, true, false)).toBe("aux");
-    expect(composerTapVerdict(true, false, false)).toBe("aux");
+    expect(composerTapVerdict(false, true, false, false)).toBe("aux");
+    expect(composerTapVerdict(true, false, false, false)).toBe("aux");
+    expect(composerTapVerdict(false, false, false, true)).toBe("aux");
   });
 });
 
 describe("focusComposerTap: the take-over, and everything it must not touch", () => {
-  function tapped(over: { focused?: boolean; value?: string } = {}) {
+  function tapped(over: { focused?: boolean; value?: string; at?: number | null } = {}) {
     const calls: string[] = [];
     const options: { preventScroll: boolean }[] = [];
+    const carets: number[] = [];
+    let measured = 0;
     const target = {
       focused: over.focused ?? false,
       value: over.value ?? "",
+      caretAt: (): number | null => {
+        measured += 1;
+        calls.push("measure");
+        return over.at ?? null;
+      },
       focus: (o: { preventScroll: boolean }): void => {
         calls.push("focus");
         options.push(o);
       },
+      setCaret: (at: number): void => {
+        calls.push("caret");
+        carets.push(at);
+      },
     };
-    return { target, calls, options, prevent: (): void => void calls.push("prevent") };
+    return {
+      target,
+      calls,
+      options,
+      carets,
+      measures: (): number => measured,
+      prevent: (): void => void calls.push("prevent"),
+    };
   }
 
   const taps = (): unknown[] =>
@@ -908,35 +938,83 @@ describe("focusComposerTap: the take-over, and everything it must not touch", ()
     expect(t.options).toEqual([{ preventScroll: true }]);
   });
 
-  it("a tap inside a focused box is not prevented and not refocused: the caret is the engine's", () => {
-    const t = tapped({ focused: true, value: "half a sentence" });
+  it("a box holding text is taken over too, with the caret put at the tapped character", () => {
+    const t = tapped({ value: "half a sentence", at: 7 });
+    expect(focusComposerTap(t.target, true, t.prevent)).toBe("caret");
+    // the measurement first (it decides whether this tap may be touched at
+    // all), then the refusal and the focus with nothing between them, then the
+    // caret, which can only be set on a control that already holds focus
+    expect(t.calls).toEqual(["measure", "prevent", "focus", "caret"]);
+    expect(t.options).toEqual([{ preventScroll: true }]);
+    expect(t.carets).toEqual([7]);
+  });
+
+  it("offset 0 is a real answer, not a missing one: the tap on the first character", () => {
+    // the trap a truthiness check would fall into, and the caret it would send
+    // to the engine instead of placing
+    const t = tapped({ value: "half a sentence", at: 0 });
+    expect(focusComposerTap(t.target, true, t.prevent)).toBe("caret");
+    expect(t.carets).toEqual([0]);
+  });
+
+  it("a tap inside a focused box is not prevented, not refocused, not even measured", () => {
+    const t = tapped({ focused: true, value: "half a sentence", at: 3 });
     expect(focusComposerTap(t.target, true, t.prevent)).toBe("focused");
     expect(t.calls).toEqual([]); // nothing happened at all, so nothing can break
+    expect(t.measures()).toBe(0); // and no layout was forced to decide that
     expect(taps()).toEqual([]);
   });
 
-  it("a tap into existing text is left to the engine, caret placement and all", () => {
-    const t = tapped({ value: "half a sentence" });
+  it("a tap into text whose character could not be measured goes back to the engine whole", () => {
+    const t = tapped({ value: "half a sentence", at: null });
     expect(focusComposerTap(t.target, true, t.prevent)).toBe("text");
-    expect(t.calls).toEqual([]);
+    expect(t.calls).toEqual(["measure"]); // asked, unanswered, and then dropped
+    expect(t.carets).toEqual([]); // above all: no offset was invented to use
   });
 
-  it("a non-primary button does nothing and records nothing", () => {
+  it("an empty box is never measured: it has one caret position and it is known", () => {
     const t = tapped();
+    focusComposerTap(t.target, true, t.prevent);
+    expect(t.measures()).toBe(0);
+    expect(t.carets).toEqual([]);
+  });
+
+  it("a non-primary button does nothing, measures nothing and records nothing", () => {
+    const t = tapped({ value: "half a sentence", at: 4 });
     expect(focusComposerTap(t.target, false, t.prevent)).toBe("aux");
     expect(t.calls).toEqual([]);
+    expect(t.measures()).toBe(0);
     expect(taps()).toEqual([]);
   });
 
-  it("both focusing taps land on the keyboard channel, named by what was decided", () => {
-    // the take-over, so a device session shows the interception firing...
+  it("every focusing tap lands on the keyboard channel, named by what was decided", () => {
+    // the empty-box take-over, so a device session shows the interception...
     const own = tapped();
     focusComposerTap(own.target, true, own.prevent);
+    // ...the with-text one, told apart from it by name and carrying the offset
+    // the caret was put at, so a caret that landed wrong is a number here...
+    const held = tapped({ value: "half a sentence", at: 7 });
+    focusComposerTap(held.target, true, held.prevent);
     // ...and the one it declined, so a shove recorded after it is explained
     const left = tapped({ value: "x" });
     focusComposerTap(left.target, true, left.prevent);
-    expect(holdDiagEvents().map((e) => e.ev)).toEqual(["kb-focusing", "kb-focusing"]);
-    expect(taps()).toEqual([{ tap: "intercept" }, { tap: "text" }]);
+    expect(holdDiagEvents().map((e) => e.ev)).toEqual([
+      "kb-focusing",
+      "kb-focusing",
+      "kb-focusing",
+    ]);
+    expect(taps()).toEqual([
+      { tap: "intercept" },
+      { tap: "caret", at: 7, of: 15 },
+      { tap: "text", at: null, of: 1 },
+    ]);
+  });
+
+  it("the trail says a caret that ran to the end of the text: at equals of", () => {
+    // the one outcome he ruled out, so it must be readable rather than felt
+    const t = tapped({ value: "half a sentence", at: 15 });
+    focusComposerTap(t.target, true, t.prevent);
+    expect(taps()).toEqual([{ tap: "caret", at: 15, of: 15 }]);
   });
 
   it("the record comes after the focus, never between the tap and the keyboard", () => {
@@ -944,11 +1022,27 @@ describe("focusComposerTap: the take-over, and everything it must not touch", ()
     const target = {
       focused: false,
       value: "",
+      caretAt: (): number | null => null,
       focus: (): void => void order.push("focus"),
+      setCaret: (): void => void order.push("caret"),
     };
     focusComposerTap(target, true, () => order.push("prevent"));
     order.push(...holdDiagEvents().map((e) => e.ev));
     expect(order).toEqual(["prevent", "focus", "kb-focusing"]);
+  });
+
+  it("the record comes after the caret too, on the tap that places one", () => {
+    const order: string[] = [];
+    const target = {
+      focused: false,
+      value: "half a sentence",
+      caretAt: (): number | null => 7,
+      focus: (): void => void order.push("focus"),
+      setCaret: (): void => void order.push("caret"),
+    };
+    focusComposerTap(target, true, () => order.push("prevent"));
+    order.push(...holdDiagEvents().map((e) => e.ev));
+    expect(order).toEqual(["prevent", "focus", "caret", "kb-focusing"]);
   });
 });
 
@@ -982,6 +1076,22 @@ describe("wiring: the focusing tap is intercepted on mousedown and nowhere else"
     expect(handler).toContain("value: t.value");
     expect(handler).toContain("e.button === 0");
     expect(handler).toContain("() => e.preventDefault()");
+  });
+
+  it("the caret is measured from the tap's own point and set on the box it was measured for", () => {
+    // the event's coordinates, not a rect read later and not a stored one: the
+    // finger is only in one place for the length of this handler
+    expect(handler).toContain("caretAt: () => caretOffsetAt(t, e.clientX, e.clientY)");
+    expect(handler).toContain("setCaret: (at) => t.setSelectionRange(at, at)");
+  });
+
+  it("the offset is placed, never derived at the edge: the handler does no arithmetic", () => {
+    // every number that could put a caret in the wrong place is measured in
+    // tapcaret.ts against real rects, so a fallback here would be the one
+    // guess the whole rule exists to refuse
+    for (const body of [handler, takeover]) {
+      expect(body).not.toMatch(/value\.length\s*[-+]|\|\|\s*0\b|\?\?\s*\d/);
+    }
   });
 
   it("no clock and no wait anywhere on the path: the focus is the tap's own turn", () => {

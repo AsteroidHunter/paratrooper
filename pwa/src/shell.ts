@@ -52,8 +52,9 @@
 //   one refusal the engine honours is preventScroll on the focus call, and it
 //   never grants a tap that flag, so the app takes the focusing tap over and
 //   makes the call itself. Only where a hand-made focus cannot lose the caret,
-//   though: an empty box that does not already hold focus, and nothing else
-//   (composerTapVerdict below).
+//   though: a box that does not already hold focus AND is either empty or has
+//   just told the app which character the finger landed on (composerTapVerdict
+//   below, measured by tapcaret.ts).
 // - Dismissing the picker menu only LOOKS instant: WKFileUploadPanel keeps
 //   tearing down natively for another ~0.5–2s, and a files.click() forwarded
 //   inside that window is silently DROPPED by WebKit — the dead-＋-tap bug.
@@ -88,6 +89,9 @@ import { holdDiagRecord } from "./hold";
 // TEMP DIAGNOSTIC (pick-timing, picktiming.ts owns the banner): the pick
 // clock's zero. One call, at the top of the change listener in bindInputSignals
 import { pickTimingStart } from "./picktiming";
+// the character under a focusing tap, so a composer holding text can be taken
+// over too instead of being left to the engine and its shove
+import { caretOffsetAt } from "./tapcaret";
 
 // --- pure decision core (unit-tested; no DOM, no iOS) --------------------------
 
@@ -266,33 +270,37 @@ export function preservesFocus(w: World): boolean {
 // What that costs is everything else the engine's focus tap does, and the part
 // that matters is the CARET: a refused tap places none, so the box would open
 // with the caret wherever a scripted focus leaves it rather than where the
-// finger landed. Reading a character offset back out of a tap point is not
-// reliable in a text control (the caret-from-point reads do not cross a form
-// control's internal tree, and a measured guess off the ruler twin would be a
-// guess on every tap), so the interception is narrowed to the taps where the
-// question cannot arise at all:
+// finger landed. So the take-over is offered to exactly two kinds of tap, and
+// the second one has to buy its way in:
 //   - the box must not already hold focus. The reveal rides the focusing tap
 //     alone, so a tap inside a focused box is left completely alone, and with
 //     it every caret move, long press and selection drag.
-//   - the box must be EMPTY. An empty box has exactly one caret position, so
-//     focusing it by hand lands the caret exactly where the tap would have. A
-//     box with text keeps today's behaviour, shove and all: a caret that jumps
-//     to the end when he taps into the middle of a half written message would
-//     be a worse bug than the one this fixes.
+//   - an EMPTY box is taken over outright. It has exactly one caret position,
+//     so focusing it by hand lands the caret exactly where the tap would have.
+//   - a box HOLDING TEXT is taken over only when the offset under the finger
+//     was actually measured (tapcaret.ts, a laid out ruler and one rect per
+//     character), and the caret is put there straight after the focus. When
+//     that measurement cannot be made the tap goes back to the engine
+//     untouched, shove and all, because a caret that jumps to the end of a
+//     half written message would be a worse bug than the one this fixes. No
+//     offset is ever assumed, defaulted, or rounded in from nothing: the
+//     measurement answers with a character or it answers with nothing.
 //   - the tap must be the primary button, so a right or middle click keeps
 //     whatever the platform does with it.
 // Nothing that focuses the composer without a tap reaches this decision, so a
 // hardware keyboard and assistive technology are untouched by it.
-export type ComposerTapVerdict = "intercept" | "focused" | "text" | "aux";
+export type ComposerTapVerdict = "intercept" | "caret" | "focused" | "text" | "aux";
 
 export function composerTapVerdict(
   alreadyFocused: boolean,
   empty: boolean,
   primary: boolean,
+  caretKnown: boolean,
 ): ComposerTapVerdict {
   if (!primary) return "aux";
   if (alreadyFocused) return "focused";
-  return empty ? "intercept" : "text";
+  if (empty) return "intercept";
+  return caretKnown ? "caret" : "text";
 }
 
 // Tap-time choreography signal (the pop-then-expand fix): .kb latches only
@@ -857,15 +865,22 @@ function bindInputSignals(input: HTMLInputElement): void {
 }
 
 /**
- * The tapped box, as the interception needs it: the two facts the verdict is
- * read from and the one effect it has. Injectable for the same reason the
- * picker lifecycle's effects are, so the path an iPhone runs is the path the
- * tests run, minus a DOM.
+ * The tapped box, as the interception needs it: the facts the verdict is read
+ * from and the two effects it has. Injectable for the same reason the picker
+ * lifecycle's effects are, so the path an iPhone runs is the path the tests
+ * run, minus a DOM.
  */
 export interface TapTarget {
   focused: boolean;
   value: string;
+  /**
+   * The offset under the finger, measured now, or null when it could not be
+   * measured at all. A thunk rather than a number because the measurement is
+   * the one costly read on this path and most taps never need it.
+   */
+  caretAt(): number | null;
   focus(options: { preventScroll: boolean }): void;
+  setCaret(offset: number): void;
 }
 
 /**
@@ -874,26 +889,43 @@ export interface TapTarget {
  * gesture, with nothing between them, so the keyboard still rises from the
  * user's tap and the reveal never gets a focus to hang itself off.
  *
- * The record comes last, after the focus rather than before it: it is what
- * names the path the composer was focused by, and it must not sit between the
- * tap and the keyboard on the one interaction the whole app turns on.
+ * The caret goes in on the far side of the focus, and the record after that.
+ * Neither may sit between the tap and the keyboard on the one interaction the
+ * whole app turns on: the record is only a name for the path this was focused
+ * by, and a selection can only be set on a control that already holds focus.
+ * Every step here is synchronous, so all of it is still the tap's own turn.
  */
 export function focusComposerTap(
   target: TapTarget,
   primary: boolean,
   prevent: () => void,
 ): ComposerTapVerdict {
-  const verdict = composerTapVerdict(target.focused, target.value.length === 0, primary);
-  if (verdict === "intercept") {
+  const empty = target.value.length === 0;
+  // The measurement is taken BEFORE the refusal, and only for the one tap
+  // whose verdict turns on it: a primary tap into a box that holds text and
+  // does not hold focus. Before, because the answer decides whether this tap
+  // may be taken over at all; only there, because every other tap already has
+  // its verdict and would be paying a layout read for nothing.
+  const at = primary && !target.focused && !empty ? target.caretAt() : null;
+  const verdict = composerTapVerdict(target.focused, empty, primary, at !== null);
+  if (verdict === "intercept" || verdict === "caret") {
     prevent(); // the engine's own focus, and the caret reveal that rides it
     target.focus({ preventScroll: true });
+    // after the focus, never between it and the refusal: nothing may come
+    // between the tap and the keyboard on the one interaction the app turns on
+    if (at !== null) target.setCaret(at);
   }
-  // Both focusing taps are on the trail: the one this took over, and the one it
-  // declined. A kb-focusing focus edge with no tap record before it was focused
-  // by something that is not a tap, and a shove landing after a `text` record is
-  // a shove on a tap this rule deliberately left to the engine.
-  if (verdict === "intercept" || verdict === "text") {
-    holdDiagRecord("kb-focusing", { tap: verdict });
+  // Every focusing tap is on the trail, named by what was decided: `intercept`
+  // is the empty box, `caret` is the box holding text, carrying the offset the
+  // caret was put at and the length it was put in, and `text` is a tap left to
+  // the engine because no offset could be measured. A kb-focusing focus edge
+  // with no tap record before it was focused by something that is not a tap; a
+  // shove after a `text` record is a shove on a tap this rule deliberately
+  // stood aside from; and a caret that lands somewhere wrong is a number in
+  // the trail rather than only a thing that was felt.
+  if (verdict === "intercept") holdDiagRecord("kb-focusing", { tap: verdict });
+  else if (verdict === "caret" || verdict === "text") {
+    holdDiagRecord("kb-focusing", { tap: verdict, at, of: target.value.length });
   }
   return verdict;
 }
@@ -922,7 +954,9 @@ function composerTapListener(e: MouseEvent): void {
     {
       focused: document.activeElement === t,
       value: t.value,
+      caretAt: () => caretOffsetAt(t, e.clientX, e.clientY),
       focus: (options) => t.focus(options),
+      setCaret: (at) => t.setSelectionRange(at, at),
     },
     e.button === 0,
     () => e.preventDefault(),
