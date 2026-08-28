@@ -751,7 +751,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         # TEMP DIAGNOSTIC (photo boxes, pwa/src/main.ts owns the banners):
         # remove this block and its test in tests/test_holddiag.py with it.
         pb = [e for e in events if isinstance(e, dict)
-              and e.get("ev") in ("guessed-box", "photo-learned", "keep-view")]
+              and e.get("ev") in ("guessed-box", "sized-box", "photo-learned",
+                                  "keep-view")]
         if pb:
             _diag.info("holddiag photo events=%d tail=%s", len(pb), json.dumps(pb[-30:]))
         return {"ok": True}

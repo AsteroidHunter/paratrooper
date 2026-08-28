@@ -110,7 +110,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.53"; // the loading screen is the Earth itself now, its coastlines turning behind a round window, and the ring and the travelling dot that used to circle the old wire globe are gone, since a planet that turns already says the app is working
+const APP_VERSION = "0.3.54"; // photos drawn at a size the app already knew now count themselves, so that the silence from the ones that had to guess actually means something
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -751,6 +751,11 @@ interface Pick {
 // had to invent their own box this session, so the record is one per photo
 // rather than one per render.
 const guessedSeen = new Set<string>();
+
+// TEMP DIAGNOSTIC (sized-box, recorded in renderUser): the photos that were
+// drawn at a size the app already knew, counted for the same reason and in the
+// same way as the guessing ones, so that neither channel's silence is ambiguous.
+const sizedSeen = new Set<string>();
 
 const picks = new Map<File, Pick>();
 
@@ -2169,6 +2174,26 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
     if (dims) {
       img.width = dims[0];
       img.height = dims[1];
+      // TEMP DIAGNOSTIC (sized-box, marked at sizedSeen): the twin of the record
+      // below, and the only thing that makes its silence mean anything. A whole
+      // scroll back through the history produced not one guess, which reads
+      // either as every photo knowing its own size or as no photo having been
+      // drawn at all, and nothing then distinguished the two. This branch
+      // counting as well settles it: both silent means the photos never came
+      // past, this one alone means the guess is not what reshapes them and the
+      // shift he sees comes from somewhere else entirely.
+      const known = `${m.seq}:${i}`;
+      if (!sizedSeen.has(known)) {
+        sizedSeen.add(known);
+        holdDiagRecord("sized-box", {
+          seq: m.seq,
+          i,
+          n: sizedSeen.size, // distinct photos drawn at a size we were told
+          w: dims[0],
+          h: dims[1],
+          tall: dims[1] > dims[0] ? 1 : 0, // the portrait ones are the complaint
+        });
+      }
     } else {
       img.width = GUESS_W;
       img.height = GUESS_H;

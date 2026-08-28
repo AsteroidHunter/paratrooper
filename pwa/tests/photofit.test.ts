@@ -315,8 +315,20 @@ describe("the box is decided once per render", () => {
 
   it("lays a photo that HAS a size out at that size, and touches nothing else", () => {
     // unchanged behaviour, deliberately: the arriving pixels are the same
-    // pixels the server measured, so this box cannot move
-    expect(render()).toContain("if (dims) {\n      img.width = dims[0];\n      img.height = dims[1];\n    } else {");
+    // pixels the server measured, so this box cannot move. The two writes still
+    // have to OPEN the branch, but this no longer demands they be the last thing
+    // in it: a counter reporting that this branch was taken lives here too, and
+    // pinning the closing brace next to them made a record that writes nothing
+    // read as a layout change. What actually matters is below.
+    const src = render();
+    expect(src).toContain("if (dims) {\n      img.width = dims[0];\n      img.height = dims[1];\n");
+    // and the real protection: whatever else stands in this branch, nothing in
+    // it may touch style. The guessed branch pins a ratio and a fit because its
+    // box is invented; this one must leave the box to the pixels themselves.
+    const known = src.slice(src.indexOf("if (dims) {"), src.indexOf("} else {"));
+    expect(known).not.toContain("img.style");
+    expect(known).not.toContain("aspectRatio");
+    expect(known).not.toContain("objectFit");
   });
 
   it("pins an EXPLICIT ratio on the box it has to guess", () => {

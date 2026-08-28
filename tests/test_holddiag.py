@@ -487,13 +487,18 @@ def test_holddiag_photo_box_marks_get_their_own_line(client, caplog):
          "d": {"seq": 412, "i": 0, "n": 3, "keys": 2, "dims": None, "hash": 1}},
         {"t": 2, "ev": "photo-learned", "d": {"seq": 412, "i": 0, "w": 3024, "h": 4032}},
         {"t": 3, "ev": "keep-view", "d": {"seq": 412, "fix": 268.5}},
-        {"t": 4, "ev": "tail-gap", "d": {"when": "photo"}},
+        {"t": 4, "ev": "sized-box",
+         "d": {"seq": 413, "i": 0, "n": 1, "w": 3024, "h": 4032, "tall": 1}},
+        {"t": 5, "ev": "tail-gap", "d": {"when": "photo"}},
     ]}
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
         assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
     photo = [r.message for r in caplog.records if "holddiag photo" in r.message]
     assert len(photo) == 1
-    assert "events=3" in photo[0]
+    assert "events=4" in photo[0]
+    # the twin channel rides the same line: without it, silence from the guessing
+    # side cannot be told apart from no photo having been drawn at all
+    assert '"sized-box"' in photo[0] and '"tall": 1' in photo[0]
     # the whole story survives: which photo guessed and how many have, the real
     # size when it arrived, and whether anything compensated for the reshape
     assert '"seq": 412' in photo[0] and '"n": 3' in photo[0]
