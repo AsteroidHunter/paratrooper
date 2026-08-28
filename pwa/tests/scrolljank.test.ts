@@ -399,13 +399,6 @@ describe("wiring and stamps, pinned by source across the stamped files", () => {
     expect(holdSrc).toMatch(/ev === "scroll-jank"/);
   });
 
-  it("the close-slack reads and their upload stamp themselves", () => {
-    expect(shellSrc).toContain('jankSpan("slack-read", jankT0)');
-    expect(shellSrc).toContain('jankSpan("slack-emit", jankT0)');
-    // entry taken after the early return, so a dead run stamps nothing
-    expect(shellSrc).toMatch(/isConnected\) return; \/\/ shell torn down mid-run\n\s*const jankT0/);
-  });
-
   it("the thread-cache write stamps both halves: the snapshot build and the clone", () => {
     expect(mainSrc).toContain('jankSpan("cache-write", jankT0)');
     expect(cacheSrc).toContain('jankSpan("cache-put", jankT0)');
@@ -425,7 +418,6 @@ describe("wiring and stamps, pinned by source across the stamped files", () => {
     for (const named of [
       "jankledger.ts",
       "main.ts",
-      "shell.ts",
       "hold.ts",
       "threadcache.ts",
       "web/app.py",

@@ -196,13 +196,7 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // close, inside a window some earlier mark already armed, and arming there
   // would only push that post later.
   //
-  // "close-slack" is IN for kb-edge's reason at longer range: the record is
-  // built when its run ends, about four seconds after the close, past every
-  // window an earlier mark could have armed, so without arming here it would
-  // sit until some unrelated mark happened by. At most two records per close
-  // (the batched timeline, and a touch pair landing after it), so no churn.
-  //
-  // "scroll-jank" is IN for close-slack's reason at gesture range: its one
+  // "scroll-jank" is IN at gesture range: its one
   // record is built about a second after the last scroll of a gesture, past
   // any window an earlier mark could have armed, and one record per gesture
   // means arming here cannot churn. TEMP DIAGNOSTIC (scroll-jank): remove
@@ -230,7 +224,7 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "boot-motion" || ev === "boot-repin" || ev === "boot-blank" ||
     ev === "grow-blink" || ev === "kb-shove" ||
     ev === "kb-focusing" || ev === "kb-glide" || ev === "kb-edge" ||
-    ev === "pick-anchor" || ev === "tail-gap" || ev === "close-slack" ||
+    ev === "pick-anchor" || ev === "tail-gap" ||
     ev === "scroll-jank" || ev === "tail-settle" || ev === "pick-timing"
   ) {
     diagPost();

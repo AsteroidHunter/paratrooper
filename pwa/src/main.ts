@@ -95,7 +95,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.38"; // sending photos now moves the way sending text does: the picked squares cluster into one bundle in the strip and that bundle rises into its place in the thread, opening out of its 64px crop as it goes, with nothing behind it
+const APP_VERSION = "0.3.39"; // the measuring code that was freezing the first scroll after every keyboard close is gone, along with its half of the server side
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

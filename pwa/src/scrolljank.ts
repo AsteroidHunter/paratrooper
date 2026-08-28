@@ -33,9 +33,7 @@
 // TO REMOVE, every call site: delete this file and jankledger.ts; in main.ts
 // delete the two import lines under the scroll-jank comment and the jankSpan
 // pairs in writeThreadCache ("cache-write") and in prepareShot's drawn
-// callback ("shot-drawn"); in shell.ts delete the jankledger import and the
-// jankSpan pairs in slackRead ("slack-read") and emitCloseSlack
-// ("slack-emit"); in hold.ts delete the jankledger import, the jankSpan pair
+// callback ("shot-drawn"); in hold.ts delete the jankledger import, the jankSpan pair
 // in diagPost ("diag-post") and the "scroll-jank" entry with its comment in
 // the post-now list; in threadcache.ts delete the jankledger import and the
 // jankSpan pair in put ("cache-put"); in web/app.py delete the

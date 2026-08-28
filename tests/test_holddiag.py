@@ -348,42 +348,10 @@ def test_holddiag_fall_and_rise_lines_do_not_clip_each_other(client, caplog):
     assert '"ms": 0' in fall[0] and '"ms": 493' in fall[0]
 
 
-def test_holddiag_close_slack_gets_its_own_line(client, caplog):
-    """close-slack batches one keyboard close's whole timeline (the empty band
-    after the last message, sampled out to four seconds plus the first touch)
-    into one wide record, so it rides its own line: on the shared viewport tail
-    a handful of closes would clip every other mark off it."""
-    samples = [
-        {"ms": ms, "sh": 4386, "ch": 702, "st": 3684, "thH": 702, "slack": 398.5,
-         "lastB": 3987.5, "maxB": 3987.5, "rows": 42, "padT": 12, "padB": 12,
-         "appT": 0, "appH": 812, "barH": 56, "pendH": 0, "compH": 54, "cpb": 34}
-        for ms in (0, 250, 500, 1000, 2000, 4000)
-    ]
-    samples.append({**samples[0], "ms": 6120, "src": "touchstart"})
-    trail = {"build": "b", "events": [
-        {"t": 1, "ev": "kb-close",
-         "d": {"phase": "close", "x": 0, "y": 0, "top": 0, "snap": False,
-               "heal": False, "ih": 844, "base": 844}},
-        {"t": 2, "ev": "close-slack", "d": {"n": 3, "samples": samples}},
-    ]}
-    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
-    slack = [r.message for r in caplog.records if "holddiag slack" in r.message]
-    assert len(slack) == 1
-    assert "events=1" in slack[0]
-    assert '"slack": 398.5' in slack[0] and '"src": "touchstart"' in slack[0]
-    # the wide record stays off the shared viewport tail entirely, and the
-    # close mark it belongs beside still rides that tail as before
-    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
-    assert len(vp) == 1
-    assert '"close-slack"' not in vp[0]
-    assert '"kb-close"' in vp[0]
-
-
 def test_holddiag_scroll_jank_gets_its_own_line(client, caplog):
     """scroll-jank batches one gesture's whole verdict (both frame cadences,
     the worst gaps with what ran inside them) into one wide record, so it rides
-    its own line like close-slack does, and the shared viewport tail never
+    its own line, and the shared viewport tail never
     carries or clips it. TEMP DIAGNOSTIC (scroll-jank): remove with the
     pwa/src/scrolljank.ts block."""
     record = {
