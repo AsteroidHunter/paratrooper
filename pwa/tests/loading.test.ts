@@ -267,12 +267,19 @@ describe("the loading page lives in the document, not in the bundle", () => {
     expect(styleOf("#loading", "(display-mode: browser)").display).toBe("none");
   });
 
-  it("measures nothing against the viewport's height, which iOS reports short", () => {
+  it("sizes nothing against the viewport's height, which iOS reports short", () => {
     // The layout viewport comes up short on the first standalone frame and
     // grows into its real height a moment later. The shorter edge of a phone is
     // its width, so a scene written in vmin is the same size before and after
     // that, and the only thing the growth can move is where the middle is.
-    expect(STYLE_SRC).not.toMatch(/[\d.]+(vh|vw|vmax|svh|lvh|dvh)\b/);
+    // So nothing is SIZED against the height. The one place the height is
+    // allowed is the anchor, and only as lvh, the large viewport, which is a
+    // fixed property of the document that the settle does not touch: centring
+    // on it is what stops the scene painting high and then dropping.
+    expect(STYLE_SRC.replace(/top: 50lvh;/g, "")).not.toMatch(
+      /[\d.]+(vh|vw|vmax|svh|lvh|dvh)\b/,
+    );
+    expect((STYLE_SRC.match(/top: 50lvh;/g) ?? []).length).toBe(1);
     expect((STYLE_SRC.match(/vmin/g) ?? []).length).toBeGreaterThan(10);
   });
 
@@ -369,7 +376,9 @@ describe("the scene: a globe with a ring round it, seen from straight above", ()
   it("centres every part on the panel, off the same pair of numbers", () => {
     for (const sel of ["#loading .globe", "#loading .ring", "#loading .orbit"]) {
       const s = styleOf(sel);
-      expect([sel, s.position, s.left, s.top]).toEqual([sel, "absolute", "50%", "50%"]);
+      // across on the panel, down on the screen: the percentage stands as the
+      // fallback and lvh is what an engine that knows it actually uses
+      expect([sel, s.position, s.left, s.top]).toEqual([sel, "absolute", "50%", "50lvh"]);
       // and pulled back by half its own size, so one length says both where a
       // thing is and how big it is
       const m = s.margin.split(" ");

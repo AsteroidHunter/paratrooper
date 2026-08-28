@@ -122,12 +122,24 @@
          custom property, because the panel under it is always the launch
          image's white while --text turns white in dark mode, and the scene
          would then be white on white. */
+      /* Centred across on the panel, which never moves, and DOWN on the screen
+         rather than on the panel, which does. iOS reports a short layout
+         viewport on the first frame of a cold open and grows it into the real
+         one a moment later: measured on device, 762 tall at first paint and 812
+         between 68 and 289ms afterwards. Half of each is 381 and 406, so a
+         scene centred on the panel paints 25px high and then drops into place,
+         which is the jump he reported. lvh is the large viewport, a fixed
+         property of the document that the settle does not touch, so the scene
+         lands where it belongs on the first frame and has nothing to correct.
+         The percentage stays underneath as the fallback for an engine that does
+         not know the unit, where the old settle is still better than no rule. */
       #loading .globe,
       #loading .ring,
       #loading .orbit {
         position: absolute;
         left: 50%;
         top: 50%;
+        top: 50lvh;
         box-sizing: border-box;
       }
 

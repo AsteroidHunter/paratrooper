@@ -98,7 +98,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.43"; // sending a message now gets the finished message straight back in the reply, so the app keeps the server's own copy of it instead of writing a guess and then fetching the real thing a moment later: a photo lands with its size and its colours already on it, one request where there used to be two, and the time stamped on your own message is the server's clock like every other message rather than the phone's, which used to survive in the cold-open cache and skew the next morning's time labels
+const APP_VERSION = "0.3.44"; // the loading globe is centred on the screen rather than on a height the phone is still revising, so it no longer paints high and drops
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
