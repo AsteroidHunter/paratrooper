@@ -7,7 +7,7 @@ name = "paratrooper"
 version = "0.1.0"
 description = "Phone -> agent -> PR system that edits the theonetrueakash.com pinboard."
 requires-python = ">=3.12"
-license = { text = "FSL-1.1-ALv2" }
+license = { file = "LICENSE.md" }
 authors = [{ name = "Akash Satpathy" }]
 
 # Base deps shared by every entry point. The placement engine is the only
