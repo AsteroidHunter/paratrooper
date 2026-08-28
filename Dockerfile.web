@@ -21,7 +21,10 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY pyproject.toml ./
+# The license file rides with it: the package metadata names the license by
+# file rather than by code, since the license has no short code of the kind
+# SPDX publishes, so the build cannot produce metadata without it.
+COPY pyproject.toml LICENSE.md ./
 COPY src ./src
 COPY config ./config
 RUN pip install --no-cache-dir -e ".[web]"
