@@ -99,28 +99,30 @@ describe("the built page blocks its first paint on nothing", () => {
     // head's <style> out into a file would leave the page painting a bare white
     // panel until that file came back, which is the flash the whole arrangement
     // exists to remove.
-    for (const part of [
-      "ring", "orbit", "dot", "globe",
-      "line equator", "line lat lat-n", "line lat lat-s", "meridian", "line axis",
-    ]) {
+    for (const part of ["globe", "earth"]) {
       expect([part, PAGE.includes(`class="${part}"`)]).toEqual([part, true]);
     }
-    for (const sel of [
-      "#loading",
-      ".scene",
-      ".globe",
-      ".equator",
-      ".meridian",
-      ".ring",
-      ".orbit",
-      ".dot",
-    ]) {
+    for (const sel of ["#loading", ".scene", ".globe", ".earth", ".coast"]) {
       expect([sel, PAGE.includes(sel)]).toEqual([sel, true]);
     }
-    // the scene arriving and the dot going round, plus the answer for anyone
+    // The coastline is the one part of this scene that is a drawing rather than
+    // a box, so it is the one part a build step could plausibly decide to pull
+    // out into a file of its own. It has to still be written out in the bytes
+    // the page serves, and it has to still be stated once and used twice: the
+    // second copy is what makes the loop seamless, and naming the first is what
+    // keeps it from costing a second 19,457 bytes.
+    expect(PAGE).toContain("<defs>");
+    const uses = [...PAGE.matchAll(/<use\b[^>]*>/g)];
+    expect(uses.length).toBe(2);
+    const id = /<path[^>]*\bid="([^"]*)"/.exec(PAGE)?.[1];
+    expect(id).toBeTruthy();
+    for (const u of uses) expect(u[0]).toContain(`href="#${id}"`);
+    expect(/\bd="[Mm][^"]{5000,}"/.test(PAGE)).toBe(true); // the shape itself, not a stub
+    // the scene arriving and the globe turning, plus the answer for anyone
     // who asked for reduced motion, which slows that turn rather than stopping
-    // it: a still loading indicator reads as an app that has died
-    for (const name of ["ld-orbit", "ld-appear"]) {
+    // it: a still loading indicator reads as an app that has died, and this is
+    // now the only moving thing on the page
+    for (const name of ["ld-spin", "ld-appear"]) {
       expect([name, PAGE.includes(`@keyframes ${name}`)]).toEqual([name, true]);
     }
     expect(PAGE).toContain("prefers-reduced-motion: reduce");
@@ -129,7 +131,7 @@ describe("the built page blocks its first paint on nothing", () => {
     // after it), and it is the only one this claim is about: the app's bubbles
     // do stop under the same setting, and should, since a person starts those.
     const own = PAGE.slice(PAGE.indexOf("<style>"), PAGE.indexOf("</style>"));
-    const full = Number(/animation:\s*ld-orbit\s+(\d+)ms/.exec(own)?.[1]);
+    const full = Number(/animation:\s*ld-spin\s+(\d+)ms/.exec(own)?.[1]);
     const slow = Number(
       /prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?animation-duration:\s*(\d+)ms/.exec(own)?.[1],
     );

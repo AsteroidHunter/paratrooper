@@ -6,9 +6,10 @@
 // read to check it. There is no DOM in this env, but more to the point the
 // whole claim is about what the SERVED document says before a line of the
 // bundle has run, and the file is exactly that. The scene is geometry, so the
-// checks on it are arithmetic: the radius the dot travels is recomputed from
-// the ring's own declarations, which is what stops the dot and the line it is
-// supposed to be riding drifting apart.
+// checks on it are arithmetic: the distance the map slides is recomputed from
+// the strip's own declarations and from how many copies of the world the strip
+// actually holds, which is what stops the loop developing a seam that walks
+// across the globe once every revolution.
 //
 // The lift rule and the quiet watch are pure, so they run on fake timers and a
 // hand-pumped frame clock, and the cases that have to watch the script take the
@@ -158,29 +159,33 @@ function vmin(value: string): number {
 }
 
 // a hair, for comparing two float routes to the same number
-/** a percentage as its number, for the two latitudes' symmetry */
-function pct(value: string): number {
-  return parseFloat(value);
-}
-
 function near(a: number, b: number, slack = 1e-6): boolean {
   return Math.abs(a - b) < slack;
 }
 
 // --- the scene's own numbers ----------------------------------------------------
 //
-// Every number below is READ off the shipped stylesheet rather than restated
-// here, so the checks are against the picture the page actually draws. The dot
-// rides the ring's centre line, not its outer edge: the box is a border-box and
-// the stroke is drawn inside it, so the line itself is half a stroke in on each
-// side, and the arm that carries the dot is sized to exactly that.
+// Every number below is READ off the shipped stylesheet and off the shipped
+// markup rather than restated here, so the checks are against the picture the
+// page actually draws.
 const GLOBE = styleOf("#loading .globe");
-const RING = styleOf("#loading .ring");
-const ORBIT = styleOf("#loading .orbit");
-const DOT = styleOf("#loading .dot");
-const RING_STROKE = vmin(RING.border);
-const RING_LINE_R = vmin(RING.width) / 2 - RING_STROKE / 2; // the line the ring draws
-const ARM_R = vmin(ORBIT.width) / 2; // where the dot's centre is carried
+const EARTH = styleOf("#loading .earth");
+const COAST = styleOf("#loading .coast");
+
+// the map's own frame, off the markup: the box the coastline is drawn in, how
+// many copies of the world stand side by side in it, and where each one starts
+const VIEWBOX = (/viewBox="([^"]*)"/.exec(MARKUP)?.[1] ?? "").split(/\s+/).map(Number);
+const USES = [...MARKUP.matchAll(/<use\b([^>]*)>/g)].map((m) => m[1]);
+// a <use> with no x starts at zero, which is the first copy
+const USE_X = USES.map((a) => Number(/\bx="([^"]*)"/.exec(a)?.[1] ?? 0));
+const WORLD = VIEWBOX[2] / USES.length; // one world, in the map's own units
+
+// a percentage as its number, for reading the strip's width and its travel
+function pctOf(value: string): number {
+  const m = /(-?[\d.]+)%/.exec(value);
+  if (!m) throw new Error(`no percentage in: ${value}`);
+  return Number(m[1]);
+}
 
 // the app's own ink, off the app's own stylesheet: the scene is drawn in the
 // colour the chat sets its text in, rather than in one invented here
@@ -216,8 +221,19 @@ describe("the loading page lives in the document, not in the bundle", () => {
 
   it("carries everything it shows, with nothing left to go and get", () => {
     // no request, no service-worker lookup, no second file and no decode
-    // between the document arriving and the picture being on screen
-    expect([...MARKUP.matchAll(/(?:src|href)="[^"]*"/g)].map((m) => m[0])).toEqual([]);
+    // between the document arriving and the picture being on screen.
+    //
+    // The scene has hrefs now, which it did not before: the coastline is
+    // written out once and drawn twice, and the second copy names the first.
+    // So the claim cannot be "no href" any more and is instead the thing that
+    // claim was ever standing in for — every one of them points INTO this
+    // document. A bare fragment is resolved against the document already in
+    // hand, so it is a lookup rather than a fetch, and there is nothing at the
+    // other end of it that can be slow or missing.
+    const refs = [...MARKUP.matchAll(/(?:src|href)="([^"]*)"/g)].map((m) => m[1]);
+    expect(refs.length).toBeGreaterThan(0); // or this passes by having nothing to check
+    for (const r of refs) expect([r, r.startsWith("#")]).toEqual([r, true]);
+    expect([...MARKUP.matchAll(/\bsrc="[^"]*"/g)].map((m) => m[0])).toEqual([]);
     expect(MARKUP).not.toContain("<img");
     expect(MARKUP).not.toContain("data:");
     expect(STYLE_SRC).not.toContain("url(");
@@ -228,17 +244,19 @@ describe("the loading page lives in the document, not in the bundle", () => {
     expect(text).toBe("");
   });
 
-  it("is empty boxes and the scene that holds them, in the order they read in", () => {
+  it("is the panel, three boxes and one shape, in the order they read in", () => {
     // the scene is flat, so this is not a painting order and nothing depends on
-    // it: the ring the dot travels, the dot on its turning arm, then the globe
-    // and the five lines that make it read as one
+    // it: the round window, the strip that slides behind it, and the coastline
+    // the strip carries. The ring and the travelling dot are gone — the globe
+    // turns now, so a second revolution beside it was two clocks running at
+    // once, and the one made of coastlines is the one that means anything.
     const parts = [...MARKUP.matchAll(/<div class="([^"]*)">/g)].map((m) => m[1]);
-    expect(parts).toEqual([
-      "scene", "ring", "orbit", "dot", "globe",
-      "line equator", "line lat lat-n", "line lat lat-s", "meridian", "line axis",
+    expect(parts).toEqual(["scene", "globe", "earth"]);
+    // and what is inside is one drawing, stated once and used twice. There is
+    // no <img> and no second file: the tags are the shape itself.
+    expect([...MARKUP.matchAll(/<(\w+)/g)].map((m) => m[1])).toEqual([
+      "div", "div", "div", "div", "svg", "defs", "path", "use", "use",
     ]);
-    // and every tag in there is one of those boxes: no picture, no svg, no text
-    expect([...MARKUP.matchAll(/<(\w+)/g)].map((m) => m[1])).toEqual(Array(11).fill("div"));
   });
 
   it("gets its styles from the document too, in the head, before the markup", () => {
@@ -248,11 +266,8 @@ describe("the loading page lives in the document, not in the bundle", () => {
       "#loading",
       "#loading .scene",
       "#loading .globe",
-      "#loading .equator",
-      "#loading .meridian",
-      "#loading .ring",
-      "#loading .orbit",
-      "#loading .dot",
+      "#loading .earth",
+      "#loading .coast",
     ]) {
       expect([sel, RULES.some((r) => r.sel.includes(sel))]).toEqual([sel, true]);
     }
@@ -289,7 +304,12 @@ describe("the loading page lives in the document, not in the bundle", () => {
       /[\d.]+(vh|vw|vmax|svh|lvh|dvh)\b/,
     );
     expect((STYLE_SRC.match(/top: 50lvh;/g) ?? []).length).toBe(1);
-    expect((STYLE_SRC.match(/vmin/g) ?? []).length).toBeGreaterThan(10);
+    // The floor is lower than it was because the scene is smaller than it was:
+    // the ring, the arm and the dot were eleven lengths between them and they
+    // are gone. What is left is the circle's own five and the coastline's
+    // weight, and the check is only here so the sweep above cannot pass by
+    // finding no lengths at all to sweep.
+    expect((STYLE_SRC.match(/vmin/g) ?? []).length).toBeGreaterThanOrEqual(5);
   });
 
   it("comes up rather than being there, which is what the growth hides under", () => {
@@ -308,7 +328,7 @@ describe("the loading page lives in the document, not in the bundle", () => {
   });
 });
 
-describe("the scene: a globe with a ring round it, seen from straight above", () => {
+describe("the scene: the Earth, alone, turning behind a round window", () => {
   it("is drawn in the app's own ink, and in no other colour", () => {
     // the ink is not invented here: it is the colour the app's stylesheet sets
     // its text in. It is written out in the page rather than read from that
@@ -324,145 +344,143 @@ describe("the scene: a globe with a ring round it, seen from straight above", ()
     expect(STYLE_SRC).not.toMatch(/gradient|box-shadow|rgba?\(/);
   });
 
-  it("is a wire globe: a circle carrying an equator, two latitudes, a meridian and an axis", () => {
-    const stroke = vmin(GLOBE.border);
+  it("is a hollow circle, and that circle is what the map is seen through", () => {
+    // The circle is the limb of the globe and the window onto the strip at the
+    // same time. Hollow, or there would be nothing to see through it; a true
+    // circle, or the planet reads as an egg; and it hides what leaves it, which
+    // is the whole of how the map is cropped. No second shape is cut to do it,
+    // which is why there is still no clip-path anywhere on the page.
     expect(vmin(GLOBE.width)).toBe(vmin(GLOBE.height)); // a circle, not an oval
     expect(GLOBE["border-radius"]).toBe("50%");
-    expect(GLOBE.background).toBeUndefined(); // hollow, or none of the lines would show
-    // the straight lines are drawn at half the width the curves are, because a
-    // straight horizontal line lands square on the screen's rows and comes out
-    // solid where a curve of the same width is spread across them and reads
-    // lighter. Drawn at the same number they were bars across a set of hairlines.
-    expect(styleOf("#loading .line").background).toBe(APP_INK); // one ink, said once
-    const straight = styleOf("#loading .equator"); // the shared straight-line rule
-    expect(near(vmin(straight.height), stroke / 2)).toBe(true);
-    expect(near(vmin(straight["margin-top"]), -vmin(straight.height) / 2)).toBe(true);
-    // the equator is the full diameter; each latitude is the chord the circle
-    // actually has at its own height, which a quarter of the radius up or down
-    // leaves just under nine tenths as wide
-    expect(styleOf("#loading .equator").left).toBe("0");
-    expect(styleOf("#loading .equator").right).toBe("0");
-    expect(styleOf("#loading .equator").top).toBe("50%");
-    const north = styleOf("#loading .lat-n");
-    const south = styleOf("#loading .lat-s");
-    expect([north.left, north.right, north.top]).toEqual(["6.7%", "6.7%", "25%"]);
-    expect([south.left, south.right, south.top]).toEqual(["6.7%", "6.7%", "75%"]);
-    // and they sit the same distance either side of the equator, or the globe
-    // reads as leaning
-    expect(pct(north.top) + pct(south.top)).toBe(100);
-    // the meridian is the one line of longitude that is not edge on, an ellipse
-    // half the width of the box and all of its height; the axis is that same
-    // line seen flat, so it is straight and drawn at the straight weight
-    const mer = styleOf("#loading .meridian");
-    expect([mer.top, mer.bottom, mer.left, mer.right]).toEqual(["0", "0", "25%", "25%"]);
-    expect(mer["border-radius"]).toBe("50%");
-    expect(vmin(mer.border)).toBe(stroke);
-    const axis = styleOf("#loading .axis");
-    expect([axis.top, axis.bottom, axis.left]).toEqual(["0", "0", "50%"]);
-    expect(near(vmin(axis.width), stroke / 2)).toBe(true);
-    expect(near(vmin(axis["margin-left"]), -vmin(axis.width) / 2)).toBe(true);
+    expect(GLOBE.background).toBeUndefined(); // hollow, or the map cannot show
+    expect(GLOBE.overflow).toBe("hidden"); // the crop
+    expect(GLOBE["box-sizing"]).toBe("border-box"); // the limb is drawn inside the size
+    expect(STYLE_SRC).not.toContain("clip-path");
   });
 
-  it("leaves the ring room: the globe is well inside the circle the dot travels", () => {
-    // he asked for it smaller, and the point of smaller is that the ring stops
-    // being a collar on it
-    expect(vmin(GLOBE.width) * 2).toBeLessThan(vmin(RING.width));
+  it("draws the land as an outline, lighter than the limb that holds it", () => {
+    // Outlined rather than filled, and that was settled by rendering the page
+    // at the size it ships at: filled is legible but carries about twice the
+    // ink, which turns the one thing on the page into a solid on a page that is
+    // otherwise all hairlines.
+    expect(COAST.fill).toBe("none");
+    expect(COAST.stroke).toBe(APP_INK); // one ink, and the app's own
+    // and thinner than the circle around it, so the limb stays the edge of the
+    // drawing and the coast stays detail inside it
+    expect(vmin(COAST["stroke-width"])).toBeLessThan(vmin(GLOBE.border));
+
+    // The width above only means anything because the shape says its stroke is
+    // measured on the screen. The strip is four circles wide and the map is
+    // 1600 units across, so one map unit is a fraction of a pixel, and a width
+    // read in map units disappears whatever the number says. It has to sit on
+    // the shape rather than in a rule, because it is not inherited and a rule
+    // does not reach the copies drawn from it — measured on a rendered page,
+    // the same 0.2vmin drew 4,752 pixels of ink with it on the shape against
+    // 2,397 with it in a rule, and 2,397 is about the bare circle on its own.
+    expect(/<path\b[^>]*\bvector-effect="non-scaling-stroke"/.test(MARKUP)).toBe(true);
   });
 
-  it("is flat: a true circle for a ring, nothing tilted, nothing cut, no depth", () => {
-    // this is the whole change. A tilted ellipse has a near arc and a far arc,
-    // and every bit of machinery the old scene carried was there to fake which
-    // of them passed in front: two copies of the ring, two copies of the moon,
-    // a clip on one of them and five layer numbers. Seen from above there are
-    // no arcs, so none of it has anything to do.
-    expect(vmin(RING.width)).toBe(vmin(RING.height)); // a circle, not an ellipse
-    expect(RING["border-radius"]).toBe("50%");
-    expect(RING.transform).toBeUndefined(); // no tilt
-    expect(STYLE_SRC).not.toContain("clip-path"); // nothing cut down to an arc
-    // and nothing in the scene states a layer, because nothing overlaps. The
-    // panel keeps its own, which is where it sits over the app.
+  it("is flat: nothing tilted, nothing layered, nothing overlapping", () => {
+    // The scene was already flat and is flatter still: the ring and the dot are
+    // gone, so the only things left are a circle and the strip inside it, and
+    // the strip is behind the circle only in the sense that the circle crops
+    // it. Nothing states a layer. The panel keeps its own, which is where it
+    // sits over the app.
+    expect(GLOBE.transform).toBeUndefined();
+    expect(EARTH.transform).toBeUndefined(); // the travel is the animation's, not a static tilt
     const inScene = RULES.filter((r) => r.sel.some((s) => s.startsWith("#loading .")));
     expect(inScene.filter((r) => "z-index" in r.decls).flatMap((r) => r.sel)).toEqual([]);
     expect(styleOf("#loading")["z-index"]).toBe("40");
   });
 
-  it("stands the ring well clear of the globe, so the dot never reaches it", () => {
-    const globeR = vmin(GLOBE.width) / 2;
-    expect(RING_LINE_R).toBeGreaterThan(globeR);
-    expect(ARM_R - vmin(DOT.width) / 2).toBeGreaterThan(globeR); // clear air between
-    // the ring is the thinner of the two lines, so the globe stays the subject
-    expect(RING_STROKE).toBeLessThan(vmin(GLOBE.border));
-    // and the traveller is a small filled circle: smaller than the globe, and
-    // fatter than the line it rides, which is what makes it the thing moving
-    expect(vmin(DOT.width)).toBe(vmin(DOT.height));
-    expect(vmin(DOT.width)).toBeLessThan(vmin(GLOBE.width));
-    expect(vmin(DOT.width)).toBeGreaterThan(RING_STROKE);
-    expect(DOT["border-radius"]).toBe("50%");
-    expect(DOT.background).toBe(APP_INK);
-  });
-
-  it("centres every part on the panel, off the same pair of numbers", () => {
-    for (const sel of ["#loading .globe", "#loading .ring", "#loading .orbit"]) {
-      const s = styleOf(sel);
-      // across on the panel, down on the screen: the percentage stands as the
-      // fallback and lvh is what an engine that knows it actually uses
-      expect([sel, s.position, s.left, s.top]).toEqual([sel, "absolute", "50%", "50lvh"]);
-      // and pulled back by half its own size, so one length says both where a
-      // thing is and how big it is
-      const m = s.margin.split(" ");
-      expect([sel, near(vmin(m[0]), -vmin(s.height) / 2), near(vmin(m[3]), -vmin(s.width) / 2)])
-        .toEqual([sel, true, true]);
-    }
+  it("centres the globe on the panel, off one pair of numbers", () => {
+    // This used to sweep three boxes that shared an anchor. There is one box
+    // now, and it is the same anchor: across on the panel, which never moves,
+    // and down on the SCREEN, which is the point — the percentage stands as the
+    // fallback and lvh is what an engine that knows it actually uses, because
+    // iOS reports a short layout viewport on the first frame and a scene
+    // centred on the panel would paint high and then drop.
+    const s = styleOf("#loading .globe");
+    expect([s.position, s.left, s.top]).toEqual(["absolute", "50%", "50lvh"]);
+    // and pulled back by half its own size, so one length says both where it is
+    // and how big it is
+    const m = s.margin.split(" ");
+    expect(near(vmin(m[0]), -vmin(s.height) / 2)).toBe(true);
+    expect(near(vmin(m[3]), -vmin(s.width) / 2)).toBe(true);
   });
 });
 
-describe("the revolution: one dot, on the line the ring draws", () => {
-  it("puts the dot on that line rather than beside it", () => {
-    // The arm is an empty box that turns, and the dot sits centred on its top
-    // edge, so the arm's own half-width is the radius the dot travels. The ring
-    // is a border-box with its stroke painted inside it, so the line it draws
-    // is half a stroke in from the box, and the arm is the ring's box less one
-    // whole stroke. This is the check that keeps the two together.
-    expect(near(ARM_R, RING_LINE_R)).toBe(true);
-    expect(vmin(ORBIT.width)).toBe(vmin(ORBIT.height)); // something round to turn
-    expect(ORBIT.border).toBeUndefined(); // the arm draws nothing of its own
-    expect(ORBIT.background).toBeUndefined();
-    expect([DOT.left, DOT.top]).toEqual(["50%", "0"]);
-    const m = DOT.margin.split(" ");
-    expect(near(vmin(m[0]), -vmin(DOT.height) / 2)).toBe(true);
-    expect(near(vmin(m[3]), -vmin(DOT.width) / 2)).toBe(true);
+describe("the rotation: one world's worth of travel, and no seam", () => {
+  it("carries the world more than once, so there is something to slide into", () => {
+    // The strip holds the same drawing twice, side by side, and the second copy
+    // NAMES the first rather than repeating it: written out twice this map
+    // would cost another 19,457 bytes in the document, and named it costs 67.
+    // The shape is stated once, in a block that draws nothing by itself.
+    expect(MARKUP).toContain("<defs>");
+    expect((MARKUP.match(/<path\b/g) ?? []).length).toBe(1);
+    expect(USES.length).toBeGreaterThan(1);
+    const id = /<path[^>]*\bid="([^"]*)"/.exec(MARKUP)?.[1];
+    expect(id).toBeTruthy();
+    for (const a of USES) expect(a).toContain(`href="#${id}"`);
+    // the copies stand one whole world apart, in the map's own units, and the
+    // first one starts at the origin
+    expect(USE_X).toEqual(USES.map((_, i) => i * WORLD));
   });
 
-  it("goes round once, calmly, and never stops", () => {
-    const turn = anims(ORBIT.animation);
-    expect(turn.length).toBe(1); // one track: a turn is the whole of it now
-    expect(turn[0].name).toBe("ld-orbit");
+  it("slides by exactly one world, which is what leaves no seam", () => {
+    // This is the check the dot's old one became. It used to hold the dot on
+    // the line it was riding by recomputing the radius from the ring's own
+    // declarations; it now holds the loop shut by recomputing the travel from
+    // the strip's own width and from how many worlds the strip actually holds.
+    //
+    // The strip is a percentage of the circle, and the travel is a percentage
+    // of the strip. Slide by one copy's worth and the picture at the end is the
+    // one at the start, so the repeat cannot be seen. Slide by anything else
+    // and a join walks across the globe once every revolution.
+    const spin = FRAMES["ld-spin"];
+    expect(spin.map((s) => s[0])).toEqual(["from", "to"]);
+    const from = pctOf(spin[0][1].transform);
+    const to = Number(/translateX\((-?[\d.]+)/.exec(spin[1][1].transform)?.[1] ?? NaN);
+    expect(to).toBe(0); // it ends where the strip sits, so the loop's ends meet
+    // one copy is 1/n of the strip, and that is exactly the distance travelled
+    expect(Math.abs(from)).toBe(100 / USES.length);
+    // and the strip really is n worlds wide, or the fraction above is a
+    // fraction of the wrong thing. Each world is two circles across, so the
+    // circle shows half a world: as much of a sphere as can face you at once.
+    expect(pctOf(EARTH.width)).toBe(200 * USES.length);
+    // the map's own box holds those n worlds and nothing over
+    expect(VIEWBOX[2]).toBe(WORLD * USES.length);
+    expect(VIEWBOX[2] / VIEWBOX[3]).toBe(2 * USES.length); // and each is 2:1, as the world is
+  });
+
+  it("turns once, calmly, and never stops", () => {
+    const turn = anims(EARTH.animation);
+    expect(turn.length).toBe(1); // one track: the turn is the whole of it
+    expect(turn[0].name).toBe("ld-spin");
     expect([turn[0].ease, turn[0].count]).toEqual(["linear", "infinite"]);
     expect(turn[0].ms >= 2000 && turn[0].ms <= 3000).toBe(true);
-    expect(FRAMES["ld-orbit"]).toEqual([
-      ["from", { transform: "rotate(0deg)" }],
-      ["to", { transform: "rotate(360deg)" }],
-    ]);
   });
 
   it("animates nothing but transform and opacity, so no frame needs the layout", () => {
     // the main thread is at its busiest during a boot, which is the whole
-    // reason the scene is drawn this way rather than by script. A rotate is a
-    // transform, and there is no scale anywhere, so the dot is rasterized at
-    // its own size and only turned.
+    // reason the scene is drawn this way rather than by script. A translate is
+    // a transform, and there is no scale anywhere, so the map is rasterized at
+    // its own size and only moved.
     const props = new Set<string>();
     for (const stops of Object.values(FRAMES)) {
       for (const [, d] of stops) for (const p of Object.keys(d)) props.add(p);
     }
     expect([...props].sort()).toEqual(["opacity", "transform"]);
     // the whole page has two animations: the scene arriving, and this turn
-    expect(Object.keys(FRAMES).sort()).toEqual(["ld-appear", "ld-orbit"]);
+    expect(Object.keys(FRAMES).sort()).toEqual(["ld-appear", "ld-spin"]);
     // and the moving part is marked as such, so it gets its own layer
-    expect(ORBIT["will-change"]).toBe("transform");
+    expect(EARTH["will-change"]).toBe("transform");
+    // nothing in the page runs per frame in script, and nothing measures
+    expect(INDEX_HTML).not.toMatch(/requestAnimationFrame|setInterval|getBoundingClientRect/);
   });
 });
 
-describe("asked for reduced motion, the revolution slows rather than stopping", () => {
+describe("asked for reduced motion, the rotation slows rather than stopping", () => {
   const reduce = "(prefers-reduced-motion: reduce)";
 
   it("keeps turning, at half the pace", () => {
@@ -473,10 +491,14 @@ describe("asked for reduced motion, the revolution slows rather than stopping", 
     // guidance agrees, treating motion in a preload phase as essential where a
     // still indicator could have someone think the content is frozen, and
     // halving the pace is what is done elsewhere instead.
-    const slow = styleOf("#loading .orbit", reduce);
+    //
+    // It matters more than it did rather than less. The dot used to carry this
+    // and there were two moving things; the globe is the only one left, so a
+    // freeze here is a page with nothing moving on it at all.
+    const slow = styleOf("#loading .earth", reduce);
     expect(slow.animation).toBeUndefined(); // nothing is turned off
     expect(Number(slow["animation-duration"].replace("ms", ""))).toBe(
-      anims(ORBIT.animation)[0].ms * 2,
+      anims(EARTH.animation)[0].ms * 2,
     );
   });
 
@@ -485,6 +507,7 @@ describe("asked for reduced motion, the revolution slows rather than stopping", 
     // either; the only thing that ever froze the scene was the rule this
     // replaced
     expect(STYLE_SRC).not.toMatch(/animation:\s*none/);
+    expect(STYLE_SRC).not.toMatch(/animation-play-state/);
   });
 
   it("says only the duration, on the one rule that turns, standing after it", () => {
@@ -492,10 +515,10 @@ describe("asked for reduced motion, the revolution slows rather than stopping", 
     // count exactly as the rule above says them, so there is one revolution
     // described in one place. It is written against the very same selector, so
     // it can only win by standing later in the sheet.
-    expect(Object.keys(styleOf("#loading .orbit", reduce))).toEqual(["animation-duration"]);
-    expect(orderOf("#loading .orbit", reduce)).toBeGreaterThan(orderOf("#loading .orbit"));
+    expect(Object.keys(styleOf("#loading .earth", reduce))).toEqual(["animation-duration"]);
+    expect(orderOf("#loading .earth", reduce)).toBeGreaterThan(orderOf("#loading .earth"));
     expect(RULES.filter((r) => r.media === reduce).flatMap((r) => r.sel)).toEqual([
-      "#loading .orbit",
+      "#loading .earth",
     ]);
   });
 

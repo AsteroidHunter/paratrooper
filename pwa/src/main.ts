@@ -110,7 +110,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.52"; // every keyboard close now says what really ended it and whether the phone was still claiming a keyboard-sized screen at that moment, which is where the white band under the compose bar hides
+const APP_VERSION = "0.3.53"; // the loading screen is the Earth itself now, its coastlines turning behind a round window, and the ring and the travelling dot that used to circle the old wire globe are gone, since a planet that turns already says the app is working
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
