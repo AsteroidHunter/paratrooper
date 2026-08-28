@@ -216,6 +216,14 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // whole correction would sit in the ring until something unrelated happened
   // by. A box that changes over a beat writes a short burst of them and the
   // settle below folds a burst into one post, so this cannot churn either.
+  //
+  // "thread-blank" is IN for the same reason and more sharply: its record is
+  // built at the first touch AFTER the photo cancel that armed it, which may be
+  // seconds later and with nothing else happening anywhere near it, so nothing
+  // else can be relied on to arm the post. One record per armed cancel, and a
+  // cancel only arms one while the conversation is still gliding, so it cannot
+  // churn. TEMP DIAGNOSTIC (blank-thread): remove this entry and this paragraph
+  // with the blankprobe.ts block.
   if (
     ev === "held" || ev === "release" || ev === "pass" || ev === "reset" ||
     ev === "snapback" || ev === "followtail" || ev === "flight" ||
@@ -225,7 +233,8 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "grow-blink" || ev === "kb-shove" ||
     ev === "kb-focusing" || ev === "kb-glide" || ev === "kb-edge" ||
     ev === "pick-anchor" || ev === "tail-gap" ||
-    ev === "scroll-jank" || ev === "tail-settle" || ev === "pick-timing"
+    ev === "scroll-jank" || ev === "tail-settle" || ev === "pick-timing" ||
+    ev === "thread-blank"
   ) {
     diagPost();
   }

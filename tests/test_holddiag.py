@@ -509,3 +509,96 @@ def test_holddiag_photo_box_marks_get_their_own_line(client, caplog):
     assert len(vp) == 1
     assert '"guessed-box"' not in vp[0]
     assert '"tail-gap"' in vp[0]
+
+
+def test_holddiag_settle_marks_get_their_own_line(client, caplog):
+    """The app's one scroll write, on the one channel that was reaching nobody:
+    the phone has been posting tail-settle all along and no block claimed it, so
+    every correction it made was discarded here. Both shapes ride the line — a
+    single settle carrying its mode, and a whole run of the per-frame ones
+    folded into a summary carrying n — because a box that eases writes two dozen
+    of them and the pair only reads as one event. TEMP DIAGNOSTIC (blank-thread):
+    remove with the pwa/src/viewport.ts block."""
+    trail = {"build": "b", "events": [
+        {"t": 1, "ev": "followtail", "d": {"to": False, "trigger": "scroll-away"}},
+        # the drawer's beat: twenty-four writes, none of which moved the reader
+        {"t": 2, "ev": "tail-settle",
+         "d": {"via": "box", "n": 24, "moved": 0, "from": 2180, "to": 2180,
+               "over": 0, "ms": 396, "sh": 4329, "ch": 700}},
+        # and the louder settle that ended it
+        {"t": 3, "ev": "tail-settle",
+         "d": {"via": "drawer-close", "mode": "clamp", "from": 2180, "to": 2180,
+               "over": 0, "sh": 4329, "ch": 770, "cut": False, "air": 0}},
+    ]}
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    settle = [r.message for r in caplog.records if "holddiag settle" in r.message]
+    assert len(settle) == 1
+    assert "events=2" in settle[0]
+    # the run's whole verdict survives: how many writes landed, how many moved
+    # the reader, and where the scroll stood at the first and at the last
+    assert '"n": 24' in settle[0] and '"moved": 0' in settle[0]
+    assert '"from": 2180' in settle[0] and '"ms": 396' in settle[0]
+    # and the mark that closed the run is on the same line, so the beat and its
+    # ending read as one sequence
+    assert '"via": "drawer-close"' in settle[0] and '"mode": "clamp"' in settle[0]
+    # a burst of them stays off the shared viewport tail, which keeps its own
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"tail-settle"' not in vp[0]
+    assert '"followtail"' in vp[0]
+
+
+def test_holddiag_thread_blank_gets_its_own_line(client, caplog):
+    """One armed photo cancel batches seven readings of the conversation's
+    geometry into one wide record, from before the tap out to the frame after
+    the touch that repaired the blank, so it rides its own line like scroll-jank
+    and pick-timing do. The reading that decides the whole question is vis, the
+    rows standing inside the visible band, so the digest has to carry it
+    unclipped for every one of the seven. TEMP DIAGNOSTIC (thread-blank): remove
+    with the pwa/src/blankprobe.ts block."""
+    def frame(w, ms, vis, sc):
+        return {"w": w, "ms": ms, "st": 2180, "sh": 4329, "ch": 700, "over": 0,
+                "kids": 168, "rows": 41, "vis": vis, "top1": -22, "botN": 690,
+                "h1": 44, "scan": 96, "cap": False, "pendH": 76, "pendD": "flex",
+                "anA": 0, "anT": 0, "app": "", "thr": "", "peek": "0px",
+                "ft": False, "sc": sc, "set": 0, "setMoved": 0}
+
+    record = {
+        "n": 1, "t0": 51230, "paired": True,
+        "f": [
+            frame("tap", 0, 9, 0),
+            frame("frame", 16, 9, 1),
+            frame("mid", 132, 9, 4),
+            frame("beat", 401, 9, 7),
+            frame("rest", 703, 9, 7),
+            frame("touch", 2140, 9, 7),
+            frame("after", 2156, 9, 8),
+        ],
+    }
+    trail = {"build": "b", "events": [
+        {"t": 1, "ev": "tail-settle",
+         "d": {"via": "box", "n": 24, "moved": 0, "from": 2180, "to": 2180,
+               "over": 0, "ms": 396, "sh": 4329, "ch": 700}},
+        {"t": 2, "ev": "thread-blank", "d": record},
+    ]}
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+    blank = [r.message for r in caplog.records if "holddiag blank" in r.message]
+    assert len(blank) == 1
+    assert "events=1" in blank[0]
+    # every moment of the run reaches the line, the pair included: a record that
+    # arrived without its two halves cannot answer anything
+    for moment in ("tap", "frame", "mid", "beat", "rest", "touch", "after"):
+        assert f'"w": "{moment}"' in blank[0]
+    assert '"paired": true' in blank[0]
+    # and the readings that decide it: rows standing in the band, the list still
+    # being in the document, where the scroll was, and whether the walk was clipped
+    assert '"vis": 9' in blank[0] and '"kids": 168' in blank[0]
+    assert '"st": 2180' in blank[0] and '"cap": false' in blank[0]
+    # the wide record stays off both the shared viewport tail and the settle line
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert vp == [] or '"thread-blank"' not in vp[0]
+    settle = [r.message for r in caplog.records if "holddiag settle" in r.message]
+    assert len(settle) == 1
+    assert '"thread-blank"' not in settle[0]

@@ -205,6 +205,106 @@ export function settleMark(
   };
 }
 
+// ===================== TEMP DIAGNOSTIC (remove after the blank-thread session) =====================
+// The per-frame settles, folded into one mark per run.
+//
+// A box that eases rather than hops delivers a resize on every frame of the
+// ease, and each one settles: the photo drawer's own close is about
+// twenty-four of them inside four hundred milliseconds, and the keyboard's
+// glide home is the same shape. Those passes carry a `quiet` flag and, unless
+// one of them corrected an overhang or cut a ride, they record nothing at all
+// — which is how a whole beat of writes came to be the one stretch of this
+// app with no trail behind it, at exactly the moment a blank thread was
+// reported. Recording each of them instead would put two dozen marks on a
+// bounded digest tail and push everything else off it, so a run is summarised:
+// how many writes landed, how many of them actually moved the reader, where
+// the scroll stood at the first and at the last, and the worst overhang any
+// one of them had to take back.
+//
+// A run ends when its writes stop arriving. The gap below is wider than a
+// frame at 60fps and far narrower than the space between two separate box
+// changes, so a beat cannot be split in half and two beats cannot be joined.
+// Pure, and holding only numbers, so a run's whole lifecycle is pinned on
+// synthetic timestamps like the rest of this file.
+//
+// TO REMOVE: delete this block, and in main.ts the tailBurst wiring and its
+// two calls inside settleTail.
+
+/** two frames at 60fps: wider than the ease's own cadence, narrower than the
+    quiet between two box changes */
+export const SETTLE_BURST_GAP_MS = 34;
+
+export type SettleBurstMark = {
+  via: string;
+  n: number; // writes that landed inside the run
+  moved: number; // how many of them put the scroll somewhere else
+  from: number; // where it stood at the first write
+  to: number; // and at the last
+  over: number; // the worst overhang any one write took back
+  ms: number; // first write to last
+  sh: number; // the scroller's numbers as the run ended, so the box's
+  ch: number; // own change is legible beside the writes it caused
+};
+
+export interface SettleBurst {
+  /** fold one quiet pass in; hands back the run this pass ended, if it ended one */
+  add(via: string, g: BottomGeometry, plan: TailSettle, at: number): SettleBurstMark | null;
+  /** close whatever is open — a louder settle arrived, or the writes stopped */
+  take(): SettleBurstMark | null;
+}
+
+interface OpenRun {
+  via: string;
+  n: number;
+  moved: number;
+  from: number;
+  to: number;
+  over: number;
+  sh: number;
+  ch: number;
+  t0: number; // the first write's clock; the mark carries the length, not this
+  last: number;
+}
+
+export function createSettleBurst(gapMs: number = SETTLE_BURST_GAP_MS): SettleBurst {
+  let run: OpenRun | null = null;
+  const close = (): SettleBurstMark | null => {
+    if (!run) return null;
+    const { via, n, moved, from, to, over, sh, ch, t0, last } = run;
+    run = null;
+    return { via, n, moved, from, to, over, ms: Math.round(last - t0), sh, ch };
+  };
+  return {
+    add(via, g, plan, at): SettleBurstMark | null {
+      const ended = run && at - run.last > gapMs ? close() : null;
+      if (!run) {
+        run = {
+          via,
+          n: 0,
+          moved: 0,
+          from: Math.round(g.st),
+          to: 0,
+          over: 0,
+          sh: 0,
+          ch: 0,
+          t0: at,
+          last: at,
+        };
+      }
+      run.n += 1;
+      if (plan.moved) run.moved += 1;
+      run.to = Math.round(plan.top);
+      run.over = Math.max(run.over, Math.round(plan.over));
+      run.sh = Math.round(g.sh);
+      run.ch = Math.round(g.ch);
+      run.last = at;
+      return ended;
+    },
+    take: close,
+  };
+}
+// =================== END TEMP DIAGNOSTIC (remove after the blank-thread session) ===================
+
 // ===================== TEMP DIAGNOSTIC (remove after the tail-gap session) =====================
 // The room under the last message, as one number.
 //

@@ -755,6 +755,30 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                                   "keep-view")]
         if pb:
             _diag.info("holddiag photo events=%d tail=%s", len(pb), json.dumps(pb[-30:]))
+        # tail-settle records, their own line. The client has been posting these
+        # for some time and no block here ever claimed them, so every one was
+        # discarded on arrival — the same way the photo-box marks above went
+        # missing, and this time on the channel carrying the app's only scroll
+        # write. Two shapes ride it: one settle, which carries mode, and a whole
+        # run of the per-frame ones folded into a summary, which carries n. A box
+        # that eases rather than hops writes a run of them, so the tail is
+        # generous enough to hold several beats whole.
+        # TEMP DIAGNOSTIC (blank-thread, pwa/src/viewport.ts owns the banner):
+        # remove this block and its test in tests/test_holddiag.py with it.
+        tl = [e for e in events if isinstance(e, dict) and e.get("ev") == "tail-settle"]
+        if tl:
+            _diag.info("holddiag settle events=%d tail=%s", len(tl), json.dumps(tl[-24:]))
+        # thread-blank records, their own line: one record batches a whole armed
+        # photo cancel — seven readings of the conversation's geometry, from
+        # before the tap out to the frame after the touch that repaired it — so
+        # records are wide and few. Six is more device sessions than the question
+        # needs, and on the shared viewport tail a single record would clip
+        # everything else off it.
+        # TEMP DIAGNOSTIC (blank-thread, pwa/src/blankprobe.ts owns the banner):
+        # remove this block and its test in tests/test_holddiag.py with it.
+        tb = [e for e in events if isinstance(e, dict) and e.get("ev") == "thread-blank"]
+        if tb:
+            _diag.info("holddiag blank events=%d tail=%s", len(tb), json.dumps(tb[-6:]))
         return {"ok": True}
 
     @app.get("/api/debug/holddiag")

@@ -29,6 +29,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  SETTLE_BURST_GAP_MS,
+  createSettleBurst,
   maxScrollTop,
   settleBottom,
   settleMark,
@@ -486,3 +488,133 @@ describe("the signals that call it", () => {
     expect(css).not.toMatch(/(?<![-\w])scroll-behavior\s*:/);
   });
 });
+
+// ===================== TEMP DIAGNOSTIC (remove after the blank-thread session) =====================
+// Pins for the per-frame settles' summary (src/viewport.ts createSettleBurst,
+// and its wiring in settleTail).
+//
+// A box that eases rather than hops settles on every frame of the ease, and
+// those passes carry a quiet flag: unless one of them corrected an overhang or
+// cut a ride, they recorded nothing. That left the photo drawer's close — about
+// two dozen scroll writes inside four hundred milliseconds — as the one stretch
+// of this app with no trail behind it, which is exactly the stretch a blank
+// message area was reported in. Recording each pass instead would put two dozen
+// marks on a bounded digest tail and push everything else off it, so what is
+// pinned here is that a run folds into ONE mark, that the mark keeps the four
+// things the run is asked about, and that a run cannot be split in half or
+// joined to the next one.
+describe("the quiet settles, folded into one mark per run", () => {
+  const geom = (st: number, sh = CONTENT, ch = REST_BOX) => ({ sh, st, ch });
+  const plan = (top: number, st: number, over = 0) => ({
+    mode: "clamp" as const,
+    top,
+    over,
+    moved: top !== st,
+  });
+
+  it("nothing open hands back nothing", () => {
+    expect(createSettleBurst().take()).toBeNull();
+  });
+
+  it("the drawer's whole beat becomes one mark: the writes, and that none moved", () => {
+    // the shape under suspicion: the strip hands its height back frame by
+    // frame, every frame settles, and with the reader up in the history each
+    // write lands on the position it just read
+    const b = createSettleBurst();
+    for (let i = 0; i < 24; i += 1) {
+      expect(b.add("box", geom(2180), plan(2180, 2180), 1000 + i * 16)).toBeNull();
+    }
+    const mark = b.take();
+    expect(mark).toEqual({
+      via: "box",
+      n: 24,
+      moved: 0,
+      from: 2180,
+      to: 2180,
+      over: 0,
+      ms: 368,
+      sh: CONTENT,
+      ch: REST_BOX,
+    });
+  });
+
+  it("a write that actually moved the reader is counted apart from one that did not", () => {
+    const b = createSettleBurst();
+    b.add("box", geom(STUCK), plan(TRUE_END, STUCK, 386), 1000);
+    b.add("box", geom(TRUE_END), plan(TRUE_END, TRUE_END), 1016);
+    b.add("box", geom(TRUE_END), plan(TRUE_END, TRUE_END), 1032);
+    const mark = b.take();
+    expect(mark?.n).toBe(3);
+    expect(mark?.moved).toBe(1);
+    // where it stood at the first write and at the last, so the run's whole
+    // travel reads off one line
+    expect(mark?.from).toBe(STUCK);
+    expect(mark?.to).toBe(TRUE_END);
+    // and the worst band any single write took back, not the last one's
+    expect(mark?.over).toBe(386);
+  });
+
+  it("the box's own numbers are the run's last, so the change it caused is legible", () => {
+    const b = createSettleBurst();
+    b.add("box", geom(2180, CONTENT, OPEN_BOX), plan(2180, 2180), 1000);
+    b.add("box", geom(2180, CONTENT, REST_BOX), plan(2180, 2180), 1016);
+    expect(b.take()).toMatchObject({ sh: CONTENT, ch: REST_BOX });
+  });
+
+  it("a gap wider than two frames ends the run and hands it back as the next one opens", () => {
+    const b = createSettleBurst();
+    b.add("box", geom(2180), plan(2180, 2180), 1000);
+    b.add("box", geom(2180), plan(2180, 2180), 1016);
+    // a separate box change, well after the first ease finished
+    const ended = b.add("box", geom(1400), plan(1400, 1400), 1016 + SETTLE_BURST_GAP_MS + 1);
+    expect(ended?.n).toBe(2);
+    expect(ended?.from).toBe(2180);
+    const next = b.take();
+    expect(next?.n).toBe(1);
+    expect(next?.from).toBe(1400);
+  });
+
+  it("a frame's own cadence cannot split a beat: exactly the gap still belongs to it", () => {
+    const b = createSettleBurst();
+    b.add("box", geom(2180), plan(2180, 2180), 1000);
+    expect(b.add("box", geom(2180), plan(2180, 2180), 1000 + SETTLE_BURST_GAP_MS)).toBeNull();
+    expect(b.take()?.n).toBe(2);
+  });
+
+  it("a single stray quiet pass is still a run of one, never dropped", () => {
+    const b = createSettleBurst();
+    b.add("box", geom(2180), plan(2180, 2180), 1000);
+    expect(b.take()).toMatchObject({ n: 1, ms: 0 });
+  });
+});
+
+describe("the settle's wiring: quiet passes kept, loud ones still first-class", () => {
+  const body = fnBody("settleTail");
+
+  it("a pass with nothing to report folds into the run instead of vanishing", () => {
+    expect(body).toContain("tailBurstFold(via, g, plan)");
+  });
+
+  it("a louder settle closes the run first, so the beat reads before its ending", () => {
+    expect(body.indexOf("tailBurstClose()")).toBeLessThan(
+      body.indexOf('holdDiagRecord("tail-settle", settleMark('),
+    );
+  });
+
+  it("both shapes ride the one channel, which the server now has a block for", () => {
+    expect(src).toContain('holdDiagRecord("tail-settle", mark)');
+    const app = readFileSync(new URL("../../src/paratrooper/web/app.py", import.meta.url), "utf8");
+    expect(app).toContain('e.get("ev") == "tail-settle"');
+  });
+
+  it("the fold reads no geometry of its own: it is handed what the settle read", () => {
+    const fold = fnBody("tailBurstFold");
+    expect(fold).not.toMatch(/scrollTop|scrollHeight|clientHeight|getBoundingClientRect/);
+  });
+
+  it("the backstop timer cannot outlive the run it was armed for", () => {
+    expect(fnBody("tailBurstClose")).toContain("clearTimeout(tailBurstTimer)");
+    expect(fnBody("tailBurstFold")).toContain("clearTimeout(tailBurstTimer)");
+  });
+});
+// =================== END TEMP DIAGNOSTIC (remove after the blank-thread session) ===================

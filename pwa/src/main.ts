@@ -67,8 +67,10 @@ import {
 } from "./shell";
 import { bootBlankGap, installLoadingScreen, installStartupImage, watchQuiet } from "./splash";
 import {
+  SETTLE_BURST_GAP_MS,
   USER_SCROLL_INTENT_MS,
   compensationFor,
+  createSettleBurst,
   flightOverflow,
   followFlipDecision,
   giveUpTarget,
@@ -79,6 +81,7 @@ import {
   settleMark,
   tailGapFrame,
 } from "./viewport";
+import type { BottomGeometry, SettleBurstMark, TailSettle } from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
 import type { OutboxRecord } from "./outbox";
 import {
@@ -106,11 +109,16 @@ import {
   pickTimingPainted,
   pickTimingStep,
 } from "./picktiming";
+// TEMP DIAGNOSTIC (blank-thread, blankprobe.ts owns the banner): the readings
+// either side of a photo cancel taken mid-glide, which is the one gesture the
+// blank message area has ever been reported after. TO REMOVE: this import and
+// the three calls named in that banner's list.
+import { blankProbeFollow, blankProbeSettle, blankProbeTap } from "./blankprobe";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.54"; // photos drawn at a size the app already knew now count themselves, so that the silence from the ones that had to guess actually means something
+const APP_VERSION = "0.3.55"; // the scroll writes a closing photo drawer makes now leave a mark instead of vanishing, and cancelling a photo mid-glide takes readings either side of the blank so the next one cannot be argued about
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1108,6 +1116,10 @@ function stagePick(file: File, box: HTMLElement): Pick {
   x.addEventListener("click", () => {
     const at = pendingFiles.indexOf(file);
     if (at < 0) return; // a second tap while the first one is still easing out
+    // TEMP DIAGNOSTIC (blank-thread, blankprobe.ts owns the banner): the
+    // before-picture, taken here because everything below this line changes
+    // something. It arms nothing unless the conversation was still gliding.
+    blankProbeTap(performance.now() - lastScrollAt);
     pendingFiles.splice(at, 1);
     refreshSend(); // the ↑ answers the tap; the tray answers over the beat below
     dismissPick(file, pick);
@@ -1236,6 +1248,12 @@ function setFollowTail(next: boolean, trigger: string): void {
 watchFollowTail(() => followTail);
 // =================== END TEMP DIAGNOSTIC (remove after the keyboard-fall session) ===================
 
+// TEMP DIAGNOSTIC (blank-thread, blankprobe.ts owns the banner): every reading
+// that probe takes says which way the view was pointing when it took it, and
+// the flag lives here. Read-only, registered the same way the line above is.
+// TO REMOVE: delete this call.
+blankProbeFollow(() => followTail);
+
 // genuine-gesture evidence for the scroll handler: a finger currently on the
 // thread, or wheel/pointer/touch activity inside the intent window. Starts
 // at -Infinity so a boot-time scroll event can never read as a gesture.
@@ -1352,9 +1370,40 @@ function cancelTailRide(): boolean {
   return riding;
 }
 
+// ===================== TEMP DIAGNOSTIC (remove after the blank-thread session) =====================
+// The quiet passes, kept instead of dropped. viewport.ts (createSettleBurst)
+// holds the whole reasoning and the arithmetic; this is the clock and the one
+// record. A run normally ends because the next settle is a loud one, and the
+// photo drawer's close ends on exactly such a settle, so the timer below is a
+// backstop for a run whose successor never comes rather than the ordinary
+// path. Re-arming it per write costs the clearTimeout/setTimeout pair the
+// trail's own upload already re-arms on every record it takes.
+// TO REMOVE: this block and the three calls in settleTail.
+const tailBurst = createSettleBurst();
+let tailBurstTimer: ReturnType<typeof setTimeout> | null = null;
+
+function tailBurstShip(mark: SettleBurstMark | null): void {
+  if (mark) holdDiagRecord("tail-settle", mark);
+}
+
+function tailBurstClose(): void {
+  if (tailBurstTimer) clearTimeout(tailBurstTimer);
+  tailBurstTimer = null;
+  tailBurstShip(tailBurst.take());
+}
+
+function tailBurstFold(via: string, g: BottomGeometry, plan: TailSettle): void {
+  tailBurstShip(tailBurst.add(via, g, plan, performance.now()));
+  if (tailBurstTimer) clearTimeout(tailBurstTimer);
+  tailBurstTimer = setTimeout(tailBurstClose, SETTLE_BURST_GAP_MS + 20);
+}
+// =================== END TEMP DIAGNOSTIC (remove after the blank-thread session) ===================
+
 /**
  * @param via   the signal that called, as the trail carries it
- * @param quiet a per-frame caller: leave a record only when there was work
+ * @param quiet a per-frame caller: a pass with nothing of its own to report
+ *              folds into its run's summary rather than taking a mark
+ *              (viewport.ts createSettleBurst)
  */
 function settleTail(via: string, quiet = false): void {
   const t = document.getElementById("thread");
@@ -1364,9 +1413,13 @@ function settleTail(via: string, quiet = false): void {
   const plan = settleBottom(g, followTail);
   const cut = plan.moved ? cancelTailRide() : false;
   t.scrollTo({ top: plan.top, behavior: "auto" });
+  blankProbeSettle(plan.moved); // TEMP DIAGNOSTIC (blank-thread): a counter, nothing read
   if (!quiet || plan.over > 0 || cut) {
+    tailBurstClose(); // TEMP DIAGNOSTIC (blank-thread): the run this pass ended goes first
     holdDiagRecord("tail-settle", settleMark(via, g, plan, cut, flightsUp));
+    return;
   }
+  tailBurstFold(via, g, plan); // TEMP DIAGNOSTIC (blank-thread): kept, not dropped
 }
 
 // The same settle, asked for the other reason: the CONVERSATION changed height,
