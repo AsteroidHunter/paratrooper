@@ -197,8 +197,11 @@ html, body {
    the hop to a different element: .compose's padding carries the pill and the
    ＋; .jump's seat is measured up from the same gap, and the chevron is on
    screen precisely when the thread is scrolled away from the bottom; .filepick
-   is invisible but IS the rect iOS anchors the picker sheet to, so it has to
-   sit on the ＋ mid-glide as well as at rest. */
+   is invisible and is parked on the ＋, so it has to ride the same clock
+   mid-glide as at rest or it steps while everything else glides. That parking
+   is a leftover of the disproved theory that iOS anchors the picker sheet to
+   this rect (see the .filepick rule below for what actually places the sheet),
+   and it costs nothing as long as it moves with the rest. */
 #app.gliding .compose {
   transition: padding-bottom var(--glide);
 }
@@ -805,14 +808,19 @@ html, body {
 #app.settling .compose .attach { filter: opacity(0.35); transition: none; }
 #app.settling .field { opacity: 0.5; transition: none; }
 
-/* the real file input, invisibly overlaying the ＋ button: iOS anchors its
-   picker menu to the input's rendered rect, and a display:none input has none
-   (the menu then floats mid-screen). Taps still land on the button. */
+/* the real file input, invisibly overlaying the ＋ button. The overlay, the
+   34px box and the kept-rendered opacity 0 all come from the DEAD theory that
+   iOS anchors its picker menu to the input's rendered rect. That theory is
+   disproved: the rect never reaches the UI process, and the menu opens centred
+   on whichever element the hit test credited the last physical touch to, which
+   here is the button (the input takes no pointer events). None of the geometry
+   below has been shown to matter either way, so read it as a leftover awaiting
+   a device check rather than as a rule. Taps land on the button. */
 .filepick {
   position: absolute;
   left: 0.75rem;
-  /* tracks the ＋ through the padding toggle AND its centering lift — iOS
-     anchors the picker sheet to this rect, so it must sit exactly on the ＋ */
+  /* keeps the invisible input sitting on the ＋ through the padding toggle and
+     its centering lift; kept from the dead anchor theory, not proven to matter */
   bottom: calc(var(--pad-b) + 2.5px);
   width: 34px;
   height: 34px;

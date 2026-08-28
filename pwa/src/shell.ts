@@ -64,8 +64,13 @@
 //   only when attention comes back (the window refocus family below) or when
 //   the expiry backstop fires; the input's events merely settle it.
 // - While an editable is focused, a ＋ tap must preventDefault on pointerdown
-//   (or the keyboard collapses mid-presentation and the menu anchors to a
-//   stale rect); from idle it must NOT (or iOS swallows the next focus tap).
+//   (its own focus grab would otherwise collapse the keyboard mid-presentation);
+//   from idle it must NOT (or iOS swallows the next focus tap). This bullet used
+//   to add "and the menu anchors to a stale rect". That was the DEAD theory and
+//   it is disproved: WebKit never sends the file input's rect to the UI process,
+//   so no layout of ours, fresh or stale, can place the menu. Where the menu
+//   opens is settled by the hit-test credit for the last physical touch and by
+//   nothing else (plusClickVerdict below carries the live rule).
 
 import { holdDiagRecord } from "./hold";
 // TEMP DIAGNOSTIC (scroll-jank, scrolljank.ts owns the banner): activity
@@ -718,8 +723,8 @@ const picker = createPickerLifecycle({
   present: (fresh: boolean) => {
     if (fresh) swapFileInput();
     fileEl?.click();
-    // TEMP DIAGNOSTIC (pick-anchor, block at the bottom): the two rects, read
-    // after the click that presented so the read cannot alter what iOS anchored to
+    // TEMP DIAGNOSTIC (pick-anchor, block at the bottom): the two rects. The
+    // read sits after the click, an order kept from the disproved rect theory
     pickAnchorRecord(fresh);
     reconcile(); // the settling visual starts NOW, inside the opening tap
   },
@@ -760,7 +765,13 @@ function swapFileInput(): void {
   parent.replaceChild(next, old);
   fileEl = next;
   bindInputSignals(next);
-  void next.offsetWidth; // flush layout: iOS anchors the menu to the rendered rect
+  // A forced layout kept from the DEAD theory that iOS anchors the menu to the
+  // input's rendered rect. That theory is disproved: the rect never reaches the
+  // UI process, so flushing layout here cannot aim the menu anywhere. The line
+  // stays because taking it out is a change only a device can judge, and nothing
+  // has shown it to matter either way. Treat it as a candidate for removal, not
+  // as a load-bearing line.
+  void next.offsetWidth;
 }
 
 // The input's own signals only SETTLE the session. Both fire at the
@@ -1007,13 +1018,17 @@ export function currentFileInput(): HTMLInputElement | null {
 //                 470ms after the close edge. Nothing recorded that moment, and
 //                 an eighteen-frame probe stopped before it.
 //   pick-anchor : the file input's rect against the ＋ button's at the instant
-//                 the picker presents. iOS anchors WKFileUploadPanel to the
-//                 INPUT's rendered rect, and .filepick is parked invisibly on
-//                 top of the ＋ precisely so the two agree; a panel opening
-//                 off to the right means on that tap they did not. A record
-//                 carrying `held: true` instead of rects is a guard-window
-//                 tap the ＋ click swallowed (plusClickVerdict): no present
-//                 happened, so there are no rects to compare. And a record
+//                 the picker presents. The pair was recorded to test the
+//                 theory that iOS anchors WKFileUploadPanel to the INPUT's
+//                 rendered rect. That theory is DEAD: WebKit never sends the
+//                 rect to the UI process at all, and the panel opens centred
+//                 on whatever element the hit test credited the last physical
+//                 touch to, so a gap between these two rects explains
+//                 nothing. The channel still earns its place through the
+//                 other two records on it. A record carrying `held: true`
+//                 instead of rects is a guard-window tap the ＋ click
+//                 swallowed (plusClickVerdict): no present happened, so
+//                 there are no rects to compare. And a record
 //                 carrying `end` is a session's completion, named by the one
 //                 signal that delivered it (focus, pageshow, visible or
 //                 expiry), so a trail states whether real dismissals ride
@@ -1258,9 +1273,11 @@ export function pinRecord(
 
 /**
  * The anchor record's fields, spelled so a deploy log names which rect is
- * which without the code in front of the reader: file* is the invisible input
- * iOS actually anchors to, plus* is the ＋ the user aimed at, and dx/dy is the
- * gap between them — the whole question, already subtracted.
+ * which without the code in front of the reader: file* is the invisible input,
+ * plus* is the ＋ the user aimed at, and dx/dy is the gap between them, already
+ * subtracted. The gap was recorded to test the theory that iOS anchors the
+ * panel to the input's rendered rect. That theory is DEAD, since the rect never
+ * reaches the UI process, so these numbers cannot explain a centred menu.
  */
 export function anchorFrame(
   file: AnchorRect,

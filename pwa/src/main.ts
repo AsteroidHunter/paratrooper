@@ -95,7 +95,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.35"; // the wait between picking a photo and seeing it in the tray is now timed step by step, so the slow part of it can be named instead of guessed at
+const APP_VERSION = "0.3.36"; // nothing the app does changes here: the notes about why the photo menu sometimes opened in the middle of the screen now carry the explanation that was proven, instead of the guess that was later ruled out
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
