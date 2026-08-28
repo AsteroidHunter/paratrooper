@@ -18,6 +18,8 @@ import {
   RISE_TAIL_EVERY,
   RISE_TRACE_MS,
   anchorFrame,
+  closeCause,
+  closeMark,
   domCensus,
   edgeFrame,
   edgeMark,
@@ -26,7 +28,20 @@ import {
   riseKeeps,
   sizeRecord,
 } from "../src/shell";
-import type { EdgeReader } from "../src/shell";
+import type { EdgeReader, World } from "../src/shell";
+
+// a world as the shell reads one, full-screen and idle unless a case says
+// otherwise; 844 is the baseline the device trails were taken on
+function world(over: Partial<World> = {}): World {
+  return {
+    editorFocused: false,
+    fileFocused: false,
+    baseline: 844,
+    vvHeight: 844,
+    vvTop: 0,
+    ...over,
+  };
+}
 
 // one edge frame's geometry reads, as plain numbers
 function reader(over: Partial<Record<keyof EdgeReader, unknown>> = {}): EdgeReader {
@@ -362,8 +377,11 @@ describe("wiring: read-only, and each read on the right side of the writes", () 
     expect(shell).toMatch(
       /if \(t\.kb && !appliedKb\) riseEdge\(\);[\s\S]{0,900}appEl\.classList\.toggle\("kb", t\.kb\);/,
     );
-    // and it is the frame the rest are measured against: ms 0, clock started here
-    expect(shell).toMatch(/edgeT0 = performance\.now\(\);[\s\S]{0,1400}edgeSample\(0, undefined\);/);
+    // and it is the frame the rest are measured against: ms 0, clock started
+    // here. The window is a proximity pin on one function's body, not a byte
+    // budget: it holds the head build between the two, and the head grew when
+    // the close learned to name its cause.
+    expect(shell).toMatch(/edgeT0 = performance\.now\(\);[\s\S]{0,2100}edgeSample\(0, undefined\);/);
   });
 
   it("one probe serves both edges: the same start, the same builder, only the channel differs", () => {
@@ -652,5 +670,146 @@ describe("wiring: the box records sit at the writes, and change none of them", (
       expect(body).not.toMatch(/classList|setProperty|removeProperty|scrollTo\(|offsetHeight/);
       expect(body).not.toMatch(/getBoundingClientRect|getComputedStyle/);
     }
+  });
+});
+
+// The white band. The shell keeps standing at keyboard height for about a
+// second after the keyboard has visibly gone, leaving white between the compose
+// bar and the bottom of the screen, and then snaps to full height — which reads
+// as the whole view dropping. "Is there a keyboard" is an AND of focus and a
+// short viewport, so the close fires on whichever input flips FIRST, and the
+// record could not say which: six of eight production closes carried src
+// "other", which only means no fresh viewport event was in flight. Worse, five
+// of those six acted while the viewport was STILL reporting the keyboard-sized
+// height, so the phone's own number was stale and the app had been standing
+// short for a period nothing recorded at all.
+describe("kb-edge close: which input flipped it, and whether the viewport still lied", () => {
+  // the keyboard-up world every case below closes from: 412px of keyboard
+  // against the 844 screen the device trails were taken on
+  const up = world({ editorFocused: true, vvHeight: 432 });
+
+  it("focus letting go first is named focus, whatever the viewport still claims", () => {
+    // the five closes under hunt: the editor loses focus and the phone is still
+    // publishing 432 against an 844 screen
+    expect(closeCause(up, world({ editorFocused: false, vvHeight: 432 }))).toBe("focus");
+  });
+
+  it("the viewport growing back under a still-focused editor is named viewport", () => {
+    expect(closeCause(up, world({ editorFocused: true, vvHeight: 844 }))).toBe("viewport");
+  });
+
+  it("both inputs moving in one evaluation reads as both, never as either alone", () => {
+    expect(closeCause(up, world({ editorFocused: false, vvHeight: 844 }))).toBe("both");
+  });
+
+  it("a first evaluation, with nothing to compare against, says unknown rather than guessing", () => {
+    expect(closeCause(null, world({ vvHeight: 844 }))).toBe("unknown");
+  });
+
+  it("a shrink too small to be a keyboard is not the viewport growing back", () => {
+    // the iOS 26 stale-viewport lie is tens of px (keyboardInset's filter), and
+    // a cause read off one would name something that never happened
+    const lie = world({ editorFocused: true, vvHeight: 820 });
+    expect(closeCause(lie, world({ editorFocused: true, vvHeight: 844 }))).toBe("unknown");
+  });
+
+  it("vvStale is true when the phone was still reporting a keyboard-sized screen", () => {
+    // the whole point of the record: true means the app had been standing short
+    // with no way to know for how long
+    expect(closeMark(up, world({ editorFocused: false, vvHeight: 432 }), 980)).toEqual({
+      cause: "focus", vvBase: 844, vvStale: true, vvHeldMs: 980,
+    });
+  });
+
+  it("vvStale is false when the viewport itself is what flipped the close", () => {
+    expect(closeMark(up, world({ editorFocused: true, vvHeight: 844 }), 16)).toEqual({
+      cause: "viewport", vvBase: 844, vvStale: false, vvHeldMs: 16,
+    });
+  });
+
+  it("the baseline rides beside the height, so the subtraction is on the line", () => {
+    // vvH is already on the head; vvBase is what it was judged against, and
+    // 844 - 432 over MIN_KEYBOARD_PX is the whole of the stale verdict
+    const m = closeMark(up, world({ editorFocused: false, vvHeight: 432 }), 500);
+    expect(m.vvBase).toBe(844);
+    expect(m.vvStale).toBe(true);
+  });
+
+  it("vvHeldMs is how long that one number had stood: the band's upper bound", () => {
+    // a viewport that republished 16ms ago was not stuck; one holding the same
+    // number for most of a second is the second the user reports
+    expect(closeMark(up, world({ editorFocused: false, vvHeight: 432 }), 16).vvHeldMs).toBe(16);
+    expect(closeMark(up, world({ editorFocused: false, vvHeight: 432 }), 983.62).vvHeldMs).toBe(984);
+  });
+
+  it("vvHeldMs reads -1 before any height change has been seen, never a 0 that reads as fresh", () => {
+    expect(closeMark(up, up, -1).vvHeldMs).toBe(-1);
+  });
+
+  it("a fractional baseline rounds like every other pixel on the line", () => {
+    expect(closeMark(up, world({ editorFocused: false, baseline: 843.5, vvHeight: 432 }), 0).vvBase)
+      .toBe(844);
+  });
+});
+
+// The close facts are stamps taken before anything acts on the evaluation they
+// describe: the pair of worlds the cause is read from, the clock that says how
+// long the viewport has been holding one number, and the wait a lying close
+// opens. None of them may read geometry or touch the target the shell is about
+// to be written from — a probe that moved the close would be measuring itself.
+describe("wiring: the close facts are stamped, never measured", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+
+  it("the world is read once and shared, so the edge sees the evaluation's own numbers", () => {
+    expect(shell).toMatch(/const w = readWorld\(\);\n\s*const t = computeShell\(w\);/);
+  });
+
+  it("the two worlds advance as a pair, so an edge can never be handed itself as its before", () => {
+    expect(shell).toMatch(/edgeWorldBefore = edgeWorld;\n\s*edgeWorld = w;/);
+  });
+
+  it("the height clock moves on ANY change and does nothing else", () => {
+    expect(shell).toMatch(
+      /if \(w\.vvHeight !== vvHeightSeen\) \{\n\s*vvHeightSeen = w\.vvHeight;\n\s*vvHeightAt = performance\.now\(\);\n\s*\}/,
+    );
+  });
+
+  it("the close facts join the head right after vvH, and only on a close", () => {
+    expect(shell).toMatch(
+      /kind === "close" && edgeWorld\n\s*\? closeMark\(edgeWorldBefore, edgeWorld, vvHeightAt === 0 \? -1 : edgeT0 - vvHeightAt\)/,
+    );
+    expect(shell).toMatch(/vvH: Math\.round\(vv\?\.height \?\? 0\),[\s\S]{0,260}\.\.\.\(close \?\? \{\}\),/);
+  });
+
+  it("a stale close arms the follow-up wait and every other edge cancels one", () => {
+    expect(shell).toMatch(/staleCloseAt = close\?\.vvStale === true \? edgeT0 : -1;/);
+    expect(shell).toMatch(/staleCloseRun = edgeRun;/);
+  });
+
+  it("the wait ends on the first reading that agrees the screen is whole again", () => {
+    expect(shell).toMatch(
+      /if \(staleCloseAt >= 0 && keyboardInset\(w\.baseline, w\.vvHeight\) === 0\) \{/,
+    );
+    expect(shell).toMatch(/staleCloseAt = -1;\n\s*\}/);
+  });
+
+  it("the follow-up is its own record on the same channel, not an edge held back", () => {
+    // the edge record must not wait on the very viewport it is accusing
+    expect(shell).toMatch(
+      /holdDiagRecord\("kb-edge", \{\n\s*edge: "late",\n\s*n: staleCloseRun,\n\s*vvLateMs: Math\.round\(performance\.now\(\) - staleCloseAt\),\n\s*\}\);/,
+    );
+  });
+
+  it("neither builder reads anything: they are handed worlds and return a record", () => {
+    for (const name of ["closeCause", "closeMark"]) {
+      const body = shell.match(new RegExp(`export function ${name}\\([\\s\\S]*?\\n\\}`))?.[0] ?? "";
+      expect([name, body.length > 0]).toEqual([name, true]);
+      expect(body).not.toMatch(/window\.|document\.|performance\.|holdDiagRecord/);
+    }
+  });
+
+  it("the banner's TO REMOVE names the world split, which is the one line that was not additive", () => {
+    const note = shell.match(/\/\/ TO REMOVE: delete this block[\s\S]*?digest filters\./)?.[0] ?? "";
+    expect(note).toContain("computeShell(readWorld())");
   });
 });

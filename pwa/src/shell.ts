@@ -726,9 +726,34 @@ function keystrokeStarted(): void {
 }
 
 export function reconcile(): void {
-  const t = computeShell(readWorld());
+  const w = readWorld();
+  const t = computeShell(w);
   const wasUp = kbUp;
   kbUp = t.kb;
+  // TEMP DIAGNOSTIC (kb-edge, block at the bottom): the three reads a close
+  // edge cannot reconstruct once it has happened — the world it flipped FROM,
+  // how long the phone had been publishing the same viewport height, and the
+  // moment a viewport that lied at a close finally tells the truth. Every line
+  // below assigns or records; none reads geometry, and none touches the target
+  // the rest of this function acts on. It goes when that block goes, along
+  // with the world split above (`computeShell(readWorld())` was one line).
+  edgeWorldBefore = edgeWorld;
+  edgeWorld = w;
+  if (w.vvHeight !== vvHeightSeen) {
+    vvHeightSeen = w.vvHeight;
+    vvHeightAt = performance.now();
+  }
+  // the wait a stale close opened, closed by the first reading that agrees the
+  // screen is whole again. It cannot fire on the close's own evaluation: that
+  // one measured an inset, which is what armed it.
+  if (staleCloseAt >= 0 && keyboardInset(w.baseline, w.vvHeight) === 0) {
+    holdDiagRecord("kb-edge", {
+      edge: "late",
+      n: staleCloseRun,
+      vvLateMs: Math.round(performance.now() - staleCloseAt),
+    });
+    staleCloseAt = -1;
+  }
   // Typing-time shove backstop: while the keyboard is up and steady, a vv
   // move sourced from a window scroll (this same batch's scrollX/Y) is
   // cleared in this same frame and the box is NOT rewritten — the stable
@@ -1178,6 +1203,26 @@ export function currentFileInput(): HTMLInputElement | null {
 //                 built to catch, and it caught it; edgeBoxTop refuses it now,
 //                 so a `sy` far from 0 with `boxTop` 0 on the same line is the
 //                 refusal working rather than the bug repeating.
+//                 The CLOSE now carries four more fields, for the white band
+//                 that shows under the compose bar for about a second before
+//                 the shell snaps to full height (closeMark and closeCause own
+//                 the reasons). `cause` names which of the two inputs flipped
+//                 the decision — the editor losing focus, the viewport growing
+//                 back, or both in one evaluation — which `src` never could,
+//                 since it names the event the evaluation arrived on and read
+//                 "other" on six of eight production closes. `vvStale` says
+//                 whether the viewport was STILL reporting a keyboard-sized
+//                 screen at the instant the app decided the keyboard was gone
+//                 (true on five of those six), with `vvBase` beside the head's
+//                 own `vvH` so the subtraction is on the line. `vvHeldMs` is
+//                 how long the viewport had been publishing that same number,
+//                 which under a true `vvStale` is the upper bound on how long
+//                 the band could have been up. And a stale close leaves one
+//                 follow-up line on this channel, `edge: "late"` with the
+//                 close's own `n` and a `vvLateMs`: how long after the edge
+//                 the viewport finally admitted the full screen. It is a
+//                 separate record rather than a delayed one because the edge
+//                 record must not wait on the very viewport it is accusing.
 //   shell-pin   : the one frame the shell leaves its numeric box for the
 //                 four-edge pin, at the end of the glide's settle window. The
 //                 pin cannot be animated, so if the ride home had not landed
@@ -1223,7 +1268,9 @@ export function currentFileInput(): HTMLInputElement | null {
 // DIAGNOSTIC (the atEdge flag, the two edge samples and the seeding-reflow mark
 // in applyShell, the shell-size and shell-pin records in the same function, the
 // census in correctionPass, the probe start in keyboardClosed and the mirror
-// one in reconcile, the en field on reconcile's two kb-shove records, the
+// one in reconcile, reconcile's world/height/late-close stamp block along with
+// the world split at its top — `const w = readWorld()` goes back to being
+// `computeShell(readWorld())` — the en field on reconcile's two kb-shove records, the
 // anchor record in the picker's present effect plus the
 // held swallow's record in pickerTapOpen, the four pickEndRecord calls (the
 // three hand-back handlers in initShell and the expiry backstop), the two
@@ -1410,6 +1457,66 @@ export function edgeMark(
 }
 
 /**
+ * Which of the two inputs flipped the close, read from the two worlds the edge
+ * straddles instead of guessed afterwards. "Is there a keyboard" is an AND —
+ * an editor holds focus, AND the viewport is short of the learned baseline by
+ * MIN_KEYBOARD_PX — so the close fires on whichever input flips FIRST, and the
+ * record's existing `src` cannot say which: it names the event the evaluation
+ * arrived on ("resize", "other"), and "other" only means no fresh viewport
+ * event was in flight. Six of eight closes in a production trail read "other".
+ *
+ * "unknown" covers a close with no earlier world to compare against and one
+ * where neither input moved. Neither should reach here, and folding them into
+ * a real answer would put a number in the log that nothing measured.
+ */
+export type CloseCause = "focus" | "viewport" | "both" | "unknown";
+
+export function closeCause(before: World | null, after: World): CloseCause {
+  if (!before) return "unknown";
+  const blurred = before.editorFocused && !after.editorFocused;
+  const grew =
+    keyboardInset(before.baseline, before.vvHeight) > 0 &&
+    keyboardInset(after.baseline, after.vvHeight) === 0;
+  if (blurred && grew) return "both";
+  if (blurred) return "focus";
+  return grew ? "viewport" : "unknown";
+}
+
+/**
+ * The white band, stated in numbers. The report is a shell left standing at
+ * keyboard height for about a second after the keyboard has visibly gone —
+ * white showing between the compose bar and the bottom of the screen — and
+ * then a snap to full height that reads as the whole view dropping. A trail of
+ * eight closes said six were learned from focus rather than from the viewport
+ * growing back, and that in five of those the viewport was STILL publishing
+ * the keyboard-sized height at the instant the app acted. So the phone's own
+ * number was stale and the app had been standing short for a period nothing
+ * recorded.
+ *
+ * vvStale is that instant as a fact rather than a subtraction the reader has
+ * to do; vvBase is the learned full-screen height it was decided against,
+ * sitting beside the vvH the head already carries; vvHeldMs is how long the
+ * viewport had been publishing the same number, which when vvStale is true is
+ * the upper bound on how long the band could have been on screen. -1 there
+ * means no height change has been seen yet, never a viewport that just moved.
+ *
+ * Close edges only. The open record is untouched, so raises recorded either
+ * side of this build still read against each other.
+ */
+export function closeMark(
+  before: World | null,
+  after: World,
+  heldMs: number,
+): Record<string, unknown> {
+  return {
+    cause: closeCause(before, after),
+    vvBase: Math.round(after.baseline),
+    vvStale: keyboardInset(after.baseline, after.vvHeight) > 0,
+    vvHeldMs: Math.round(heldMs),
+  };
+}
+
+/**
  * A box write, as the trail carries it. top/h are exactly what the session
  * before this one was read in, so old and new trails still line up. The rest is
  * what that session could not tell: `glide` says whether the write ANIMATED or
@@ -1520,6 +1627,23 @@ let edgeHead: Record<string, unknown> | null = null; // this edge's record, half
 let edgeSeeded = false; // the edge's box write had to seed the pin's geometry
 let edgeVvAt = -1; // the last viewport event's own dispatch time
 let edgeVvSrc = "other";
+// The two worlds a close edge is read from. Kept as a pair advanced together
+// in reconcile rather than assigned around applyShell, so a nested reconcile
+// shifts both or neither and an edge can never be handed itself as its own
+// "before".
+let edgeWorld: World | null = null;
+let edgeWorldBefore: World | null = null;
+// The viewport's own honesty clock: the last height the app looked at and when
+// that value first appeared. Any change counts, keyboard or not — a viewport
+// that republished ANYTHING was not stuck — and 0 means none has been seen.
+let vvHeightSeen = -1;
+let vvHeightAt = 0;
+// A close that fired while the viewport was still short stays armed until the
+// viewport finally reports the full screen; that wait is the follow-up record.
+// -1 is disarmed, and every edge disarms, so a wait can never be credited to
+// the wrong close.
+let staleCloseAt = -1;
+let staleCloseRun = 0;
 
 // Stamped by a listener registered ahead of the one that acts on the event
 // (initShell), so an edge knows which event carried it and when the browser
@@ -1585,6 +1709,16 @@ function edgeStart(kind: "open" | "close"): void {
   // a stale stamp would read as a fast dispatch and quietly invent a fact; an
   // edge reached from focusin or a timer says so instead
   const fresh = edgeVvAt >= 0 && since >= 0 && since < EVT_FRESH_MS;
+  // the white-band facts, and only on the close: which input flipped it,
+  // whether the viewport was still short when it did, and how long that number
+  // had already been standing (closeMark carries the whole reason)
+  const close =
+    kind === "close" && edgeWorld
+      ? closeMark(edgeWorldBefore, edgeWorld, vvHeightAt === 0 ? -1 : edgeT0 - vvHeightAt)
+      : null;
+  // a close that lied gets a wait to close out; every other edge cancels one
+  staleCloseAt = close?.vvStale === true ? edgeT0 : -1;
+  staleCloseRun = edgeRun;
   edgeHead = {
     edge: kind,
     n: edgeRun,
@@ -1597,6 +1731,10 @@ function edgeStart(kind: "open" | "close"): void {
     sy: Math.round(window.scrollY),
     vvTop: Math.round(vv?.offsetTop ?? 0),
     vvH: Math.round(vv?.height ?? 0),
+    // directly after vvH, so the height and the baseline it was judged against
+    // sit side by side and the subtraction is on the line rather than in the
+    // reader's head
+    ...(close ?? {}),
     // how much of the keyboard's rise had already happened: styles.css starts
     // the ＋ collapse and the pill widen from the focus tap (.focusing) and the
     // shell's own glide only from this edge, so this is how far apart the two
