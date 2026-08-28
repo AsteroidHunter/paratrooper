@@ -8,7 +8,15 @@ import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
 import { ackFrame, enrichFrame } from "./enrich";
-import { bundleSeats, coverBox, gatherMsFor, shotLeg } from "./gather";
+import {
+  SHOT_BEND,
+  bundleSeats,
+  coverBox,
+  elbowBox,
+  elbowPath,
+  gatherMsFor,
+  shotLeg,
+} from "./gather";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { composeMirror, fitComposeBox } from "./mirror";
 import {
@@ -102,7 +110,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.46"; // the white band under the last message is now measured at the keyboard close too, which is where he sees it and where nothing has ever been recorded
+const APP_VERSION = "0.3.47"; // a sent photo now leaves the strip on an L, straight up first and across second, with the corner between the two legs rounded instead of square
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -3178,13 +3186,19 @@ function armShotMorph(files: readonly File[]): ShotMorph | null {
       for (const msg of msgs) msg.style.opacity = "0"; // the copies ARE the rows until they land
       flightsUp++;
       const seat0 = seatOf(msgs[0]);
+      // The stamp gets the carry's two ends and its beat, not its corner: it
+      // is a declarative animation on the row above and it takes the straight
+      // reading between the same two points. Same start, same landing, same
+      // clock, so the two arrive together; only the middle of the travel
+      // differs, by the corner's own depth, on an element that is still
+      // fading up while the turn is being made.
       const ride: ShotRide = {
         dx: bundle[0].left - seat0.left,
         dy: bundle[0].top - seat0.top,
         delay: gatherMs, // the stamp waits the gather out and rides the carry
       };
       holdDiagRecord("flight", {
-        phase: "shot-launch", n, gather: gatherMs,
+        phase: "shot-launch", n, gather: gatherMs, bend: SHOT_BEND,
         dx: Math.round(ride.dx * 10) / 10,
         dy: Math.round(ride.dy * 10) / 10,
         toW: Math.round(seat0.width), toH: Math.round(seat0.height),
@@ -3202,14 +3216,40 @@ function armShotMorph(files: readonly File[]): ShotMorph | null {
       };
       const t0 = performance.now();
       let carrying = false; // the gather's end, stamped once
+      let turning = false; // the corner's start, likewise
+      let risen = false; // and the rise's end, past which the travel is all sideways
       const step = (now: number): void => {
         raf = 0;
         if (!msgs[0].isConnected) return settle("shot-cancel"); // replay took the seats
         const at = shotLeg(now - t0, gatherMs, FLIGHT_MS);
         const p = flightEase(at.f);
-        if (at.leg === "carry" && !carrying) {
+        const onward = at.leg === "carry";
+        // The L. One clock and one ease still, and this only reads which of
+        // the two legs has spent how much of the one progress above: the rise
+        // leads, the run follows, and they overlap so the corner is a curve.
+        // The gather has no corner of its own, so it keeps the plain box.
+        const bend = onward ? elbowPath(p) : null;
+        if (onward && !carrying) {
           carrying = true;
           holdDiagRecord("flight", { phase: "shot-carry", at: Math.round(now - t0) });
+        }
+        // the two legs, timed on the device: when the run picks up and how
+        // much rise was left under it, then when the rise is spent and how
+        // much run had already been made. A session that says the L is not
+        // reading has these two instants to argue from.
+        if (bend && !turning && bend.across > 0) {
+          turning = true;
+          holdDiagRecord("flight", {
+            phase: "shot-elbow", at: Math.round(now - t0), up: Math.round(bend.up * 100),
+          });
+        }
+        if (bend && !risen && bend.up >= 1) {
+          risen = true;
+          holdDiagRecord("flight", {
+            phase: "shot-across",
+            at: Math.round(now - t0),
+            across: Math.round(bend.across * 100),
+          });
         }
         // Every read first, then every write. The carry's far end is re-read
         // each frame for the reason the bar morph re-reads its own: a second
@@ -3218,21 +3258,24 @@ function armShotMorph(files: readonly File[]): ShotMorph | null {
         // launch. Reading a seat between two box writes would make the browser
         // re-lay-out once per photo per frame, so the whole frame's rects are
         // taken in one pass before anything is written.
-        const ends = at.leg === "gather" ? bundle : msgs.map(seatOf);
+        const ends = onward ? msgs.map(seatOf) : bundle;
         fliers.forEach((f, i) => {
-          const from = at.leg === "gather" ? f.square : bundle[i];
+          const from = onward ? bundle[i] : f.square;
           const to = ends[i];
-          const cut = morphBox(from, to, p);
+          // The cut and the picture behind it take the same path and the same
+          // size fraction, so they stay concentric and the window never pans
+          // over the picture: one object travelling, not a frame sliding on a
+          // photograph.
+          const cut = bend ? elbowBox(from, to, p, bend) : morphBox(from, to, p);
           // the whole picture's box: the oversized cover frame while the cut is
           // still a square, the seat itself once the cut has opened onto it
-          const box = morphBox(
-            coverBox(from, f.natW, f.natH),
-            at.leg === "gather" ? coverBox(to, f.natW, f.natH) : to,
-            p,
-          );
-          const radius = at.leg === "gather"
-            ? thumbRadius
-            : morphCorners(thumbRadius, [seatRadius], p)[0];
+          const cover = coverBox(from, f.natW, f.natH);
+          const box = bend
+            ? elbowBox(cover, to, p, bend)
+            : morphBox(cover, coverBox(to, f.natW, f.natH), p);
+          const radius = onward
+            ? morphCorners(thumbRadius, [seatRadius], p)[0]
+            : thumbRadius;
           paint(f, box, cut, radius);
         });
         if (!at.done) {

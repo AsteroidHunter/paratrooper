@@ -92,6 +92,27 @@ describe("send morph (armFieldMorph) — the bar leaves the box", () => {
     expect(fnBody("armFieldMorph")).not.toContain("gather");
   });
 
+  it("the photo's L is nowhere in the bar morph: the text send still goes straight", () => {
+    // The owner asked for the photo and only the photo. Both sends share
+    // morphBox and flightEase, so the corner had to be added on the photo's
+    // side of them or the text would have turned too. gather.test.ts holds the
+    // arithmetic; this holds the wiring.
+    expect(morph).not.toContain("elbow");
+    expect(morph).not.toContain("SHOT_BEND");
+    expect(morph).not.toContain("across");
+    // one eased fraction, straight into the seat, exactly as it shipped
+    expect(morph).toContain("const p = flightEase(f);");
+    expect(morph).toMatch(/writeBox\(morphBox\(\s*bar,/);
+    expect(morph).toContain("morphCorners(barRadius, corners, p)");
+    // and the shared helper it leans on stays a plain per-axis interpolation
+    const shift = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../src/shift.ts"),
+      "utf8",
+    );
+    const box = shift.slice(shift.indexOf("export function morphBox"));
+    expect(box.slice(0, box.indexOf("\n}"))).not.toContain("elbow");
+  });
+
   it("the shell is honest box geometry re-aimed at the live seat every frame", () => {
     expect(morph).toContain("morphBox(");
     expect(morph).toContain("morphCorners(");
@@ -171,6 +192,30 @@ describe("photo send morph (armShotMorph): the squares leave the strip", () => {
     expect(shot).toContain("gatherMsFor(n)");
     expect(shot).toContain("shotLeg(now - t0, gatherMs, FLIGHT_MS)");
     expect(shot).toContain("coverBox(");
+  });
+
+  it("the carry travels the L, and the gather keeps the plain box", () => {
+    // the corner is read off the one eased progress the carry already runs on,
+    // so there is no second clock and no second curve anywhere in here
+    expect(shot).toContain("elbowPath(p)");
+    expect(shot).toContain("const onward = at.leg === \"carry\"");
+    expect(shot).toContain("const bend = onward ? elbowPath(p) : null");
+    // the cut and the picture behind it take the same legs and the same size
+    // fraction: one object travelling, not a window panning over a photograph
+    expect(shot).toContain("bend ? elbowBox(from, to, p, bend) : morphBox(from, to, p)");
+    expect(shot).toContain("? elbowBox(cover, to, p, bend)");
+    expect(shot).toContain(": morphBox(cover, coverBox(to, f.natW, f.natH), p)");
+  });
+
+  it("the two legs are timed on the trail, so a device session can show them", () => {
+    expect(shot).toContain('phase: "shot-elbow"'); // the run picks up
+    expect(shot).toContain('phase: "shot-across"'); // the rise is spent
+    expect(shot).toMatch(/phase: "shot-elbow".*up:/s);
+    expect(shot).toMatch(/phase: "shot-across".*across:/s);
+    expect(shot).toContain("bend: SHOT_BEND"); // which corner shipped
+    // each stamped once, the way the gather's end already is
+    expect(shot).toContain("turning = true");
+    expect(shot).toContain("risen = true");
   });
 
   it("honest box geometry on the shared ease, never transform scale", () => {

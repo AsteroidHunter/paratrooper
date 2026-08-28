@@ -15,10 +15,16 @@
 // one object. A single photo has no arrangement to change, so it gets no
 // gather at all (gatherMsFor) and simply travels.
 //
-// CARRY. The bundle rises into the seats the thread has already reserved for
-// it, growing as it goes: one movement, rising and settling together, not a
-// rise followed by a slide. Both ends are live rects, so the caller re-reads
-// the seats every frame the way the bar morph does.
+// CARRY. The bundle travels into the seats the thread has already reserved
+// for it, growing as it goes. Its path is an L and not a diagonal: straight up
+// out of the strip first, then across into the seats. The corner between the
+// two legs is rounded rather than square (elbowPath, SHOT_BEND), because an
+// object that has to come to a stop in order to turn reads as a machine doing
+// two moves, and the send is meant to read as one hand carrying something to
+// its place. Both ends are live rects, so the caller re-reads the seats every
+// frame the way the bar morph does. The L belongs to this flight alone: the
+// bar morph a text send rides shares the beat, the ease and the box
+// arithmetic, and none of the corner below.
 //
 // THE CROP. A strip thumbnail is a hard 64px square filled with object-fit:
 // cover, so it shows the middle of the photo and nothing else, while the sent
@@ -127,4 +133,78 @@ export function shotLeg(elapsed: number, gatherMs: number, carryMs: number): Sho
   const raw = (elapsed - gatherMs) / carryMs;
   const f = raw > 1 ? 1 : raw > 0 ? raw : 0;
   return { leg: "carry", f, done: f >= 1 };
+}
+
+// --- the carry's corner ------------------------------------------------------
+
+// How much of the carry the two legs share, which is the only number that
+// says how round the corner is. Zero is a true right angle: the rise finishes
+// before the run begins, so the object has to stop dead to turn, and a frame
+// by frame reading of a square corner shows the speed falling to a tenth of
+// its peak at the turn, which is exactly the stop an eye reads as mechanical.
+// One puts both legs on the whole carry, which makes them the same motion
+// again and hands back the diagonal this replaced. In between, the run starts
+// while the rise is still finishing, and the overlap is the curve. At this
+// value a little over half the height is a dead straight rise and a little
+// over half the width is a dead straight run, with the turn in the middle of
+// each: unmistakably an L, and never a bowed diagonal. Turn it down for a
+// sharper corner, up for a softer one.
+export const SHOT_BEND = 0.3;
+
+export interface ElbowPath {
+  /** how far through the rise, which leads, always inside 0 to 1 */
+  up: number;
+  /** how far through the run, which follows, always inside 0 to 1 */
+  across: number;
+}
+
+const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+// Smoothstep, flat at both ends of a leg and steepest in its middle. Flat
+// ends are the whole point: the leg that is finishing and the leg that is
+// starting both pass through the overlap at a speed that is easing to or from
+// nothing, so neither one steps, and the join is a curve rather than a cut
+// corner. Straight ramps would blend just as well in time and still leave two
+// creases in the path, which is a chamfer and not a rounding.
+const smoothLeg = (u: number): number => u * u * (3 - 2 * u);
+
+// The two legs, read off the one progress the carry already runs on. Their
+// windows are symmetric about the middle of that progress: the rise owns the
+// first (1 + bend) / 2 of it and the run owns the last, so the legs are the
+// same length and overlap by exactly the bend. Nothing here starts a second
+// clock or lays a second curve over the shared ease. The progress handed in
+// is already eased, and all this says is which axis has spent how much of it.
+export function elbowPath(p: number, bend: number = SHOT_BEND): ElbowPath {
+  const leg = (1 + clamp01(bend)) / 2; // never under a half, so neither divisor can vanish
+  return {
+    up: smoothLeg(clamp01(p / leg)),
+    // measured back from the landing rather than forward from where the run
+    // opens, so both ends stay exact whatever number the bend is set to
+    across: smoothLeg(clamp01((p - 1) / leg + 1)),
+  };
+}
+
+// One frame's box on that L. The SIZE stays on the shared progress, so the
+// photo grows over the whole travel instead of doing all its growing on one
+// leg: cramming the growth into the rise would land the picture at full size
+// with a slide still to come, and cramming it into the run would hold a
+// thumbnail up the whole way. Only the box's MIDDLE is split between the two
+// legs, and it has to be the middle rather than the left and top edges: a box
+// pinned by its left edge while it grows drifts its middle sideways, which
+// would put horizontal motion inside the leg that is supposed to be straight
+// up. Growing about the middle is what keeps the rise honest. Feeding both
+// legs the shared progress gives back exactly morphBox, so the diagonal is
+// still in here as the bend's own limit.
+export function elbowBox(
+  from: MorphBox,
+  to: MorphBox,
+  p: number,
+  at: ElbowPath,
+): MorphBox {
+  const mix = (a: number, b: number, t: number): number => a + (b - a) * t;
+  const width = mix(from.width, to.width, p);
+  const height = mix(from.height, to.height, p);
+  const cx = mix(from.left + from.width / 2, to.left + to.width / 2, at.across);
+  const cy = mix(from.top + from.height / 2, to.top + to.height / 2, at.up);
+  return { left: cx - width / 2, top: cy - height / 2, width, height };
 }

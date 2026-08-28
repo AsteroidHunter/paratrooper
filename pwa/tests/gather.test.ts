@@ -7,8 +7,11 @@ import { describe, expect, it } from "vitest";
 import {
   DECK_STEP_PX,
   GATHER_MS,
+  SHOT_BEND,
   bundleSeats,
   coverBox,
+  elbowBox,
+  elbowPath,
   gatherMsFor,
   shotLeg,
 } from "../src/gather";
@@ -222,26 +225,31 @@ interface Frame {
   cut: MorphBox;
 }
 
+// The bend is a parameter here and a constant in main.ts, so the same
+// simulator can be run against the square corner and against the diagonal and
+// the shipped value can be measured beside both of them.
 function flight(
   squares: MorphBox[],
   seats: MorphBox[],
   nat: [number, number],
+  bend: number = SHOT_BEND,
 ): (elapsed: number) => Frame[] {
   const bundle = bundleSeats(squares);
   const gatherMs = gatherMsFor(squares.length);
   return (elapsed: number): Frame[] => {
     const at = shotLeg(elapsed, gatherMs, FLIGHT_MS);
     const p = flightEase(at.f);
+    const onward = at.leg === "carry";
+    const path = onward ? elbowPath(p, bend) : null; // the gather has no corner
     return squares.map((s, i) => {
-      const from = at.leg === "gather" ? s : bundle[i];
-      const to = at.leg === "gather" ? bundle[i] : seats[i];
+      const from = onward ? bundle[i] : s;
+      const to = onward ? seats[i] : bundle[i];
+      const cover = coverBox(from, nat[0], nat[1]);
       return {
-        cut: morphBox(from, to, p),
-        box: morphBox(
-          coverBox(from, nat[0], nat[1]),
-          at.leg === "gather" ? coverBox(to, nat[0], nat[1]) : to,
-          p,
-        ),
+        cut: path ? elbowBox(from, to, p, path) : morphBox(from, to, p),
+        box: path
+          ? elbowBox(cover, to, p, path)
+          : morphBox(cover, coverBox(to, nat[0], nat[1]), p),
       };
     });
   };
@@ -302,9 +310,10 @@ describe("the flight as one object", () => {
     expect(start.height).toBeCloseTo(THUMB + DECK_STEP_PX * 2, 3);
   });
 
-  it("the object rises and grows on the one beat, never sliding after arriving", () => {
-    // one movement: the top edge only ever climbs, and it is still climbing at
-    // the moment the width finishes growing
+  it("the object only ever climbs and only ever grows: nothing doubles back", () => {
+    // the L turns the travel sideways at the end but it never reverses either
+    // axis, and the top edge is still climbing as the last of the width
+    // arrives, because the box grows about its own middle
     let prevTop = Infinity;
     let prevW = -Infinity;
     for (const t of sweep(end).filter((t) => t >= gatherEnd)) {
@@ -433,5 +442,271 @@ describe("one photo: the same flight minus the gather", () => {
       return area(f.cut) / area(f.box);
     };
     expect(shown(GATHER_MS)).toBeGreaterThan(shown(0) + 0.05);
+  });
+});
+
+// --- the L: straight up first, then across ------------------------------------
+// The carry's path. Not a diagonal off the compose bar but a rise and then a
+// run, with the corner between the two rounded rather than square. elbowPath
+// is the whole shape and SHOT_BEND is the only number in it.
+
+describe("elbowPath: the rise leads, the run follows", () => {
+  const many = sweep(1, 400); // the eased progress, end to end
+
+  it("both legs start and finish with the carry, and neither runs backwards", () => {
+    expect(elbowPath(0)).toEqual({ up: 0, across: 0 });
+    expect(elbowPath(1)).toEqual({ up: 1, across: 1 });
+    let prev = elbowPath(0);
+    for (const p of many) {
+      const now = elbowPath(p);
+      expect(now.up).toBeGreaterThanOrEqual(prev.up - 1e-12);
+      expect(now.across).toBeGreaterThanOrEqual(prev.across - 1e-12);
+      prev = now;
+    }
+  });
+
+  it("the rise is ahead of the run at every moment in between", () => {
+    for (const p of many) {
+      const { up, across } = elbowPath(p);
+      expect(up).toBeGreaterThanOrEqual(across - 1e-12);
+    }
+    expect(elbowPath(0.5).up).toBeGreaterThan(elbowPath(0.5).across + 0.5);
+  });
+
+  it("the run has not begun while the rise is still on its straight stretch", () => {
+    const opens = (1 - SHOT_BEND) / 2;
+    expect(elbowPath(opens).across).toBe(0);
+    expect(elbowPath(opens - 0.05).across).toBe(0);
+    expect(elbowPath(opens).up).toBeGreaterThan(0.5); // over half the height already
+  });
+
+  it("the rise is spent while the run still has better than a third to make", () => {
+    const spent = (1 + SHOT_BEND) / 2;
+    expect(elbowPath(spent).up).toBe(1);
+    expect(elbowPath(spent + 0.05).up).toBe(1);
+    expect(elbowPath(spent).across).toBeLessThan(0.66);
+    expect(elbowPath(spent).across).toBeGreaterThan(0); // and it is already under way
+  });
+
+  it("the corner IS the overlap: moments where both legs are moving at once", () => {
+    const both = many.filter((p) => {
+      const { up, across } = elbowPath(p);
+      return up > 0 && up < 1 && across > 0 && across < 1;
+    });
+    expect(both.length).toBeGreaterThan(many.length / 20);
+    // a square corner has no such moment: the rise is finished before the run
+    // is allowed to start, which is the stop and turn nobody wants
+    const square = many.filter((p) => {
+      const { up, across } = elbowPath(p, 0);
+      return up > 0 && up < 1 && across > 0 && across < 1;
+    });
+    expect(square).toHaveLength(0);
+  });
+
+  it("the bend at its limit is the diagonal again: one motion on both axes", () => {
+    for (const p of many) {
+      const { up, across } = elbowPath(p, 1);
+      expect(up).toBeCloseTo(across, 12);
+    }
+  });
+
+  it("a bend outside its range is clamped, never divided by nothing", () => {
+    for (const p of [0, 0.25, 0.5, 0.75, 1]) {
+      expect(elbowPath(p, -3)).toEqual(elbowPath(p, 0));
+      expect(elbowPath(p, 9)).toEqual(elbowPath(p, 1));
+      expect(Number.isFinite(elbowPath(p, -3).up)).toBe(true);
+      expect(Number.isFinite(elbowPath(p, 9).across)).toBe(true);
+    }
+  });
+
+  it("the shipped bend leaves a straight stretch on each leg and a turn between", () => {
+    expect(SHOT_BEND).toBeGreaterThan(0); // not a square corner
+    expect(SHOT_BEND).toBeLessThan(1); // not the diagonal
+    expect(SHOT_BEND).toBeLessThan(0.5); // each leg keeps more straight than turn
+    expect(elbowPath((1 - SHOT_BEND) / 2).up).toBeGreaterThan(0.5);
+    expect(elbowPath((1 + SHOT_BEND) / 2).across).toBeLessThan(0.5);
+  });
+});
+
+describe("elbowBox: the legs move the middle, the shared progress sizes the box", () => {
+  const from = square(12, 700);
+  const to: MorphBox = { left: 85.5, top: 300, width: 292.5, height: 219.375 };
+
+  it("the ends are exact: it leaves the square and lands on the seat", () => {
+    expect(elbowBox(from, to, 0, { up: 0, across: 0 })).toEqual(from);
+    expect(elbowBox(from, to, 1, { up: 1, across: 1 })).toEqual(to);
+  });
+
+  it("the size rides the shared progress and neither leg can touch it", () => {
+    for (const p of sweep(1, 40)) {
+      for (const at of [{ up: 0, across: 0 }, { up: 1, across: 0 }, { up: 1, across: 1 }]) {
+        const b = elbowBox(from, to, p, at);
+        expect(b.width).toBeCloseTo(from.width + (to.width - from.width) * p, 9);
+        expect(b.height).toBeCloseTo(from.height + (to.height - from.height) * p, 9);
+      }
+    }
+  });
+
+  it("a stalled leg stalls the middle, not an edge: the rise stays straight", () => {
+    // the same progress at two different points of the run, the rise held: the
+    // middle must not have moved sideways by so much as a pixel, even though
+    // the box has grown around it
+    const a = elbowBox(from, to, 0.4, { up: 0.9, across: 0 });
+    const b = elbowBox(from, to, 0.4, { up: 0.4, across: 0 });
+    expect(centre(a)[0]).toBeCloseTo(centre(from)[0], 9);
+    expect(centre(b)[0]).toBeCloseTo(centre(from)[0], 9);
+    expect(a.left).toBeCloseTo(b.left, 9); // and the grown box is still centred
+  });
+});
+
+describe("the L as it is painted: one photo and several", () => {
+  for (const n of [1, 3]) {
+    const label = n === 1 ? "one photo" : "three photos";
+    const squares = strip(n);
+    const seats = seatsFor(n);
+    const at = flight(squares, seats, NAT);
+    const start = bundleSeats(squares)[0]; // where the carry begins, gather or not
+    const carry = gatherMsFor(n); // the clock instant the carry starts
+
+    // how much of the carry's two legs the first photo's middle has made
+    const made = (t: number): { up: number; across: number } => {
+      const [cx, cy] = centre(at(t)[0].cut);
+      const [fx, fy] = centre(start);
+      const [tx, ty] = centre(seats[0]);
+      return { up: (cy - fy) / (ty - fy), across: (cx - fx) / (tx - fx) };
+    };
+    const when = (reached: (m: { up: number; across: number }) => boolean): number => {
+      for (const t of sweep(FLIGHT_MS, 400)) if (reached(made(carry + t))) return carry + t;
+      return NaN; // never reached: every reading off it fails, which is the point
+    };
+
+    it(`${label}: the middle goes straight up before it goes sideways at all`, () => {
+      const startX = centre(start)[0];
+      let rose = 0;
+      for (const t of sweep(FLIGHT_MS, 400)) {
+        const [cx, cy] = centre(at(carry + t)[0].cut);
+        if (Math.abs(cx - startX) > 0.01) break; // the run has picked up
+        rose = centre(start)[1] - cy;
+      }
+      const whole = centre(start)[1] - centre(seats[0])[1];
+      expect(rose / whole).toBeGreaterThan(0.5); // over half the height, dead straight
+    });
+
+    it(`${label}: the rise is spent before the run is half made`, () => {
+      expect(made(when((m) => m.across >= 0.5)).up).toBeGreaterThan(0.99);
+    });
+
+    it(`${label}: the run is barely begun when the rise is nearly done`, () => {
+      expect(made(when((m) => m.up >= 0.9)).across).toBeLessThan(0.25);
+    });
+
+    it(`${label}: the path leaves the straight line it replaced, on the rise's side`, () => {
+      const [fx, fy] = centre(start);
+      const [tx, ty] = centre(seats[0]);
+      const vx = tx - fx;
+      const vy = ty - fy;
+      const len = Math.hypot(vx, vy);
+      let worst = 0;
+      for (const t of sweep(FLIGHT_MS, 400)) {
+        const [cx, cy] = centre(at(carry + t)[0].cut);
+        const off = ((cx - fx) * vy - (cy - fy) * vx) / len;
+        if (Math.abs(off) > Math.abs(worst)) worst = off;
+      }
+      expect(worst).toBeGreaterThan(0); // above the line, which is the rise's side
+      // a fifth of the whole line's length away from it at the widest: a bow
+      // this deep cannot be mistaken for the diagonal it replaced
+      expect(worst / len).toBeGreaterThan(0.2);
+    });
+
+    it(`${label}: the bend at its limit puts the path back on that straight line`, () => {
+      const straight = flight(squares, seats, NAT, 1);
+      const [fx, fy] = centre(start);
+      const [tx, ty] = centre(seats[0]);
+      const vx = tx - fx;
+      const vy = ty - fy;
+      for (const t of sweep(FLIGHT_MS, 60)) {
+        const [cx, cy] = centre(straight(carry + t)[0].cut);
+        expect(((cx - fx) * vy - (cy - fy) * vx) / Math.hypot(vx, vy)).toBeCloseTo(0, 9);
+      }
+    });
+
+    it(`${label}: the corner is rounded, not square: it never stops to turn`, () => {
+      // per-frame travel of the middle at 60Hz. A square corner has the rise
+      // finish before the run starts, so one frame in the turn crawls; the
+      // rounded corner has the run already moving as the rise runs out.
+      const pace = (bend: number): { peak: number; slowest: number } => {
+        const play = flight(squares, seats, NAT, bend);
+        const pts: [number, number][] = [];
+        for (let ms = 0; ms <= FLIGHT_MS; ms += 1000 / 60) {
+          pts.push(centre(play(carry + ms)[0].cut));
+        }
+        const hop = pts
+          .slice(1)
+          .map((q, i) => Math.hypot(q[0] - pts[i][0], q[1] - pts[i][1]));
+        // the turn is made in the carry's first quarter; the rest is the
+        // ease's own tail, which is slow on any path and proves nothing
+        const turn = hop.filter((_, i) => ((i + 1) * 1000) / 60 <= FLIGHT_MS / 4);
+        return { peak: Math.max(...hop), slowest: Math.min(...turn) };
+      };
+      const sharp = pace(0);
+      const round = pace(SHOT_BEND);
+      expect(sharp.slowest / sharp.peak).toBeLessThan(0.15); // a stop, in a word
+      expect(round.slowest / round.peak).toBeGreaterThan(0.15);
+      expect(round.slowest).toBeGreaterThan(sharp.slowest * 1.4);
+    });
+
+    it(`${label}: the size change is spread over both legs, not crammed into one`, () => {
+      const grown = (t: number): number =>
+        (at(t)[0].cut.width - start.width) / (seats[0].width - start.width);
+      const spent = when((m) => m.up >= 1); // the rise's end
+      expect(grown(spent)).toBeGreaterThan(0.35); // the rise did not hold a thumbnail up
+      expect(grown(spent)).toBeLessThan(0.85); // nor did it arrive full size with a slide left
+      expect(grown(carry + FLIGHT_MS)).toBeCloseTo(1, 9);
+    });
+  }
+});
+
+describe("the text send's path is not on this L", () => {
+  // The bar morph (main.ts armFieldMorph) interpolates its box with the SAME
+  // morphBox and the SAME flightEase the photo flight uses, so anything the L
+  // did to either of those would drag the text send along with it. The owner
+  // asked for the photo and only the photo. These hold the bar on the straight
+  // line it has always travelled.
+  const bar: MorphBox = { left: 12, top: 690, width: 366, height: 44 };
+  const seat: MorphBox = { left: 150, top: 320, width: 228, height: 38 };
+
+  it("the bar's box is the one eased fraction on every axis, every frame", () => {
+    for (const f of sweep(1, 200)) {
+      const p = flightEase(f);
+      const b = morphBox(bar, seat, p);
+      expect(b.left).toBeCloseTo(bar.left + (seat.left - bar.left) * p, 9);
+      expect(b.top).toBeCloseTo(bar.top + (seat.top - bar.top) * p, 9);
+      expect(b.width).toBeCloseTo(bar.width + (seat.width - bar.width) * p, 9);
+      expect(b.height).toBeCloseTo(bar.height + (seat.height - bar.height) * p, 9);
+    }
+  });
+
+  it("its middle never leaves the straight line between the two rects", () => {
+    const [fx, fy] = centre(bar);
+    const [tx, ty] = centre(seat);
+    const vx = tx - fx;
+    const vy = ty - fy;
+    for (const f of sweep(1, 200)) {
+      const [cx, cy] = centre(morphBox(bar, seat, flightEase(f)));
+      expect(((cx - fx) * vy - (cy - fy) * vx) / Math.hypot(vx, vy)).toBeCloseTo(0, 9);
+    }
+  });
+
+  it("the corner lives in the legs, not in the helper both sends share", () => {
+    // feeding elbowBox the shared progress on both legs reproduces morphBox to
+    // the pixel, which can only be true while the L is entirely in the legs
+    for (const p of sweep(1, 40)) {
+      const bent = elbowBox(bar, seat, p, { up: p, across: p });
+      const flat = morphBox(bar, seat, p);
+      expect(bent.left).toBeCloseTo(flat.left, 9);
+      expect(bent.top).toBeCloseTo(flat.top, 9);
+      expect(bent.width).toBeCloseTo(flat.width, 9);
+      expect(bent.height).toBeCloseTo(flat.height, 9);
+    }
   });
 });
