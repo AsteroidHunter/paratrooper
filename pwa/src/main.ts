@@ -110,7 +110,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.50"; // the white band is now measured OUTSIDE the conversation too, between where its box ends and where the compose bar starts, which is the only place left for it
+const APP_VERSION = "0.3.51"; // the app now says which photos it had to guess the shape of, which is the branch that makes a portrait one come up wide and then go tall
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -746,6 +746,11 @@ interface Pick {
   wrap: HTMLElement; // the tray thumbnail, holding its square from the tap on
   img: HTMLImageElement; // the ONE drawn photo: the tray shows it, the send carries it
 }
+
+// TEMP DIAGNOSTIC (guessed-box, recorded in renderUser): the photos that have
+// had to invent their own box this session, so the record is one per photo
+// rather than one per render.
+const guessedSeen = new Set<string>();
 
 const picks = new Map<File, Pick>();
 
@@ -2169,6 +2174,28 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
       img.height = GUESS_H;
       img.style.aspectRatio = GUESS_RATIO; // lock the box even after decode
       img.style.objectFit = "cover";
+      // TEMP DIAGNOSTIC (guessed-box, block marked at guessedSeen): he reports
+      // portrait photos coming up wide and then going tall as he scrolls back
+      // through them, which is this branch and only this branch: a photo whose
+      // size we were told cannot change shape at all. The compensation for the
+      // correction only covers a photo entirely above the top of the screen,
+      // and scrolling up they arrive across that edge, so nothing catches them.
+      // What is not known is why the size is missing, since the server works it
+      // out on the way in and repairs old rows on the way out. So: which photos
+      // guess, and how many. One record per photo, not per render, or a scroll
+      // through history would bury the trail in its own noise.
+      const mark = `${m.seq}:${i}`;
+      if (!guessedSeen.has(mark)) {
+        guessedSeen.add(mark);
+        holdDiagRecord("guessed-box", {
+          seq: m.seq,
+          i,
+          n: guessedSeen.size, // distinct photos that have had to guess this session
+          keys: (m.attachments ?? []).length,
+          dims: m.attachment_dims ? m.attachment_dims.length : null,
+          hash: m.attachment_blurhashes?.[i] ? 1 : 0, // told one thing but not the other?
+        });
+      }
     }
     // the photo's own colours in the box, in place of the grey rectangle, from
     // this frame and with no second request (styles.css reads --blur). A photo
