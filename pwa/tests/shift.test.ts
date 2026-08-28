@@ -242,7 +242,7 @@ describe("sibling shift wiring — the order that kills the white strip", () => 
     const wrapper = send.indexOf('localWrapper("user")');
     const pin = send.indexOf("scrollToBottom(true)");
     const play = send.indexOf("shift.play()");
-    const fly = send.indexOf("flyFromField(w, morph)");
+    const fly = send.indexOf("flyFromField(w, morph, shotMorph)");
     expect(measure).toBeGreaterThan(-1);
     expect(measure).toBeLessThan(wrapper); // before-rects predate the insert
     expect(pin).toBeLessThan(play); // the pin fires first
@@ -387,8 +387,14 @@ describe("flight slack wiring: the armed clock waits for the first paint", () =>
     );
   });
 
-  it("the stamp rides the same options, so the pair cannot start apart", () => {
-    expect(fly.match(/delay: FLIGHT_SLACK_MS, fill: "backwards"/g)).toHaveLength(2);
+  it("the stamp rides the ride's own delay, so the pair cannot start apart", () => {
+    // there are two kinds of ride now and the stamp takes whichever one moved
+    // the photos: a FLIP spends the slack, the strip morph drives its own
+    // frames from the launch instant and spends the gather instead
+    expect(fly).toContain("delay: rideDelay, fill: \"backwards\"");
+    expect(fly).toContain("let rideDelay = FLIGHT_SLACK_MS");
+    expect(fly).toContain("rideDelay = FLIGHT_SLACK_MS; // this one IS a FLIP");
+    expect(fly).toContain("rideDelay = ride.delay");
   });
 });
 
@@ -406,9 +412,9 @@ describe("stamp-ride wiring: the stamp moves with its row, fading from zero", ()
     expect(fly).toContain('{ opacity: 1, transform: "none" }');
   });
 
-  it("fades from nothing, and the slack makes the nothing actually paint", () => {
+  it("fades from nothing, on the runway of whatever it is riding", () => {
     expect(fly).toContain("opacity: 0");
-    expect(fly.indexOf("delay: FLIGHT_SLACK_MS", fly.indexOf(":scope > .stamp")))
+    expect(fly.indexOf("delay: rideDelay", fly.indexOf(":scope > .stamp")))
       .toBeGreaterThan(-1);
   });
 

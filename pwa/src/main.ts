@@ -8,6 +8,7 @@ import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
 import { enrichFrame } from "./enrich";
+import { bundleSeats, coverBox, gatherMsFor, shotLeg } from "./gather";
 import { createReplyHold, holdDiagRecord } from "./hold";
 import { composeMirror, fitComposeBox } from "./mirror";
 import {
@@ -94,7 +95,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.37"; // the jump-down glide runs the whole way again and the stretch at the bottom eases back instead of snapping: the clamp that was cutting both of them is gone
+const APP_VERSION = "0.3.38"; // sending photos now moves the way sending text does: the picked squares cluster into one bundle in the strip and that bundle rises into its place in the thread, opening out of its 64px crop as it goes, with nothing behind it
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -858,6 +859,15 @@ function dismissPick(file: File, pick: Pick): void {
 // keeps the box the img used to size), and a square still waiting keeps the
 // grey face and ring it was already wearing. At no point is an emptied strip
 // on screen.
+//
+// Unless the squares have been taken ALOFT, which is the ordinary send now
+// (armShotMorph): a copy of each picture is already standing over its square
+// in viewport coordinates, about to gather and fly, so the square underneath
+// has nothing left to say and goes on the spot. Nothing of it is on screen to
+// shrink, and painting the blob a second time as a background under a copy
+// that is covering it would be work for a frame nobody sees. The box's own
+// height still eases down the same way; with every square handed over it is an
+// empty box with no face of its own, so that close is pure bookkeeping.
 function dismissSent(): void {
   const box = document.getElementById("pending");
   const sent = [...picks.values()];
@@ -901,6 +911,10 @@ function dismissSent(): void {
   for (const pick of sent) {
     // no url is revoked here: takeShot blanked every one on the way in, and
     // the thread is reading the photos through them right now
+    if (pick.wrap.classList.contains("aloft")) {
+      pick.wrap.remove(); // its picture is airborne over the spot it just left
+      continue;
+    }
     if (!pick.wrap.classList.contains("undrawn")) {
       pick.wrap.style.backgroundImage = `url("${pick.img.src}")`;
     }
@@ -2805,43 +2819,288 @@ function armFieldMorph(textEl: HTMLTextAreaElement): FieldMorph | null {
   };
 }
 
+// --- the photo send morph: the picked squares leave the strip -----------------
+// The bar morph above is the text send's answer to the question of what
+// actually moves. A photo send's answer has to be a different one, because the
+// bar never held the photos: they were staged in the strip over the compose
+// bar, and that is where they must be seen to leave from. So the flying thing
+// here is the PICTURE and only the picture. Nothing is behind it at any point,
+// in flight or after: a sent photo has no bubble (styles.css .msg.shot), so
+// neither does the object that becomes one.
+//
+// What flies is a copy per picked photo, in one fixed sheet over the whole
+// screen. Fixed and outside the thread for the bar morph's reason: the thread
+// clips its children at its own box, so nothing inside it could rise out of
+// the strip and across the thread's bottom edge. The real rows keep the one
+// drawn element the tray handed them and hold their reserved seats in layout
+// the whole time, hidden, taking over on the landing frame, exactly as the bar
+// morph parks the real bubble. The strip's own squares are hidden from the
+// frame the flight is armed (styles.css .pthumb.aloft) and its close then
+// plays out on a box with no face of its own. Two elements over one blob url
+// is the second read the tray's own close already did, and it is asked for
+// only once the picture is decoded and standing on screen: a pick with no
+// pixels yet stands the whole flight down (the record says which) and the send
+// keeps the plain translate it always had.
+//
+// gather.ts holds the two legs, the deck the squares cluster into, and the
+// cover-crop arithmetic that opens as the bundle grows. This half writes
+// boxes. Armed BEFORE the composer collapse for the bar morph's reason too:
+// the squares have to be measured while they are still in the strip.
+
+/** what the newborn gap stamp copies so it travels with the photos, not past them */
+interface ShotRide {
+  dx: number;
+  dy: number;
+  delay: number;
+}
+
+interface ShotMorph {
+  launch(msgs: HTMLElement[]): ShotRide | null;
+  launched(): boolean;
+  cancel(): void;
+}
+
+interface ShotFlier {
+  copy: HTMLImageElement;
+  square: MorphBox; // the strip thumbnail's rect, measured before the collapse
+  natW: number;
+  natH: number;
+}
+
+function armShotMorph(files: readonly File[]): ShotMorph | null {
+  // a flight that cannot be armed says so on the trail, so a device session
+  // that shows the old translate can name the reason instead of being argued
+  const stand = (reason: string): null => {
+    holdDiagRecord("flight", { phase: "shot-skip", reason, n: files.length });
+    return null;
+  };
+  if (files.length === 0) return null;
+  const fliers: ShotFlier[] = [];
+  const wraps: HTMLElement[] = [];
+  let thumbRadius = 12; // styles.css .pthumb img, re-read below from the real square
+  for (const file of files) {
+    const pick = picks.get(file);
+    if (!pick) return stand("unstaged"); // never reached the strip: nothing to lift
+    if (pick.wrap.classList.contains("undrawn")) return stand("undrawn");
+    const nat = naturalSize(pick.img);
+    if (!nat) return stand("nodims"); // no shape to open the crop onto
+    const r = pick.img.getBoundingClientRect();
+    if (!(r.width > 0) || !(r.height > 0)) return stand("unlaid");
+    const copy = document.createElement("img");
+    // never a synchronous decode at paint: the pixels are already on screen in
+    // the square this copy is standing over, so the cache serves it, and if it
+    // somehow does not then a missing frame beats freezing the main thread
+    // through the whole launch (photobox.ts has the device numbers)
+    copy.decoding = "async";
+    copy.src = pick.img.src;
+    // one style read for the whole strip: every square wears the same rule
+    if (fliers.length === 0) {
+      thumbRadius = parseFloat(getComputedStyle(pick.img).borderTopLeftRadius) || thumbRadius;
+    }
+    fliers.push({
+      copy,
+      square: { left: r.left, top: r.top, width: r.width, height: r.height },
+      natW: nat[0],
+      natH: nat[1],
+    });
+    wraps.push(pick.wrap);
+  }
+  const shell = document.createElement("div");
+  shell.className = "shotflight";
+  // The picture's own box and the cut that shows part of it, written together.
+  // The box is where the WHOLE photo sits; the cut is the window onto it. They
+  // start far apart (a 64px window on a photo blown up to cover it) and end as
+  // the same rect, which is the crop opening. The corner lives on the cut,
+  // never on the box: the box's own corners are outside the window for most of
+  // the flight and would simply not be there to see.
+  const paint = (f: ShotFlier, box: MorphBox, cut: MorphBox, radius: number): void => {
+    f.copy.style.left = `${box.left.toFixed(1)}px`;
+    f.copy.style.top = `${box.top.toFixed(1)}px`;
+    f.copy.style.width = `${box.width.toFixed(1)}px`;
+    f.copy.style.height = `${box.height.toFixed(1)}px`;
+    const i = zoomClipInset(box, cut);
+    f.copy.style.clipPath =
+      `inset(${i.top.toFixed(1)}px ${i.right.toFixed(1)}px ` +
+      `${i.bottom.toFixed(1)}px ${i.left.toFixed(1)}px round ${radius.toFixed(1)}px)`;
+  };
+  const n = fliers.length;
+  fliers.forEach((f, i) => {
+    // the first picked photo is the top of the deck and the top row of the
+    // landed stack: one order, held from the gather through to the landing
+    f.copy.style.zIndex = String(n - i);
+    paint(f, coverBox(f.square, f.natW, f.natH), f.square, thumbRadius);
+    shell.appendChild(f.copy);
+  });
+  document.body.appendChild(shell);
+  for (const wrap of wraps) wrap.classList.add("aloft"); // the copies cover them now
+  holdDiagRecord("flight", {
+    phase: "shot-arm", n, thumb: Math.round(fliers[0].square.width),
+  });
+  let raf = 0;
+  let up = false;
+  return {
+    launched: () => up,
+    cancel(): void {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      shell.remove(); // never launched: nothing hidden in the thread, nothing airborne
+    },
+    launch(msgs: HTMLElement[]): ShotRide | null {
+      if (msgs.length !== n) {
+        shell.remove(); // the rows and the squares disagree: no honest pairing
+        holdDiagRecord("flight", { phase: "shot-skip", reason: "rows", n: msgs.length });
+        return null;
+      }
+      up = true;
+      // the seat is the PHOTO's rect, not the row's: .msg.shot has no padding
+      // so today they are the same box, and the img is the one that stays true
+      // if that ever changes
+      const seatOf = (msg: HTMLElement): MorphBox => {
+        const r = (msg.querySelector("img") ?? msg).getBoundingClientRect();
+        return { left: r.left, top: r.top, width: r.width, height: r.height };
+      };
+      const seatRadius =
+        parseFloat(
+          getComputedStyle(msgs[0].querySelector("img") ?? msgs[0]).borderTopLeftRadius,
+        ) || thumbRadius;
+      const bundle = bundleSeats(fliers.map((f) => f.square));
+      const gatherMs = gatherMsFor(n); // a lone photo has no arrangement to change
+      for (const msg of msgs) msg.style.opacity = "0"; // the copies ARE the rows until they land
+      flightsUp++;
+      const seat0 = seatOf(msgs[0]);
+      const ride: ShotRide = {
+        dx: bundle[0].left - seat0.left,
+        dy: bundle[0].top - seat0.top,
+        delay: gatherMs, // the stamp waits the gather out and rides the carry
+      };
+      holdDiagRecord("flight", {
+        phase: "shot-launch", n, gather: gatherMs,
+        dx: Math.round(ride.dx * 10) / 10,
+        dy: Math.round(ride.dy * 10) / 10,
+        toW: Math.round(seat0.width), toH: Math.round(seat0.height),
+      });
+      const settle = (phase: string): void => {
+        // hand the seats back byte-clean: the flight was pure presentation, so
+        // the landed thread must carry no trace of it
+        for (const msg of msgs) {
+          msg.style.removeProperty("opacity");
+          if (!msg.getAttribute("style")) msg.removeAttribute("style");
+        }
+        shell.remove();
+        holdDiagRecord("flight", { phase });
+        flightSettled();
+      };
+      const t0 = performance.now();
+      let carrying = false; // the gather's end, stamped once
+      const step = (now: number): void => {
+        raf = 0;
+        if (!msgs[0].isConnected) return settle("shot-cancel"); // replay took the seats
+        const at = shotLeg(now - t0, gatherMs, FLIGHT_MS);
+        const p = flightEase(at.f);
+        if (at.leg === "carry" && !carrying) {
+          carrying = true;
+          holdDiagRecord("flight", { phase: "shot-carry", at: Math.round(now - t0) });
+        }
+        // Every read first, then every write. The carry's far end is re-read
+        // each frame for the reason the bar morph re-reads its own: a second
+        // send's pin and shift, or a reply landing mid-flight, moves the seat,
+        // and this must land where the seat IS rather than where it was at
+        // launch. Reading a seat between two box writes would make the browser
+        // re-lay-out once per photo per frame, so the whole frame's rects are
+        // taken in one pass before anything is written.
+        const ends = at.leg === "gather" ? bundle : msgs.map(seatOf);
+        fliers.forEach((f, i) => {
+          const from = at.leg === "gather" ? f.square : bundle[i];
+          const to = ends[i];
+          const cut = morphBox(from, to, p);
+          // the whole picture's box: the oversized cover frame while the cut is
+          // still a square, the seat itself once the cut has opened onto it
+          const box = morphBox(
+            coverBox(from, f.natW, f.natH),
+            at.leg === "gather" ? coverBox(to, f.natW, f.natH) : to,
+            p,
+          );
+          const radius = at.leg === "gather"
+            ? thumbRadius
+            : morphCorners(thumbRadius, [seatRadius], p)[0];
+          paint(f, box, cut, radius);
+        });
+        if (!at.done) {
+          raf = requestAnimationFrame(step);
+        } else {
+          // the landed frame paints once, copies and rows now pixel-identical,
+          // and only THEN the swap: settling in the write's own frame could
+          // drop the landing frame under load and read as a snap
+          raf = requestAnimationFrame(() => settle("shot-finish"));
+        }
+      };
+      raf = requestAnimationFrame(step);
+      return ride;
+    },
+  };
+}
+
 // iMessage send flight: the fresh bubble lifts out of the compose field and
-// rises into its thread seat. The TEXT row rides the morph above — the bar
-// itself compressing into the bubble; photo rows keep the FLIP translate (the
-// bubble laid out in its final spot, instantly translated back to the field's
-// rect, then released), because the bar never contained the photos — they
-// stage in the pending tray, and a bar morphing into a photo would be a
-// motion with no referent. Replayed and received bubbles keep their ordinary
-// entrance. The flight must always play (standing order) — no reduced-motion
-// gate. Every invocation leaves a trail record with the measured per-bubble
-// dx/dy and the animation's start and finish/cancel, so a device session
-// where nothing visibly moved shows WHY (near-zero deltas are themselves the
-// finding).
-function flyFromField(wrapper: HTMLElement, morph: FieldMorph | null = null): void {
+// rises into its thread seat. The TEXT row rides the bar morph, the compose
+// pill itself compressing into the bubble, and the PHOTO rows ride the strip
+// morph above, gathering into one bundle and growing into their seats out of
+// the squares they were staged in. Each leaves from where it actually was.
+// The FLIP translate below (the bubble laid out in its final spot, instantly
+// translated back to the field's rect, then released) is what remains for
+// anything neither morph could take: a row with no morph armed, or a photo
+// whose pixels had not landed by the time ↑ was pressed. Replayed and received
+// bubbles keep their ordinary entrance. The flight must always play (standing
+// order), with no reduced-motion gate. Every invocation leaves a trail record with
+// the measured per-bubble dx/dy and the animation's start and finish/cancel,
+// so a device session where nothing visibly moved shows WHY (near-zero deltas
+// are themselves the finding).
+function flyFromField(
+  wrapper: HTMLElement,
+  morph: FieldMorph | null = null,
+  shotMorph: ShotMorph | null = null,
+): void {
   const field = document.querySelector(".field");
   const msgs = wrapper.querySelectorAll<HTMLElement>(".msg");
   holdDiagRecord("flight", { phase: "invoke", msgs: msgs.length, field: field !== null });
   if (!field || !msgs.length) {
     morph?.cancel();
+    shotMorph?.cancel();
     return;
   }
   const start = field.getBoundingClientRect();
-  let flips = 0; // FLIP flights launched (the morph's text row is not one)
-  let rideDx = 0; // the first FLIP row's travel, for the stamp below
+  let flights = 0; // motions launched, of any kind, that the stamp can ride
+  let rideDx = 0; // the first row's travel, for the stamp below
   let rideDy = 0;
+  let rideDelay = FLIGHT_SLACK_MS;
+  // the photos go first and go together: one object, one launch, so the ride
+  // the stamp copies is the bundle's own travel rather than any single row's
+  const shotRows = Array.from(msgs).filter((m) => m.classList.contains("shot"));
+  if (shotMorph && shotRows.length) {
+    const ride = shotMorph.launch(shotRows);
+    if (ride) {
+      flights++;
+      rideDx = ride.dx;
+      rideDy = ride.dy;
+      // the morph drives its own frames from the launch instant, so it spends
+      // no runway: a stamp riding it must not wait out the FLIP's slack either
+      rideDelay = ride.delay;
+    }
+  }
   msgs.forEach((msg, i) => {
     if (morph && msg.classList.contains("text")) {
       morph.launch(msg);
       return;
     }
+    if (shotMorph?.launched() && msg.classList.contains("shot")) return; // the strip morph has it
     const end = msg.getBoundingClientRect();
     const dx = start.right - end.right;
     const dy = start.top - end.top;
-    if (!flips) {
+    if (!flights) {
       rideDx = dx;
       rideDy = dy;
+      rideDelay = FLIGHT_SLACK_MS; // this one IS a FLIP, so it spends the runway
     }
-    flips++;
+    flights++;
     // Web Animations API, not a transition: the start state lives inside the
     // animation itself, so WebKit cannot coalesce the two style writes into
     // one and silently skip the motion (which is what killed the old
@@ -2886,22 +3145,27 @@ function flyFromField(wrapper: HTMLElement, morph: FieldMorph | null = null): vo
   // wrapper is built by this send, so any stamp in it was born with it. Pure
   // presentation, like the ride itself: no flightsUp, no airborneRows (the
   // row beneath it already registers the deeper translate).
-  const stamp = flips ? wrapper.querySelector<HTMLElement>(":scope > .stamp") : null;
+  // The ride is whichever motion took the photos: the strip morph's bundle
+  // travel, which starts only after the gather and so waits the gather out in
+  // place of the FLIP's runway, or the FLIP's own first row.
+  const stamp = flights ? wrapper.querySelector<HTMLElement>(":scope > .stamp") : null;
   if (stamp) {
     stamp.animate(
       [
         { opacity: 0, transform: `translate(${rideDx}px, ${rideDy}px)` },
         { opacity: 1, transform: "none" },
       ],
-      { duration: FLIGHT_MS, easing: FLIGHT_EASE, delay: FLIGHT_SLACK_MS, fill: "backwards" },
+      { duration: FLIGHT_MS, easing: FLIGHT_EASE, delay: rideDelay, fill: "backwards" },
     );
     holdDiagRecord("flight", {
       phase: "stamp-ride",
       dx: Math.round(rideDx * 10) / 10,
       dy: Math.round(rideDy * 10) / 10,
+      delay: Math.round(rideDelay),
     });
   }
   if (morph && !morph.launched()) morph.cancel(); // no text row rendered: no seat to morph into
+  if (shotMorph && !shotMorph.launched()) shotMorph.cancel(); // no photo row: nothing to land on
   recordSendMotion(msgs[msgs.length - 1]);
   recordTailGap(msgs[msgs.length - 1]);
 }
@@ -3442,8 +3706,14 @@ async function send(): Promise<void> {
   // pill, and the typed text, standing over the field — so the collapse (and
   // its re-pin wait) happens beneath the shell and no bare-field frame ever
   // paints; the launch itself still runs after the collapse, in the insert
-  // task below. Photo-only sends arm nothing: the bar never contained them.
+  // task below. The bar carried the text and never the photos, so it morphs
+  // for the text alone.
   const morph = text ? armFieldMorph(textEl) : null;
+  // the photos' own shell, snapshotted for the same reason and in the same
+  // breath: the strip's squares have to be measured while they are still in
+  // the strip, since collapseBar takes it out of the layout. A send carrying
+  // both arms both, and each object then leaves from where it actually was.
+  const shotMorph = files.length ? armShotMorph(files) : null;
   if (!airborne) {
     const fieldHBefore = textEl.offsetHeight;
     collapseBar();
@@ -3510,7 +3780,7 @@ async function send(): Promise<void> {
   setFollowTail(true, "send"); // sending snaps you to the tail
   scrollToBottom(true); // instant pin first; the transforms below play over it
   shift.play(); // preceding rows glide, newborn stamps fade up: no white strip, no pop
-  flyFromField(w, morph);
+  flyFromField(w, morph, shotMorph);
   lastLaunchAt = performance.now();
   if (airborne) collapseBar(); // the shipped order when a flight is already up
 

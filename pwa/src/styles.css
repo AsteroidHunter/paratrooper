@@ -899,6 +899,30 @@ html, body {
   opacity: 0;
 }
 
+/* The picked photos in flight (main.ts armShotMorph). A sheet over the whole
+   screen for the reason .morph is one: the thread clips its children at its
+   own box, so nothing inside it could rise out of the strip and cross the
+   thread's bottom edge. It has NO face of any kind, and never gains one. A
+   sent photo has no bubble behind it (.msg.shot above), so neither does the
+   object that becomes one: what travels is the picture and nothing else. */
+.shotflight {
+  position: fixed;
+  inset: 0;
+  z-index: 7; /* the send morph's layer: over the bar and chevron, under the lightbox */
+  pointer-events: none;
+}
+/* Each copy owns its geometry while airborne: viewport coordinates written per
+   frame by main.ts, and its visible shape is entirely the clip-path written
+   with them, corner included. The box underneath that clip is the WHOLE photo
+   at whatever size covers the window of the moment, so it is routinely wider
+   than the window and must never be capped to it. */
+.shotflight img {
+  position: absolute;
+  display: block;
+  max-width: none;
+  max-height: none;
+}
+
 .buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }
 
 /* jump-to-latest chevron: seated at the bar's RIGHT end, floating just above
@@ -1041,6 +1065,13 @@ html, body {
   border-radius: 50%;
   animation: oldspin 0.8s linear infinite; /* the history spinner's ring, one vocabulary */
 }
+/* A square the send flight has taken over (main.ts armShotMorph). A copy of
+   its picture is already standing exactly where it stands, in viewport
+   coordinates, about to gather and fly, so the square itself must not paint
+   underneath: two identical pictures a frame apart read as a doubling. It
+   keeps its box until the tray's close removes it, so nothing in the strip
+   reflows out from under the copies as they leave. */
+.pthumb.aloft { visibility: hidden; }
 /* The square a send leaves behind (main.ts dismissSent). The img is the one
    drawn element and the send carries it into the bubble, so the square paints
    the same pixels as its own background for the length of the close, and the
