@@ -16,6 +16,10 @@
 // follows from the aspect ratio. Never upscaled: a photo narrower than the cap
 // keeps its own size, which is what max-width alone would leave it at.
 
+// the one shape a rect takes in this app, shared with the flight's math rather
+// than restated here (the gap section at the foot of this file uses it)
+import type { MorphBox } from "./shift";
+
 export const SHOT_MAX_WIDTH = 0.75; // .msg max-width in styles.css
 
 export interface PhotoBox {
@@ -269,5 +273,91 @@ export function trayClose(heightPx: number, padTopPx: number): Keyframe[] {
   return [
     { height: `${heightPx}px`, paddingTop: `${padTopPx}px` },
     { height: "0px", paddingTop: "0px" },
+  ];
+}
+
+// --- the gap a cancelled square leaves -----------------------------------------
+// A square that is only fading is still standing. Opacity and scale cost the
+// layout nothing, so a cancelled square held its whole 64px seat for the whole
+// beat while the picture inside it went early: the shared ease spends most of
+// its travel in the first third, so the photo is under a tenth of its opacity
+// about 150ms into a 400ms beat and the rest of that beat is a white hole with
+// nothing moving in it. The neighbours only learned the square was gone when
+// the teardown removed it at the very end, and they arrived in a single frame.
+// That is the owner's report in two halves: the gap that stands there, and the
+// jump that closes it.
+//
+// So the square gives up its SEAT on the tap and keeps only its picture. It is
+// parked exactly where it stands, out of the flow, and the squares after it
+// reflow into the room in that same frame. Then first, last, invert, play: each
+// survivor is measured before and after, pushed back to where it was standing,
+// and released on the shared beat, so the gap closes while the picture fades out
+// of it and no frame holds a hole. The same shape the send's sibling shift uses
+// (shift.ts), on the same clock, so a cancel moves the way the app moves.
+//
+// All of it is measured, never written down. The strip wraps, so losing one
+// square can pull another up a whole line, and the strip's own top moves when
+// that happens. Viewport coordinates throughout for the same reason: a square
+// starts its slide where the eye last saw it, which is a screen fact.
+
+/** a square's corner, in whatever coordinates the caller measured in */
+export interface ThumbSeat {
+  left: number;
+  top: number;
+}
+
+/** how far a square has to be pushed back to start where it was standing */
+export interface ThumbMove {
+  dx: number;
+  dy: number;
+}
+
+/**
+ * Where the leaving square stands once it is out of the flow: its own rect,
+ * put into the strip's coordinates, so it paints in the very place it was
+ * painting before it gave the seat up.
+ *
+ * The strip rect handed in must be the one read AFTER the reflow. A strip that
+ * has just lost a whole line has moved out from under any number taken before
+ * it, and parking against the old origin would drop the picture a line at the
+ * instant it is still fully opaque.
+ */
+export function thumbPark(square: MorphBox, strip: ThumbSeat): MorphBox {
+  return {
+    left: square.left - strip.left,
+    top: square.top - strip.top,
+    width: square.width,
+    height: square.height,
+  };
+}
+
+/**
+ * The invert half: where each surviving square was, less where it now is.
+ * Paired by position, so the two readings must be of the same squares in the
+ * same order.
+ */
+export function thumbMoves(
+  before: readonly ThumbSeat[],
+  after: readonly ThumbSeat[],
+): ThumbMove[] {
+  const n = Math.min(before.length, after.length);
+  const moves: ThumbMove[] = [];
+  for (let i = 0; i < n; i++) {
+    moves.push({ dx: before[i].left - after[i].left, dy: before[i].top - after[i].top });
+  }
+  return moves;
+}
+
+/** under this a square is where it already was: everything left of the gap */
+export const THUMB_MOVE_MIN_PX = 0.5;
+
+export function thumbMoved(move: ThumbMove, min: number = THUMB_MOVE_MIN_PX): boolean {
+  return Math.abs(move.dx) > min || Math.abs(move.dy) > min;
+}
+
+export function thumbShift(move: ThumbMove): Keyframe[] {
+  return [
+    { transform: `translate(${move.dx}px, ${move.dy}px)` },
+    { transform: "none" },
   ];
 }

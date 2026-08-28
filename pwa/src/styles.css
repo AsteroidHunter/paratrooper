@@ -1018,6 +1018,10 @@ html, body {
   gap: 0.4rem;
   flex-wrap: wrap;
   padding: 0.4rem 0.75rem 0;
+  /* the frame a cancelled square is parked in (.pthumb.leaving below): the
+     square holds its place in the strip's own coordinates, so it stays with
+     the strip while the strip moves. Nothing about this layout changes. */
+  position: relative;
 }
 /* The strip on its way out (main.ts dismissPick eases its height and its top
    padding down over the send flight's beat, while the square inside shrinks and
@@ -1028,6 +1032,17 @@ html, body {
    shave the corner off every ✕. */
 .pending.closing { overflow: hidden; }
 .pthumb { position: relative; }
+/* A cancelled square with others still staged (main.ts closeGap). It gives up
+   its SEAT on the tap and keeps only its picture: parked where it stood, out of
+   the flow, so the squares after it reflow into the room in that same frame and
+   can slide into it while this one shrinks and fades. Left in the flow it held
+   a full 64px of nothing for the whole beat, and that is the white gap that
+   used to stand there with nothing moving. Deaf to taps, because it paints over
+   its neighbours now and its own ✕ has already been answered. */
+.pthumb.leaving {
+  position: absolute;
+  pointer-events: none;
+}
 /* The seat: a hard 64px square that stands whether or not the img has anything
    to show yet, so the tray's height lands on the tap and the picture is the
    only thing left waiting (main.ts stagePick). */

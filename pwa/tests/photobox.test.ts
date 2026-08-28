@@ -24,7 +24,12 @@ import {
   photoBox,
   resizeHonoured,
   smallShotUrl,
+  THUMB_MOVE_MIN_PX,
   thumbDrop,
+  thumbMoved,
+  thumbMoves,
+  thumbPark,
+  thumbShift,
   thumbSlide,
   trayClose,
   whenDrawn,
@@ -1068,5 +1073,112 @@ describe("the attach never blocks on undecoded pixels", () => {
     // size from the insert and plainly says a photo is coming
     expect(fnBody("send")).toContain("photoBox(nat[0], nat[1], rowW)");
     expect(fnBody("prepareShot")).toContain("img.classList.add(WAIT_CLASS)");
+  });
+});
+
+// The gap a cancelled square leaves. The fault it replaces was two halves of
+// one thing: a square that only faded kept its whole seat, so the row held a
+// hole with nothing moving in it for the rest of the beat, and the neighbours
+// then arrived in a single frame when the teardown finally removed it.
+describe("closing the gap a cancelled square leaves", () => {
+  it("parks the leaving square exactly where it was standing, in the strip's own frame", () => {
+    // a square at 100,700 on screen, in a strip whose corner is at 12,690
+    const park = thumbPark(
+      { left: 100, top: 700, width: 64, height: 64 },
+      { left: 12, top: 690 },
+    );
+    expect(park).toEqual({ left: 88, top: 10, width: 64, height: 64 });
+  });
+
+  it("pairs each survivor's old place against its new one", () => {
+    const before = [{ left: 12, top: 10 }, { left: 84, top: 10 }, { left: 156, top: 10 }];
+    const after = [{ left: 12, top: 10 }, { left: 84, top: 10 }, { left: 84, top: 10 }];
+    expect(thumbMoves(before, after)).toEqual([
+      { dx: 0, dy: 0 },
+      { dx: 0, dy: 0 },
+      { dx: 72, dy: 0 },
+    ]);
+  });
+
+  it("a square pulled up onto the line above carries both directions", () => {
+    // the strip wraps, so losing one square can lift another a whole row
+    const moves = thumbMoves([{ left: 12, top: 82 }], [{ left: 156, top: 10 }]);
+    expect(moves).toEqual([{ dx: -144, dy: 72 }]);
+  });
+
+  it("everything left of the gap has not moved, and is not animated", () => {
+    expect(THUMB_MOVE_MIN_PX).toBe(0.5);
+    expect(thumbMoved({ dx: 0, dy: 0 })).toBe(false);
+    expect(thumbMoved({ dx: 0.4, dy: -0.4 })).toBe(false); // sub-pixel rounding is not a move
+    expect(thumbMoved({ dx: 72, dy: 0 })).toBe(true);
+    expect(thumbMoved({ dx: 0, dy: -72 })).toBe(true);
+  });
+
+  it("starts each survivor where it was standing and releases it to its own place", () => {
+    expect(thumbShift({ dx: 72, dy: 0 })).toEqual([
+      { transform: "translate(72px, 0px)" },
+      { transform: "none" },
+    ]);
+  });
+});
+
+describe("closeGap wiring: the seat goes back on the tap, not at the end", () => {
+  const gap = (): string => fnBody("closeGap");
+
+  it("the leaving square is taken out of the flow BEFORE the strip is re-read", () => {
+    // parking against a strip rect read before the reflow would drop the
+    // picture a whole line at the instant it is still fully opaque
+    const body = gap();
+    const leaves = body.indexOf('wrap.classList.add("leaving")');
+    const strip = body.indexOf("box.getBoundingClientRect()");
+    expect(leaves).toBeGreaterThan(-1);
+    expect(strip).toBeGreaterThan(leaves);
+  });
+
+  it("reads the survivors before it, and again after it, in that order", () => {
+    const body = gap();
+    const before = body.indexOf("const before = others.map(seat)");
+    const leaves = body.indexOf('wrap.classList.add("leaving")');
+    const after = body.indexOf("const after = others.map(seat)");
+    expect(before).toBeGreaterThan(-1);
+    expect(before).toBeLessThan(leaves);
+    expect(after).toBeGreaterThan(leaves);
+  });
+
+  it("takes any slide still running off first, so translates cannot stack", () => {
+    const body = gap();
+    const cancel = body.indexOf("slide.cancel()");
+    const before = body.indexOf("const before = others.map(seat)");
+    expect(cancel).toBeGreaterThan(-1);
+    expect(cancel).toBeLessThan(before);
+  });
+
+  it("rides the same beat the leaving square does, and animates only what moved", () => {
+    const body = gap();
+    expect(body).toContain("if (!thumbMoved(move)) return");
+    expect(body).toContain("others[i].animate(thumbShift(move), beat)");
+  });
+
+  it("only runs while other squares are staged; the last one still closes the strip", () => {
+    const dismiss = fnBody("dismissPick");
+    expect(dismiss).toContain("const last = pendingFiles.length === 0;");
+    expect(dismiss).toContain("if (box && !last) closeGap(box, pick.wrap, beat);");
+    expect(dismiss).toContain("if (box && last) {"); // the strip's own height, unchanged
+    // and the settle that used to hop the conversation stays gone
+    expect(dismiss).not.toContain('settleTail("drawer-close")');
+  });
+
+  it("the parked square is out of the flow and deaf to taps", () => {
+    const css = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../src/styles.css"),
+      "utf8",
+    );
+    const leaving = /\.pthumb\.leaving\s*{([^}]*)}/.exec(css)?.[1] ?? "";
+    expect(leaving).toMatch(/position:\s*absolute/);
+    expect(leaving).toMatch(/pointer-events:\s*none/);
+    // the frame it is parked in: without this the square would be placed
+    // against the page rather than against the strip
+    const pending = /\.pending\s*{([^}]*)}/.exec(css)?.[1] ?? "";
+    expect(pending).toMatch(/position:\s*relative/);
   });
 });

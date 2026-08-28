@@ -18,11 +18,15 @@ import {
   resizeHonoured,
   smallShotUrl,
   thumbDrop,
+  thumbMoved,
+  thumbMoves,
+  thumbPark,
+  thumbShift,
   thumbSlide,
   trayClose,
   whenDrawn,
 } from "./photobox";
-import type { DrawWhy, SmallDrawHost, SmallShot } from "./photobox";
+import type { DrawWhy, SmallDrawHost, SmallShot, ThumbSeat } from "./photobox";
 import { GUESS_H, GUESS_RATIO, GUESS_W, learnDims, scrollFix } from "./photofit";
 import type { Dims } from "./photofit";
 import { WAIT_CLASS, createPhotoQueue, nearMargin } from "./photolazy";
@@ -98,7 +102,7 @@ import {
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.44"; // the loading globe is centred on the screen rather than on a height the phone is still revising, so it no longer paints high and drops
+const APP_VERSION = "0.3.45"; // cancelling one of several picked photos gives its place back on the tap and the others slide into it, instead of a hole standing there and then everything jumping
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -734,6 +738,11 @@ const picks = new Map<File, Pick>();
 // zero height would keep the new thumbnail clipped out of sight (showPending).
 let trayClosing: Animation | null = null;
 
+// The survivors' slide into a cancelled square's place (closeGap). Kept so that
+// a second cancel arriving mid-slide can read them where they visually are and
+// then take the old motions off, instead of stacking one translate on another.
+let gapSlides: Animation[] = [];
+
 function renderPending(): void {
   refreshSend(); // staged files count toward "something to send"
   const box = document.getElementById("pending");
@@ -793,6 +802,40 @@ function showPending(): void {
   pickTimingStep("open"); // TEMP DIAGNOSTIC (pick-timing)
 }
 
+// The gap a cancelled square leaves, closed while it goes rather than after it.
+// photobox.ts (the gap section) holds the reasoning and all of the arithmetic;
+// this is the reads, the writes and the one class.
+function closeGap(box: HTMLElement, wrap: HTMLElement, beat: KeyframeAnimationOptions): void {
+  const others = Array.from(box.querySelectorAll<HTMLElement>(".pthumb"))
+    .filter((el) => el !== wrap);
+  if (others.length === 0) return;
+  // any slide still running comes off FIRST, so the before-reading below is of
+  // squares where the eye last saw them and no translate is stacked on another
+  for (const slide of gapSlides) slide.cancel();
+  gapSlides = [];
+  const seat = (el: HTMLElement): ThumbSeat => {
+    const r = el.getBoundingClientRect();
+    return { left: r.left, top: r.top };
+  };
+  const before = others.map(seat);
+  const square = wrap.getBoundingClientRect();
+  wrap.classList.add("leaving"); // out of the flow in THIS frame: the room is given back now
+  const strip = box.getBoundingClientRect(); // read after the reflow, never before
+  const park = thumbPark(
+    { left: square.left, top: square.top, width: square.width, height: square.height },
+    { left: strip.left, top: strip.top },
+  );
+  wrap.style.left = `${park.left}px`;
+  wrap.style.top = `${park.top}px`;
+  wrap.style.width = `${park.width}px`;
+  wrap.style.height = `${park.height}px`;
+  const after = others.map(seat);
+  thumbMoves(before, after).forEach((move, i) => {
+    if (!thumbMoved(move)) return; // everything left of the gap has not moved
+    gapSlides.push(others[i].animate(thumbShift(move), beat));
+  });
+}
+
 // The ✕. Everything the tap DECIDES lands on the tap — the file leaves the
 // staging list and the ↑ answers for it immediately — and only the DOM teardown
 // waits for the motion, so a send fired mid-close can never pick the dismissed
@@ -813,7 +856,8 @@ function dismissPick(file: File, pick: Pick): void {
     fill: "forwards", // the square stays gone and the box stays shut until the teardown below
   };
   // the tray's own height moves only when this was the last square in it
-  if (box && pendingFiles.length === 0) {
+  const last = pendingFiles.length === 0;
+  if (box && last) {
     const padTop = parseFloat(getComputedStyle(box).paddingTop) || 0;
     box.classList.add("closing"); // clips the full-size square while the box goes past it
     trayClosing = box.animate(trayClose(box.offsetHeight, padTop), beat);
@@ -837,9 +881,13 @@ function dismissPick(file: File, pick: Pick): void {
     // anything, because nothing here has changed yet; the close's own frames and
     // showPending's settle below own the whole of it.
   }
+  // With others still staged the strip's height does not move at all, and the
+  // work is the hole this square is about to leave in the middle of the row.
+  if (box && !last) closeGap(box, pick.wrap, beat);
   const drop = pick.wrap.animate(thumbDrop(), beat);
   const gone = (): void => {
     box?.classList.remove("closing");
+    gapSlides = []; // finished or cancelled with the square they were closing over
     pick.wrap.remove();
     if (pick.url) URL.revokeObjectURL(pick.url);
     // display:none only once the height has actually gone — and it re-reads the
