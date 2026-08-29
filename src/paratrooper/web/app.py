@@ -1,9 +1,20 @@
 """FastAPI web service: PWA host + auth gate + uploads + threads + socket + publish.
 
-Holds the socket, serves the PWA, gates every request/socket on the shared token,
-stages uploads to the inbox, persists threads to SQLite, debounce-batches messages
-into worker jobs over the Key Value queue, relays streamed results back over the
-socket, and owns the /publish merge authority.
+Holds the socket, serves the PWA, stages uploads to the inbox, persists threads to
+SQLite, debounce-batches messages into worker jobs over the Key Value queue, relays
+streamed results back over the socket, and owns the /publish merge authority.
+
+The token gate is declared per route, not applied to the app as a whole, and that
+distinction is stated here because believing otherwise is precisely how two
+diagnostic routes came to sit open to the whole internet for a bug hunt's worth of
+deploys. Every route that reads or writes thread content demands the shared token —
+in the Authorization header, or in a query param on the socket handshake and the
+thumbnail reads, since neither of those can carry headers. Deliberately public are
+the health check, which answers only with the running commit, and the PWA's own
+static bundle, which the browser must fetch before it has anywhere to type a token.
+The auto-generated schema and doc pages are switched off, so nothing publishes the
+route map either. A route added here is open until its own declaration says
+otherwise; there is no blanket to fall back on.
 
 ``create_app`` accepts injected state so tests run without Redis; in production
 the lifespan connects Key Value and starts the result-relay task.
@@ -450,9 +461,9 @@ def _lifespan(injected: AppState | None):
 # Two halves:
 #   - _holddiag_latest: the latest hold event trail POSTed by the PWA
 #     (pwa/src/hold.ts, same banner). The phone has no reachable console, so
-#     the client posts its trail here and it is read back with a plain curl on
-#     GET /api/debug/holddiag. Single web instance, so a module global (latest
-#     wins) is fine.
+#     the client posts its trail here and it is read back with a curl on
+#     GET /api/debug/holddiag, bearing the app token like every other call.
+#     Single web instance, so a module global (latest wins) is fine.
 #   - the "paratrooper.holddiag" logger: one structured line per batching and
 #     delivery decision (this file + batching.py), tagged "holddiag" so the
 #     deploy logs alone reconstruct a session. It used to carry its own INFO
@@ -470,7 +481,18 @@ _diag = logging.getLogger("paratrooper.holddiag")
 def create_app(injected: AppState | None = None) -> FastAPI:
     install_service_logging()
     install_log_redaction()
-    app = FastAPI(title="Paratrooper", lifespan=_lifespan(injected))
+    # The interactive docs and the schema they are built from are off. They take
+    # no token, so in the deployed service they were an unauthenticated index of
+    # every route, its method and its request shape — a map handed to anyone who
+    # guessed the hostname, and of no use at all to a single-user phone client
+    # that was written against these routes by hand.
+    app = FastAPI(
+        title="Paratrooper",
+        lifespan=_lifespan(injected),
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     def st() -> AppState:
         return app.state.app_state
@@ -654,14 +676,22 @@ def create_app(injected: AppState | None = None) -> FastAPI:
 
     # ===================== TEMP DIAGNOSTIC (remove after the hold session) =====================
     # reply-hold probe: the PWA POSTs its hold event trail (the phone has no
-    # reachable console) and it is read back with a plain curl. Unauthenticated
-    # on purpose so the GET needs no bearer token; latest POST wins, and the
-    # trail carries no message content (hold.ts records event names only). The
-    # digest line puts the release reasons into the deploy logs, so logs alone
-    # tell WHY the hold let go even if nobody curls the GET. TO REMOVE: delete
-    # these two routes, the TEMP DIAGNOSTIC block above _holddiag_latest, and
-    # the matching pwa/src/hold.ts block.
-    @app.post("/api/debug/holddiag")
+    # reachable console) and a curl reads it back. Latest POST wins. The digest
+    # line puts the release reasons into the deploy logs, so logs alone tell WHY
+    # the hold let go even if nobody curls the GET.
+    #
+    # Both carry the token like everything else. They were left open so that
+    # curl could be typed without one, and the convenience was not worth what it
+    # bought: the GET was handing any stranger the shape of a private
+    # conversation — how many messages, of what kind, in what order, the moments
+    # someone was typing in it, the geometry of the phone it was read on — while
+    # the POST let that same stranger replace the buffer, hold a payload of
+    # their choosing in the service's memory, and write text of their choosing
+    # into the deploy logs, which are the one record a device session is
+    # reconstructed from. The curl now sends the header the phone already sends.
+    # TO REMOVE: delete these two routes, the TEMP DIAGNOSTIC block above
+    # _holddiag_latest, and the matching pwa/src/hold.ts block.
+    @app.post("/api/debug/holddiag", dependencies=[Depends(require_token)])
     async def debug_holddiag_post(payload: dict) -> dict:
         _holddiag_latest.clear()
         _holddiag_latest.update(payload)
@@ -784,7 +814,7 @@ def create_app(injected: AppState | None = None) -> FastAPI:
             _diag.info("holddiag blank events=%d tail=%s", len(tb), json.dumps(tb[-6:]))
         return {"ok": True}
 
-    @app.get("/api/debug/holddiag")
+    @app.get("/api/debug/holddiag", dependencies=[Depends(require_token)])
     async def debug_holddiag_get() -> dict:
         return _holddiag_latest
     # =================== END TEMP DIAGNOSTIC (remove after the hold session) ===================

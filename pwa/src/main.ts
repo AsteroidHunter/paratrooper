@@ -17,7 +17,7 @@ import {
   gatherMsFor,
   shotLeg,
 } from "./gather";
-import { createReplyHold, holdDiagRecord } from "./hold";
+import { createReplyHold, holdDiagAuth, holdDiagRecord } from "./hold";
 import { composeMirror, fitComposeBox } from "./mirror";
 import {
   DRAW_NO_DEADLINE,
@@ -117,7 +117,7 @@ import { blankProbeEdge, blankProbeFollow, blankProbeSettle } from "./blankprobe
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.57"; // every photo in the history now compares the picture it was actually served against the size it was promised as the pixels land, and says so only when the two disagree, with a count of how many it looked at so a quiet trail cannot be mistaken for a trail nobody wrote to
+const APP_VERSION = "0.3.58"; // the diagnostic trail the app posts for the bug hunt is no longer readable or writable by anyone who knows the address — it now needs the same access token everything else does, and the app sends it along automatically, while a post that cannot be signed still fails quietly and changes nothing you see
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -364,6 +364,13 @@ document.addEventListener("selectionchange", () => {
 function authHeaders(): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
+
+// TEMP DIAGNOSTIC (hold.ts trail): its POST goes to a route that now demands
+// the app token like every other one, so it is handed this builder rather than
+// growing its own copy of the token read. A function, not the header itself:
+// the token arrives at the gate screen and leaves at logout, and the trail must
+// follow it both ways. TO REMOVE: this line, with that block.
+holdDiagAuth(authHeaders);
 
 // --- token gate --------------------------------------------------------------
 

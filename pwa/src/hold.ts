@@ -139,16 +139,19 @@ export function createReplyHold<T>(
 // (74b0095). The iPhone has no reachable console, so the hold's event trail
 // (every observed composer key with its event type, every clock reset, every
 // park, every release with its exact reason, every rendered bubble) rides a
-// ring buffer here and is POSTed to the server, where a plain curl reads it
-// back (see /api/debug/holddiag in web/app.py). The state-machine hooks above
-// record unconditionally (pure array pushes, read by tests through
-// holdDiagEvents); the DOM observers and the POSTs switch on only inside the
-// real shell (static #app present), so node/vitest stay inert. Key records
-// carry event/inputType names only, never typed characters, because the debug
-// route is unauthenticated. TO REMOVE: delete this block and
-// the holdDiagRecord calls above, plus the matching TEMP DIAGNOSTIC block and
-// holddiag log lines in web/app.py and web/batching.py, and the keyboard and
-// picker probe block at the bottom of shell.ts, which rides this same trail.
+// ring buffer here and is POSTed to the server, where a curl bearing the app
+// token reads it back (see /api/debug/holddiag in web/app.py). The
+// state-machine hooks above record unconditionally (pure array pushes, read by
+// tests through holdDiagEvents); the DOM observers and the POSTs switch on only
+// inside the real shell (static #app present), so node/vitest stay inert. Key
+// records carry event/inputType names only, never typed characters. The route
+// they ride to is behind that token now, but the practice stands on its own: a
+// trail that never holds what was typed cannot leak it, whatever happens to the
+// gate in front of it or to the deploy logs it is copied into. TO REMOVE:
+// delete this block, the holdDiagRecord calls above and the holdDiagAuth wiring
+// in main.ts, plus the matching TEMP DIAGNOSTIC block and holddiag log lines in
+// web/app.py and web/batching.py, and the keyboard and picker probe block at
+// the bottom of shell.ts, which rides this same trail.
 
 declare const __BUILT_AT__: string;
 
@@ -162,6 +165,20 @@ const DIAG_MAX = 600; // ~150 keystrokes of tail: a whole test exchange fits
 const diagTrail: HoldDiagEvent[] = [];
 let diagPostsOn = false;
 let diagPostTimer: ReturnType<typeof setTimeout> | null = null;
+
+// The debug route is gated on the app token now, so the post has to wear the
+// same Authorization header the rest of the app does. The shell hands its own
+// header builder down rather than this block reading the stored token a second
+// time: one place still owns that token, so a logout that clears it is felt
+// here too, and a copy of the read cannot drift out of step with it. Left
+// unhanded — outside the real shell, where nothing posts anyway — the post
+// simply goes bare and the server refuses it, which is the same silent nothing
+// any other failed post has always been.
+let diagAuthHeaders: (() => Record<string, string>) | null = null;
+
+export function holdDiagAuth(headers: () => Record<string, string>): void {
+  diagAuthHeaders = headers;
+}
 
 export function holdDiagEvents(): readonly HoldDiagEvent[] {
   return diagTrail;
@@ -252,9 +269,20 @@ function diagPost(): void {
       build: typeof __BUILT_AT__ === "string" ? __BUILT_AT__ : "unknown",
       events: diagTrail.slice(),
     };
+    // Building the header is the one step here that runs someone else's code,
+    // so it is the one step that could throw where nothing is watching. A
+    // diagnostic that cannot name itself is a non-event; a diagnostic that
+    // throws on the way out is an app bug. It goes bare instead and the server
+    // refuses it, which costs the same nothing a dropped post always cost.
+    let headers: Record<string, string> = { "Content-Type": "application/json" };
+    try {
+      if (diagAuthHeaders) headers = { ...headers, ...diagAuthHeaders() };
+    } catch {
+      /* no header to be had; the bare post below is the fallback */
+    }
     void fetch("/api/debug/holddiag", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(payload),
     }).catch(() => {
       /* diagnostic only: a failed post must never disturb the app */

@@ -1,4 +1,4 @@
-"""TEMP DIAGNOSTIC tests (remove with the reply-hold probe): the unauthenticated
+"""TEMP DIAGNOSTIC tests (remove with the reply-hold probe): the token-gated
 /api/debug/holddiag POST/GET pair round-trips the phone's hold trail, and the
 "paratrooper.holddiag" logger names every batching and relay decision, which is
 the deploy-log record the device session is reconstructed from."""
@@ -16,6 +16,8 @@ from paratrooper.web import ThreadCoordinator, ThreadStore
 from paratrooper.web.app import AppState, _relay_result, create_app
 from paratrooper.web.inbox import DiskInbox
 from paratrooper.web.models import ResultMessage
+
+AUTH = {"Authorization": "Bearer tok"}
 
 
 def _run(coro):
@@ -72,9 +74,10 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
-def test_holddiag_roundtrip_no_auth(client, caplog):
-    """The phone posts its trail with no bearer token; a plain curl reads the
-    latest back; the digest line lands in the logs with the release reasons."""
+def test_holddiag_roundtrip_with_token(client, caplog):
+    """The phone posts its trail with the app's bearer token; a curl carrying the
+    same token reads the latest back; the digest line lands in the logs with the
+    release reasons."""
     trail = {
         "ts": "2026-08-18T00:00:00Z",
         "build": "2026-08-18T00:00Z",
@@ -85,15 +88,58 @@ def test_holddiag_roundtrip_no_auth(client, caplog):
         ],
     }
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
-    assert client.get("/api/debug/holddiag").json() == trail
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
+    assert client.get("/api/debug/holddiag", headers=AUTH).json() == trail
     digest = [r.message for r in caplog.records if "holddiag client" in r.message]
     assert len(digest) == 1
     assert "events=3" in digest[0] and '"reason": "quiet"' in digest[0]
 
     # latest wins: a second post replaces the first entirely
-    assert client.post("/api/debug/holddiag", json={"events": []}).json() == {"ok": True}
-    assert client.get("/api/debug/holddiag").json() == {"events": []}
+    assert client.post(
+        "/api/debug/holddiag", headers=AUTH, json={"events": []}
+    ).json() == {"ok": True}
+    assert client.get("/api/debug/holddiag", headers=AUTH).json() == {"events": []}
+
+
+# The gate on this pair, pinned in both directions. These two routes shipped
+# open for the length of a bug hunt because nothing here would have noticed if
+# they were, and the cost of reopening them by accident is not a diagnostic's
+# worth of trouble — it is the conversation's shape on one side and the deploy
+# logs on the other. Remove these with the probe, not before it.
+
+
+def test_holddiag_post_refuses_an_unauthenticated_write(client, caplog):
+    """Open, the POST let a stranger replace the buffer, hold a body of their
+    choosing in the service's memory, and write their own text into the logs a
+    session is reconstructed from. Unsigned it now buys nothing at all: the
+    stored trail stands and no digest line is written."""
+    assert client.post(
+        "/api/debug/holddiag", headers=AUTH, json={"build": "mine", "events": []}
+    ).json() == {"ok": True}
+    intruder = {"build": "theirs", "events": [{"t": 1, "ev": "held", "d": {"seq": 1}}]}
+    caplog.clear()  # the legitimate post above wrote its own digest line
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        bare = client.post("/api/debug/holddiag", json=intruder)
+        wrong = client.post(
+            "/api/debug/holddiag", headers={"Authorization": "Bearer nope"}, json=intruder
+        )
+    assert bare.status_code == 401 and wrong.status_code == 401
+    assert [r.message for r in caplog.records if "holddiag client" in r.message] == []
+    assert client.get("/api/debug/holddiag", headers=AUTH).json()["build"] == "mine"
+
+
+def test_holddiag_get_refuses_an_unauthenticated_read(client):
+    """Open, the GET handed anyone who knew the address the shape of a private
+    conversation: which seqs exist, what kind of event each was, and the phone's
+    own geometry around them. Unsigned it now returns the refusal and none of
+    the trail, while the tokened read is unchanged."""
+    trail = {"build": "b", "events": [{"t": 1, "ev": "held", "d": {"seq": 41}}]}
+    assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
+    bare = client.get("/api/debug/holddiag")
+    wrong = client.get("/api/debug/holddiag", headers={"Authorization": "Bearer nope"})
+    assert bare.status_code == 401 and wrong.status_code == 401
+    assert "41" not in bare.text and "41" not in wrong.text
+    assert client.get("/api/debug/holddiag", headers=AUTH).json() == trail
 
 
 def test_holddiag_digest_carries_cold_open_marks(client, caplog):
@@ -111,7 +157,7 @@ def test_holddiag_digest_carries_cold_open_marks(client, caplog):
         ],
     }
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     digest = [r.message for r in caplog.records if "holddiag client" in r.message]
     assert len(digest) == 1
     for name in ("cache-read", "cache-applied", "batch-commit", "reconcile-drop"):
@@ -133,7 +179,7 @@ def test_holddiag_viewport_digest_carries_send_motion(client, caplog):
         ],
     }
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
     assert len(vp) == 1
     assert '"send-motion"' in vp[0] and '"moved": "seat"' in vp[0]
@@ -157,7 +203,7 @@ def test_holddiag_viewport_digest_carries_keyboard_regime_marks(client, caplog):
         ],
     }
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
     assert len(vp) == 1
     assert '"shell-size"' in vp[0]
@@ -180,7 +226,7 @@ def test_holddiag_viewport_digest_carries_typing_shove_marks(client, caplog):
         ],
     }
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
     assert len(vp) == 1
     assert '"grow-blink"' in vp[0]
@@ -204,7 +250,7 @@ def test_holddiag_viewport_digest_carries_keyboard_dynamics_marks(client, caplog
         ],
     }
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
     assert len(vp) == 1
     assert '"kb-focusing"' in vp[0] and '"phase": "focus"' in vp[0]
@@ -228,7 +274,7 @@ def test_holddiag_boot_digest_carries_boot_motion_head_first(client, caplog):
         ],
     }
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     boot = [r.message for r in caplog.records if "holddiag boot" in r.message]
     assert len(boot) == 1
     assert '"boot-motion"' in boot[0] and '"moved": "vv-top"' in boot[0]
@@ -273,7 +319,7 @@ def test_holddiag_rise_trail_gets_its_own_line(client, caplog):
     displaced are still on the viewport line beside it."""
     trail = {"build": "b", "events": _rise_trail()}
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     rise = [r.message for r in caplog.records if "holddiag rise" in r.message]
     assert len(rise) == 1
     assert "events=30" in rise[0]
@@ -301,7 +347,7 @@ def test_holddiag_edge_marks_get_their_own_line(client, caplog):
     ]
     trail = {"build": "b", "events": _rise_trail() + noise}
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     edge = [r.message for r in caplog.records if "holddiag edge" in r.message]
     assert len(edge) == 1
     assert "events=1" in edge[0]
@@ -334,7 +380,7 @@ def test_holddiag_fall_and_rise_lines_do_not_clip_each_other(client, caplog):
     ]
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
         assert client.post(
-            "/api/debug/holddiag", json={"build": "b", "events": events}
+            "/api/debug/holddiag", headers=AUTH, json={"build": "b", "events": events}
         ).json() == {"ok": True}
     fall = [r.message for r in caplog.records if "holddiag fall" in r.message]
     rise = [r.message for r in caplog.records if "holddiag rise" in r.message]
@@ -368,7 +414,7 @@ def test_holddiag_scroll_jank_gets_its_own_line(client, caplog):
         {"t": 2, "ev": "scroll-jank", "d": record},
     ]}
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     jank = [r.message for r in caplog.records if "holddiag jank" in r.message]
     assert len(jank) == 1
     assert "events=1" in jank[0]
@@ -406,7 +452,7 @@ def test_holddiag_pick_timing_gets_its_own_line(client, caplog):
         {"t": 2, "ev": "pick-timing", "d": record},
     ]}
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     pick = [r.message for r in caplog.records if "holddiag pick" in r.message]
     assert len(pick) == 1
     assert "events=1" in pick[0]
@@ -499,7 +545,7 @@ def test_holddiag_photo_box_marks_get_their_own_line(client, caplog):
         {"t": 6, "ev": "tail-gap", "d": {"when": "photo"}},
     ]}
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     photo = [r.message for r in caplog.records if "holddiag photo" in r.message]
     assert len(photo) == 1
     assert "events=5" in photo[0]
@@ -547,7 +593,7 @@ def test_holddiag_settle_marks_get_their_own_line(client, caplog):
                "over": 0, "sh": 4329, "ch": 770, "cut": False, "air": 0}},
     ]}
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     settle = [r.message for r in caplog.records if "holddiag settle" in r.message]
     assert len(settle) == 1
     assert "events=2" in settle[0]
@@ -601,7 +647,7 @@ def test_holddiag_thread_blank_gets_its_own_line(client, caplog):
         {"t": 2, "ev": "thread-blank", "d": record},
     ]}
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
-        assert client.post("/api/debug/holddiag", json=trail).json() == {"ok": True}
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     blank = [r.message for r in caplog.records if "holddiag blank" in r.message]
     assert len(blank) == 1
     assert "events=1" in blank[0]
