@@ -380,6 +380,36 @@ describe("tail-gap — the empty room under the last message, as one number", ()
   it("no rows to measure leaves the verdict unclaimed rather than guessed", () => {
     expect(tailGapFrame("settle", tailReader({ lastBottom: NaN })).short).toBeNull();
   });
+
+  // The room the OTHER way, and the one the keyboard-close readings are really
+  // about: not space under the last message inside the scroller, but the
+  // scroller sitting past the end of its own range, which is the white strip
+  // between the conversation and the compose bar. Every line of this trail
+  // carried the three numbers it takes to work that out and none of them
+  // carried the answer.
+  it("a thread inside its own range has nothing past the end", () => {
+    expect(tailGapFrame("settle", tailReader()).over).toBe(0);
+    expect(tailGapFrame("settle", tailReader({ st: 0 })).over).toBe(0);
+  });
+
+  it("his close: the strip is on the line instead of being derived from it", () => {
+    // 6775 of content in a 624 box ends at 6151; the offset handed back was
+    // 6537, that same content less the 238 of box the keyboard had left it
+    const stuck = tailGapFrame("kb-close", tailReader({ sh: 6775, st: 6537, ch: 624 }));
+    expect(stuck.over).toBe(386);
+    expect(stuck.when).toBe("kb-close");
+  });
+
+  it("keeps a tenth of a pixel, like every other number on the line", () => {
+    expect(tailGapFrame("kb-close-late", tailReader({ sh: 4000, st: 3200.4, ch: 800 })).over).toBe(
+      0.4,
+    );
+  });
+
+  it("a missing reading lands as null rather than a zero that reads as healthy", () => {
+    expect(tailGapFrame("kb-close", tailReader({ sh: NaN })).over).toBeNull();
+    expect(tailGapFrame("kb-close", tailReader({ ch: NaN })).over).toBeNull();
+  });
 });
 
 // --- the defect this probe shipped with ---------------------------------------

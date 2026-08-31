@@ -713,7 +713,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                                   "receipt-hold", "boot-motion", "boot-repin",
                                   "grow-blink", "kb-shove",
                                   "kb-focusing", "kb-glide", "shell-pin",
-                                  "dom-census", "pick-anchor", "tail-gap")]
+                                  "dom-census", "pick-anchor", "tail-gap",
+                                  "kb-restore", "scroll-ghost")]
         if vp:
             _diag.info("holddiag viewport events=%d tail=%s",
                        len(vp), json.dumps(vp[-20:]))
@@ -812,6 +813,23 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         tb = [e for e in events if isinstance(e, dict) and e.get("ev") == "thread-blank"]
         if tb:
             _diag.info("holddiag blank events=%d tail=%s", len(tb), json.dumps(tb[-6:]))
+        # the white strip after a keyboard close, and the scroll writes nobody
+        # made. kb-restore is the correction taking back a position past the end
+        # of the thread's range (viewport.ts restoreVerdict); scroll-ghost is
+        # every move of that scroll no app write accounts for, which is what
+        # decides whether the engine or one of our own unannounced writers put
+        # it there. They ride the viewport tuple above like every motion mark,
+        # AND this line of their own: both are few — four corrections per close
+        # at the very most, one record per unexplained run — and the viewport
+        # tail keeps only the last twenty marks of every kind, so a busy typing
+        # session would push exactly the answer off the end of it.
+        # TEMP DIAGNOSTIC (scroll-ghost, pwa/src/scrollghost.ts owns the
+        # banner): drop "scroll-ghost" from both here and the tuple above when
+        # that block goes; the kb-restore half stays with the correction.
+        kr = [e for e in events if isinstance(e, dict)
+              and e.get("ev") in ("kb-restore", "scroll-ghost")]
+        if kr:
+            _diag.info("holddiag ghost events=%d tail=%s", len(kr), json.dumps(kr[-16:]))
         return {"ok": True}
 
     @app.get("/api/debug/holddiag", dependencies=[Depends(require_token)])

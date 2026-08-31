@@ -690,3 +690,80 @@ def test_holddiag_thread_blank_gets_its_own_line(client, caplog):
     settle = [r.message for r in caplog.records if "holddiag settle" in r.message]
     assert len(settle) == 1
     assert '"thread-blank"' not in settle[0]
+
+
+def test_holddiag_ghost_line_carries_the_correction_and_the_unexplained_move(client, caplog):
+    """The white strip after a keyboard close, both halves of it. kb-restore is
+    the correction taking back a position past the end of the thread's range,
+    and scroll-ghost is the move that put it there with no write of the app's to
+    account for it: the pair only means anything read together — the ghost says
+    the app asked for 6151 and the scroller went to 6537, the correction says it
+    was 386px past an end that had already settled — so they share one line, and
+    a busy typing session must not push either off the viewport tail."""
+    trail = {"build": "b", "events": [
+        # the move nobody made: 6775 of content in a 624 box ends at 6151, and
+        # 6537 is that same content less the 238 of box the keyboard had left it
+        {"t": 1, "ev": "scroll-ghost",
+         "d": {"at": "frame", "from": 6151, "to": 6537, "over": 386, "pre": 6537,
+               "stale": True, "via": "box", "want": 6151, "wms": 16, "kms": 224,
+               "gest": False}},
+        # and the app taking it straight back
+        {"t": 2, "ev": "kb-restore",
+         "d": {"via": "frame", "act": "fix", "ms": 224, "over": 386, "from": 6537,
+               "to": 6151, "sh": 6775, "ch": 624, "pre": 6537, "n": 1}},
+        # the correction writes through the one settle, which records as usual
+        {"t": 3, "ev": "tail-settle",
+         "d": {"via": "kb-restore", "mode": "follow", "from": 6537, "to": 6151,
+               "over": 386, "sh": 6775, "ch": 624, "cut": False, "air": 0}},
+    ]}
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
+    ghost = [r.message for r in caplog.records if "holddiag ghost" in r.message]
+    assert len(ghost) == 1
+    assert "events=2" in ghost[0]
+    # the correction: how big the strip was, and how long after the close
+    assert '"kb-restore"' in ghost[0]
+    assert '"act": "fix"' in ghost[0] and '"over": 386' in ghost[0] and '"ms": 224' in ghost[0]
+    assert '"pre": 6537' in ghost[0] and '"to": 6151' in ghost[0]
+    # the accusation: an intention of 6151 sixteen milliseconds old, a scroller
+    # at 6537, and no gesture anywhere near it
+    assert '"scroll-ghost"' in ghost[0]
+    assert '"want": 6151' in ghost[0] and '"wms": 16' in ghost[0]
+    assert '"stale": true' in ghost[0] and '"gest": false' in ghost[0]
+    assert '"at": "frame"' in ghost[0]
+    # and both also ride the viewport line, like every other motion mark, so a
+    # log read either way finds them
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"kb-restore"' in vp[0] and '"scroll-ghost"' in vp[0]
+    # the settle they caused stays on its own line and clips neither
+    assert '"tail-settle"' not in ghost[0]
+    settle = [r.message for r in caplog.records if "holddiag settle" in r.message]
+    assert len(settle) == 1 and '"via": "kb-restore"' in settle[0]
+
+
+def test_holddiag_tail_gap_carries_the_overscroll(client, caplog):
+    """The band under the last message and the band the scroller opens BELOW it
+    are different numbers, and only the first was ever on the line. The
+    keyboard-close readings now carry over — scrollTop plus clientHeight less
+    scrollHeight, never negative — so the strip he actually sees is stated
+    rather than rebuilt from three other fields by whoever reads the log."""
+    trail = {"build": "b", "events": [
+        {"t": 1, "ev": "tail-gap",
+         "d": {"when": "kb-close", "gap": 0.3, "sh": 6775, "st": 6537, "ch": 624,
+               "pad": 12, "air": 0, "lastB": 6762.7, "rows": 40, "below": None,
+               "atB": True, "short": False, "over": 386}},
+        {"t": 2, "ev": "tail-gap",
+         "d": {"when": "kb-close-late", "gap": 0.3, "sh": 6775, "st": 6151,
+               "ch": 624, "pad": 12, "air": 0, "lastB": 6762.7, "rows": 40,
+               "below": None, "atB": True, "short": False, "over": 0}},
+    ]}
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    # the reading that measures the room INSIDE the thread comes back healthy on
+    # both, which is what made this trail so hard to read before over rode it
+    assert '"gap": 0.3' in vp[0]
+    assert '"when": "kb-close"' in vp[0] and '"over": 386' in vp[0]
+    assert '"when": "kb-close-late"' in vp[0] and '"over": 0' in vp[0]

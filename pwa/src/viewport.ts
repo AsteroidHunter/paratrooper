@@ -205,6 +205,127 @@ export function settleMark(
   };
 }
 
+// The scroll offset the app never wrote, and the one state this scroller can
+// never legitimately be in.
+//
+// The keyboard's close hands the thread its full box back and the settle above
+// lands the scroll on the end of the range that new box makes. The device trail
+// (v0.3.58, two occurrences) says it lands there correctly and then does not
+// stay. At the close transition's end, ms 208, the scroller sat at 6151:
+// exactly scrollHeight less the clientHeight that had just grown from 238 to
+// 624. ONE FRAME LATER, ms 224, it read 6537 — that same scrollHeight less the
+// OLD 238, which is the bottom of the range as it stood while the keyboard was
+// still up. That is 386px past a maximum the scroller cannot hold, and it stayed
+// there: still 6537 at 600ms and at 2100ms, until the next gesture made the
+// engine re-clamp. The white strip between the last message and the compose bar
+// is that overhang, on screen.
+//
+// Nothing of ours wrote it. Every scroll write in this app names itself on the
+// trail and none fired on that frame; the close's own correction pass had
+// already run; and the viewport was not lying, since all three closes of that
+// session were learned from focus with the full height admitted inside 26-45ms.
+// What is left is WebKit restoring the offset it remembered from before the
+// dismissal at the end of its own close transition, and restoring it without
+// clamping it into the range the new box leaves. One close in the same session
+// did not do it, so it is not a thing the app can arrange to avoid.
+//
+// So the app takes it back. Past the end of the range is a position that does
+// not exist, on a scroller nothing else may scroll, and settleBottom lands on
+// the SAME number whichever way following happens to be pointing — the follow
+// arm pins to the end, the clamp arm cannot go past it — so the correction IS
+// the settle that already exists rather than a second writer. What is new is
+// only when it is asked: on the frames right after a close, which is the one
+// stretch nothing else watches. The thread's resize observer sees every frame
+// of the box's glide and then goes quiet at ms 208, sixteen milliseconds before
+// the restore lands.
+//
+// The clamp on every scroll event that the note above warns about is not coming
+// back with it: this is asked inside a close's own window and at that close's
+// later checkpoints, never on a scroll event, and never while a finger is on the
+// glass, where the same reading is a rubber band being stretched on purpose.
+
+/** corrections one close may make before it stands down (the loop guard, the
+    shape shell.ts's shove budget uses: two writers fighting over one number is
+    the failure the retired kb-vv counter shipped) */
+export const MAX_CLOSE_RESTORES = 4;
+
+/**
+ * The box this look reads is the box the last one read, so nothing is easing.
+ *
+ * This is the whole difference between the fault and the ordinary frame, and
+ * without it the correction would fire on every close. A box that GROWS lowers
+ * the end of the range under a position that was legitimately on the old end,
+ * so for the instant between the growth and the settle that answers it, every
+ * frame of the shell's glide home reads past the end — by about a twelfth of
+ * the trip, twelve times over. Those frames are already owned: the thread's
+ * resize observer is delivered on each of them and settles before anything
+ * paints. What nothing owns is an overhang that appears while the box is
+ * holding still, which is exactly the shape of the restore (ms 208 the box
+ * stops, ms 224 the offset comes back).
+ *
+ * A first look has nothing to compare against and is therefore never settled,
+ * which costs one frame at the start of a window that runs for six hundred ms.
+ */
+export function boxSettled(now: BottomGeometry, was: BottomGeometry | null): boolean {
+  return was !== null && now.sh === was.sh && now.ch === was.ch;
+}
+
+export type RestoreVerdict = "none" | "moving" | "held" | "fix" | "spent";
+
+export function restoreVerdict(
+  g: BottomGeometry,
+  settled: boolean,
+  made: number,
+  gesture: boolean,
+): RestoreVerdict {
+  if (tailOverhang(g) === 0) return "none"; // at or inside the end: the ordinary frame
+  if (!settled) return "moving"; // a box mid-ease, with its own settle coming
+  if (gesture) return "held"; // a gesture owns the scroll, rubber band and all
+  return made < MAX_CLOSE_RESTORES ? "fix" : "spent";
+}
+
+/**
+ * One correction, as the trail carries it: which checkpoint caught it, how long
+ * after the close edge, how far past the end the scroller was sitting, and the
+ * end of the range both now and as it stood while the keyboard was up. `pre` is
+ * the accusation stated as a number — a `from` equal to it is the pre-dismissal
+ * bottom handed back, which no box change and no write of ours can produce.
+ */
+export type RestoreMark = {
+  via: string;
+  act: RestoreVerdict;
+  ms: number;
+  over: number; // the strip he can see, in pixels
+  from: number;
+  to: number; // the end of the range this frame's numbers make
+  sh: number;
+  ch: number;
+  pre: number; // that end as it stood with the keyboard up; -1 = never measured
+  n: number; // corrections this close has made, this one counted
+};
+
+export function restoreMark(
+  via: string,
+  act: RestoreVerdict,
+  ms: number,
+  g: BottomGeometry,
+  n: number,
+  pre: number,
+): RestoreMark {
+  return {
+    via,
+    act,
+    ms: Math.round(ms),
+    over: Math.round(tailOverhang(g)),
+    from: Math.round(g.st),
+    to: Math.round(maxScrollTop(g.sh, g.ch)),
+    sh: Math.round(g.sh),
+    ch: Math.round(g.ch),
+    pre: Math.round(pre),
+    n,
+  };
+}
+
 // ===================== TEMP DIAGNOSTIC (remove after the blank-thread session) =====================
 // The per-frame settles, folded into one mark per run.
 //
@@ -406,6 +527,7 @@ export type TailGap = {
   below: string | null;
   atB: boolean | null;
   short: boolean | null;
+  over: number | null;
 };
 
 const tenth = (n: number): number | null =>
@@ -432,6 +554,15 @@ export function tailGapFrame(when: string, read: TailReader): TailGap {
     Number.isFinite(lastB) && Number.isFinite(pad) && Number.isFinite(ch)
       ? lastB + pad < ch
       : null;
+  // The room the OTHER way: how far past the end of its own range the scroller
+  // is sitting (scrollTop + clientHeight - scrollHeight, never negative). It is
+  // the same subtraction tailOverhang makes, and after a keyboard close it is
+  // the whole of the white strip — the reading that had to be reconstructed by
+  // hand from sh, st and ch on every one of these lines until now.
+  const over =
+    Number.isFinite(sh) && Number.isFinite(st) && Number.isFinite(ch)
+      ? tenth(tailOverhang({ sh, st, ch }))
+      : null;
   return {
     when,
     gap: tenth(gap),
@@ -447,6 +578,7 @@ export function tailGapFrame(when: string, read: TailReader): TailGap {
       ? nearBottomOf(sh, st, ch, air)
       : null,
     short,
+    over,
   };
 }
 // =================== END TEMP DIAGNOSTIC (remove after the tail-gap session) ===================

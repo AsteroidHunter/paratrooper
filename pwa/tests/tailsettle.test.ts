@@ -29,9 +29,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  MAX_CLOSE_RESTORES,
   SETTLE_BURST_GAP_MS,
+  boxSettled,
   createSettleBurst,
   maxScrollTop,
+  restoreMark,
+  restoreVerdict,
   settleBottom,
   settleMark,
   tailOverhang,
@@ -618,3 +622,192 @@ describe("the settle's wiring: quiet passes kept, loud ones still first-class", 
   });
 });
 // =================== END TEMP DIAGNOSTIC (remove after the blank-thread session) ===================
+
+// --- the keyboard's parting shot ----------------------------------------------
+//
+// The third way the same band opens, and the only one nothing of ours caused.
+// The v0.3.58 trail, two occurrences and one close in the same session that did
+// not reproduce: at the close transition's end, ms 208, the scroller sat at
+// 6151, which is its 6775 of content less the 624 of box the keyboard had just
+// given back. ONE FRAME LATER, ms 224, it read 6537 — that same content less
+// the 238 of box it had while the keyboard was up — and stayed there through
+// the 600ms and 2100ms readings. Nothing of ours wrote it: every scroll writer
+// in the app records itself and none had.
+//
+// So the numbers below are his, and what is pinned is that the correction can
+// only fire on a state the scroller can never legitimately hold, that it stands
+// aside for the two states that LOOK like it (a box still easing, a finger on
+// the glass), and that it lands on the same place whichever way following
+// happens to be pointing.
+const REST_SH = 6775; // his content
+const OPEN_CH = 238; // thread box with the keyboard up
+const REST_CH = 624; // and once it has gone
+const BACK_END = REST_SH - REST_CH; // 6151: where the close correctly landed
+const STALE_END = REST_SH - OPEN_CH; // 6537: what came back one frame later
+const PAST_END = { sh: REST_SH, st: STALE_END, ch: REST_CH };
+
+describe("boxSettled: the difference between the fault and an ordinary frame", () => {
+  it("the same box twice over is a box that is not easing", () => {
+    expect(boxSettled(PAST_END, { ...PAST_END, st: BACK_END })).toBe(true); // only the scroll moved
+  });
+
+  it("a box mid-glide is not settled, whichever of its numbers moved", () => {
+    expect(boxSettled(PAST_END, { ...PAST_END, ch: 600 })).toBe(false);
+    expect(boxSettled(PAST_END, { ...PAST_END, sh: 6700 })).toBe(false);
+  });
+
+  it("a first look has nothing to compare against and says so", () => {
+    expect(boxSettled(PAST_END, null)).toBe(false);
+  });
+});
+
+describe("the correction: only ever a position that cannot exist", () => {
+  it("his frame: 386px past an end the scroller cannot hold is corrected", () => {
+    expect(tailOverhang(PAST_END)).toBe(386);
+    expect(restoreVerdict(PAST_END, true, 0, false)).toBe("fix");
+  });
+
+  it("sitting exactly on the end is not the fault, and neither is sitting inside it", () => {
+    expect(restoreVerdict({ ...PAST_END, st: BACK_END }, true, 0, false)).toBe("none");
+    expect(restoreVerdict({ ...PAST_END, st: 200 }, true, 0, false)).toBe("none");
+    expect(restoreVerdict({ ...PAST_END, st: 0 }, true, 0, false)).toBe("none");
+  });
+
+  it("a thread shorter than its own box has an end of zero and is never past it", () => {
+    expect(restoreVerdict({ sh: 400, st: 0, ch: 624 }, true, 0, false)).toBe("none");
+  });
+
+  it("every frame of the shell's glide home stands aside for the settle it owns", () => {
+    // the box grew this frame, so the position that was on the old end is past
+    // the new one for the instant before the thread's resize observer answers
+    expect(restoreVerdict(PAST_END, false, 0, false)).toBe("moving");
+  });
+
+  it("a gesture owns the scroll, rubber band and all", () => {
+    expect(restoreVerdict(PAST_END, true, 0, true)).toBe("held");
+  });
+
+  it("two writers cannot fight over one number: the budget stands the app down", () => {
+    expect(restoreVerdict(PAST_END, true, MAX_CLOSE_RESTORES - 1, false)).toBe("fix");
+    expect(restoreVerdict(PAST_END, true, MAX_CLOSE_RESTORES, false)).toBe("spent");
+  });
+
+  it("the place it goes back to is the same one whichever way following points", () => {
+    // this is what lets the correction BE the settle rather than a new writer
+    expect(settleBottom(PAST_END, true).top).toBe(BACK_END);
+    expect(settleBottom(PAST_END, false).top).toBe(BACK_END);
+    expect(tailOverhang({ ...PAST_END, st: BACK_END })).toBe(0);
+  });
+});
+
+describe("what the correction leaves on the trail", () => {
+  const mark = restoreMark("frame", "fix", 224.4, PAST_END, 1, STALE_END);
+
+  it("names the strip he can see, and how long after the close it was caught", () => {
+    expect(mark.over).toBe(386);
+    expect(mark.ms).toBe(224);
+    expect(mark.via).toBe("frame");
+    expect(mark.act).toBe("fix");
+    expect(mark.n).toBe(1);
+  });
+
+  it("states the accusation as a number: the bottom the keyboard-era box made", () => {
+    // from equal to pre is the pre-dismissal position handed back, which no box
+    // change and no write of ours can produce
+    expect(mark.from).toBe(STALE_END);
+    expect(mark.pre).toBe(STALE_END);
+    expect(mark.to).toBe(BACK_END);
+    expect(mark.sh).toBe(REST_SH);
+    expect(mark.ch).toBe(REST_CH);
+  });
+
+  it("a close whose thread was never measured says -1 rather than a coordinate", () => {
+    expect(restoreMark("gap", "fix", 600, PAST_END, 1, -1).pre).toBe(-1);
+  });
+
+  it("carries whole pixels, so a fractional read is still one number", () => {
+    const m = restoreMark("late", "spent", 2100.6, { sh: 6774.6, st: 6537.4, ch: 623.5 }, 5, 0);
+    expect(m.from).toBe(6537);
+    expect(m.sh).toBe(6775);
+    expect(m.ch).toBe(624);
+    expect(m.ms).toBe(2101);
+    expect(m.act).toBe("spent");
+  });
+});
+
+describe("the correction's wiring in main.ts", () => {
+  const fix = fnBody("fixCloseTail");
+  const start = fnBody("closeTailStart");
+
+  it("the window opens on the close edge and is cancelled by the next open", () => {
+    const edge = src.slice(src.indexOf("watchKeyboard((up)"), src.indexOf("bootGate"));
+    expect(edge).toContain("if (up) closeTailStop();");
+    expect(edge).toContain("else closeTailStart();");
+    // before the settle on that same edge, so the bottom it remembers is the
+    // one the keyboard-era box made
+    expect(edge.indexOf("closeTailStart()")).toBeLessThan(edge.indexOf("settleTail(via)"));
+  });
+
+  it("remembers the end of the range as it stood with the keyboard still up", () => {
+    expect(start).toContain("maxScrollTop(t.scrollHeight, t.clientHeight)");
+    expect(start).toContain("closeFixes = 0");
+  });
+
+  it("the frames are bounded by a clock AND a count, and a newer edge owns them", () => {
+    expect(src).toContain("const CLOSE_TAIL_MS = 600");
+    expect(src).toContain("const CLOSE_TAIL_FRAMES = 90");
+    expect(start).toContain("if (run !== closeRun) return");
+    expect(start).toContain("i < CLOSE_TAIL_FRAMES && performance.now() - t0 < CLOSE_TAIL_MS");
+  });
+
+  it("reads the three numbers once and decides through viewport.ts", () => {
+    expect(fix).toContain("const g = { sh: t.scrollHeight, st: t.scrollTop, ch: t.clientHeight }");
+    expect(fix).toContain("restoreVerdict(g, settled, closeFixes, gesture)");
+    expect(fix).toContain("boxSettled(g, closeBox)");
+  });
+
+  it("stands aside for a finger on the frames, and for a fling at the late looks", () => {
+    // the dismissing tap is itself inside the intent window, so the frames can
+    // only ask about a finger that is down NOW; by 600ms and 2100ms that tap's
+    // window has expired and intent means a fling, whose rubber band at the
+    // bottom reads exactly like the fault
+    expect(fix).toContain(
+      'const gesture = threadTouching || (via !== "frame" && userScrollIntent())',
+    );
+  });
+
+  it("writes through the one settle, so it obeys the one follow-versus-clamp rule", () => {
+    expect(fix).toContain('settleTail("kb-restore")');
+    // and nothing else in it touches the scroll
+    expect(fix).not.toMatch(/scrollTop\s*=/);
+    expect(fix).not.toContain("scrollTo(");
+  });
+
+  it("records the fault before correcting it, so the trail reads in order", () => {
+    expect(fix.indexOf('holdDiagRecord(\n    "kb-restore"')).toBeLessThan(
+      fix.indexOf('settleTail("kb-restore")'),
+    );
+  });
+
+  it("the ordinary states of a close leave no record at all", () => {
+    expect(fix).toContain('if (act === "none" || act === "moving" || act === "held") return');
+    expect(fix).toContain('if (act === "spent" && closeFixes > MAX_CLOSE_RESTORES) return');
+  });
+
+  it("the close's two later checkpoints ask the same question again", () => {
+    const gap = fnBody("recordTailGapNow");
+    expect(gap).toContain('fixCloseTail(i === 0 ? "gap" : "late")');
+    expect(src).toContain("const TAIL_GAP_AT_MS = [SEND_MOTION_WINDOW_MS, 2100] as const");
+    // after both readings, so what they describe is the state before the write
+    expect(gap.indexOf("tailGapFrame(")).toBeLessThan(gap.indexOf("fixCloseTail("));
+  });
+
+  it("nothing outside a close's own window can reach the correction", () => {
+    expect(fix).toContain("if (closeAt < 0) return");
+    expect(fnBody("closeTailStop")).toContain("closeAt = -1");
+    // and the scroller's own scroll events still carry no clamp (the regression
+    // the note at the top of the handler describes)
+    const handler = src.indexOf('thread.addEventListener("scroll"');
+    expect(src.slice(handler, handler + 1400)).not.toContain("fixCloseTail(");
+  });
+});

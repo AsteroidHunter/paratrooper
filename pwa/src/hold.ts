@@ -249,6 +249,18 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // by. A box that changes over a beat writes a short burst of them and the
   // settle below folds a burst into one post, so this cannot churn either.
   //
+  // "kb-restore" is IN because the correction it names can fire at the close's
+  // LATE checkpoint, 2.1 seconds after the edge, by which time every post the
+  // edge's own marks armed has long gone. Four records per close at the very
+  // most (the correction's budget stands it down past that), and closes are
+  // rare, so arming here cannot churn. "scroll-ghost" is IN for the sharper
+  // version of the same reason: a scroll nobody wrote can land in a stretch
+  // where nothing else records at all, which is exactly the stretch that makes
+  // it worth having. An unexplained RUN is one record, not one per event, so a
+  // gesture cannot churn it either. TEMP DIAGNOSTIC (scroll-ghost): remove that
+  // entry and this second half with the scrollghost.ts block; the kb-restore
+  // entry stays with the correction.
+  //
   // "thread-blank" is IN for the same reason and more sharply: its record is
   // built at the first touch AFTER the photo cancel that armed it, which may be
   // seconds later and with nothing else happening anywhere near it, so nothing
@@ -266,7 +278,7 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "kb-focusing" || ev === "kb-glide" || ev === "kb-edge" ||
     ev === "pick-anchor" || ev === "tail-gap" ||
     ev === "scroll-jank" || ev === "tail-settle" || ev === "pick-timing" ||
-    ev === "thread-blank"
+    ev === "thread-blank" || ev === "kb-restore" || ev === "scroll-ghost"
   ) {
     diagPost();
   }

@@ -67,15 +67,20 @@ import {
 } from "./shell";
 import { bootBlankGap, installLoadingScreen, installStartupImage, watchQuiet } from "./splash";
 import {
+  MAX_CLOSE_RESTORES,
   SETTLE_BURST_GAP_MS,
   USER_SCROLL_INTENT_MS,
+  boxSettled,
   compensationFor,
   createSettleBurst,
   flightOverflow,
   followFlipDecision,
   giveUpTarget,
   laidOutRows,
+  maxScrollTop,
   nearBottomOf,
+  restoreMark,
+  restoreVerdict,
   rowName,
   settleBottom,
   settleMark,
@@ -116,11 +121,18 @@ import {
 // either side of a drawer height change that begins mid-glide, whichever edge
 // moved it. TO REMOVE: this import and the calls named in that banner's list.
 import { blankProbeEdge, blankProbeFollow, blankProbeSettle } from "./blankprobe";
+// TEMP DIAGNOSTIC (scroll-ghost, scrollghost.ts owns the banner): the app states
+// what it asked the thread's scroll to do at every site that writes it, and two
+// looks — the scroller's own scroll handler and the frames after a keyboard
+// close — hand back any move no statement of ours accounts for. TO REMOVE: this
+// import and the calls named in that banner's list.
+import { scrollGhostLook, scrollGhostWrite } from "./scrollghost";
+import type { GhostContext } from "./scrollghost";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.59"; // the scroll-stutter hunt gets real instruments: the recorder now names which of the app's own jobs (history landing, bubble decorating, photo loading and settling) ran inside each stall, reports every gesture's total stalled time instead of a number that always read zero, and the diagnostic upload itself — caught blocking mid-scroll — now waits until your gesture is over and the app is idle before it sends
+const APP_VERSION = "0.3.60"; // the band of white that sometimes opened between your last message and the compose bar as the keyboard went down is taken back: the phone hands the conversation back the scroll position it had while the keyboard was still up, which is past where the conversation now ends, and the app watches the frames after every close and puts it back on its last line the moment that happens — plus a new watcher that writes down any scroll move the app itself never asked for
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -216,6 +228,11 @@ const downBtn = createDownButton((show) =>
 watchKeyboard((up) => {
   downBtn.keyboard(up, followTail);
   const via = up ? "kb-open" : "kb-close";
+  // the close's own window opens BEFORE the settle below, so the bottom it
+  // remembers is the one the keyboard-era box made — the number the engine
+  // hands back a fifth of a second later (closeTailWatch owns the whole reason)
+  if (up) closeTailStop();
+  else closeTailStart();
   settleTail(via);
   requestAnimationFrame(() => settleTail(via));
   // TEMP DIAGNOSTIC (tail-gap, block at the foot of this file): the band under
@@ -561,6 +578,13 @@ function renderChat(): void {
     if (flip === "follow") setFollowTail(true, "scroll-bottom");
     else if (flip === "unfollow") setFollowTail(false, "scroll-away");
     else holdDiagRecord("ft-suppress", { st: Math.round(thread.scrollTop) });
+    // TEMP DIAGNOSTIC (scroll-ghost, scrollghost.ts owns the banner): the look,
+    // not a clamp — this handler writes nothing and must not start (the note at
+    // the top of it, and viewport.ts's retired needsSettle, own that rule). The
+    // three numbers are the ones the verdict above has already forced.
+    scrollGhostLook("scroll", {
+      sh: thread.scrollHeight, st: thread.scrollTop, ch: thread.clientHeight,
+    }, ghostCtx());
     downBtn.scrolled(followTail); // away restarts its 4s stillness window; bottom hides it
     // start BANKING older pages while the user is still ~1.5 screens away —
     // inserts happen separately, at glide boundaries
@@ -724,6 +748,7 @@ function drainOlder(): void {
   if (page) for (const m of page) applyEvent(m);
   suppressAnim = prevSuppress;
   t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
+  scrollGhostWrite("drain", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
   if (dropSpin) {
     // the farewell happens at scrollTop~0 where the pin cannot compensate for
     // height removed above (it can't go negative) — an abrupt remove() shoved
@@ -1368,8 +1393,12 @@ function nearBottom(): boolean {
 
 function scrollToBottom(force = false): void {
   const t = threadEl();
+  const top = t.scrollHeight;
   // replay bursts (suppressAnim) jump instantly; live messages glide
-  t.scrollTo({ top: t.scrollHeight, behavior: suppressAnim || force ? "auto" : "smooth" });
+  t.scrollTo({ top, behavior: suppressAnim || force ? "auto" : "smooth" });
+  // TEMP DIAGNOSTIC (scroll-ghost): the TARGET, not a read-back — a gliding pin
+  // arrives over a beat, and the watch explains every frame of it by that target
+  scrollGhostWrite("bottom", top);
 }
 
 // the jump tap's glide: one rAF-driven ride, full cruise speed while far out,
@@ -1474,6 +1503,7 @@ function settleTail(via: string, quiet = false): void {
   const plan = settleBottom(g, followTail);
   const cut = plan.moved ? cancelTailRide() : false;
   t.scrollTo({ top: plan.top, behavior: "auto" });
+  scrollGhostWrite(via, plan.top); // TEMP DIAGNOSTIC (scroll-ghost)
   jankSpan("settle-tail", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
   blankProbeSettle(plan.moved); // TEMP DIAGNOSTIC (blank-thread): a counter, nothing read
   if (!quiet || plan.over > 0 || cut) {
@@ -1522,6 +1552,121 @@ function settleContent(what: string): void {
   settleTail(`content-${what}`);
 }
 
+// --- the keyboard's parting shot ----------------------------------------------
+// viewport.ts (restoreVerdict) holds the whole reason: after a close the engine
+// can hand the thread back the scroll offset it held while the keyboard was
+// still up — hundreds of pixels past where the conversation now ends — and
+// leave it there until the next gesture, which is the strip of white between
+// the last message and the compose bar. This half is the clock and the reads.
+//
+// WHEN IT LOOKS. Every frame for CLOSE_TAIL_MS after a close edge, because the
+// restore lands in the one stretch nothing else covers: the thread's resize
+// observer settles on every frame of the shell's glide home and then goes quiet
+// when the box stops moving, at ms 208 on the trail, and the restore arrived at
+// ms 224. The window runs on past the glide's own settle window and the shell's
+// drop back to the four-edge pin (~470ms), so a restore riding either of those
+// is caught as well. After it, the close's two later checkpoints ask the same
+// question again (recordTailGapNow, at 600ms and 2100ms), which is where a
+// restore delivered late, or one whose frames were throttled, is still taken
+// back — the trail says the state survives for seconds, so a late correction is
+// still the right correction.
+//
+// WHAT IT COSTS on the closes where nothing is wrong, which is most of them:
+// three property reads per frame for six tenths of a second, on frames the app
+// is already painting a shell glide into, and no write of any kind. The
+// correction itself goes through settleTail, so it cancels a ride aimed at the
+// old box, supersedes deferred writes and lands on the trail exactly like every
+// other settle; the kb-restore record beside it is what names the fault.
+// the same 600 the first checkpoint sits at (SEND_MOTION_WINDOW_MS), so the
+// frames hand straight over to it with no unwatched gap in between
+const CLOSE_TAIL_MS = 600;
+const CLOSE_TAIL_FRAMES = 90; // a callback backstop behind that clock, at 120Hz
+
+let closeAt = -1; // the last keyboard close, on the app's own clock
+let closeBottom = -1; // the end of the thread's range as that close began
+let closeFixes = 0; // corrections made since it (restoreVerdict's budget)
+let closeRun = 0; // a newer edge owns the frames from there on
+let closeBox: BottomGeometry | null = null; // the previous look's box, for boxSettled
+
+function closeTailStop(): void {
+  closeRun += 1; // a keyboard on its way back owns the geometry now
+  closeAt = -1;
+  closeBottom = -1;
+  closeBox = null;
+}
+
+function closeTailStart(): void {
+  const t = document.getElementById("thread");
+  closeAt = performance.now();
+  closeBox = null; // this close's first look has nothing to compare against
+  // taken at the edge, before this event's settle writes anything: with the
+  // shell still standing at its keyboard-era box this is the last position the
+  // scroller could hold, and a restore is that number handed back
+  closeBottom = t ? maxScrollTop(t.scrollHeight, t.clientHeight) : -1;
+  closeFixes = 0;
+  const run = (closeRun += 1);
+  const t0 = closeAt;
+  if (typeof requestAnimationFrame !== "function") return;
+  let i = 0;
+  const step = (): void => {
+    if (run !== closeRun) return; // a newer edge owns the frames
+    fixCloseTail("frame");
+    i += 1;
+    if (i < CLOSE_TAIL_FRAMES && performance.now() - t0 < CLOSE_TAIL_MS) {
+      requestAnimationFrame(step);
+    }
+  };
+  requestAnimationFrame(step);
+}
+
+function fixCloseTail(via: string): void {
+  if (closeAt < 0) return; // no close to be correcting after
+  const t = document.getElementById("thread");
+  if (!t) return; // shell torn down under a deferred call
+  const g = { sh: t.scrollHeight, st: t.scrollTop, ch: t.clientHeight };
+  // TEMP DIAGNOSTIC (scroll-ghost, scrollghost.ts owns the banner): the look
+  // nothing else can take, handed the numbers this pass has already read —
+  // these are the frames on which the app itself is writing nothing
+  scrollGhostLook(via, g, ghostCtx());
+  // the box is compared with the previous look's before anything else uses
+  // either, so a pass that returns early still leaves the next one a baseline
+  const settled = boxSettled(g, closeBox);
+  closeBox = g;
+  // A gesture owns the scroll, and which reading says so depends on when this
+  // pass is: on the FRAMES, only a finger currently on the glass, because the
+  // tap that dismissed the keyboard is itself inside the intent window and
+  // would otherwise stand the whole window down. At the two LATE checkpoints
+  // that tap's window has long expired, so intent there really does mean a
+  // fling still running — and the rubber band at the end of one reads exactly
+  // like the fault this corrects.
+  const gesture = threadTouching || (via !== "frame" && userScrollIntent());
+  const act = restoreVerdict(g, settled, closeFixes, gesture);
+  // "moving" is every frame of the shell's glide home and "held" repeats for as
+  // long as a finger is down: both are the ordinary state of a close, and
+  // neither is news. "spent" is recorded once, on the pass the budget runs out.
+  if (act === "none" || act === "moving" || act === "held") return;
+  if (act === "spent" && closeFixes > MAX_CLOSE_RESTORES) return; // one stand-down, not one a frame
+  closeFixes += 1;
+  holdDiagRecord(
+    "kb-restore",
+    restoreMark(via, act, performance.now() - closeAt, g, closeFixes, closeBottom),
+  );
+  // the settle is the writer: it lands on the end of the range whichever way
+  // following happens to be pointing, and it is the app's one scroll authority
+  if (act === "fix") settleTail("kb-restore");
+}
+
+// TEMP DIAGNOSTIC (scroll-ghost, scrollghost.ts owns the banner): what the app
+// knows that the scroller's three numbers do not, gathered once for both looks
+function ghostCtx(): GhostContext {
+  return {
+    pre: closeBottom,
+    kms: closeAt < 0 ? -1 : performance.now() - closeAt,
+    gest: userScrollIntent(),
+    touching: threadTouching,
+  };
+}
+
 // The other half of the scroll's ownership, and the opposite case to the one
 // above. settleTail is for the room UNDER the conversation changing, where the
 // answer is to re-establish the end of the range. This is for a row INSIDE the
@@ -1556,6 +1701,7 @@ function keepView(row: HTMLElement, change: () => void): void {
     followTail);
   if (fix === 0) return;
   t.scrollTop += fix; // same frame as the change, so the two paint as one
+  scrollGhostWrite("keep-view", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
   holdDiagRecord("keep-view", {
     fix: Math.round(fix), bot: Math.round(before.bottom), fold: Math.round(fold),
   });
@@ -1573,6 +1719,7 @@ function startGlide(): void {
     if (!t || run.cancelled()) return; // shell torn down, or a gesture took over
     pos += run.step(now, t.scrollHeight - t.clientHeight - pos, t.clientHeight);
     t.scrollTop = pos;
+    scrollGhostWrite("glide", pos); // TEMP DIAGNOSTIC (scroll-ghost)
     if (run.done()) {
       glide = null;
       glideRaf = 0;
@@ -1662,6 +1809,7 @@ function autosize(typed = false): void {
     // its box just shrank from the bottom, so without this the line that sat
     // on that edge (the message he just sent) is clipped away under the bar
     t.scrollTop = giveUpTarget(t.scrollTop, oldHeight, newHeight, t.scrollHeight - t.clientHeight);
+    scrollGhostWrite("give-up", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
   }
   // TEMP DIAGNOSTIC field stM: the thread's position read the instant the
   // height landed, before the fit put it back. Measured on the twin it must
@@ -2998,6 +3146,7 @@ function applyReplay(m: ServerMsg): void {
   const isTail = (m.seq ?? 0) > lastSeq;
   applyEvent(m);
   if (!isTail) t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
+  scrollGhostWrite("replay", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
   suppressAnim = prevSuppress;
 }
 
@@ -3841,6 +3990,15 @@ function recordTailGapNow(when: string): void {
           vvTop: one(window.visualViewport?.offsetTop ?? NaN),
           ih: window.innerHeight,
         });
+        // The close's two later checkpoints, and the ONE line here that is not
+        // a diagnostic: the correction asks its question again, after both
+        // readings above have described the state it is about to change. The
+        // trail says a restored offset survives for seconds, so these are where
+        // one delivered late — or one whose frames were throttled away — is
+        // still taken back. The pass itself lives outside this block (see the
+        // keyboard's parting shot); if this block goes, the frame window stays
+        // and only the two late looks are lost.
+        fixCloseTail(i === 0 ? "gap" : "late");
       }, delay),
     );
   });
@@ -4865,6 +5023,7 @@ function armBootFrameGuard(): void {
     if (t && followTail) {
       repin = t.scrollHeight - t.scrollTop - t.clientHeight >= 1;
       if (repin) t.scrollTop = t.scrollHeight; // instant: a settle must not glide
+      if (repin) scrollGhostWrite("boot-repin", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
     }
     if (snap || repin) holdDiagRecord("boot-repin", { src, x, y, top, snap, repin });
   };
@@ -4918,6 +5077,7 @@ async function bootFromCache(): Promise<void> {
       // it. A bottom-geometry settle landing in between has already answered
       // for the fresh box, so this stands down rather than pinning over it.
       if (el && armed === tailGen) el.scrollTop = el.scrollHeight;
+      if (el) scrollGhostWrite("cache-pin", el.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
     });
     holdDiagRecord("cache-applied", { lastSeq, ms: Math.round(performance.now() - t0) });
     void settleLoadingScreen(); // the cached thread is the first paint: the wait for quiet starts here
