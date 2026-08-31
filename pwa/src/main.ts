@@ -93,8 +93,11 @@ import {
 } from "./threadcache";
 // TEMP DIAGNOSTIC (scroll-jank, scrolljank.ts owns the banner): the recorder
 // wires itself on import (clock-only listeners plus the longtask observer),
-// and jankSpan stamps the two heavier jobs this file owns so a long frame can
-// name them. TO REMOVE: both imports and the two stamped pairs below.
+// and jankSpan stamps the heavier jobs this file owns so a long frame can
+// name them — the cache snapshot, the older-history drain, the decorate fold,
+// the photo queue's release batch and its pixels' landing, the tail settle,
+// and the sent shot's landing. TO REMOVE: both imports and the stamped pairs
+// below (the banner's list names each one).
 import { jankSpan } from "./jankledger";
 import "./scrolljank";
 // TEMP DIAGNOSTIC (pick-timing, picktiming.ts owns the banner): the pick clock's
@@ -117,7 +120,7 @@ import { blankProbeEdge, blankProbeFollow, blankProbeSettle } from "./blankprobe
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.58"; // the diagnostic trail the app posts for the bug hunt is no longer readable or writable by anyone who knows the address — it now needs the same access token everything else does, and the app sends it along automatically, while a post that cannot be signed still fails quietly and changes nothing you see
+const APP_VERSION = "0.3.59"; // the scroll-stutter hunt gets real instruments: the recorder now names which of the app's own jobs (history landing, bubble decorating, photo loading and settling) ran inside each stall, reports every gesture's total stalled time instead of a number that always read zero, and the diagnostic upload itself — caught blocking mid-scroll — now waits until your gesture is over and the app is idle before it sends
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -708,6 +711,11 @@ function drainOlder(): void {
   const page = pendingOlder.shift();
   const dropSpin = historyDone && pendingOlder.length === 0 && spin !== null;
   if (!page && !dropSpin) return;
+  // TEMP DIAGNOSTIC (scroll-jank): a whole page's insert — twenty-five
+  // applyEvent+decorate rounds plus the pin — is sync main-thread work and the
+  // prime scroll-back suspect. Taken after the early return: a no-op drain
+  // stamps nothing. TO REMOVE with the scrolljank.ts block.
+  const jankT0 = performance.now();
   const t = threadEl();
   const prevScroll = t.scrollTop;
   const prevHeight = t.scrollHeight;
@@ -723,6 +731,7 @@ function drainOlder(): void {
     spin.classList.add("bye");
     setTimeout(() => spin.remove(), 300);
   }
+  jankSpan("drain-older", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
 }
 
 // the boundary gate: no finger down and the glide over (scrollend sets
@@ -1455,11 +1464,17 @@ function tailBurstFold(via: string, g: BottomGeometry, plan: TailSettle): void {
 function settleTail(via: string, quiet = false): void {
   const t = document.getElementById("thread");
   if (!t) return; // no shell yet, or torn down under a deferred call
+  // TEMP DIAGNOSTIC (scroll-jank): the geometry reads force layout and the
+  // scroll write follows them, several callers deep in the settle machinery —
+  // spanned through the write so a stall over one names the settle logic.
+  // TO REMOVE with the scrolljank.ts block: this stamp pair.
+  const jankT0 = performance.now();
   tailGen++;
   const g = { sh: t.scrollHeight, st: t.scrollTop, ch: t.clientHeight };
   const plan = settleBottom(g, followTail);
   const cut = plan.moved ? cancelTailRide() : false;
   t.scrollTo({ top: plan.top, behavior: "auto" });
+  jankSpan("settle-tail", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
   blankProbeSettle(plan.moved); // TEMP DIAGNOSTIC (blank-thread): a counter, nothing read
   if (!quiet || plan.over > 0 || cut) {
     tailBurstClose(); // TEMP DIAGNOSTIC (blank-thread): the run this pass ended goes first
@@ -1726,6 +1741,12 @@ function rowEl(wrapper: HTMLElement, role: string, cls: string, at: number): HTM
 // run-continuation classes and owns the gap stamps. Same result no matter what
 // order events arrived in.
 function decorate(): void {
+  // TEMP DIAGNOSTIC (scroll-jank): the fold walks EVERY wrapper and applyEvent
+  // runs it once per applied frame, so a history page pays it twenty-five
+  // times over a growing thread — spanned per call, so a stall carrying many
+  // of these names the pass itself as the weight. TO REMOVE with the
+  // scrolljank.ts block: this stamp pair.
+  const jankT0 = performance.now();
   let prevSide: string | null = null;
   let prevAt = 0;
   let lastStampAt = 0;
@@ -1772,6 +1793,7 @@ function decorate(): void {
       prevAt = at;
     }
   }
+  jankSpan("decorate", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
 }
 
 // applyEvent(): THE one path every keyed frame takes — live push, reconnect
@@ -1896,11 +1918,18 @@ function watchPhotos(thread: HTMLElement): void {
   const margin = nearMargin(thread.clientHeight || window.innerHeight);
   photoObserver = new IntersectionObserver(
     (entries, obs) => {
+      // TEMP DIAGNOSTIC (scroll-jank): a scroll-back sweeps whole batches of
+      // parked photos into reach at once, and each release puts a source on
+      // the wire — spanned per batch, stamped only when one actually
+      // released. TO REMOVE with the scrolljank.ts block: this stamp pair.
+      const jankT0 = performance.now();
+      let released = 0;
       for (const e of entries) {
         if (!e.isIntersecting) continue;
         obs.unobserve(e.target);
-        photoQueue.release(e.target as HTMLImageElement);
+        if (photoQueue.release(e.target as HTMLImageElement)) released += 1;
       }
+      if (released > 0) jankSpan("photo-release", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
     },
     { root: thread, rootMargin: `${margin}px 0px` },
   );
@@ -2336,6 +2365,13 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
     if (face) div.style.setProperty("--blur", `url("${face}")`);
     img.alt = "photo";
     img.onload = () => {
+      // TEMP DIAGNOSTIC (scroll-jank): a history photo's pixels landing runs
+      // main-thread work here (the box adopt or the shape check, plus the
+      // re-pin), and the paint after it carries the decode itself — the
+      // engine's half is unstampable, so this span is the app's share of that
+      // moment and its name in a stall marks decode territory. TO REMOVE with
+      // the scrolljank.ts block: this stamp pair.
+      const jankT0 = performance.now();
       photoQueue.arrived(img); // the grey box comes off with the first pixels
       // a photo that had to guess its box now has its own pixels to measure:
       // the box takes their shape in this same task, the scroll is handed back
@@ -2349,6 +2385,7 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
       // decoded height lands late; re-pin INSTANTLY — a layout completion must
       // never glide (the opening-scroll motion he flagged came from these)
       if (followTail) scrollToBottom(true);
+      jankSpan("photo-load", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
     };
     img.onerror = () => {
       photoQueue.arrived(img); // no pixels are coming; the chip replaces the box

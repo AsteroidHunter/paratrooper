@@ -28,20 +28,38 @@
 // entries arrive after the fact, and the close sits a second past the last
 // scroll, so late delivery still lands inside the record; an engine without
 // longtask support simply leaves those fields empty and the two clocks carry
-// the verdict on their own.
+// the verdict on their own — and the record says which case it is (ltSup), so
+// an empty field is never mistaken for a clean gesture.
+//
+// The totals: worst keeps only the ten biggest gaps, so the record also
+// carries stallN and stallMs — every stall and all of its time, summed as the
+// gaps stream in (the same stall seen by both clocks is merged, not counted
+// twice). They come from the two clocks themselves, not from the observer, so
+// they are real on every engine, and they are on every record — a clean
+// gesture says 0 rather than saying nothing.
+//
+// The recorder also feeds one thing OUT: the wiring hands hold.ts a gesture
+// gate (holdDiagGesture) so the trail's own upload can wait for the window to
+// close instead of stringifying inside a gesture — the upload was the one
+// stall in the data that could name itself, and naming it got it evicted.
 //
 // TO REMOVE, every call site: delete this file and jankledger.ts; in main.ts
 // delete the two import lines under the scroll-jank comment and the jankSpan
-// pairs in writeThreadCache ("cache-write") and in prepareShot's drawn
-// callback ("shot-drawn"); in hold.ts delete the jankledger import, the jankSpan pair
-// in diagPost ("diag-post") and the "scroll-jank" entry with its comment in
-// the post-now list; in threadcache.ts delete the jankledger import and the
-// jankSpan pair in put ("cache-put"); in web/app.py delete the
-// "holddiag jank" digest block; and delete tests/scrolljank.test.ts and the
+// pairs in writeThreadCache ("cache-write"), drainOlder ("drain-older"),
+// decorate ("decorate"), watchPhotos' release batch ("photo-release"),
+// renderUser's onload ("photo-load"), settleTail ("settle-tail") and
+// prepareShot's drawn callback ("shot-drawn"); in hold.ts delete the
+// jankledger import, the jankSpan pair in diagPostSend ("diag-post"), the
+// "scroll-jank" entry with its comment in the post-now list, and the
+// holdDiagGesture setter with its gate variable (the deferred upload stays
+// and simply never parks with nothing feeding the gate); in threadcache.ts
+// delete the jankledger import and the jankSpan pair in put ("cache-put");
+// in web/app.py delete the "holddiag jank" digest block; and delete
+// tests/scrolljank.test.ts and the
 // scroll-jank test in tests/test_holddiag.py. Nothing else refers to any of
 // it.
 
-import { holdDiagRecord } from "./hold";
+import { holdDiagGesture, holdDiagRecord } from "./hold";
 import { jankStamps } from "./jankledger";
 import type { JankStamp } from "./jankledger";
 
@@ -82,6 +100,9 @@ export interface JankMachine {
   frame(t: number): void;
   /** one longtask observer entry (startTime, duration) */
   longtask(start: number, dur: number): void;
+  /** the wiring saw a real longtask entry type on this engine: ltMs means
+      "looked and found this much" rather than "could not look" */
+  longtaskOn(): void;
   /** armed or open; the frame pump runs exactly while this is true */
   active(): boolean;
   /** advance the lifecycle; returns the finished record exactly once per gesture */
@@ -104,10 +125,14 @@ export function createJankMachine(
   let rafN = 0;
   let scN = 0;
   let longN = 0; // every long gap, counted even when keep-worst drops its entry
+  let stallN = 0; // distinct stalls: a gap both clocks expose is one stall, not two
+  let stallMs = 0; // their total time — every stall's, not just the ten kept below
+  let coverEnd = -Infinity; // how far the stalls counted so far reach; the merge line
   let gaps: { ms: number; end: number; clock: "raf" | "sc" }[] = [];
   let gesture = 0;
   const tasks: { s: number; d: number }[] = []; // lifetime ring, like the ledger
   let taskCursor = 0;
+  let ltSup = 0; // 1 once the wiring reports the engine really has longtask
 
   const begin = (t: number): void => {
     state = "tentative";
@@ -117,12 +142,24 @@ export function createJankMachine(
     rafN = 0;
     scN = 0;
     longN = 0;
+    stallN = 0;
+    stallMs = 0;
+    coverEnd = -Infinity;
     gaps = [];
   };
 
+  // The running totals, summed as gaps stream in so keep-worst can never lose
+  // time from them. Gaps arrive in end order (each ends at the event exposing
+  // it), so one watermark merges the two clocks: only the stretch past the
+  // line is new time, and a gap starting behind the line is the stall the
+  // other clock already opened, extended rather than double counted.
   const noteGap = (ms: number, end: number, clock: "raf" | "sc"): void => {
     if (!(ms > LONG_GAP_MS)) return;
     longN += 1;
+    const gapStart = end - ms;
+    if (gapStart >= coverEnd) stallN += 1;
+    stallMs += Math.max(0, end - Math.max(gapStart, coverEnd));
+    coverEnd = Math.max(coverEnd, end);
     if (gaps.length < GAP_KEEP) {
       gaps.push({ ms, end, clock });
       return;
@@ -138,11 +175,22 @@ export function createJankMachine(
     Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
 
   // One record per gesture. t0 and dur describe the GESTURE (input to last
-  // scroll); raf, long and ltMs run to the close a second later on purpose: a
+  // scroll); raf, long, the stall totals and ltMs run to the close a second
+  // later on purpose: a
   // stall right after the last scroll event is exactly where glide-boundary
   // work lands, and a gap there carries at past dur, which names it a settle
   // stall without a field of its own. Attribution happens here, at close,
   // because both sources are push-based and may deliver late.
+  //
+  // stallN and stallMs beside ltMs, and ltSup beside both, because ltMs alone
+  // proved unreadable: it read 0 in every record off the phone, not because
+  // the gestures were clean but because the phone's engine has no longtask
+  // entry type at all — the observe() lands in the wiring's catch, the tasks
+  // ring stays empty for the app's whole life, and an empty sum rounds to the
+  // same 0 a clean gesture would earn (and even with the API, the TASK_KEEP
+  // ring caps what a close can still sum). ltSup says whether the observer is
+  // real here, and the stall totals are the true bound: they need only the
+  // two clocks, which are the same instruments that expose the gaps.
   const build = (now: number): Record<string, unknown> => {
     gesture += 1;
     const stamps = ledger();
@@ -175,6 +223,9 @@ export function createJankMachine(
       raf: rafN,
       sc: scN,
       long: longN,
+      stallN,
+      stallMs: Math.round(stallMs),
+      ltSup,
       ltMs: Math.round(ltMs),
       worst,
     };
@@ -213,6 +264,9 @@ export function createJankMachine(
       else tasks[taskCursor] = entry;
       taskCursor = (taskCursor + 1) % TASK_KEEP;
     },
+    longtaskOn(): void {
+      ltSup = 1;
+    },
     active(): boolean {
       return state !== "idle";
     },
@@ -238,6 +292,11 @@ export function createJankMachine(
 function startScrollJank(): void {
   if (typeof document === "undefined" || document.getElementById("app") === null) return;
   const machine = createJankMachine();
+  // the trail's upload must never stringify inside a gesture (hold.ts defers
+  // it), and this machine already owns the definition of "a gesture is on":
+  // armed or open, quiet tail included, exactly the stretch a stall would land
+  // a long block into
+  holdDiagGesture(() => machine.active());
   let pumping = false;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -319,9 +378,14 @@ function startScrollJank(): void {
   // longtask entries are push-based and cost nothing between deliveries, so
   // the observer runs for the app's whole life; buffered picks up boot-era
   // entries too. An engine without the type lands in the catch and the
-  // record's lt fields simply stay empty.
+  // record's lt fields simply stay empty — which is why ltSup rides the
+  // record: WebKit has never shipped the type, so on the phone every ltMs
+  // read 0 and nothing said whether that was innocence or blindness. The
+  // supportedEntryTypes check is the honest source (observe() can swallow an
+  // unknown type with only a console warning, which no phone session sees).
   if (typeof PerformanceObserver !== "undefined") {
     try {
+      if (PerformanceObserver.supportedEntryTypes?.includes("longtask")) machine.longtaskOn();
       new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) machine.longtask(entry.startTime, entry.duration);
       }).observe({ type: "longtask", buffered: true });

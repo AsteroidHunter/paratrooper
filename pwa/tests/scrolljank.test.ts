@@ -38,6 +38,9 @@ type Rec = {
   raf: number;
   sc: number;
   long: number;
+  stallN: number;
+  stallMs: number;
+  ltSup: number;
   ltMs: number;
   worst: JankGap[];
 };
@@ -226,6 +229,35 @@ describe("long gaps: over the threshold on either clock, streamed then kept wors
     expect(rec.worst[9].ms).toBe(44);
     const sizes = rec.worst.map((g) => g.ms);
     expect([...sizes].sort((a, b) => b - a)).toEqual(sizes);
+    // the totals outlive keep-worst: all fourteen gaps' time, not the ten kept
+    expect(rec.stallN).toBe(14);
+    expect(rec.stallMs).toBe(651); // 40+41+..+53
+  });
+
+  it("a stall both clocks expose totals once, however many gaps it wrote", () => {
+    const m = machineWith();
+    m.wheel(0);
+    m.scroll(10);
+    m.frame(20);
+    m.frame(150); // the raf clock exposes 20..150
+    m.scroll(150); // and the sc clock exposes 10..150 of the same stall
+    const rec = m.poll(150 + SCROLL_QUIET_MS) as Rec;
+    expect(rec.long).toBe(2); // counted per clock, as ever
+    expect(rec.stallN).toBe(1); // but it was ONE stall
+    expect(rec.stallMs).toBe(130); // its time counted once, not summed twice
+  });
+
+  it("a second stall past the first counts and totals separately", () => {
+    const m = machineWith();
+    m.wheel(0);
+    m.scroll(10);
+    m.frame(20);
+    m.frame(100); // 80ms
+    m.frame(116);
+    m.frame(216); // 100ms, clear of the first
+    const rec = m.poll(10 + SCROLL_QUIET_MS) as Rec;
+    expect(rec.stallN).toBe(2);
+    expect(rec.stallMs).toBe(180);
   });
 
   it("a stall in the settle second after the last scroll still counts, marked past dur", () => {
@@ -313,21 +345,45 @@ describe("attribution: ledger spans and longtask entries, matched at close", () 
     const rec = m.poll(10 + SCROLL_QUIET_MS) as Rec;
     expect(rec.ltMs).toBe(0);
   });
+
+  it("ltSup says whether an ltMs of zero was innocence or blindness", () => {
+    // the field the phone data forced: every device record read ltMs 0, and
+    // nothing said whether the gestures were clean or the engine simply has no
+    // longtask type (it has none — the wiring's catch ate the difference)
+    const blind = machineWith();
+    blind.wheel(0);
+    blind.scroll(10);
+    expect((blind.poll(10 + SCROLL_QUIET_MS) as Rec).ltSup).toBe(0);
+    const sighted = machineWith();
+    sighted.longtaskOn(); // the wiring saw the entry type in supportedEntryTypes
+    sighted.wheel(0);
+    sighted.scroll(10);
+    const rec = sighted.poll(10 + SCROLL_QUIET_MS) as Rec;
+    expect(rec.ltSup).toBe(1);
+    expect(rec.ltMs).toBe(0); // now an honest zero: it looked and found nothing
+  });
 });
 
 describe("the record: one per gesture, exactly its fields, rounded", () => {
-  it("carries exactly n, t0, dur, raf, sc, long, ltMs, worst", () => {
+  it("carries exactly n, t0, dur, raf, sc, long, stallN, stallMs, ltSup, ltMs, worst", () => {
     const m = machineWith();
     m.wheel(0.4);
     m.scroll(10.6);
     m.scroll(30.4);
     const rec = m.poll(30.4 + SCROLL_QUIET_MS) as Rec;
-    expect(Object.keys(rec)).toEqual(["n", "t0", "dur", "raf", "sc", "long", "ltMs", "worst"]);
+    expect(Object.keys(rec)).toEqual([
+      "n", "t0", "dur", "raf", "sc", "long", "stallN", "stallMs", "ltSup", "ltMs", "worst",
+    ]);
     expect(rec.t0).toBe(0);
     expect(rec.dur).toBe(30);
     expect(rec.raf).toBe(0);
     expect(rec.sc).toBe(2);
     expect(rec.long).toBe(0);
+    // the totals ride EVERY record, a stall-free gesture included: a clean
+    // drive must read as zeroes the probe wrote, never as fields it skipped
+    expect(rec.stallN).toBe(0);
+    expect(rec.stallMs).toBe(0);
+    expect(rec.ltSup).toBe(0);
     expect(rec.ltMs).toBe(0);
     expect(rec.worst).toEqual([]);
   });
@@ -407,6 +463,25 @@ describe("wiring and stamps, pinned by source across the stamped files", () => {
   it("the photo decode's landing work and the trail upload stamp themselves", () => {
     expect(mainSrc).toContain('jankSpan("shot-drawn", jankT0)');
     expect(holdSrc).toContain('jankSpan("diag-post", jankT0)');
+  });
+
+  it("every scroll-back suspect stamps itself: the unattributed blocks' short list", () => {
+    // the sweep's verdict: 78.5% of sampled block time carried no name, and
+    // only stamped paths can earn one — so the paths a scroll back actually
+    // runs all stamp now (the history landing, the per-frame decorate fold,
+    // the photo queue's release batch, the pixels' landing, the tail settle)
+    expect(mainSrc).toContain('jankSpan("drain-older", jankT0)');
+    expect(mainSrc).toContain('jankSpan("decorate", jankT0)');
+    expect(mainSrc).toContain('jankSpan("photo-release", jankT0)');
+    expect(mainSrc).toContain('jankSpan("photo-load", jankT0)');
+    expect(mainSrc).toContain('jankSpan("settle-tail", jankT0)');
+  });
+
+  it("the wiring hands hold.ts the gesture gate, and reads longtask support honestly", () => {
+    // the recorder owns "a gesture is on"; the trail's upload defers on it
+    expect(jankSrc).toContain("holdDiagGesture(() => machine.active())");
+    // ltSup comes from supportedEntryTypes, not from observe() not throwing
+    expect(jankSrc).toMatch(/supportedEntryTypes\?\.includes\("longtask"\)/);
   });
 
   it("main.ts boots the recorder on import", () => {
@@ -494,6 +569,7 @@ describe("a simulated gesture through the real wiring, geometry spied shut", () 
     vi.stubGlobal(
       "PerformanceObserver",
       class {
+        static supportedEntryTypes = ["longtask"]; // an engine that really has it
         constructor(cb: (list: { getEntries(): { startTime: number; duration: number }[] }) => void) {
           observed = cb;
         }
@@ -548,6 +624,9 @@ describe("a simulated gesture through the real wiring, geometry spied shut", () 
     expect(d.raf).toBe(7);
     expect(d.sc).toBe(7);
     expect(d.long).toBe(2); // the stall showed on BOTH clocks
+    expect(d.stallN).toBe(1); // and the totals counted it once
+    expect(d.stallMs).toBe(120);
+    expect(d.ltSup).toBe(1); // the stub engine advertises longtask, so 0 would mean clean
     expect(d.ltMs).toBe(100);
     expect(d.worst[0]).toEqual({
       ms: 120,

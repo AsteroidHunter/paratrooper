@@ -12,6 +12,13 @@
 // because stamps only need to outlive their window long enough for the
 // recorder to read overlaps at gesture close; the newest spans are always the
 // ones a close cares about, and the ledger can never grow with session length.
+//
+// The ring is sized for its busiest writer: one history page landing stamps a
+// "decorate" span per applied frame (twenty-five of them) around its one
+// "drain-older", and the gesture that provoked it still needs its photo and
+// settle spans alive at close, a second later. 128 holds two such landings
+// with room, where the original 64 could have evicted the very spans the
+// worst gaps were waiting to be named by.
 
 export interface JankStamp {
   name: string;
@@ -19,7 +26,7 @@ export interface JankStamp {
   end: number; // and at its exit; the span between is main-thread time spent
 }
 
-export const JANK_STAMP_KEEP = 64;
+export const JANK_STAMP_KEEP = 128;
 
 const stamps: JankStamp[] = [];
 let cursor = 0; // once the ring is full, the next slot to overwrite (the oldest)

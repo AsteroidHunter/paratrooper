@@ -396,17 +396,23 @@ def test_holddiag_fall_and_rise_lines_do_not_clip_each_other(client, caplog):
 
 def test_holddiag_scroll_jank_gets_its_own_line(client, caplog):
     """scroll-jank batches one gesture's whole verdict (both frame cadences,
-    the worst gaps with what ran inside them) into one wide record, so it rides
+    the worst gaps with what ran inside them, and the gesture's true stall
+    totals) into one wide record, so it rides
     its own line, and the shared viewport tail never
-    carries or clips it. TEMP DIAGNOSTIC (scroll-jank): remove with the
+    carries or clips it. The stall totals and the suspects' new span names ride
+    the SAME claimed event, and this pins that they survive to both the logs
+    and the read-back — a record the client posts but nothing here claims is
+    silently dropped, which has already happened twice on this channel. TEMP
+    DIAGNOSTIC (scroll-jank): remove with the
     pwa/src/scrolljank.ts block."""
     record = {
         "n": 2, "t0": 5200, "dur": 1240, "raf": 41, "sc": 96, "long": 3,
+        "stallN": 2, "stallMs": 233, "ltSup": 0,
         "ltMs": 180,
         "worst": [
-            {"ms": 87, "at": 310, "clock": "raf", "led": ["slack-read"], "lt": 71},
-            {"ms": 52, "at": 640, "clock": "sc", "led": ["cache-put"]},
-            {"ms": 41, "at": 1290, "clock": "raf"},
+            {"ms": 87, "at": 310, "clock": "raf", "led": ["drain-older", "decorate"], "lt": 71},
+            {"ms": 52, "at": 640, "clock": "sc", "led": ["photo-release", "photo-load"]},
+            {"ms": 41, "at": 1290, "clock": "raf", "led": ["settle-tail"]},
         ],
     }
     trail = {"build": "b", "events": [
@@ -418,10 +424,19 @@ def test_holddiag_scroll_jank_gets_its_own_line(client, caplog):
     jank = [r.message for r in caplog.records if "holddiag jank" in r.message]
     assert len(jank) == 1
     assert "events=1" in jank[0]
-    # the attribution survives the digest: the gap, its clock, and the names
+    # the attribution survives the digest: the gap, its clock, and the names —
+    # the five scroll-back suspects' spans among them
     assert '"ms": 87' in jank[0] and '"clock": "raf"' in jank[0]
-    assert '"slack-read"' in jank[0] and '"cache-put"' in jank[0]
-    assert '"ltMs": 180' in jank[0]
+    assert '"drain-older"' in jank[0] and '"decorate"' in jank[0]
+    assert '"photo-release"' in jank[0] and '"photo-load"' in jank[0]
+    assert '"settle-tail"' in jank[0]
+    # and so do the totals: every stall's time and count, plus whether the
+    # engine could even look for longtasks (ltSup names why ltMs may read 0)
+    assert '"stallN": 2' in jank[0] and '"stallMs": 233' in jank[0]
+    assert '"ltSup": 0' in jank[0] and '"ltMs": 180' in jank[0]
+    # the whole record also survives to the tokened read-back, fields intact
+    fetched = client.get("/api/debug/holddiag", headers=AUTH).json()
+    assert fetched["events"][1]["d"] == record
     # the wide record stays off the shared viewport tail entirely, and the
     # scroll mark beside it still rides that tail as before
     vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]

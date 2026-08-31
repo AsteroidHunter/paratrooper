@@ -19,7 +19,8 @@
 // injectable clock, no DOM) beneath a one-line wiring in main.ts.
 
 // TEMP DIAGNOSTIC (scroll-jank, scrolljank.ts owns the banner): one stamped
-// span in diagPost below, so an upload that lands mid-scroll names itself
+// span in diagPostSend below, so an upload that lands mid-scroll names itself
+// — it did, which is why the upload now waits out gestures (diagPost's stages)
 import { jankSpan } from "./jankledger";
 
 export const QUIET_MS = 7000;
@@ -180,6 +181,20 @@ export function holdDiagAuth(headers: () => Record<string, string>): void {
   diagAuthHeaders = headers;
 }
 
+// TEMP DIAGNOSTIC (scroll-jank, scrolljank.ts owns the banner): the gesture
+// gate, handed down like the auth builder above and for the same reason — the
+// recorder owns the definition of "a scroll gesture is on" and one place must
+// keep owning it. The upload below asks it before doing any of its work: the
+// copy+stringify ran to multi-hundred-ms blocks on device, and the jank data
+// showed those blocks landing inside the very gestures the trail was built to
+// measure. Unhanded — outside the real shell, or with the recorder removed —
+// the gate reads as never-live and the upload simply never parks.
+let diagGestureLive: (() => boolean) | null = null;
+
+export function holdDiagGesture(live: () => boolean): void {
+  diagGestureLive = live;
+}
+
 export function holdDiagEvents(): readonly HoldDiagEvent[] {
   return diagTrail;
 }
@@ -257,38 +272,99 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   }
 }
 
+// The upload runs in stages now, because it used to run whole inside the
+// settle timer and the scroll-jank data caught it there: the copy+stringify of
+// a full ring is multi-hundred-ms work on device, and it was landing inside
+// gestures — the one stall in a whole sweep's worth of blocks that could name
+// itself. So: the settle timer only ASKS for the upload; the ask waits out any
+// live scroll gesture (the gate scrolljank.ts hands down, quiet tail
+// included), then rides an idle callback so the send lands in slack rather
+// than in front of the next frame; and the idle callback asks the gate once
+// more, because a new gesture can rise while the turn is waited for and
+// engines run idle callbacks in a gesture's between-frame slack. None of this
+// can lose a record: the payload is always the whole ring, so a parked post
+// simply carries more when it finally goes — and going hidden mid-park lands
+// it immediately (diagPostHide below), where blocking matters to nobody.
+const DIAG_SETTLE_MS = 600; // one release posts once, not once per rendered frame
+const DIAG_RETRY_MS = 250; // re-ask cadence while a gesture holds the send back
+let diagPostIdleQueued = false; // an idle send is booked; new marks ride it free
+
 function diagPost(): void {
   if (!diagPostsOn) return;
   if (diagPostTimer) clearTimeout(diagPostTimer);
   // short settle: one release posts once, not once per rendered frame
-  diagPostTimer = setTimeout(() => {
-    diagPostTimer = null;
-    const jankT0 = performance.now(); // TEMP DIAGNOSTIC (scroll-jank): the upload's sync cost starts here
-    const payload = {
-      ts: new Date().toISOString(),
-      build: typeof __BUILT_AT__ === "string" ? __BUILT_AT__ : "unknown",
-      events: diagTrail.slice(),
-    };
-    // Building the header is the one step here that runs someone else's code,
-    // so it is the one step that could throw where nothing is watching. A
-    // diagnostic that cannot name itself is a non-event; a diagnostic that
-    // throws on the way out is an app bug. It goes bare instead and the server
-    // refuses it, which costs the same nothing a dropped post always cost.
-    let headers: Record<string, string> = { "Content-Type": "application/json" };
-    try {
-      if (diagAuthHeaders) headers = { ...headers, ...diagAuthHeaders() };
-    } catch {
-      /* no header to be had; the bare post below is the fallback */
-    }
-    void fetch("/api/debug/holddiag", {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    }).catch(() => {
-      /* diagnostic only: a failed post must never disturb the app */
-    });
-    jankSpan("diag-post", jankT0); // TEMP DIAGNOSTIC (scroll-jank): copy, stringify and send-off spanned
-  }, 600);
+  diagPostTimer = setTimeout(diagPostWhenClear, DIAG_SETTLE_MS);
+}
+
+function diagPostWhenClear(): void {
+  diagPostTimer = null;
+  if (diagGestureLive?.()) {
+    // mid-gesture: park. The ring is whole, so nothing is lost, only later.
+    diagPostTimer = setTimeout(diagPostWhenClear, DIAG_RETRY_MS);
+    return;
+  }
+  if (diagPostIdleQueued) return; // the booked send will carry everything anyway
+  diagPostIdleQueued = true;
+  // idle where the engine has it; a plain macrotask where it does not
+  if (typeof requestIdleCallback === "function") requestIdleCallback(diagPostIdle);
+  else setTimeout(diagPostIdle, 0);
+}
+
+function diagPostIdle(): void {
+  diagPostIdleQueued = false;
+  if (diagGestureLive?.()) {
+    // a gesture rose while the turn was waited for: back to parking
+    if (!diagPostTimer) diagPostTimer = setTimeout(diagPostWhenClear, DIAG_RETRY_MS);
+    return;
+  }
+  // a settle timer still pending covers records this payload is about to
+  // carry anyway; anything recorded after the slice below arms its own post
+  if (diagPostTimer) clearTimeout(diagPostTimer);
+  diagPostTimer = null;
+  diagPostSend(false);
+}
+
+// going hidden with an upload parked anywhere in the stages: land it NOW, the
+// cacheWrites.flush() rule — the page may freeze before any timer or idle
+// callback runs again, and mid-gesture blocking matters to nobody on the way
+// out. keepalive lets the send outlive the page. (A booked idle callback that
+// still fires later re-sends the same whole ring; latest-wins upstream makes
+// that a non-event.)
+function diagPostHide(): void {
+  if (!diagPostTimer && !diagPostIdleQueued) return; // nothing parked: already posted
+  if (diagPostTimer) clearTimeout(diagPostTimer);
+  diagPostTimer = null;
+  diagPostIdleQueued = false;
+  diagPostSend(true);
+}
+
+function diagPostSend(hiding: boolean): void {
+  const jankT0 = performance.now(); // TEMP DIAGNOSTIC (scroll-jank): the upload's sync cost starts here
+  const payload = {
+    ts: new Date().toISOString(),
+    build: typeof __BUILT_AT__ === "string" ? __BUILT_AT__ : "unknown",
+    events: diagTrail.slice(),
+  };
+  // Building the header is the one step here that runs someone else's code,
+  // so it is the one step that could throw where nothing is watching. A
+  // diagnostic that cannot name itself is a non-event; a diagnostic that
+  // throws on the way out is an app bug. It goes bare instead and the server
+  // refuses it, which costs the same nothing a dropped post always cost.
+  let headers: Record<string, string> = { "Content-Type": "application/json" };
+  try {
+    if (diagAuthHeaders) headers = { ...headers, ...diagAuthHeaders() };
+  } catch {
+    /* no header to be had; the bare post below is the fallback */
+  }
+  void fetch("/api/debug/holddiag", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    keepalive: hiding, // the hide flush must outlive the page; nothing else needs it
+  }).catch(() => {
+    /* diagnostic only: a failed post must never disturb the app */
+  });
+  jankSpan("diag-post", jankT0); // TEMP DIAGNOSTIC (scroll-jank): copy, stringify and send-off spanned
 }
 
 // Passive observers only; nothing here feeds the hold or the app. The key
@@ -331,6 +407,8 @@ function startHoldDiag(): void {
   );
   document.addEventListener("visibilitychange", () => {
     holdDiagRecord("vis", { state: document.visibilityState });
+    // a parked upload must not die with the page (deferral's one debt)
+    if (document.visibilityState === "hidden") diagPostHide();
   });
   if ("MutationObserver" in globalThis) {
     new MutationObserver((muts) => {
