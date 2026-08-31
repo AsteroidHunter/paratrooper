@@ -140,7 +140,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.61"; // photos in your history now hold their true shape from the first grey box, instead of drawing as a thin landscape strip and springing into portrait the moment the picture arrives — which is what made the screen walk down under you while you scrolled back through old photos on the iPhone
+const APP_VERSION = "0.3.62"; // server-side hygiene: waking the reply worker when it is already awake no longer prints a false error into the deploy logs, and the site agent is told never to sign its commits or PRs as Claude
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
