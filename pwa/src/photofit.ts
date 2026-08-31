@@ -173,3 +173,53 @@ export function servedShape(told: Dims, nat: Dims): ServedShape | null {
     r: Math.round((w / h / (nw / nh)) * 1000) / 1000,
   };
 }
+
+// --- TEMP DIAGNOSTIC (photo-strip) ---------------------------------------------
+// The answer the section above was looking for, and the reading that proves it
+// stays answered.
+//
+// The pixels were never the problem. A parked photo is an img with NO source
+// and a non-empty alt, and WebKit gives that element the natural size of the
+// alt text's own box — the word "photo", about 49 by 24 — while `aspect-ratio:
+// auto W/H`, which is all the width and height attributes ever were, yields to
+// a natural ratio wherever it finds one. So every reserved box in a history of
+// photos came out as the same thin landscape strip, held that shape through the
+// whole fetch (a source arriving does not make WebKit re-ask), and stood up into
+// the real picture at load, shoving everything under it down the page. Chromium
+// honours the attributes and never strips, which is why every reading taken off
+// a desktop agreed with the code and disagreed with him.
+//
+// A DECLARED ratio outranks the alt box, so the known-size branch now writes one
+// next to the attributes, exactly as the guessing branch always has. This is the
+// same comparison the guessed box's own correction rests on — is the box the
+// shape it was promised — asked at the last moment the reserved box is the only
+// thing standing there, on the device rather than in an argument.
+//
+// Silent when it is, because that is the whole expectation and a record per
+// correctly reserved photo would be a history's worth of noise saying yes. Two
+// pixels of slop: the rendered height is a fractional layout number and the
+// promised one is arithmetic on two integers.
+//
+// TO REMOVE: this section, checkPhotoStrip and its call in main.ts, the
+// "photo-strip" name in the app.py photo digest, and the tests naming them.
+
+/** how far a rendered height may sit from the promised one and mean nothing */
+export const STRIP_SLOP_PX = 2;
+
+/**
+ * True when the box on screen is not the shape its width and height attributes
+ * asked for: the strip.
+ *
+ * False for a box there is nothing to compare. A zero on either side is a row
+ * that has not been laid out or a photo that was never given a size, and
+ * neither was ever promised a shape to miss.
+ */
+export function strippedBox(
+  rw: number,
+  rh: number,
+  toldW: number,
+  toldH: number,
+): boolean {
+  if (!(rw > 0) || !(rh > 0) || !(toldW > 0) || !(toldH > 0)) return false;
+  return Math.abs(rh - rw * (toldH / toldW)) > STRIP_SLOP_PX;
+}

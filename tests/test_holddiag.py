@@ -588,6 +588,48 @@ def test_holddiag_photo_box_marks_get_their_own_line(client, caplog):
     assert '"tail-gap"' in vp[0]
 
 
+def test_holddiag_photo_strip_rides_the_photo_line(client, caplog):
+    """The record that says the landscape strip is gone, and the one that would
+    say it came back. A photo waiting for the reader to come near it has no
+    source at all, and WebKit took such an image's shape from its ALT TEXT's box
+    — one wide strip whatever picture was coming — which is what made a history
+    of portrait photos draw landscape and spring upright as each one loaded. The
+    photo now declares its real ratio, and the phone measures the reserved box
+    against the size it was promised in the last moment before the source goes
+    on. It should never fire again, which is exactly why it has to be carried: a
+    mark no block here claims is dropped on arrival, and its absence would read
+    as "the strip is gone" whether or not anyone ever looked. TEMP DIAGNOSTIC
+    (photo boxes): remove with the pwa/src/main.ts block."""
+    trail = {"build": "b", "events": [
+        # an engine still doing it: a 3024x4032 photo whose seat came out at the
+        # alt word's own shape, 240 wide and 117 tall instead of 320
+        {"t": 1, "ev": "photo-strip",
+         "d": {"rw": 240, "rh": 117, "toldW": 3024, "toldH": 4032}},
+        # and the neighbours it only means anything beside
+        {"t": 2, "ev": "sized-box",
+         "d": {"seq": 413, "i": 0, "n": 1, "w": 3024, "h": 4032, "tall": 1, "ck": 0}},
+        {"t": 3, "ev": "followtail", "d": {"to": False, "trigger": "scroll-away"}},
+    ]}
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
+    photo = [r.message for r in caplog.records if "holddiag photo" in r.message]
+    assert len(photo) == 1
+    assert "events=2" in photo[0]
+    # the box that stood and the box it was promised, both, since either alone
+    # says only that something is wrong and neither says by how much
+    assert '"photo-strip"' in photo[0]
+    assert '"rw": 240' in photo[0] and '"rh": 117' in photo[0]
+    assert '"toldW": 3024' in photo[0] and '"toldH": 4032' in photo[0]
+    # it reads beside the seat the same photo was drawn at, on the one line
+    assert '"sized-box"' in photo[0]
+    # and stays off the shared viewport tail, which keeps its own marks
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"photo-strip"' not in vp[0]
+    # the whole trail survives to the tokened GET as posted, mark included
+    assert client.get("/api/debug/holddiag", headers=AUTH).json() == trail
+
+
 def test_holddiag_settle_marks_get_their_own_line(client, caplog):
     """The app's one scroll write, on the one channel that was reaching nobody:
     the phone has been posting tail-settle all along and no block claimed it, so

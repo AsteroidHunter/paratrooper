@@ -35,7 +35,15 @@ import {
   whenDrawn,
 } from "./photobox";
 import type { DrawWhy, SmallDrawHost, SmallShot, ThumbSeat } from "./photobox";
-import { GUESS_H, GUESS_RATIO, GUESS_W, learnDims, scrollFix, servedShape } from "./photofit";
+import {
+  GUESS_H,
+  GUESS_RATIO,
+  GUESS_W,
+  learnDims,
+  scrollFix,
+  servedShape,
+  strippedBox, // TEMP DIAGNOSTIC (photo-strip): remove with checkPhotoStrip
+} from "./photofit";
 import type { Dims } from "./photofit";
 import { WAIT_CLASS, createPhotoQueue, nearMargin } from "./photolazy";
 import { receiptFor } from "./receipts";
@@ -132,7 +140,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.60"; // the band of white that sometimes opened between your last message and the compose bar as the keyboard went down is taken back: the phone hands the conversation back the scroll position it had while the keyboard was still up, which is past where the conversation now ends, and the app watches the frames after every close and puts it back on its last line the moment that happens — plus a new watcher that writes down any scroll move the app itself never asked for
+const APP_VERSION = "0.3.61"; // photos in your history now hold their true shape from the first grey box, instead of drawing as a thin landscape strip and springing into portrait the moment the picture arrives — which is what made the screen walk down under you while you scrolled back through old photos on the iPhone
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -2075,12 +2083,46 @@ function watchPhotos(thread: HTMLElement): void {
       for (const e of entries) {
         if (!e.isIntersecting) continue;
         obs.unobserve(e.target);
-        if (photoQueue.release(e.target as HTMLImageElement)) released += 1;
+        const img = e.target as HTMLImageElement;
+        checkPhotoStrip(img); // TEMP DIAGNOSTIC (photo-strip): the seat, while it is still the only thing there
+        if (photoQueue.release(img)) released += 1;
       }
       if (released > 0) jankSpan("photo-release", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
     },
     { root: thread, rootMargin: `${margin}px 0px` },
   );
+}
+
+// TEMP DIAGNOSTIC (photo-strip, rule in photofit.ts): the reserved box read on
+// the last frame it is the only thing standing there — the source goes on in the
+// very next statement, and after that the box is whatever the picture makes it.
+//
+// This is the check that says the landscape strip is gone, on the device, in the
+// engine that had it. It should never write anything again: the declared ratio
+// in renderUser outranks the alt box that caused it, so the seat is already the
+// photo's own shape here. It stays because "should" is what the attributes were
+// doing before, and because an engine nobody has tested this on can only be
+// heard from this way.
+//
+// One geometry read per photo, once. The source that goes on between two of
+// them moves no box — the pixels land in a later task, and the seat was decided
+// at the render — so a whole batch of photos coming into reach at once costs the
+// single layout the first read forces, not one apiece.
+function checkPhotoStrip(img: HTMLImageElement): void {
+  // the ATTRIBUTES, not img.width / img.height: those two answer with the
+  // rendered box once the element is in the page, which is the very number this
+  // is holding them to, and the check would compare the strip against itself
+  const toldW = Number(img.getAttribute("width"));
+  const toldH = Number(img.getAttribute("height"));
+  if (!(toldW > 0) || !(toldH > 0)) return; // no size was promised: no shape to miss
+  const box = img.getBoundingClientRect();
+  if (!strippedBox(box.width, box.height, toldW, toldH)) return; // the seat is right
+  holdDiagRecord("photo-strip", {
+    rw: Math.round(box.width), // the box as it actually stands
+    rh: Math.round(box.height),
+    toldW, // and the shape it was told to stand in
+    toldH,
+  });
 }
 
 // --- tap-to-zoom: the photo grows out of its spot and shrinks back into it ----
@@ -2441,16 +2483,30 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
     // scroll under the reader.
     //
     // Either way the box is decided HERE and only here, and it holds for this
-    // whole render. The known branch lays the photo out at its own size and the
-    // arriving pixels agree with it. The guessed branch pins an explicit ratio,
-    // which is not the natural one, so the arriving pixels have no say in it
-    // either. The only thing that can reshape either box is adoptPhotoBox on the
-    // load below, deliberately, once, and paying the scroll back as it goes.
+    // whole render. Both branches now pin an EXPLICIT ratio next to the size,
+    // the known one from the size it was told and the guessed one from the box
+    // it invented, so nothing that decodes later has a say in either. The only
+    // thing that can reshape either box is adoptPhotoBox on the load below,
+    // deliberately, once, and paying the scroll back as it goes.
     const dims = m.attachment_dims?.[i];
     const guessed = !dims; // this render has to invent the box, and say so later
     if (dims) {
       img.width = dims[0];
       img.height = dims[1];
+      // and the same size again, DECLARED, which is the whole of the landscape
+      // strip fix. The attributes alone are `aspect-ratio: auto W/H`, and that
+      // `auto` steps aside for any natural ratio the element has — including,
+      // on WebKit and only on WebKit, the natural ratio of the ALT TEXT's box
+      // on an img that has no source yet, which every photo here is until the
+      // reader comes near it (photolazy.ts). The word "photo" is about 49 by
+      // 24, so every parked box was that one wide strip whatever picture it
+      // was holding a seat for, kept the strip through the whole fetch, and
+      // stood up into the real photo at load: his landscape-then-portrait, and
+      // the screen walking down under it. A declared ratio outranks a natural
+      // one, so the seat is the photo's own shape from the first grey frame.
+      // The alt text stays: the box it must not be read from is a bug in one
+      // engine, and a screen reader announcing the photo is not.
+      img.style.aspectRatio = `${dims[0]} / ${dims[1]}`;
       // TEMP DIAGNOSTIC (sized-box, marked at sizedSeen): the twin of the record
       // below, and the only thing that makes its silence mean anything. A whole
       // scroll back through the history produced not one guess, which reads
@@ -2576,6 +2632,13 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
 // A photo whose pixels never reported a size keeps the guess and takes no
 // branch at all, which is the behaviour that has always been there: the guess
 // is the only thing standing between an undecodable photo and a zero tall row.
+//
+// This is also the only place a box's numbers ever change after its render, so
+// it is where the one rule about the declared ratio has to hold: a declaration
+// never outlives the size it was made for. Both go in the same write below, the
+// old ratio off before the new numbers land, and what takes over is the photo's
+// own decoded shape — which IS the size being written, measured from it. There
+// is no moment here where a stale ratio and a fresh size are both standing.
 function adoptPhotoBox(
   img: HTMLImageElement,
   row: HTMLElement,
@@ -2585,7 +2648,7 @@ function adoptPhotoBox(
   const nat = naturalSize(img);
   if (!nat) return; // nothing to measure: the guessed box stands, as it always has
   keepView(row, () => {
-    img.style.aspectRatio = ""; // back to the photo's own ratio
+    img.style.aspectRatio = ""; // the declaration goes with the size it was made for
     img.style.objectFit = "";
     img.width = nat[0];
     img.height = nat[1];

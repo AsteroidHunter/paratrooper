@@ -502,16 +502,24 @@ html, body {
 
 .msg.shot { padding: 0; background: none; }
 /* height:auto + the width/height attributes = the box's aspect ratio is
-   reserved before decode, so a landing photo can never shove the scroll */
+   reserved before decode, so a landing photo can never shove the scroll.
+   The width the box takes is decided here; the SHAPE is not left to the
+   attributes alone. They only ever meant `aspect-ratio: auto W/H`, and that
+   `auto` steps aside for any natural ratio the element has — which on WebKit
+   includes the alt text's own box while a photo is still parked with no source
+   (photolazy.ts), the whole reason a history of photos drew as one repeated
+   landscape strip. main.ts writes the real ratio inline next to the attributes,
+   declared, and a declared ratio has no `auto` to step aside with. */
 .msg.shot img { max-width: 100%; height: auto; border-radius: 14px; display: block; cursor: zoom-in; }
 
 /* the photo that has not arrived yet (main.ts + photolazy.ts put .waiting on it
    from the frame its row is built until its first pixels paint, whether it is
    still parked far from the screen or fetching right now). The box is already
-   reserved by the width/height attributes above, so these two layers just fill
+   reserved by the size main.ts writes above, so these two layers just fill
    it: a face over the whole box, and the history spinner's own ring
    centred on it. Both are positioned pseudo-elements, so they paint OVER the
-   empty img (an image with no source would otherwise show its alt text) and
+   empty img (an image with no source would otherwise show its alt text —
+   covering it is why nobody could SEE what was setting the strip's shape) and
    cost the layout nothing: the box does not move, resize, or reflow when they
    go. :has() carries the state up from the img, the same way the history
    spinner's own visibility rule reads the thread.

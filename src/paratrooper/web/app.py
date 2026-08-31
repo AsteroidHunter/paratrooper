@@ -782,11 +782,20 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         # that every mark below has to be named here or it is silently dropped: a
         # record the client posts but no block claims never reaches the logs at
         # all, which is exactly how this channel went missing.
+        #
+        # photo-strip is the answer that came out of all of the above, standing
+        # watch over itself. The reshape was never the pixels: a parked photo has
+        # no source at all, and WebKit took the box's shape from the ALT TEXT,
+        # which is one wide strip whatever picture is coming. The photo now
+        # declares its real ratio, and this mark is the box being measured
+        # against the size it was promised in the last moment before the source
+        # goes on. It should never arrive. One that does names an engine doing
+        # the same thing again.
         # TEMP DIAGNOSTIC (photo boxes, pwa/src/main.ts owns the banners):
         # remove this block and its test in tests/test_holddiag.py with it.
         pb = [e for e in events if isinstance(e, dict)
               and e.get("ev") in ("guessed-box", "sized-box", "photo-learned",
-                                  "keep-view", "served-shape")]
+                                  "keep-view", "served-shape", "photo-strip")]
         if pb:
             _diag.info("holddiag photo events=%d tail=%s", len(pb), json.dumps(pb[-30:]))
         # tail-settle records, their own line. The client has been posting these

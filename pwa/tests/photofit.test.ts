@@ -30,9 +30,11 @@ import {
   GUESS_H,
   GUESS_RATIO,
   GUESS_W,
+  STRIP_SLOP_PX,
   learnDims,
   scrollFix,
   servedShape,
+  strippedBox,
 } from "../src/photofit";
 import type { Dims } from "../src/photofit";
 
@@ -363,22 +365,37 @@ describe("the learned size reaches the next cold open", () => {
 describe("the box is decided once per render", () => {
   const render = (): string => fnBody("renderUser");
 
-  it("lays a photo that HAS a size out at that size, and touches nothing else", () => {
-    // unchanged behaviour, deliberately: the arriving pixels are the same
-    // pixels the server measured, so this box cannot move. The two writes still
-    // have to OPEN the branch, but this no longer demands they be the last thing
-    // in it: a counter reporting that this branch was taken lives here too, and
-    // pinning the closing brace next to them made a record that writes nothing
-    // read as a layout change. What actually matters is below.
+  it("lays a photo that HAS a size out at that size, and DECLARES that shape", () => {
+    // The two writes still have to OPEN the branch, but this no longer demands
+    // they be the last thing in it: a counter reporting that this branch was
+    // taken lives here too, and pinning the closing brace next to them made a
+    // record that writes nothing read as a layout change.
     const src = render();
     expect(src).toContain("if (dims) {\n      img.width = dims[0];\n      img.height = dims[1];\n");
-    // and the real protection: whatever else stands in this branch, nothing in
-    // it may touch style. The guessed branch pins a ratio and a fit because its
-    // box is invented; this one must leave the box to the pixels themselves.
+    // and the ratio, written out, from the same two numbers. This branch used to
+    // forbid itself any style at all, on the reading that the arriving pixels
+    // are the pixels the server measured and so the box could not move. The
+    // pixels were never what moved it: until the reader comes near, this img has
+    // NO source (photolazy.ts), and WebKit takes an unsourced img's natural
+    // ratio from its alt text's box — one wide strip, whatever picture is
+    // coming — which `aspect-ratio: auto W/H`, all the attributes above ever
+    // were, quietly yields to. A declared ratio has no `auto` to yield with.
     const known = src.slice(src.indexOf("if (dims) {"), src.indexOf("} else {"));
-    expect(known).not.toContain("img.style");
-    expect(known).not.toContain("aspectRatio");
+    expect(known).toContain("img.style.aspectRatio = `${dims[0]} / ${dims[1]}`");
+    // it is the size on the attributes and nothing invented: same two numbers,
+    // same order, so the box declared is the box promised
+    expect(known).not.toContain("GUESS");
+    // and that is the ONLY thing it may write. The crop the guessed box wears
+    // belongs to a box that was invented; a photo laid out at its own size is
+    // the shape of its own pixels and has nothing to crop.
     expect(known).not.toContain("objectFit");
+    expect(known.match(/img\.style/g)).toHaveLength(1);
+  });
+
+  it("keeps the alt text the strip came from: the box was the bug, not the word", () => {
+    // an img with no source and no alt reserves nothing to read out loud either.
+    // The fix is the ratio outranking the alt box, not the alt going away.
+    expect(render()).toContain('img.alt = "photo"');
   });
 
   it("pins an EXPLICIT ratio on the box it has to guess", () => {
@@ -423,6 +440,53 @@ describe("adoptPhotoBox: the one reshape, and the last guess", () => {
     expect(adopt()).toContain('img.style.objectFit = ""');
     expect(adopt()).toContain("img.width = nat[0]");
     expect(adopt()).toContain("img.height = nat[1]");
+  });
+
+  it("never leaves a declared ratio standing next to a size it was not made for", () => {
+    // both branches of the render now DECLARE a ratio beside the attributes, and
+    // this is the one place a box's numbers ever change afterwards. So the rule
+    // the declaration lives by is pinned here: the old ratio comes off before
+    // the new size goes on, in the same write, and what takes over is the
+    // photo's own decoded shape — which is the size being written, measured off
+    // it. No frame holds a stale ratio and a fresh size together.
+    const body = adopt();
+    expect(body.indexOf('img.style.aspectRatio = ""')).toBeLessThan(
+      body.indexOf("img.width = nat[0]"),
+    );
+    expect(body.indexOf("keepView(row")).toBeLessThan(
+      body.indexOf('img.style.aspectRatio = ""'),
+    );
+    // and it is the size it just measured that lands, so the shape the box ends
+    // up in is the shape the pixels are: nothing to declare and nothing to fight
+    expect(body).toContain("const nat = naturalSize(img)");
+  });
+
+  it("is the only place a DECLARED box is ever re-sized", () => {
+    // If anything else re-sized one, the ratio declared beside those attributes
+    // would outrank the new numbers and hold the old shape — the failure this
+    // fix exists to end, pointed the other way. So every size write in the app
+    // is accounted for here: two of them stand beside a declaration (the two
+    // branches of the render), one clears the declaration in the same write
+    // (adopt, above), and the other two are on elements that carry no
+    // declaration at all — the board preview, sized off its own png header, and
+    // a sent photo's seat, sized off pixels already decoded.
+    const writes = src
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^img\.(width|height) = /.test(l))
+      .sort();
+    expect(writes).toEqual([
+      "img.height = GUESS_H;",
+      "img.height = dims[1];",
+      "img.height = dims[1];",
+      "img.height = nat[1];",
+      "img.height = nat[1];",
+      "img.width = GUESS_W;",
+      "img.width = dims[0];",
+      "img.width = dims[0];",
+      "img.width = nat[0];",
+      "img.width = nat[0];",
+    ]);
   });
 
   it("writes the size down, so this is the last render that ever guesses", () => {
@@ -504,6 +568,112 @@ describe("checkServedShape: the other branch's pixels, finally looked at", () =>
     expect(body).not.toContain("keepView");
     expect(body).not.toContain("img.style");
     expect(body).not.toMatch(/img\.(width|height) =/);
+  });
+});
+
+// TEMP DIAGNOSTIC (photo-strip): remove with the photofit.ts section and the
+// main.ts block these pin.
+//
+// The bug the declared ratio ends, written down as arithmetic so the record
+// that watches for its return can be tested without an engine that has it: a
+// parked photo has no source, WebKit sizes an unsourced img from its ALT TEXT's
+// box (the word "photo", about 49 by 24), and `aspect-ratio: auto W/H` yields to
+// a natural ratio wherever it finds one. Every seat came out the same wide
+// strip, whatever picture was coming.
+describe("strippedBox: the seat against the shape it was promised", () => {
+  it("says nothing about a box that is the shape it was told to be", () => {
+    // the expected answer on every engine now, and the reason silence reads as
+    // the fix holding rather than as nothing having been looked at
+    expect(strippedBox(240, 320, 3024, 4032)).toBe(false); // portrait, seated right
+    expect(strippedBox(320, 240, 4032, 3024)).toBe(false); // landscape, seated right
+    expect(strippedBox(240, 240, 1000, 1000)).toBe(false);
+  });
+
+  it("catches the strip: a portrait photo's seat drawn as the alt text's box", () => {
+    // his case, in the numbers WebKit actually produced — a 3024x4032 photo
+    // whose reserved box came out at the alt word's own 49:24, then sprang to
+    // 320 tall when the picture arrived
+    expect(strippedBox(240, 117, 3024, 4032)).toBe(true);
+    // and the springing itself, as a height: the seat owed 320 and held 117
+    expect(320 - 117).toBeGreaterThan(200); // the shove, per photo, down the page
+  });
+
+  it("forgives the slop a fractional layout number costs, and nothing beyond it", () => {
+    // the promised height is arithmetic on two integers; the rendered one is
+    // whatever the engine's own subpixel rounding made of the row's width
+    expect(strippedBox(240, 320 + STRIP_SLOP_PX, 3024, 4032)).toBe(false);
+    expect(strippedBox(240, 320 - STRIP_SLOP_PX, 3024, 4032)).toBe(false);
+    expect(strippedBox(240, 320 + STRIP_SLOP_PX + 0.01, 3024, 4032)).toBe(true);
+    expect(STRIP_SLOP_PX).toBe(2);
+  });
+
+  it("says nothing about a box it cannot compare", () => {
+    // a row not yet laid out has no shape to be wrong, and a photo that was
+    // never given a size was never promised one
+    expect(strippedBox(0, 0, 3024, 4032)).toBe(false);
+    expect(strippedBox(240, 320, 0, 0)).toBe(false);
+    expect(strippedBox(Number.NaN, 320, 3024, 4032)).toBe(false);
+    expect(strippedBox(240, 320, 3024, Number.NaN)).toBe(false);
+  });
+});
+
+// TEMP DIAGNOSTIC (photo-strip): remove with the main.ts block these pin.
+describe("checkPhotoStrip: the seat read in the last frame it is alone", () => {
+  const check = (): string => fnBody("checkPhotoStrip");
+  const watch = (): string => fnBody("watchPhotos");
+
+  it("runs at the release, BEFORE the source goes on", () => {
+    // afterwards the box is whatever the picture makes it, and the reading says
+    // nothing about what was reserved
+    const body = watch();
+    expect(body).toContain("checkPhotoStrip(img);");
+    expect(body.indexOf("checkPhotoStrip(img)")).toBeLessThan(
+      body.indexOf("photoQueue.release(img)"),
+    );
+    // and photolazy.ts is what puts the source on, in that same next statement
+    expect(readFileSync(join(here, "../src/photolazy.ts"), "utf8")).toContain("img.src = src;");
+  });
+
+  it("holds the box to the ATTRIBUTES, not to the two getters that lie", () => {
+    // img.width and img.height answer with the RENDERED box once the element is
+    // in the page, which is the very number this is checking — read through
+    // them, a strip agrees with itself perfectly
+    const body = check();
+    expect(body).toContain('Number(img.getAttribute("width"))');
+    expect(body).toContain('Number(img.getAttribute("height"))');
+    const code = body.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+    expect(code).not.toMatch(/img\.width\b/);
+    expect(code).not.toMatch(/img\.height\b/);
+  });
+
+  it("reads the geometry once, and writes nothing after it", () => {
+    const body = check();
+    expect(body.match(/getBoundingClientRect/g)).toHaveLength(1);
+    expect(body).not.toContain("img.style");
+    expect(body).not.toContain("keepView");
+    expect(body).not.toContain("scrollTop");
+  });
+
+  it("asks photofit whether there is anything to report, and reports only that", () => {
+    // silence is the finding when the seat is right, so nothing may be written
+    // above the question
+    const body = check();
+    expect(body).toContain("if (!strippedBox(box.width, box.height, toldW, toldH)) return");
+    expect(body.indexOf("if (!strippedBox(")).toBeLessThan(
+      body.indexOf('holdDiagRecord("photo-strip"'),
+    );
+    // a photo that was never given a size is not a photo that was seated wrong,
+    // and it costs no layout read to say so
+    expect(body).toContain("if (!(toldW > 0) || !(toldH > 0)) return");
+    expect(body.indexOf("if (!(toldW > 0)")).toBeLessThan(body.indexOf("getBoundingClientRect"));
+  });
+
+  it("carries the box that stands and the box that was promised, and no more", () => {
+    const body = check();
+    expect(body).toContain("rw: Math.round(box.width)");
+    expect(body).toContain("rh: Math.round(box.height)");
+    expect(body).toContain("toldW,");
+    expect(body).toContain("toldH,");
   });
 });
 
