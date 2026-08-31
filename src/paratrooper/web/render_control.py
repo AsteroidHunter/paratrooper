@@ -50,8 +50,13 @@ class RenderControl:
         except httpx.HTTPError as exc:
             logger.error("render %s failed for %s: %s", action, self.worker_id, exc)
             return False
-        # 202 = accepted; resuming a running service / suspending a suspended one
-        # is treated as fine (the desired state holds either way)
+        # 202 = accepted. A resume on a service that is not suspended comes
+        # back 400 with this exact complaint — the worker is already awake,
+        # which is the state the call wanted, so it is success, not an error
+        # (before this check every such call cried wolf in the error log)
+        if resp.status_code == 400 and action == "resume" and "suspended by a user" in resp.text:
+            logger.info("render resume for %s: already awake", self.worker_id)
+            return True
         if resp.status_code >= 400:
             logger.error(
                 "render %s for %s returned %s: %s",

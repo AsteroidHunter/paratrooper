@@ -992,6 +992,50 @@ def test_render_control_calls_api(monkeypatch):
     ]
 
 
+def test_render_control_resume_already_awake_is_success(monkeypatch, caplog):
+    # Render refuses to resume a running service with a 400; that means the
+    # worker is already awake — the desired state — so it must read as success
+    # and stay out of the error log, not cry wolf on every warm wake
+    import httpx
+
+    from paratrooper.web import render_control
+
+    def _client_returning(status, body):
+        class _FakeClient:
+            def __init__(self, timeout=None):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, headers=None):
+                return httpx.Response(
+                    status, text=body, request=httpx.Request("POST", url)
+                )
+
+        return _FakeClient
+
+    rc = render_control.RenderControl("rnd_key", "srv-abc123")
+
+    monkeypatch.setattr(
+        render_control.httpx, "AsyncClient",
+        _client_returning(400, '{"message":"only services suspended by a user can be resumed"}'),
+    )
+    with caplog.at_level("ERROR"):
+        assert _run(rc.resume_worker()) is True
+    assert not caplog.records
+
+    # any other 400 is still a real failure and still logged loudly
+    monkeypatch.setattr(
+        render_control.httpx, "AsyncClient",
+        _client_returning(400, '{"message":"service not found"}'),
+    )
+    assert _run(rc.resume_worker()) is False
+
+
 def test_coordinator_has_pending():
     async def scenario():
         enq, intr, enqueued, _ = _recorders()
