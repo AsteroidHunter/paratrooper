@@ -79,6 +79,7 @@ import {
   SETTLE_BURST_GAP_MS,
   USER_SCROLL_INTENT_MS,
   boxSettled,
+  closeRedrawTarget,
   compensationFor,
   createSettleBurst,
   flightOverflow,
@@ -140,7 +141,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.62"; // server-side hygiene: waking the reply worker when it is already awake no longer prints a false error into the deploy logs, and the site agent is told never to sign its commits or PRs as Claude
+const APP_VERSION = "0.3.63"; // redraw a stale Safari tail after a no-move keyboard close
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1509,6 +1510,10 @@ function settleTail(via: string, quiet = false): void {
   tailGen++;
   const g = { sh: t.scrollHeight, st: t.scrollTop, ch: t.clientHeight };
   const plan = settleBottom(g, followTail);
+  // A close whose ordinary settles moved the thread already forced WebKit to
+  // reconcile its painted offset. Only a whole close made entirely of
+  // same-value writes needs the redraw backstop below.
+  if (closeAt >= 0 && plan.moved) closeMoved = true;
   const cut = plan.moved ? cancelTailRide() : false;
   t.scrollTo({ top: plan.top, behavior: "auto" });
   scrollGhostWrite(via, plan.top); // TEMP DIAGNOSTIC (scroll-ghost)
@@ -1581,10 +1586,13 @@ function settleContent(what: string): void {
 //
 // WHAT IT COSTS on the closes where nothing is wrong, which is most of them:
 // three property reads per frame for six tenths of a second, on frames the app
-// is already painting a shell glide into, and no write of any kind. The
-// correction itself goes through settleTail, so it cancels a ride aimed at the
-// old box, supersedes deferred writes and lands on the trail exactly like every
-// other settle; the kb-restore record beside it is what names the fault.
+// is already painting a shell glide into. The overhang watcher writes only when
+// it corrects a fault. The separate exact-bottom failure gets one synchronous
+// one-pixel away/back redraw at the first late checkpoint, and only when no ordinary
+// close settle moved the thread. An overhang correction itself goes through
+// settleTail, so it cancels a ride aimed at the old box, supersedes deferred
+// writes and lands on the trail exactly like every other settle; the kb-restore
+// record beside it is what names that fault.
 // the same 600 the first checkpoint sits at (SEND_MOTION_WINDOW_MS), so the
 // frames hand straight over to it with no unwatched gap in between
 const CLOSE_TAIL_MS = 600;
@@ -1593,6 +1601,8 @@ const CLOSE_TAIL_FRAMES = 90; // a callback backstop behind that clock, at 120Hz
 let closeAt = -1; // the last keyboard close, on the app's own clock
 let closeBottom = -1; // the end of the thread's range as that close began
 let closeFixes = 0; // corrections made since it (restoreVerdict's budget)
+let closeMoved = false; // an ordinary settle changed the thread during this close
+let closeRedrawn = false; // the no-movement repaint backstop ran for this close
 let closeRun = 0; // a newer edge owns the frames from there on
 let closeBox: BottomGeometry | null = null; // the previous look's box, for boxSettled
 
@@ -1600,6 +1610,8 @@ function closeTailStop(): void {
   closeRun += 1; // a keyboard on its way back owns the geometry now
   closeAt = -1;
   closeBottom = -1;
+  closeMoved = false;
+  closeRedrawn = false;
   closeBox = null;
 }
 
@@ -1612,6 +1624,8 @@ function closeTailStart(): void {
   // scroller could hold, and a restore is that number handed back
   closeBottom = t ? maxScrollTop(t.scrollHeight, t.clientHeight) : -1;
   closeFixes = 0;
+  closeMoved = false;
+  closeRedrawn = false;
   const run = (closeRun += 1);
   const t0 = closeAt;
   if (typeof requestAnimationFrame !== "function") return;
@@ -1652,7 +1666,11 @@ function fixCloseTail(via: string): void {
   // "moving" is every frame of the shell's glide home and "held" repeats for as
   // long as a finger is down: both are the ordinary state of a close, and
   // neither is news. "spent" is recorded once, on the pass the budget runs out.
-  if (act === "none" || act === "moving" || act === "held") return;
+  if (act === "none") {
+    redrawCloseTail(t, via, g, settled, gesture);
+    return;
+  }
+  if (act === "moving" || act === "held") return;
   if (act === "spent" && closeFixes > MAX_CLOSE_RESTORES) return; // one stand-down, not one a frame
   closeFixes += 1;
   holdDiagRecord(
@@ -1662,6 +1680,33 @@ function fixCloseTail(via: string): void {
   // the settle is the writer: it lands on the end of the range whichever way
   // following happens to be pointing, and it is the app's one scroll authority
   if (act === "fix") settleTail("kb-restore");
+}
+
+// The second close failure has no bad DOM number to correct. The thread reads
+// exactly at its bottom while WebKit keeps painting the keyboard-era offset.
+// The records prove that no app writer requested that stale position, but they
+// do not rule out our close choreography as the trigger. Page code cannot reach
+// the compositor's hidden offset, so the first checkpoint after the close glide
+// gives it one real scroll change to reconcile: one pixel away and straight
+// back, synchronously, before anything can paint between the writes.
+function redrawCloseTail(
+  t: HTMLElement,
+  via: string,
+  g: BottomGeometry,
+  settled: boolean,
+  gesture: boolean,
+): void {
+  if (via !== "gap" || closeRedrawn) return; // once, at the first late checkpoint
+  const away = closeRedrawTarget(
+    g, followTail, settled, closeMoved, closeFixes > 0, gesture,
+  );
+  if (away === null) return;
+  closeRedrawn = true;
+  const back = maxScrollTop(g.sh, g.ch);
+  t.scrollTo({ top: away, behavior: "auto" });
+  scrollGhostWrite("kb-redraw-away", away); // TEMP DIAGNOSTIC (scroll-ghost)
+  t.scrollTo({ top: back, behavior: "auto" });
+  scrollGhostWrite("kb-redraw-back", back); // TEMP DIAGNOSTIC (scroll-ghost)
 }
 
 // TEMP DIAGNOSTIC (scroll-ghost, scrollghost.ts owns the banner): what the app
@@ -4057,10 +4102,12 @@ function recordTailGapNow(when: string): void {
         // a diagnostic: the correction asks its question again, after both
         // readings above have described the state it is about to change. The
         // trail says a restored offset survives for seconds, so these are where
-        // one delivered late — or one whose frames were throttled away — is
-        // still taken back. The pass itself lives outside this block (see the
-        // keyboard's parting shot); if this block goes, the frame window stays
-        // and only the two late looks are lost.
+        // one delivered late, or one whose frames were throttled away, is still
+        // taken back. The first checkpoint is also where a close made entirely
+        // of same-value settles gets its one-pixel redraw. The pass itself lives
+        // outside this block (see the keyboard's parting shot); if this block
+        // goes, the frame correction window stays, but its late checks and the
+        // no-movement redraw go with it.
         fixCloseTail(i === 0 ? "gap" : "late");
       }, delay),
     );
@@ -5157,4 +5204,3 @@ if (token) {
   renderTokenGate();
   void settleLoadingScreen(); // no thread on this path: the page holds its minimum and goes
 }
-

@@ -3,14 +3,14 @@
 //
 // The correction beside it (viewport.ts, restoreVerdict) takes back a position
 // the thread cannot legitimately hold after a keyboard close, and the case for
-// blaming the engine for that position is currently an argument from absence:
+// locating that unrequested write inside the engine is an argument from absence:
 // every scroll writer in this app records what it wrote, and on the frame the
 // scroller jumped 386px past its own end none of them had recorded anything.
 // An argument from absence is exactly as good as the completeness of the list it
-// is drawn from, and that list is eleven call sites across three files. This
+// is drawn from, and that list is thirteen call sites across three files. This
 // channel turns it into a measurement: the app states what it asked the scroll
 // to do, the position is looked at, and a move no statement of ours accounts for
-// is written down with everything needed to convict — where it went, how far
+// is written down with everything needed to locate it — where it went, how far
 // past the end that is, whether it landed on the bottom the range had while the
 // keyboard was up, what the app's last intention was and how long ago, and
 // whether a gesture was under way at all.
@@ -30,12 +30,12 @@
 // half is what an animated ride looks like from outside: the smooth pin a live
 // message asks for arrives over a beat, monotonically, and a rule that wanted
 // the target reached at once would call every frame of its landing a ghost. The
-// strict half is the whole reason the channel can convict anything: on the
-// trail the restore landed SIXTEEN MILLISECONDS after a settle of ours, so any
-// rule that let a fresh write vouch for whatever happened next would have
-// explained away precisely the event it exists to catch. That settle asked for
-// 6151 and the scroller went to 6537; asking for one number does not account
-// for another.
+// strict half is the whole reason the channel can locate an unrequested move.
+// On the trail the restore landed SIXTEEN MILLISECONDS after a settle of
+// ours, so any rule that let a fresh write vouch for whatever happened next
+// would have explained away precisely the event it exists to catch. That
+// settle asked for 6151 and the scroller went to 6537; asking for one number
+// does not account for another.
 //
 // A stale write does not explain a position by matching it either, and that
 // refusal is the same point from the other side: the pin taken while the

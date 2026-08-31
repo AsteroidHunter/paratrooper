@@ -2,7 +2,7 @@
 // main.ts).
 //
 // The correction beside it takes back a position the thread cannot legitimately
-// hold after a keyboard close, and the case for blaming the engine rests on an
+// hold after a keyboard close, and locating the unrequested move rests on an
 // absence: on the frame the scroller jumped 386px past its own end, none of the
 // app's scroll writers had recorded anything. An absence is only as good as the
 // list it is drawn from, so this channel states the same thing as a measurement
@@ -261,6 +261,8 @@ describe("the wiring: every writer announces itself, and the looks read nothing"
       'scrollGhostWrite("replay", t.scrollTop)',
       'scrollGhostWrite("boot-repin", t.scrollTop)',
       'scrollGhostWrite("cache-pin", el.scrollTop)',
+      'scrollGhostWrite("kb-redraw-away", away)',
+      'scrollGhostWrite("kb-redraw-back", back)',
     ]) {
       expect(src, `${call} is missing`).toContain(call);
     }

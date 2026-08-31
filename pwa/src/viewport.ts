@@ -220,14 +220,13 @@ export function settleMark(
 // engine re-clamp. The white strip between the last message and the compose bar
 // is that overhang, on screen.
 //
-// Nothing of ours wrote it. Every scroll write in this app names itself on the
-// trail and none fired on that frame; the close's own correction pass had
-// already run; and the viewport was not lying, since all three closes of that
-// session were learned from focus with the full height admitted inside 26-45ms.
-// What is left is WebKit restoring the offset it remembered from before the
-// dismissal at the end of its own close transition, and restoring it without
-// clamping it into the range the new box leaves. One close in the same session
-// did not do it, so it is not a thing the app can arrange to avoid.
+// No app scroll writer requested it. Every scroll write in this app names
+// itself on the trail and none fired on that frame; the close's own correction
+// pass had already run; and the viewport was not lying, since all three closes
+// of that session were learned from focus with the full height admitted inside
+// 26-45ms. The wrong offset is therefore restored inside WebKit, but that does
+// not prove our close choreography cannot provoke it. One close in the same
+// session did not reproduce, so the page cannot rely on avoiding the trigger.
 //
 // So the app takes it back. Past the end of the range is a position that does
 // not exist, on a scroller nothing else may scroll, and settleBottom lands on
@@ -282,6 +281,28 @@ export function restoreVerdict(
   if (!settled) return "moving"; // a box mid-ease, with its own settle coming
   if (gesture) return "held"; // a gesture owns the scroll, rubber band and all
   return made < MAX_CLOSE_RESTORES ? "fix" : "spent";
+}
+
+// A different WebKit close failure leaves every page-visible number correct:
+// scrollTop already equals the fresh maximum, while the compositor keeps
+// painting the keyboard-era offset. Same-value settles do not make it catch up.
+// Once the close glide is over, a close on which no settle or correction moved
+// the thread gets one changed-value write and an immediate restore in main.ts.
+// This decision is deliberately narrower than near-bottom: a reader anywhere
+// but the exact followed tail, any active gesture, and a range too short to move
+// by a full pixel all stand aside.
+export function closeRedrawTarget(
+  g: BottomGeometry,
+  following: boolean,
+  settled: boolean,
+  moved: boolean,
+  corrected: boolean,
+  gesture: boolean,
+): number | null {
+  if (!following || !settled || moved || corrected || gesture) return null;
+  const bottom = maxScrollTop(g.sh, g.ch);
+  if (bottom < 1 || g.st !== bottom) return null;
+  return bottom - 1;
 }
 
 /**
