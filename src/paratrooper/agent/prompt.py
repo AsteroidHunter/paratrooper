@@ -77,7 +77,8 @@ invisible to placement and the next one would land on the same spot.
 5. `append_changelog` with a one-line summary (pass your branch name), THEN \
 commit (`git add -A`, `git commit`) so the changelog line rides this update's \
 own commit, then `git push -u origin <branch>`. Branch has no PR yet -> \
-`gh pr create --title "..." --body "..."`. Then ALWAYS call `report_pr` with \
+`gh pr create --title "..." --body "..."`. Never sign commits or PRs as \
+Claude: no "Generated with Claude Code" or co-author lines. Then ALWAYS call `report_pr` with \
 the PR link + branch — after opening a new PR AND after pushing more commits \
 to an existing one. His Publish button only appears because you called it. \
 NEVER tell Akash to merge or publish manually; publishing is one tap for him \
