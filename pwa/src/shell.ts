@@ -29,7 +29,14 @@
 //   instead of being latched around. "Is there a keyboard" stays measured
 //   against a BASELINE full-screen height captured while no editor is
 //   focused, never innerHeight - vvHeight (that reads 0 in window-shrink
-//   mode, and 10 of 14 taps landed there).
+//   mode, and 10 of 14 taps landed there). "Provably up" is an AND over focus
+//   and the viewport, so it can go false while the keyboard is still on the
+//   screen: the editor loses focus, the viewport is still publishing the
+//   keyboard-sized height, and a shell that grew there resized ahead of the
+//   phone by 6 to 44ms and left the thread scrolled a keyboard past its own
+//   end (nine closes, 2026-09-01). The box therefore waits out that gap
+//   (holdsShellBox below): one shell resize per close, taken when the viewport
+//   says the screen is whole.
 // - Corrections run at CLOSE, never mid-typing (Telegram never fights the
 //   keyboard): a window.scrollTo(0,0) conditional on displacement being
 //   actually stuck — iOS 26 can leave vv.offsetTop nonzero after dismissal
@@ -134,6 +141,40 @@ export function computeShell(w: World): ShellTarget {
 // needs no measurement, so cold-start height misreports can't touch it.
 export function shellBox(t: ShellTarget): { top: number; height: number } | null {
   return t.kb ? { top: t.vvTop, height: t.vvHeight } : null;
+}
+
+// The close the VIEWPORT has not admitted yet, and the one moment the shell
+// must not act on its own decision (device trail 2026-09-01, nine closes, all
+// the same shape).
+//
+// "Is there a keyboard" is an AND: an editor holds focus AND the viewport is
+// short of the learned baseline. Either input can flip first (closeCause names
+// which one did, per close), and when FOCUS flips first the AND is already
+// false while the keyboard is still standing on the screen and the viewport is
+// still publishing the short height. All nine failures were that close, and
+// closeMark's vvStale said so on the line. The shell grew to full height
+// there, 6 to 44ms before the phone agreed. That growth drops the end of the
+// thread's scroll range by a whole keyboard under an offset that was
+// legitimately sitting on the old end, and when the engine finished its own
+// close transition it handed that
+// pre-dismissal offset back: 386px past an end that had just moved, which is
+// the white band, and the overhang correction taking it back on the next frame
+// is the snap that follows it. Every close in the same trail that was learned
+// from the VIEWPORT was clean, because that one grows the shell at the instant
+// the screen is really whole again.
+//
+// So a close learned from focus alone keeps the box it already has, and the
+// viewport's own catch-up releases it through the very path a viewport-learned
+// close takes. One resize per close, when the keyboard is really gone.
+//
+// Nothing is latched and no clock is started: every evaluation asks the two
+// live numbers again, so the first viewport reading that admits the full
+// screen drops the box, and a viewport that never admits it is a screen that
+// really is still short. The bar's own choreography is not held with it — .kb
+// comes off at the focus edge exactly as before, so the close still feels
+// immediate; it is only the SHELL's box that waits for the phone to agree.
+export function holdsShellBox(kb: boolean, hasBox: boolean, inset: number): boolean {
+  return !kb && hasBox && inset > 0;
 }
 
 // The box top at a keyboard edge, and the one case where the freshest number
@@ -536,9 +577,14 @@ function readWorld(): World {
 // re-converges once the window ends — reconcile drops .gliding (and a close
 // glide's numeric rest box) through the one writer; a stale or duplicate fire
 // reconciles an already-converged state, harmlessly.
-function armGlide(edge: "open" | "close"): void {
+function armGlide(edge: "open" | "close", held: boolean): void {
   glideUntil = performance.now() + GLIDE_SETTLE_MS;
-  holdDiagRecord("kb-glide", { edge });
+  // `held` marks the close that is standing on its keyboard-era box until the
+  // viewport catches up (holdsShellBox). It rides this record rather than one
+  // of its own because this line is already written once per edge and already
+  // digested, and because the release needs no second record: the shell-size
+  // write a few ms later carries the wait in its own ems.
+  holdDiagRecord("kb-glide", held ? { edge, held } : { edge });
   if (glideTimer) clearTimeout(glideTimer);
   glideTimer = setTimeout(() => {
     glideTimer = null;
@@ -562,6 +608,15 @@ function applyShell(t: ShellTarget, settling: boolean): void {
   // the box written further down is the edge's own target rather than a
   // mid-session resize
   const atEdge = t.kb !== appliedKb;
+  // The keyboard has left the app's decision but not the screen: this frame
+  // keeps the box it already applied, and the viewport's own catch-up is what
+  // grows the shell (holdsShellBox owns the whole reason). Read here, ahead of
+  // every write below, so the box it asks about is the one standing now.
+  const held = holdsShellBox(
+    t.kb,
+    appliedTop !== null || appliedHeight !== null,
+    keyboardInset(baseline, t.vvHeight),
+  );
   // TEMP DIAGNOSTIC (kb-fall, block at the bottom): the last frame with the
   // keyboard still up, sampled on the close edge and BEFORE the class toggle
   // below collapses --pad-b — after it, the comparison the bug turns on is gone
@@ -569,7 +624,7 @@ function applyShell(t: ShellTarget, settling: boolean): void {
   if (t.kb && !appliedKb) riseEdge(); // TEMP DIAGNOSTIC (kb-rise): the same, mirrored
   if (t.kb !== appliedKb) {
     appliedKb = t.kb;
-    armGlide(t.kb ? "open" : "close");
+    armGlide(t.kb ? "open" : "close", held);
   }
   const gliding = performance.now() < glideUntil;
   const editorFocused = isEditable(document.activeElement);
@@ -587,6 +642,12 @@ function applyShell(t: ShellTarget, settling: boolean): void {
   appEl.classList.toggle("gliding", gliding);
   appEl.classList.toggle("focusing", focusing);
 
+  // The box: the visual viewport while the keyboard is up, the ride home to the
+  // pin's geometry once it is gone — and, on a close the viewport has not
+  // admitted yet, neither. A held close is the one way a numeric box outlives
+  // the .kb class without being written on; it stands exactly where it is until
+  // the viewport reports the full screen, and the ride home then runs once, on
+  // the same reading a viewport-learned close would have run it on.
   const box = shellBox(t);
   if (box) {
     const top = Math.round(box.top);
@@ -609,7 +670,7 @@ function applyShell(t: ShellTarget, settling: boolean): void {
       // the device's read-back for every shell resize the keyboard causes
       recordShellSize(top, height, gliding, atEdge);
     }
-  } else if (appliedTop !== null || appliedHeight !== null) {
+  } else if (!held && (appliedTop !== null || appliedHeight !== null)) {
     if (gliding) {
       // the close glide: ride a numeric box home to the pin's geometry (the
       // pin itself cannot animate); armGlide's timer drops it below once the
@@ -1223,6 +1284,11 @@ export function currentFileInput(): HTMLInputElement | null {
 //                 the viewport finally admitted the full screen. It is a
 //                 separate record rather than a delayed one because the edge
 //                 record must not wait on the very viewport it is accusing.
+//                 Such a close now writes no box at its own edge (the shell
+//                 waits for that same viewport: holdsShellBox), so its boxTop
+//                 and boxH read null and the write it would have carried
+//                 arrives on shell-size a few ms later, with the wait in its
+//                 ems. The kb-glide record beside it carries `held`.
 //   shell-pin   : the one frame the shell leaves its numeric box for the
 //                 four-edge pin, at the end of the glide's settle window. The
 //                 pin cannot be animated, so if the ride home had not landed

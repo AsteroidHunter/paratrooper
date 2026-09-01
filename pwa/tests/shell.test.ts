@@ -21,6 +21,7 @@ import {
   focusingActive,
   healNeeded,
   holdsBarTap,
+  holdsShellBox,
   keyboardInset,
   plusClickVerdict,
   preservesFocus,
@@ -98,6 +99,226 @@ describe("computeShell + shellBox — one rule for iOS 26's keyboard modes (tapl
 
   it("parked file-input focus is not 'keyboard up' — no shell resize for the picker", () => {
     expect(computeShell(world({ fileFocused: true, vvHeight: 508 })).kb).toBe(false);
+  });
+});
+
+// The white band and the snap that follows it (production trail 2026-09-01,
+// nine failures, every one the same shape). "Is there a keyboard" is an AND, so
+// it goes false on whichever input flips first, and on all nine that was FOCUS:
+// the close was learned from the editor losing it while the viewport was still
+// publishing the keyboard-sized height, the shell grew to full height there,
+// and 6 to 44ms later the engine handed back the offset the range had held
+// while the keyboard was up — 386px past an end the app had already moved. The
+// band is that overhang and the snap is the correction taking it back. Closes
+// learned from the viewport were clean, all of them, because those grow the
+// shell at the instant the screen is whole. So the box waits for the viewport.
+describe("holdsShellBox — the close the phone has not admitted yet", () => {
+  const UP = 458; // the visual viewport with the keyboard up: 844 less 386
+  const inset = (vvHeight: number): number => keyboardInset(844, vvHeight);
+
+  it("the failing close: focus gone, viewport still short — the box stands", () => {
+    expect(holdsShellBox(false, true, inset(UP))).toBe(true);
+  });
+
+  it("a viewport-learned close never holds: the screen is whole when it is asked", () => {
+    // kb went false because the height came back, so there is no gap to wait out
+    expect(holdsShellBox(false, true, inset(844))).toBe(false);
+  });
+
+  it("the wait is drawn on the same threshold the inset filter is", () => {
+    expect(holdsShellBox(false, true, inset(844 - MIN_KEYBOARD_PX))).toBe(true);
+    expect(holdsShellBox(false, true, inset(844 - MIN_KEYBOARD_PX + 1))).toBe(false);
+  });
+
+  it("a keyboard that is up sizes from the viewport as it always did", () => {
+    expect(holdsShellBox(true, true, inset(UP))).toBe(false);
+  });
+
+  it("nothing to hold at rest: the four-edge pin is never held onto", () => {
+    expect(holdsShellBox(false, false, inset(UP))).toBe(false);
+  });
+
+  it("the iOS 26 stale-viewport lie is not a keyboard, so it cannot hold the box", () => {
+    // a ~24px-short viewport after dismissal reads as no inset at all
+    // (keyboardInset's own filter), which is what ends the wait
+    expect(holdsShellBox(false, true, inset(820))).toBe(false);
+  });
+
+  it("mid-retraction the keyboard is still on the screen, so the wait continues", () => {
+    expect(holdsShellBox(false, true, inset(600))).toBe(true);
+  });
+});
+
+// The same rule played through a whole close, because the property that matters
+// is not one verdict but the sequence: ONE shell resize per close, never two,
+// and never one before the phone agrees. The stand-in below is applyShell's box
+// branch and nothing else — the wiring pins further down hold it to the source
+// it mirrors.
+describe("the close's writes: one resize, taken when the viewport says so", () => {
+  const UP = 458;
+
+  function shellWriter() {
+    let top: number | null = null;
+    let height: number | null = null;
+    const writes: (readonly [number | null, number | null])[] = [];
+    return {
+      writes,
+      box: () => [top, height] as const,
+      /** one viewport reading, exactly as reconcile hands it to applyShell */
+      read(w: World, gliding = true): void {
+        const t = computeShell(w);
+        const held = holdsShellBox(
+          t.kb,
+          top !== null || height !== null,
+          keyboardInset(w.baseline, w.vvHeight),
+        );
+        const box = shellBox(t);
+        if (box) {
+          if (Math.round(box.top) !== top || Math.round(box.height) !== height) {
+            top = Math.round(box.top);
+            height = Math.round(box.height);
+            writes.push([top, height]);
+          }
+        } else if (!held && (top !== null || height !== null)) {
+          if (gliding) {
+            const restH = Math.round(w.baseline);
+            if (top !== 0 || height !== restH) {
+              top = 0;
+              height = restH;
+              writes.push([top, height]);
+            }
+          } else {
+            top = null;
+            height = null;
+            writes.push([null, null]); // the vars go, the four-edge pin takes over
+          }
+        }
+      },
+    };
+  }
+
+  const raised = (): ReturnType<typeof shellWriter> => {
+    const s = shellWriter();
+    s.read(world({ editorFocused: true, vvHeight: UP }));
+    return s;
+  };
+
+  it("the raise still sizes the shell from the viewport, once", () => {
+    expect(raised().writes).toEqual([[0, UP]]);
+  });
+
+  it("focus leaves under a stale viewport: nothing is written, the box stays keyboard-sized", () => {
+    const s = raised();
+    s.read(world({ editorFocused: false, vvHeight: UP }));
+    expect(s.writes).toEqual([[0, UP]]); // still only the raise's own write
+    expect(s.box()).toEqual([0, UP]);
+  });
+
+  it("the viewport catches up and the shell grows exactly once", () => {
+    const s = raised();
+    s.read(world({ editorFocused: false, vvHeight: UP })); // the focus edge
+    s.read(world({ editorFocused: false, vvHeight: 844 })); // 6-44ms later
+    expect(s.writes).toEqual([
+      [0, UP],
+      [0, 844],
+    ]);
+  });
+
+  it("every held reading in between is silent, however many arrive", () => {
+    const s = raised();
+    s.read(world({ editorFocused: false, vvHeight: UP }));
+    s.read(world({ editorFocused: false, vvHeight: UP })); // a scroll event on the same numbers
+    s.read(world({ editorFocused: false, vvHeight: 600 })); // the keyboard half retracted
+    expect(s.writes).toHaveLength(1);
+    s.read(world({ editorFocused: false, vvHeight: 844 }));
+    expect(s.writes).toHaveLength(2);
+  });
+
+  it("a viewport-learned close is untouched: it grows on its own reading, once", () => {
+    const s = raised();
+    s.read(world({ editorFocused: true, vvHeight: 844 })); // the height came back first
+    expect(s.writes).toEqual([
+      [0, UP],
+      [0, 844],
+    ]);
+    s.read(world({ editorFocused: false, vvHeight: 844 })); // focus follows it down
+    expect(s.writes).toHaveLength(2);
+  });
+
+  it("no close writes the box twice, whichever signal taught it", () => {
+    for (const close of [
+      [world({ editorFocused: false, vvHeight: UP }), world({ editorFocused: false, vvHeight: 844 })],
+      [world({ editorFocused: true, vvHeight: 844 }), world({ editorFocused: false, vvHeight: 844 })],
+      [world({ editorFocused: false, vvHeight: 844 })],
+    ]) {
+      const s = raised();
+      for (const w of close) s.read(w);
+      // one write for the raise, one for the close, and no third
+      expect(s.writes).toHaveLength(2);
+      expect(s.box()).toEqual([0, 844]);
+    }
+  });
+
+  it("the ride home still lands on the pin's own geometry when the window ends", () => {
+    const s = raised();
+    s.read(world({ editorFocused: false, vvHeight: UP }));
+    s.read(world({ editorFocused: false, vvHeight: 844 }));
+    s.read(world({ editorFocused: false, vvHeight: 844 }), false); // the glide expired
+    expect(s.writes).toEqual([
+      [0, UP],
+      [0, 844],
+      [null, null],
+    ]);
+  });
+});
+
+// Wiring pins for the wait. The decision is one line, so what needs holding
+// down is where it sits: it must be read from the box that is actually applied
+// and the viewport's own fresh inset, it must gate the box-drop branch and
+// NOTHING else — the .kb class, the glide, the close's correction pass and the
+// keyboard edge all still fire at the focus edge, which is what keeps a close
+// feeling immediate — and it must add no clock, since a wait that could time
+// out would resize twice again on exactly the closes this is for.
+describe("wiring: the shell box waits for the viewport, and only the box does", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+
+  it("read once per pass, from the applied box and the fresh inset", () => {
+    expect(shell).toMatch(
+      /const held = holdsShellBox\(\n\s*t\.kb,\n\s*appliedTop !== null \|\| appliedHeight !== null,\n\s*keyboardInset\(baseline, t\.vvHeight\),\n\s*\);/,
+    );
+    expect(shell.match(/holdsShellBox\(/g)).toHaveLength(2); // the definition and the call
+  });
+
+  it("it gates the drop alone: the keyboard-up branch writes from the viewport as before", () => {
+    expect(shell).toMatch(
+      /\} else if \(!held && \(appliedTop !== null \|\| appliedHeight !== null\)\) \{/,
+    );
+    expect(shell).toMatch(/const box = shellBox\(t\);\n\s*if \(box\) \{/);
+  });
+
+  it("the bar's own choreography is not held: the classes still turn at the focus edge", () => {
+    expect(shell).toMatch(/appEl\.classList\.toggle\("kb", t\.kb\);/);
+    expect(shell).toMatch(/appEl\.classList\.toggle\("gliding", gliding\);/);
+    expect(shell).toMatch(/if \(wasUp && !t\.kb\) keyboardClosed\(\);/);
+  });
+
+  it("no clock and no latch: the wait is two live numbers, asked again every pass", () => {
+    const decide = shell.slice(
+      shell.indexOf("export function holdsShellBox"),
+      shell.indexOf("// The DOM half"),
+    );
+    expect(decide).toMatch(
+      /export function holdsShellBox\([\s\S]{0,160}return !kb && hasBox && inset > 0;\n\}/,
+    );
+    expect(shell).not.toMatch(/heldUntil|holdTimer|HOLD_MAX_MS|releaseHold/);
+  });
+
+  it("a held close says so on the trail, beside the glide it armed", () => {
+    expect(shell).toMatch(/function armGlide\(edge: "open" \| "close", held: boolean\): void \{/);
+    expect(shell).toMatch(
+      /holdDiagRecord\("kb-glide", held \? \{ edge, held \} : \{ edge \}\);/,
+    );
+    expect(shell).toMatch(/armGlide\(t\.kb \? "open" : "close", held\);/);
   });
 });
 
@@ -583,7 +804,9 @@ describe("presentation — glide scoped to kb edges, focusing keys the choreogra
   });
 
   it("shell.ts arms the glide on the .kb edge alone and lets the window expire by clock", () => {
-    expect(shell).toMatch(/if \(t\.kb !== appliedKb\) \{[\s\S]{0,80}armGlide\(t\.kb \? "open" : "close"\)/);
+    expect(shell).toMatch(
+      /if \(t\.kb !== appliedKb\) \{[\s\S]{0,80}armGlide\(t\.kb \? "open" : "close", held\)/,
+    );
     expect(shell).toMatch(/GLIDE_SETTLE_MS \+ 20/); // the expiry reconverges via reconcile
   });
 

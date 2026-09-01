@@ -256,7 +256,7 @@ describe("the gesture hook still owns the glow, and now its origin", () => {
     expect(main).not.toMatch(/textEl\.addEventListener\("(?:pointer|touch|mouse)/);
   });
 
-  it("ships as 0.3.72", () => {
-    expect(main).toMatch(/^const APP_VERSION = "0\.3\.72"; \/\/ \S/m);
+  it("ships as 0.3.73", () => {
+    expect(main).toMatch(/^const APP_VERSION = "0\.3\.73"; \/\/ \S/m);
   });
 });

@@ -143,7 +143,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.72"; // notifications read "New message" and stay quiet while you're reading
+const APP_VERSION = "0.3.73"; // the layout waits for the phone to admit the keyboard is gone, so a close no longer flashes white and snaps back
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
