@@ -1,3 +1,22 @@
+// Pins for the compose pill's resting well and its hold light (styles.css
+// .field / .field.glow, plus the pointerdown hook in main.ts).
+//
+// This corner has broken Safari's native text interaction twice, and the
+// cursor comes before the look every time:
+//   1. A white veil pseudo-element painted OVER the textarea washed the text.
+//   2. Lifting the textarea out from under it with position/z-index cost
+//      double-tap word selection and tap-to-place-caret.
+// And once more in 0.3.71, for a third reason: the pill is composited
+// (backdrop-filter), so its backing store is sized from its visual overflow —
+// border box UNION every box-shadow's reach. Two OUTSET shadows faded in on
+// hold, regrowing that rect on every frame, and iOS drew the caret from a rect
+// that no longer agreed with where the layer had landed. The cursor jumped up,
+// then down, then sat wrong for the rest of the press.
+//
+// So the invariants below are not style preferences. Each one is a door that
+// was walked through: nothing paints above the textarea, nothing positions it,
+// the light lives in the field's own background layers, and the shadow is
+// declared exactly once so there is nothing for a press to interpolate.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -23,6 +42,24 @@ function decl(body: string, property: string): string {
   return m![1].replace(/\s+/g, " ").trim();
 }
 
+// Every non-custom property a rule sets, sorted.
+function properties(body: string): string[] {
+  return withoutComments(body)
+    .split(";")
+    .map((d) => d.split(":")[0].trim())
+    .filter((p) => p.length > 0 && !p.startsWith("--"))
+    .sort();
+}
+
+// Every custom property a rule sets.
+function customProperties(body: string): string[] {
+  return withoutComments(body)
+    .split(";")
+    .map((d) => d.split(":")[0].trim())
+    .filter((p) => p.startsWith("--"))
+    .sort();
+}
+
 // Split a comma-separated value at the top level only, so var()/rgba() stay whole.
 function parts(value: string): string[] {
   const out: string[] = [];
@@ -43,7 +80,7 @@ function parts(value: string): string[] {
 type Rgb = [number, number, number];
 
 // The declared value of a custom property, per colour scheme: the dark block
-// re-declares most of them, so the sheet is cut at the media query first.
+// re-declares some of them, so the sheet is cut at the media query first.
 const darkAt = css.indexOf("@media (prefers-color-scheme: dark)");
 const lightSheet = css.slice(0, darkAt);
 const darkSheet = css.slice(darkAt);
@@ -65,156 +102,193 @@ function over(fg: [number, number, number, number], bg: Rgb): Rgb {
   return [0, 1, 2].map((i) => fg[3] * fg[i] + (1 - fg[3]) * bg[i]) as Rgb;
 }
 
-function luminance([r, g, b]: Rgb): number {
-  const lin = (v: number): number => {
-    const c = v / 255;
-    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  };
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-}
-
-function contrast(a: Rgb, b: Rgb): number {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi + 0.05) / (lo + 0.05);
-}
-
 const WHITE: Rgb = [255, 255, 255]; // the light-mode canvas
 const BLACK: Rgb = [0, 0, 0]; // the dark-mode canvas
 
-describe("composer hold-light lives under the textarea, never over it", () => {
-  const field = withoutComments(rule(".field"));
-  const glow = withoutComments(rule(".field.glow"));
-  const textarea = withoutComments(rule(".compose textarea"));
+const field = withoutComments(rule(".field"));
+const glow = withoutComments(rule(".field.glow"));
+const textarea = withoutComments(rule(".compose textarea"));
 
-  // --- the two ways this was broken before -----------------------------
-  it("does not put the textarea into a positioned or composited layer", () => {
-    // attempt 1: position/z-index on the textarea to lift it above a veil.
+describe("nothing the hold does can reach Safari's native text layer", () => {
+  it("leaves the textarea unpositioned and uncomposited", () => {
+    // attempt 2: position/z-index on the textarea to lift it above a veil.
     // It worked visually and cost double-tap word select and tap-to-caret.
     expect(textarea).not.toMatch(
-      /(?:^|;)\s*(?:position|z-index|transform|filter|opacity|isolation|will-change|contain|mix-blend-mode)\s*:/,
+      /(?:^|;)\s*(?:position|z-index|transform|scale|translate|filter|backdrop-filter|opacity|isolation|will-change|contain|mix-blend-mode|perspective)\s*:/,
     );
+    // the selection is the engine's to draw; the app has never had a say in it
     expect(css).not.toContain("::selection");
   });
 
-  it("paints nothing above the textarea: no overlay pseudo-element anywhere on the pill", () => {
-    // the original bug: a 55%-white veil pseudo-element over the text, which
-    // washed the letters and the selection toward grey
+  it("paints nothing above the textarea: no overlay pseudo-element on the pill", () => {
+    // attempt 1: a 55%-white veil pseudo-element over the text, which washed
+    // the letters and the selection toward grey
     expect(css).not.toMatch(/\.field(?:\.glow)?::(?:before|after)/);
-    expect(css).not.toMatch(/\.compose textarea::(?:before|after)/);
+    expect(css).not.toMatch(/\.compose\s+textarea::(?:before|after)/);
+    expect(css).not.toMatch(/\.compose::(?:before|after)/);
   });
 
-  it("expresses the light only through the field's own background and shadow", () => {
+  it("keeps the pill's only children the text and the send button", () => {
+    // the field is a flex box with the bare textarea as its one in-flow child;
+    // a background layer on it paints BENEATH that child by definition, which
+    // is the entire safety argument for where the light lives
+    expect(decl(field, "display")).toBe("flex");
+    expect(field).not.toMatch(/(?:^|;)\s*(?:padding|border|overflow)\s*:/);
+  });
+});
+
+describe("the resting pill: a face, a rim, and a shadow well", () => {
+  it("keeps the face exactly as it shipped — the hold is not a tint", () => {
+    expect(decl(field, "background-color")).toBe("var(--glass-bg)");
+    expect(over(rgba(variable(lightSheet, "--glass-bg")), WHITE)[0]).toBeCloseTo(250.95, 1);
+    expect(over(rgba(variable(darkSheet, "--glass-bg")), BLACK)[0]).toBeCloseTo(35.7, 1);
+    // 0.3.71 made the hold visible by sinking the BODY to a cooler tone. On
+    // the phone the pill just turned grey. That token is gone for good.
+    expect(css).not.toContain("--glass-bg-glow");
+    expect(glow).not.toMatch(/(?:^|;)\s*background/);
+  });
+
+  it("carries the Messages well and the bright rim, both static", () => {
+    const shadow = parts(decl(field, "box-shadow"));
+    // outside in: the one-device-pixel rim, the pill's established stack, the well
+    expect(shadow[0]).toBe("inset 0 0 0 0.5px var(--glass-rim)");
+    expect(shadow[1]).toBe("var(--glass-stack)");
+    expect(shadow[2]).toMatch(/^0 6px 33px rgba\(0, 0, 0, 0\.06\d\)$/);
+    expect(shadow).toHaveLength(3);
+    // the rim is bright in both schemes: invisible on a white page by
+    // construction, and on black it IS the edge, because a black shadow
+    // cast on a black canvas is nothing at all
+    for (const sheet of [lightSheet, darkSheet]) {
+      const rim = rgba(variable(sheet, "--glass-rim"));
+      expect(rim.slice(0, 3)).toEqual([255, 255, 255]);
+      expect(rim[3]).toBeGreaterThan(0);
+    }
+    // and the whole 0.3.71 hold-edge vocabulary is gone
+    for (const dead of ["--glass-rim-glow", "--glass-lift-glow-a", "--glass-lift-glow-b"]) {
+      expect(css).not.toContain(dead);
+    }
+  });
+
+  it("declares the shadow ONCE, so a press has nothing to interpolate", () => {
+    // This is the 0.3.71 caret bug, closed at the source. The pill is
+    // composited (backdrop-filter), so its backing store is sized from border
+    // box UNION every shadow's reach; a shadow that fades in on hold regrows
+    // that rect every frame and iOS's caret rect stops agreeing with it.
+    expect(glow).not.toContain("box-shadow");
+    expect(properties(glow)).toEqual(["transition"]);
+    // stronger than "the two declarations match": .field.glow cannot reach the
+    // shadow indirectly either, so no future token can smuggle a change in
+    const shadow = decl(field, "box-shadow");
+    for (const token of customProperties(glow)) expect(shadow).not.toContain(token);
+    // and nothing animates the shadow from either side
+    for (const body of [field, glow]) {
+      expect(decl(body, "transition")).not.toContain("box-shadow");
+      expect(decl(body, "transition")).not.toContain("background");
+    }
+  });
+
+  it("grows no box on press: the hold sets a number and a clock, nothing else", () => {
+    // any of these would move the pill's box or its layer, and the caret with it
     expect(glow).not.toMatch(
-      /(?:^|;)\s*(?:position|z-index|isolation|transform|filter|opacity|animation|mix-blend-mode|will-change|contain|backdrop-filter)\s*:/,
+      /(?:^|;)\s*(?:position|inset|top|right|bottom|left|width|height|margin|padding|border|border-radius|outline|transform|scale|translate|filter|backdrop-filter|z-index|isolation|animation|will-change|contain|mix-blend-mode)\s*:/,
     );
-    // every non-custom property .field.glow sets has to be one of these three
-    const set = withoutComments(glow)
-      .split(";")
-      .map((d) => d.split(":")[0].trim())
-      .filter((p) => p.length > 0 && !p.startsWith("--"));
-    expect(set.sort()).toEqual(["background-color", "box-shadow", "transition"]);
+    expect(customProperties(glow)).toEqual(["--glow-a"]);
   });
+});
 
-  // --- the light itself -------------------------------------------------
-  it("anchors a radial flood at the touch point in the field's background layer", () => {
+describe("the hold light: one white bloom, in a background layer", () => {
+  it("anchors a radial white flood at the touch point", () => {
     const image = decl(field, "background-image");
     expect(image).toMatch(/^radial-gradient\(/);
     expect(image).toContain("circle var(--glow-r) at var(--tx) var(--ty)");
-    // it is white light, scaled by the two dials and by the per-scheme peak
     expect(image).toContain("calc(var(--glow-a) * var(--glow-peak))");
-    expect(image).not.toMatch(/rgba\(\s*0\b/); // never a dark wash over the text
-  });
-
-  it("resolves to nothing at rest, so the resting pill is unchanged", () => {
-    expect(decl(field, "background-color")).toBe("var(--glass-bg)");
-    expect(decl(field, "--glow-a")).toBe("0");
-    // every stop is white * --glow-a, so --glow-a: 0 makes the whole layer
-    // transparent and the resting composite is exactly --glass-bg over canvas
-    for (const stop of parts(decl(field, "background-image")).slice(1)) {
-      expect(stop).toMatch(/rgba\(255, 255, 255, (?:0|calc\(var\(--glow-a\))/);
+    expect(image).not.toMatch(/rgba\(\s*0\b/); // never a dark wash under the text
+    // every stop is white, scaled by the one dial, so --glow-a: 0 makes the
+    // whole layer transparent and the resting composite is the face alone
+    for (const stop of parts(image).slice(1)) {
+      expect(stop).toMatch(/^rgba\(255, 255, 255, (?:0|calc\(var\(--glow-a\))/);
     }
-    expect(over(rgba(variable(lightSheet, "--glass-bg")), WHITE)[0]).toBeCloseTo(250.95, 1);
+    expect(decl(field, "--glow-a")).toBe("0");
+    expect(decl(glow, "--glow-a")).toBe("1");
   });
 
-  it("animates through registered custom properties, so the light spreads", () => {
+  it("holds the gradient's geometry still — only the stop alphas move", () => {
+    // 0.3.71 grew the radius from 24px to 180px during the press. Nothing
+    // about the shape moves now: the radius is authored once and never
+    // appears in either transition list.
+    expect(decl(field, "--glow-r")).toMatch(/^\d+px$/);
+    expect(glow).not.toContain("--glow-r");
+    for (const body of [field, glow]) expect(decl(body, "transition")).not.toContain("--glow-r");
+  });
+
+  it("registers only what it animates, and keeps all of it off the textarea", () => {
     // an unregistered custom property transitions discretely: the light would
-    // arrive whole instead of growing out from under the fingertip
-    for (const name of ["--glow-a", "--glow-r", "--tx", "--ty"]) {
+    // snap on instead of coming up
+    for (const name of ["--glow-a", "--tx", "--ty"]) {
       const at = css.indexOf(`@property ${name} {`);
       expect(at, `${name} is not registered`).toBeGreaterThanOrEqual(0);
       expect(css.slice(at, at + 140)).toContain("inherits: false");
     }
-    expect(decl(glow, "--glow-a")).toBe("1");
-    expect(parseFloat(decl(glow, "--glow-r"))).toBeGreaterThan(parseFloat(decl(field, "--glow-r")));
+    // --tx/--ty are registered for the fallback, never animated: the light has
+    // to jump to the new fingertip, not slide there from the last one
+    for (const body of [field, glow]) {
+      expect(decl(body, "transition")).not.toContain("--tx");
+      expect(decl(body, "transition")).not.toContain("--ty");
+    }
   });
 
-  it("keeps the two shadow lists interpolable, so the lift fades with the light", () => {
-    const rest = parts(decl(field, "box-shadow"));
-    const held = parts(decl(glow, "box-shadow"));
-    expect(rest.length).toBe(held.length);
-    expect(rest.map((s) => s.startsWith("inset"))).toEqual(held.map((s) => s.startsWith("inset")));
-    expect(rest[0]).toBe("var(--glass-stack)"); // the resting stack, untouched
-    expect(held[0]).toBe("var(--glass-stack)");
-    // rest carries dormant stand-ins for the rim and the two casts
-    for (const slot of rest.slice(1)) expect(slot).toMatch(/0 0 0 0 transparent$/);
-    expect(held.slice(1).join(" ")).toContain("var(--glass-rim-glow)");
-    expect(held.slice(1).join(" ")).toContain("var(--glass-lift-glow-a)");
-    expect(held.slice(1).join(" ")).toContain("var(--glass-lift-glow-b)");
-  });
-
-  it("presses in over 0.25s and settles back over 0.5s, fade included", () => {
+  it("comes up over 0.25s and settles back over 0.5s, settling fade intact", () => {
     const rest = parts(decl(field, "transition"));
     const held = parts(decl(glow, "transition"));
     expect(rest[0]).toBe("opacity 0.3s ease"); // the .settling fade, preserved
     expect(held[0]).toBe("opacity 0.3s ease");
-    for (const prop of ["background-color", "box-shadow", "--glow-a", "--glow-r"]) {
-      expect(rest).toContain(`${prop} 0.5s ease`);
-      expect(held).toContain(`${prop} 0.25s ease-out`);
-    }
-  });
-
-  // --- the reason 0.3.70 was invisible ---------------------------------
-  it("clears a visible margin in light mode, where there is no headroom above white", () => {
-    // 0.3.70 aimed the hold at rgba(252,252,252,.5635): 253 against a resting
-    // 251 on a white canvas, a 2-level move nobody could see. The light has to
-    // be a difference, so the body goes cooler and the bloom writes white back.
-    const restBody = over(rgba(variable(lightSheet, "--glass-bg")), WHITE);
-    const heldBody = over(rgba(variable(lightSheet, "--glass-bg-glow")), WHITE);
-    const peak = parseFloat(variable(lightSheet, "--glow-peak"));
-    const core = over([255, 255, 255, peak], heldBody);
-
-    expect(restBody[0] - heldBody[0]).toBeGreaterThanOrEqual(10); // the pill's far end moves
-    expect(contrast(core, heldBody)).toBeGreaterThanOrEqual(1.1); // and the core reads on it
-    expect(heldBody[2]).toBeGreaterThan(heldBody[0]); // cooler, not just darker
-    expect(core[0]).toBeGreaterThan(restBody[0]); // the core is still a LIGHT
-  });
-
-  it("brightens toward the existing tone in dark mode, where the headroom is", () => {
-    const restBody = over(rgba(variable(darkSheet, "--glass-bg")), BLACK);
-    const heldBody = over(rgba(variable(darkSheet, "--glass-bg-glow")), BLACK);
-    const core = over([255, 255, 255, parseFloat(variable(darkSheet, "--glow-peak"))], heldBody);
-
-    expect(variable(darkSheet, "--glass-bg-glow")).toBe("rgba(255, 255, 255, 0.2432)");
-    expect(heldBody[0] - restBody[0]).toBeGreaterThanOrEqual(10);
-    expect(core[0] - heldBody[0]).toBeGreaterThanOrEqual(10);
-    expect(contrast(core, heldBody)).toBeGreaterThanOrEqual(1.1);
-    // the same alpha that reads as paper white on the light body would be a
-    // headlight on black, so the dark peak has to be the gentler of the two
-    expect(parseFloat(variable(darkSheet, "--glow-peak"))).toBeLessThan(
-      parseFloat(variable(lightSheet, "--glow-peak")),
-    );
-  });
-
-  it("gives both schemes a lit rim and a cast to lift the pill", () => {
-    for (const sheet of [lightSheet, darkSheet]) {
-      expect(rgba(variable(sheet, "--glass-rim-glow"))[3]).toBeGreaterThan(0);
-      expect(rgba(variable(sheet, "--glass-lift-glow-a"))[3]).toBeGreaterThan(0);
-      expect(rgba(variable(sheet, "--glass-lift-glow-b"))[3]).toBeGreaterThan(0);
-    }
+    expect(rest).toContain("--glow-a 0.5s ease");
+    expect(held).toContain("--glow-a 0.25s ease-out");
+    expect(rest).toHaveLength(2);
+    expect(held).toHaveLength(2);
   });
 });
 
-// the hold-brighten hook, from its banner down to the last listener it binds
+describe("what the light actually composites to, per scheme", () => {
+  const peak = parseFloat(variable(lightSheet, "--glow-peak"));
+  // the far end of the pill sits at the 62% stop's neighbourhood; that stop's
+  // multiplier is what keeps the light from ending at the fingertip
+  const farMul = parseFloat(
+    /\* 0\.34\)\) 62%/.exec(decl(field, "background-image")) ? "0.34" : "0",
+  );
+
+  it("uses one peak for both schemes, near the 0.15 Messages measures", () => {
+    expect(peak).toBeGreaterThanOrEqual(0.12);
+    expect(peak).toBeLessThanOrEqual(0.18);
+    // declared once, in :root, and never overridden: it is the same light in
+    // both schemes, and only the face it lands on differs
+    expect(withoutComments(css).match(/--glow-peak\s*:/g)).toHaveLength(1);
+    expect(farMul).toBeGreaterThan(0.25); // the far end still carries the glow
+  });
+
+  it("brightens the dark face clearly, core and far end alike", () => {
+    const body = over(rgba(variable(darkSheet, "--glass-bg")), BLACK);
+    const core = over([255, 255, 255, peak], body);
+    const far = over([255, 255, 255, peak * farMul], body);
+    expect(body[0]).toBeCloseTo(35.7, 1);
+    expect(core[0]).toBeCloseTo(68.6, 1); // measured 69 in Chromium and WebKit
+    expect(far[0]).toBeGreaterThan(body[0] + 6); // measured 49 at the pill's end
+    expect(core[0] - body[0]).toBeGreaterThanOrEqual(25);
+  });
+
+  it("clips to nothing over white, which is what Messages does", () => {
+    // This is deliberate and it is the reason the resting SHADOW carries the
+    // pill in light mode. A white light on a 251 face over a 255 page has
+    // half a level of headroom; 0.3.71 manufactured some by sinking the body
+    // to a cooler grey and the phone showed a grey pill. Not again.
+    const body = over(rgba(variable(lightSheet, "--glass-bg")), WHITE);
+    const core = over([255, 255, 255, peak], body);
+    expect(core[0]).toBeGreaterThan(body[0]); // still a LIGHT, never a darkening
+    expect(core[0] - body[0]).toBeLessThan(1.5); // and it clips, as measured
+  });
+});
+
+// the hold hook, from its banner down to the last listener it binds
 function holdHook(): string {
   const start = main.indexOf("// editor hold-brighten");
   const end = main.indexOf('document.addEventListener("pointercancel", unglow, true)', start);
@@ -222,7 +296,7 @@ function holdHook(): string {
   return main.slice(start, end);
 }
 
-describe("the gesture hook still owns the glow, and now its origin", () => {
+describe("the gesture hook owns the glow and its origin, and forces no layout", () => {
   const hook = holdHook();
 
   it("keeps the document-level capture listeners and the settling guard", () => {
@@ -240,10 +314,21 @@ describe("the gesture hook still owns the glow, and now its origin", () => {
   });
 
   it("records the touch point on the FIELD, never on the textarea", () => {
-    expect(hook).toContain("field.getBoundingClientRect()");
-    expect(hook).toContain('field.style.setProperty("--tx", `${Math.round(e.clientX - box.left)}px`)');
-    expect(hook).toContain('field.style.setProperty("--ty", `${Math.round(e.clientY - box.top)}px`)');
-    expect(hook).not.toMatch(/\bt\.(?:style|setAttribute)\b/);
+    expect(hook).toContain('field.style.setProperty("--tx", `${Math.round(e.offsetX)}px`)');
+    expect(hook).toContain('field.style.setProperty("--ty", `${Math.round(e.offsetY)}px`)');
+    expect(hook).not.toMatch(/\bt\.(?:style|setAttribute|classList)\b/);
+  });
+
+  it("reads no geometry: no synchronous layout flush on the touch-start path", () => {
+    // offsetX/offsetY are measured from the target's padding edge, and the
+    // textarea is the field's only in-flow child in a flex box with no padding
+    // and no border, so its padding edge IS the field's box. Forcing a layout
+    // ahead of the engine's own tap handling, next to a caret placement, is
+    // the last thing this composer needs. (Comments stripped first: the hook's
+    // banner names the call it used to make, and saying so is the point.)
+    const code = hook.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(code).not.toContain("getBoundingClientRect");
+    expect(code).not.toMatch(/\b(?:offsetTop|offsetLeft|offsetWidth|offsetHeight|getClientRects)\b/);
   });
 
   it("neither binds to the textarea nor interferes with the native gesture", () => {
@@ -256,7 +341,12 @@ describe("the gesture hook still owns the glow, and now its origin", () => {
     expect(main).not.toMatch(/textEl\.addEventListener\("(?:pointer|touch|mouse)/);
   });
 
+<<<<<<< HEAD
   it("ships as 0.3.75", () => {
     expect(main).toMatch(/^const APP_VERSION = "0\.3\.75"; \/\/ \S/m);
+=======
+  it("ships as 0.3.76", () => {
+    expect(main).toMatch(/^const APP_VERSION = "0\.3\.76"; \/\/ \S/m);
+>>>>>>> paratrooper-worktree-composer-glass
   });
 });

@@ -17,24 +17,18 @@
      (the grey impression comes from the hairline + placeholder). ~2% below
      pure white keeps a sliver of glow headroom, like their rendered glass. */
   --glass-bg: rgba(120, 120, 128, 0.03);
-  /* Hold BODY — the tone the pill's far end settles to while a finger is on
-     it, and the reason the hold is visible at all in light mode. A brighter
-     hold on a white canvas is a contradiction in terms: the resting face
-     already composites to 251/255, so the old white-veil target only reached
-     253 and read as nothing. The light has to be RELATIVE, so the body takes
-     a cooler, slightly deeper glass tone (composites to 238/238/241 over
-     white) and the touch bloom below writes white back over it. */
-  --glass-bg-glow: rgba(96, 104, 128, 0.11);
-  /* Peak alpha of that white bloom, per scheme. Over the light body it goes
-     nearly opaque, so the core under the fingertip returns to paper white;
-     the same alpha over black would be a headlight, so dark mode uses about a
-     fifth of it (see the dark block). */
-  --glow-peak: 0.95;
-  /* Hold EDGE: a thin lit rim seated just inside the hairline, plus the two
-     soft casts that pick the pill up off the canvas while it is held. */
-  --glass-rim-glow: rgba(255, 255, 255, 0.6);
-  --glass-lift-glow-a: rgba(58, 66, 96, 0.13);
-  --glass-lift-glow-b: rgba(58, 66, 96, 0.1);
+  /* The bright rim, measured off Messages' own pill: one device pixel of
+     near-white seated just inside the edge. On a white page it is invisible
+     by construction (255 on 253) — it exists for dark mode and for anything
+     that scrolls under the glass, which is where an edge is actually needed.
+     It never changes on touch; only the body light below does. */
+  --glass-rim: rgba(255, 255, 255, 0.55);
+  /* Peak alpha of the white hold bloom directly under the fingertip, the same
+     in both schemes because it is the same light. Messages measures ~0.15:
+     over black that is a clear bloom (36 -> 69 here), over a near-white face
+     it clips to nothing (251 -> 252). Apple accepts that; the light-mode hold
+     is deliberately at the edge of visibility rather than a grey tint. */
+  --glow-peak: 0.15;
   --glass-edge: rgba(0, 0, 0, 0.1); /* the opaque menu's hairline only */
   /* The glass lighting stacks, v6 — iMessage-faithful edges: definition comes
      from the canonical hairline ring (no layout-affecting border, so the ＋
@@ -79,18 +73,11 @@
     --error-bg: #3a1214;
     --error-text: #ff453a;
     --glass-bg: rgba(255, 255, 255, 0.14); /* lighter lean in dark mode too */
-    /* Old .12 white veil over .14 white glass: .12 + .14 * .88 = .2432. Dark
-       mode never had the light mode problem — black leaves all the headroom
-       there is — so the body keeps that same tone and the bloom is added on
-       top of it, brightening past it rather than instead of it. */
-    --glass-bg-glow: rgba(255, 255, 255, 0.2432);
-    /* a fifth of the light-mode peak: over a body that composites to 62/255,
-       this lands the core near 101/255 — a clear bloom, not a headlight */
-    --glow-peak: 0.2;
-    --glass-rim-glow: rgba(255, 255, 255, 0.28);
-    /* no cast reads on black, so the lift is a faint halo instead of a shadow */
-    --glass-lift-glow-a: rgba(255, 255, 255, 0.14);
-    --glass-lift-glow-b: rgba(255, 255, 255, 0.09);
+    /* Here the rim earns its keep: a black shadow cast on a black canvas is
+       nothing at all, so on dark the edge of the pill IS this line. Gentler
+       than the light value — over a face that composites to 36/255 it only
+       has to draw the boundary, not outshine it. */
+    --glass-rim: rgba(255, 255, 255, 0.3);
     --glass-edge: rgba(255, 255, 255, 0.14);
     --glass-stack:
       inset 0 1px 0 rgba(255, 255, 255, 0.3),
@@ -664,24 +651,32 @@ html, body {
   align-items: flex-end;
   padding: 0.5rem 0.75rem var(--pad-b);
 }
-/* The two dials the touch bloom is drawn with, and the point it is drawn
-   from. They HAVE to be registered: an unregistered custom property
-   transitions discretely, and the whole point of the effect is that the light
-   grows out from under the fingertip instead of arriving whole. inherits:
-   false keeps all four off the textarea entirely — they exist to feed one
-   background layer on .field and nothing else can see them. (@property is
-   Safari 16.4+; the phone is on 26.) --tx/--ty are registered for a second
-   reason: a junk value from the hook falls back to the pill's centre instead
-   of invalidating the whole gradient. */
+/* The one dial the hold light is drawn with, and the point it is drawn from.
+   --glow-a HAS to be registered: an unregistered custom property transitions
+   discretely, and the point of the effect is that the light comes up and goes
+   down rather than arriving whole. inherits: false keeps all three off the
+   textarea entirely — they exist to feed one background layer on .field and
+   nothing else can see them. (@property is Safari 16.4+; the phone is on 26.)
+   --tx/--ty are registered for a different reason: they are never animated,
+   but registering them means a junk value from the hook falls back to the
+   pill's centre instead of invalidating the whole gradient.
+
+   WHY A CUSTOM PROPERTY AND NOT SOMETHING CHEAPER. Only transform, opacity
+   and filter run off the main thread, and all three are barred here: they
+   would take the textarea with them. Every remaining way to fade a light
+   inside a background — this, a background-color tween, interpolating two
+   gradients — costs one main-thread repaint of the field's background box per
+   frame, and none of them touches layout or the layer's bounds. 0.3.70 shipped
+   a background-color tween on this exact element and the caret was fine, which
+   is the evidence that a per-frame background repaint is not what moved it;
+   what 0.3.71 added on top was two OUTSET shadows that grew and shrank the
+   composited layer every frame. So the driver is one number, and the shadow
+   below never changes. The 0.3.71 version animated two properties through six
+   calc()s; this animates one through three. */
 @property --glow-a {
   syntax: "<number>";
   inherits: false;
   initial-value: 0;
-}
-@property --glow-r {
-  syntax: "<length>";
-  inherits: false;
-  initial-value: 24px;
 }
 @property --tx {
   syntax: "<length-percentage>";
@@ -702,9 +697,13 @@ html, body {
   display: flex;
   flex: 1;
   border-radius: 18px;
-  background-color: var(--glass-bg); /* the body tone */
-  --glow-a: 0; /* bloom intensity: 0 at rest, 1 while held */
-  --glow-r: 24px; /* bloom radius: a fingertip at rest, spread while held */
+  background-color: var(--glass-bg); /* the body tone — never changes */
+  --glow-a: 0; /* hold light: 0 at rest, 1 while a finger is down */
+  /* Static. Wide enough that the far end of a full-width pill still carries
+     about a third of the core (Messages measures 19 -> 58 under the finger and
+     32 at the far end over black; this lands 36 -> 69 and 46). Nothing about
+     the gradient's GEOMETRY moves during the press — only the stop alphas. */
+  --glow-r: 440px;
   /* THE LIGHT. It is the field's own background layer, which by definition
      paints beneath every in-flow child: Safari draws the text, the caret and
      the selection on top of it by the same rule that already draws them on
@@ -718,47 +717,47 @@ html, body {
   background-image: radial-gradient(
     circle var(--glow-r) at var(--tx) var(--ty),
     rgba(255, 255, 255, calc(var(--glow-a) * var(--glow-peak))) 0%,
-    rgba(255, 255, 255, calc(var(--glow-a) * var(--glow-peak) * 0.55)) 40%,
-    rgba(255, 255, 255, calc(var(--glow-a) * var(--glow-peak) * 0.16)) 72%,
+    rgba(255, 255, 255, calc(var(--glow-a) * var(--glow-peak) * 0.62)) 30%,
+    rgba(255, 255, 255, calc(var(--glow-a) * var(--glow-peak) * 0.34)) 62%,
     rgba(255, 255, 255, 0) 100%
   );
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
-  /* The three dormant slots are what make box-shadow interpolable instead of
-     discrete: a transition between two shadow lists only animates when the
-     lists are the same length AND inset at the same positions, so the resting
-     list carries empty stand-ins for the rim and the two casts .field.glow
-     fills in. They are zero-size and transparent, so they paint nothing. */
+  /* THE SHADOW, and the reason it is declared once and never again. This pill
+     is composited (backdrop-filter), so its backing store is sized from its
+     visual overflow — border box UNION every shadow's reach. 0.3.71 faded two
+     outset shadows in on hold, which regrew that rect on every frame of the
+     press, and iOS drew the caret from a rect that no longer agreed with where
+     the layer had landed: the cursor jumped up, then down, then sat wrong
+     (WebKit 176896's family). So the list here is the whole story in both
+     states — .field.glow declares no box-shadow at all, which is stronger than
+     declaring the same one twice: there is exactly one value, so there is
+     nothing to interpolate and the layer's bounds are nailed down for the
+     entire press.
+       Three slots, outside in: the bright one-device-pixel rim (invisible on
+     white, the edge itself on dark), the pill's established hairline + near
+     lift, and the Messages shadow well — fitted off their compose pill over a
+     white conversation, ~244 directly under the bottom edge fading out over
+     about 24pt, which is what makes a 251 face read as an object on a 255
+     page. On black the well composites to nothing and the rim carries it. */
   box-shadow:
+    inset 0 0 0 0.5px var(--glass-rim),
     var(--glass-stack),
-    inset 0 0 0 0 transparent,
-    0 0 0 0 transparent,
-    0 0 0 0 transparent;
-  /* release: restore the resting material gently; keep the settling fade */
-  transition: opacity 0.3s ease, background-color 0.5s ease, box-shadow 0.5s ease,
-    --glow-a 0.5s ease, --glow-r 0.5s ease;
+    0 6px 33px rgba(0, 0, 0, 0.068);
+  /* release: the light settles back over half a second. The opacity entry is
+     the settling window's fade and is untouched. */
+  transition: opacity 0.3s ease, --glow-a 0.5s ease;
 }
-/* Hold: the light. Everything below is a paint on the field's own layers —
-   background, background-image, box-shadow — and nothing is added above the
-   textarea, given a position or a z-index, or allowed to open a stacking
-   context around it. That is the line the two earlier attempts crossed.
-   In light mode the pill cannot get brighter than the white canvas it sits
-   on, so the light is made of a difference rather than an increase: the body
-   sinks to a cooler tone, a white bloom lands under the fingertip and spreads
-   through the pill, a lit rim appears just inside the hairline, and the pill
-   picks up a soft cast. In dark mode the same shape simply brightens. */
+/* Hold: the light, and nothing else. One number goes to 1 and the white bloom
+   in the background layer above comes up under the fingertip. No body tone
+   moves, no shadow moves, no rim moves, no box moves — this rule sets a custom
+   property and a clock, and that is the entire hold state. Everything the two
+   earlier attempts reached for (an overlay above the text, a position/z-index
+   on the textarea, a cast that regrows the composited layer) is absent by
+   construction rather than by care. */
 .field.glow {
   --glow-a: 1;
-  --glow-r: 180px; /* wide enough to flood the pill, tight enough that the far
-    end still falls back to the body tone — the light keeps an origin */
-  background-color: var(--glass-bg-glow);
-  box-shadow:
-    var(--glass-stack),
-    inset 0 0 0 2px var(--glass-rim-glow),
-    0 2px 10px var(--glass-lift-glow-a),
-    0 12px 30px var(--glass-lift-glow-b);
-  transition: opacity 0.3s ease, background-color 0.25s ease-out, box-shadow 0.25s ease-out,
-    --glow-a 0.25s ease-out, --glow-r 0.25s ease-out;
+  transition: opacity 0.3s ease, --glow-a 0.25s ease-out;
 }
 .compose textarea {
   flex: 1;
