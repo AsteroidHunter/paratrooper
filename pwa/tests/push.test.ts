@@ -366,8 +366,11 @@ describe("centered notification popup wiring", () => {
     expect(PUSH_CSS_RULES).toMatch(/\.push-dialog \{[\s\S]*?inset:\s*0;/);
     expect(PUSH_CSS_RULES).toMatch(/\.push-dialog \{[\s\S]*?place-items:\s*center;/);
     expect(PUSH_CSS_RULES).toContain(".push-dialog[hidden]");
-    expect(PUSH_CSS_RULES).toMatch(/\.push-card \{[\s\S]*?border-radius:\s*30px;/);
-    expect(PUSH_CSS_RULES).toMatch(/\.push-actions button \{[\s\S]*?border-radius:\s*20px;/);
+    expect(PUSH_CSS_RULES).toMatch(/\.push-card \{[\s\S]*?width:\s*min\(304px,/);
+    expect(PUSH_CSS_RULES).toMatch(/\.push-card \{[\s\S]*?border-radius:\s*26px;/);
+    expect(PUSH_CSS_RULES).toMatch(/\.push-copy \{[\s\S]*?font-size:\s*18px;/);
+    expect(PUSH_CSS_RULES).toMatch(/\.push-copy \{[\s\S]*?font-weight:\s*500;/);
+    expect(PUSH_CSS_RULES).toMatch(/\.push-actions button \{[\s\S]*?border-radius:\s*999px;/);
     expect(PUSH_CSS_RULES).toContain(".push-dialog.push-dialog-leaving");
     expect(PUSH_CSS_RULES).not.toMatch(/\.push-dialog\.push-dialog-leaving\s*\{[^}]*pointer-events/);
     expect(PUSH_CSS_RULES).not.toMatch(/\.compose\b/);
@@ -431,6 +434,19 @@ describe("centered notification popup wiring", () => {
     expect(render).toContain('control.addEventListener("pointerdown", beginPushDialogExit)');
     expect(renderState).toContain('action.textContent = "Enable"');
     expect(renderState).not.toContain(".focus(");
+  });
+
+  it("gently delays the initial popup without delaying the permission tap", () => {
+    const render = sourceBetween("function renderChat()", "async function loadOlder(");
+    const popup = sourceBetween("const PUSH_DIALOG_TRANSITION_MS", "function pushApisSupported(");
+    expect(popup).toContain("const PUSH_DIALOG_DELAY_MS = 2500");
+    expect(popup).toMatch(
+      /setTimeout\(\(\) => \{[\s\S]*?pushDialogCanShow = true;[\s\S]*?renderPushState\(pending\);[\s\S]*?PUSH_DIALOG_DELAY_MS/,
+    );
+    expect(render.indexOf("armPushDialogEntrance()"))
+      .toBeLessThan(render.indexOf("startPushNotifications()"));
+    expect(PUSH_CSS_RULES).toMatch(/transition:\s*opacity 360ms/);
+    expect(PUSH_CSS_RULES).toMatch(/translateY\(8px\) scale\(0\.95\)/);
   });
 
   it("checks on load/resume without automatically requesting permission", () => {

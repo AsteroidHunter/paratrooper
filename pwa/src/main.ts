@@ -144,7 +144,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.69"; // iOS-style notification popup with immediate dismissal
+const APP_VERSION = "0.3.70"; // compact notification popup with delayed entrance
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -508,6 +508,7 @@ function renderChat(): void {
     beginPushDialogExit();
     pushNotifications?.dismiss();
   });
+  armPushDialogEntrance();
   startPushNotifications();
   // Log Out is gated behind an iOS-style confirm so a stray tap can't log out:
   // No (safe, bold blue) dismisses; Yes (destructive red) actually logs out.
@@ -5012,9 +5013,26 @@ function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
 
 let pushRegistration: ServiceWorkerRegistration | null = null;
 let pushNotifications: PushSetup | null = null;
-const PUSH_DIALOG_EXIT_MS = 220;
+const PUSH_DIALOG_TRANSITION_MS = 360;
+const PUSH_DIALOG_DELAY_MS = 2500;
 let pushDialogHideTimer: number | null = null;
 let pushDialogShowFrame: number | null = null;
+let pushDialogDelayTimer: number | null = null;
+let pushDialogCanShow = false;
+let pendingPushDialogState: PushState | null = null;
+
+function armPushDialogEntrance(): void {
+  if (pushDialogDelayTimer !== null) window.clearTimeout(pushDialogDelayTimer);
+  pushDialogCanShow = false;
+  pendingPushDialogState = null;
+  pushDialogDelayTimer = window.setTimeout(() => {
+    pushDialogDelayTimer = null;
+    pushDialogCanShow = true;
+    const pending = pendingPushDialogState;
+    pendingPushDialogState = null;
+    if (pending) renderPushState(pending);
+  }, PUSH_DIALOG_DELAY_MS);
+}
 
 function beginPushDialogExit(): void {
   const dialog = document.getElementById("push-dialog") as HTMLElement | null;
@@ -5038,7 +5056,7 @@ function hidePushDialog(dialog: HTMLElement, state: PushState): void {
   dialog.classList.add("push-dialog-leaving");
   pushDialogHideTimer = window.setTimeout(() => {
     if (dialog.dataset.pushState === state.kind) dialog.hidden = true;
-  }, PUSH_DIALOG_EXIT_MS);
+  }, PUSH_DIALOG_TRANSITION_MS);
 }
 
 function showPushDialog(dialog: HTMLElement): void {
@@ -5073,9 +5091,17 @@ function renderPushState(state: PushState): void {
   copy.textContent = "";
   const hidden = state.kind === "hidden" || state.kind === "checking" || state.kind === "active";
   if (hidden || state.kind === "requesting") {
+    pendingPushDialogState = null;
     hidePushDialog(dialog, state);
     return;
   }
+
+  if (!pushDialogCanShow) {
+    pendingPushDialogState = state;
+    hidePushDialog(dialog, state);
+    return;
+  }
+  pendingPushDialogState = null;
 
   if (state.kind === "enable") {
     copy.textContent = "Enable notifications from your Paratrooper?";
