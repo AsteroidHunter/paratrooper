@@ -32,7 +32,6 @@ import {
   MAX_CLOSE_RESTORES,
   SETTLE_BURST_GAP_MS,
   boxSettled,
-  closeRedrawTarget,
   createSettleBurst,
   maxScrollTop,
   restoreMark,
@@ -626,7 +625,7 @@ describe("the settle's wiring: quiet passes kept, loud ones still first-class", 
 
 // --- the keyboard's parting shot ----------------------------------------------
 //
-// The third way the same band opens, and the only one no app writer requested.
+// The third way the same band opens, and the only one nothing of ours caused.
 // The v0.3.58 trail, two occurrences and one close in the same session that did
 // not reproduce: at the close transition's end, ms 208, the scroller sat at
 // 6151, which is its 6775 of content less the 624 of box the keyboard had just
@@ -701,50 +700,6 @@ describe("the correction: only ever a position that cannot exist", () => {
   });
 });
 
-// The later m264 failure is the inverse of the overhang above. The DOM says the
-// thread is exactly at its bottom, but the pixels remain painted at the shorter
-// keyboard-era box. A same-value settle cannot make WebKit redraw that hidden
-// offset, so the no-movement close gets one real one-pixel change and restore.
-describe("the redraw: only a settled, untouched close at the exact followed tail", () => {
-  const end = { sh: REST_SH, st: BACK_END, ch: REST_CH };
-
-  const target = (
-    g = end,
-    following = true,
-    settled = true,
-    moved = false,
-    corrected = false,
-    gesture = false,
-  ): number | null => closeRedrawTarget(
-    g, following, settled, moved, corrected, gesture,
-  );
-
-  it("moves one pixel off a numerically perfect tail", () => {
-    expect(target()).toBe(BACK_END - 1);
-  });
-
-  it("never touches a reader away from the tail, by state or by position", () => {
-    expect(target(end, false)).toBeNull();
-    expect(target({ ...end, st: BACK_END - 1 })).toBeNull();
-  });
-
-  it("does nothing when an ordinary settle or the overhang correction already moved it", () => {
-    expect(target(end, true, true, true)).toBeNull();
-    expect(target(end, true, true, false, true)).toBeNull();
-  });
-
-  it("stands aside until the box is settled and while a gesture owns the scroll", () => {
-    expect(target(end, true, false)).toBeNull();
-    expect(target(end, true, true, false, false, true)).toBeNull();
-  });
-
-  it("requires a full pixel of real scroll range", () => {
-    expect(target({ sh: REST_CH, st: 0, ch: REST_CH })).toBeNull();
-    expect(target({ sh: REST_CH + 0.5, st: 0.5, ch: REST_CH })).toBeNull();
-    expect(target({ sh: REST_CH + 1, st: 1, ch: REST_CH })).toBe(0);
-  });
-});
-
 describe("what the correction leaves on the trail", () => {
   const mark = restoreMark("frame", "fix", 224.4, PAST_END, 1, STALE_END);
 
@@ -783,7 +738,6 @@ describe("what the correction leaves on the trail", () => {
 describe("the correction's wiring in main.ts", () => {
   const fix = fnBody("fixCloseTail");
   const start = fnBody("closeTailStart");
-  const redraw = fnBody("redrawCloseTail");
 
   it("the window opens on the close edge and is cancelled by the next open", () => {
     const edge = src.slice(src.indexOf("watchKeyboard((up)"), src.indexOf("bootGate"));
@@ -835,38 +789,9 @@ describe("the correction's wiring in main.ts", () => {
     );
   });
 
-  it("ordinary moving and held states leave no record at all", () => {
-    expect(fix).toContain('if (act === "moving" || act === "held") return');
+  it("the ordinary states of a close leave no record at all", () => {
+    expect(fix).toContain('if (act === "none" || act === "moving" || act === "held") return');
     expect(fix).toContain('if (act === "spent" && closeFixes > MAX_CLOSE_RESTORES) return');
-  });
-
-  it("the exact-bottom state hands only the first late checkpoint to the redraw", () => {
-    expect(fix).toContain('if (act === "none") {');
-    expect(fix).toContain("redrawCloseTail(t, via, g, settled, gesture)");
-    expect(redraw).toContain('if (via !== "gap" || closeRedrawn) return');
-  });
-
-  it("remembers whether any ordinary settle moved the thread during the close", () => {
-    const settle = fnBody("settleTail");
-    expect(settle).toContain("if (closeAt >= 0 && plan.moved) closeMoved = true");
-    expect(start).toContain("closeMoved = false");
-    expect(start).toContain("closeRedrawn = false");
-  });
-
-  it("hands every safety fact to the pure redraw decision", () => {
-    expect(redraw).toContain(
-      "g, followTail, settled, closeMoved, closeFixes > 0, gesture",
-    );
-  });
-
-  it("changes the real position by one pixel and restores it in the same task", () => {
-    expect(redraw).toContain("const back = maxScrollTop(g.sh, g.ch)");
-    expect(redraw).toContain('t.scrollTo({ top: away, behavior: "auto" })');
-    expect(redraw).toContain('scrollGhostWrite("kb-redraw-away", away)');
-    expect(redraw).toContain('t.scrollTo({ top: back, behavior: "auto" })');
-    expect(redraw).toContain('scrollGhostWrite("kb-redraw-back", back)');
-    expect(redraw).not.toMatch(/requestAnimationFrame|setTimeout/);
-    expect(redraw.indexOf("top: away")).toBeLessThan(redraw.indexOf("top: back"));
   });
 
   it("the close's two later checkpoints ask the same question again", () => {
