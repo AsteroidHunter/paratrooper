@@ -80,7 +80,7 @@ describe("push state check", () => {
     expect(h.getSubscription).not.toHaveBeenCalled();
   });
 
-  it("shows inline Settings guidance for denied permission and never retries the prompt", async () => {
+  it("shows popup Settings guidance for denied permission and never retries the prompt", async () => {
     const h = harness({ permission: "denied" });
     await h.setup.check();
     expect(h.setup.state()).toEqual({ kind: "denied" });
@@ -114,6 +114,67 @@ describe("push state check", () => {
     expect(h.setup.state()).toEqual({ kind: "hidden" });
     await h.setup.check();
     expect(h.setup.state()).toEqual({ kind: "enable" });
+  });
+});
+
+describe("session-only Not Now dismissal", () => {
+  it("hides Paratrooper's popup without calling Apple or starting subscription work", async () => {
+    const h = harness({ permission: "default" });
+    await h.setup.check();
+    h.setup.dismiss();
+    expect(h.setup.state()).toEqual({ kind: "hidden" });
+    expect(h.requestPermission).not.toHaveBeenCalled();
+    expect(h.getSubscription).not.toHaveBeenCalled();
+    expect(h.subscribe).not.toHaveBeenCalled();
+    expect(h.registerSubscription).not.toHaveBeenCalled();
+
+    await h.setup.check();
+    expect(h.setup.state()).toEqual({ kind: "hidden" });
+    expect(h.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it("does not persist dismissal into a fresh controller/app load", async () => {
+    const first = harness({ permission: "default" });
+    await first.setup.check();
+    first.setup.dismiss();
+    expect(first.setup.state()).toEqual({ kind: "hidden" });
+
+    const fresh = harness({ permission: "default" });
+    await fresh.setup.check();
+    expect(fresh.setup.state()).toEqual({ kind: "enable" });
+  });
+
+  it("still silently repairs push if iPhone Settings grants permission later", async () => {
+    const h = harness({ permission: "default" });
+    await h.setup.check();
+    h.setup.dismiss();
+    h.setPermission("granted");
+    await h.setup.check();
+    expect(h.subscribe).toHaveBeenCalledWith("public-key");
+    expect(h.registerSubscription).toHaveBeenCalledWith({ id: "new" });
+    expect(h.setup.state()).toEqual({ kind: "active" });
+    expect(h.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it("dismisses denied guidance without creating a route back to Apple's prompt", async () => {
+    const h = harness({ permission: "denied" });
+    await h.setup.check();
+    h.setup.dismiss();
+    h.setup.action();
+    expect(h.setup.state()).toEqual({ kind: "hidden" });
+    expect(h.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it("can hide a Retry popup while later checks continue repair silently", async () => {
+    const h = harness({ permission: "granted" });
+    h.registerSubscription.mockRejectedValueOnce(new Error("server unavailable"));
+    await h.setup.check();
+    expect(h.setup.state()).toEqual({ kind: "retry" });
+    h.setup.dismiss();
+    expect(h.setup.state()).toEqual({ kind: "hidden" });
+    await h.setup.check();
+    expect(h.registerSubscription).toHaveBeenCalledTimes(2);
+    expect(h.setup.state()).toEqual({ kind: "active" });
   });
 });
 
@@ -177,6 +238,22 @@ describe("the direct user-gesture permission action", () => {
     h.setup.action();
     await h.setup.check();
     expect(h.loadPublicKey).toHaveBeenCalledTimes(1);
+    expect(h.setup.state()).toEqual({ kind: "requesting" });
+    resolvePermission("default");
+    await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "enable" }));
+  });
+
+  it("ignores duplicate primary/dismiss actions while Apple's request is in flight", async () => {
+    let resolvePermission!: (value: PushPermission) => void;
+    const h = harness();
+    h.requestPermission.mockImplementation(() =>
+      new Promise<PushPermission>((resolve) => { resolvePermission = resolve; }),
+    );
+    await h.setup.check();
+    h.setup.action();
+    h.setup.action();
+    h.setup.dismiss();
+    expect(h.requestPermission).toHaveBeenCalledTimes(1);
     expect(h.setup.state()).toEqual({ kind: "requesting" });
     resolvePermission("default");
     await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "enable" }));
@@ -255,6 +332,7 @@ describe("recoverable subscription setup failures", () => {
 
 const MAIN_SOURCE = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const PUSH_CSS_SOURCE = readFileSync(new URL("../src/push.css", import.meta.url), "utf8");
+const PUSH_CSS_RULES = PUSH_CSS_SOURCE.replace(/\/\*[\s\S]*?\*\//g, "");
 const SW_SOURCE = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
 const MANIFEST = JSON.parse(
   readFileSync(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
@@ -268,33 +346,82 @@ function sourceBetween(start: string, end: string): string {
   return MAIN_SOURCE.slice(at, until);
 }
 
-describe("inline banner wiring", () => {
-  it("puts one slim banner immediately above, and outside, the composer", () => {
+describe("centered notification popup wiring", () => {
+  it("uses one fixed accessible alert dialog without adding a composer layout row", () => {
     const render = sourceBetween("function renderChat()", "async function loadOlder(");
-    const bannerAt = render.indexOf('id="push-banner"');
+    const dialogAt = render.indexOf('id="push-dialog"');
+    const pendingAt = render.indexOf('id="pending"');
     const composeAt = render.indexOf('id="compose"');
-    expect(bannerAt).toBeGreaterThan(render.indexOf('id="pending"'));
-    expect(composeAt).toBeGreaterThan(bannerAt);
-    expect(render.match(/id="push-banner"/g)).toHaveLength(1);
+    expect(dialogAt).toBeGreaterThanOrEqual(0);
+    expect(render.match(/id="push-dialog"/g)).toHaveLength(1);
+    expect(render).toContain('role="alertdialog"');
+    expect(render).toContain('aria-modal="true"');
+    expect(render).toContain('aria-labelledby="push-copy"');
+    expect(render.slice(pendingAt, composeAt)).not.toContain("push-dialog");
+    expect(render).not.toContain("push-banner");
     expect(render).not.toContain("push-setting");
-    expect(PUSH_CSS_SOURCE).toContain(".push-banner[hidden]");
-    expect(PUSH_CSS_SOURCE).toMatch(/\.push-banner \{[\s\S]*?font-size:\s*12px;/);
+    expect(PUSH_CSS_RULES).toMatch(/\.push-dialog \{[\s\S]*?position:\s*fixed;/);
+    expect(PUSH_CSS_RULES).toMatch(/\.push-dialog \{[\s\S]*?inset:\s*0;/);
+    expect(PUSH_CSS_RULES).toMatch(/\.push-dialog \{[\s\S]*?place-items:\s*center;/);
+    expect(PUSH_CSS_RULES).toContain(".push-dialog[hidden]");
+    expect(PUSH_CSS_RULES).not.toMatch(/\.compose\b/);
   });
 
-  it("uses the approved copy, one Enable action, and concise denied guidance", () => {
+  it("shows exactly Not Now and Enable with the approved question", () => {
+    const render = sourceBetween("function renderChat()", "async function loadOlder(");
     const renderState = sourceBetween("function renderPushState(", "function pushApisSupported(");
+    const dialogMarkup = render.slice(
+      render.indexOf('id="push-dialog"'),
+      render.indexOf('<main id="thread"'),
+    );
+    const actionLabels = [...dialogMarkup.matchAll(/<button[^>]*>([^<]+)<\/button>/g)]
+      .map((match) => match[1].trim());
+    expect(actionLabels).toEqual(["Not Now", "Enable"]);
     expect(renderState).toContain("Enable notifications from your Paratrooper?");
-    expect(renderState).toContain('action.textContent = state.kind === "requesting" ? "Enabling…" : "Enable"');
+    expect(renderState).toContain('action.textContent = "Enable"');
+  });
+
+  it("uses the same popup for denied guidance and retry actions", () => {
+    const renderState = sourceBetween("function renderPushState(", "function pushApisSupported(");
+    const denied = renderState.slice(
+      renderState.indexOf('state.kind === "denied"'),
+      renderState.indexOf("// Permission was granted"),
+    );
+    const retry = renderState.slice(renderState.indexOf("// Permission was granted"));
     expect(renderState).toContain("Re-enable them in iPhone Settings.");
     expect(renderState).toContain("Notifications couldn’t be enabled.");
-    expect(renderState).toContain('action.textContent = "Retry"');
+    expect(renderState).toContain("notNow.hidden = false");
+    expect(denied).not.toContain("action.hidden = false"); // Not Now only
+    expect(retry).toContain("action.hidden = false");
+    expect(retry).toContain('action.textContent = "Retry"');
   });
 
-  it("routes the tap directly into the synchronous action boundary", () => {
+  it("routes Enable directly into the synchronous action boundary", () => {
     const render = sourceBetween("function renderChat()", "async function loadOlder(");
     expect(render).toMatch(
       /getElementById\("push-action"\)[\s\S]*?addEventListener\("click", \(\) => \{\s*pushNotifications\?\.action\(\);/,
     );
+  });
+
+  it("routes Not Now only to session dismissal and has no backdrop dismiss handler", () => {
+    const render = sourceBetween("function renderChat()", "async function loadOlder(");
+    const at = render.indexOf('getElementById("push-not-now")');
+    const notNowBinding = render.slice(at, render.indexOf("});", at) + 3);
+    expect(notNowBinding).toContain("pushNotifications?.dismiss()");
+    expect(notNowBinding).not.toMatch(/requestPermission|subscribe|localStorage|\.action\(/);
+    expect(MAIN_SOURCE).not.toMatch(
+      /getElementById\("push-dialog"\)[\s\S]{0,160}addEventListener/,
+    );
+    expect(notNowBinding).not.toContain(".focus(");
+  });
+
+  it("disables both visible request actions in flight without relabeling Enable", () => {
+    const renderState = sourceBetween("function renderPushState(", "function pushApisSupported(");
+    expect(renderState).toContain('notNow.disabled = state.kind === "requesting"');
+    expect(renderState).toContain('action.disabled = state.kind === "requesting"');
+    expect(renderState).toContain('action.textContent = "Enable"');
+    expect(renderState).not.toContain("Enabling…");
+    expect(renderState).not.toContain(".focus(");
   });
 
   it("checks on load/resume without automatically requesting permission", () => {

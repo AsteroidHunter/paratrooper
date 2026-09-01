@@ -1,42 +1,57 @@
-/* Notification opt-in: one quiet, nonblocking row immediately above the
-   composer. It participates in the shell's flex layout, so the composer keeps
-   its existing geometry and interaction layers; only the thread gives up this
-   small amount of height while guidance is needed. */
-.push-banner {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 8px;
-  margin: 4px 12px 0;
-  padding: 5px 8px 5px 10px;
-  border-radius: 11px;
-  background: var(--received);
-  color: var(--received-text);
-  font-size: 12px;
-  line-height: 1.25;
+/* Fixed overlay: it consumes no flex space, so showing or hiding notification
+   UI cannot resize the thread or move the composer. No selector here reaches
+   into composer controls or their interaction layers. */
+.push-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 18;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.24);
 }
-.push-banner[hidden],
-.push-action[hidden] {
+.push-dialog[hidden],
+.push-actions [hidden] {
   display: none;
 }
-.push-copy {
-  flex: 1;
-  min-width: 0;
+.push-card {
+  width: min(290px, calc(100vw - 40px));
+  overflow: hidden;
+  border-radius: 14px;
+  background: var(--menu-bg);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22);
+  color: var(--text);
+  text-align: center;
 }
-.push-action {
-  flex: none;
-  padding: 3px 5px;
+.push-copy {
+  margin: 0;
+  padding: 18px 18px 15px;
+  font-size: 15px;
+  line-height: 1.35;
+}
+.push-actions {
+  display: flex;
+  border-top: 0.5px solid var(--hairline);
+}
+.push-actions button {
+  min-width: 0;
+  min-height: 44px;
+  flex: 1;
+  padding: 9px 12px;
   border: none;
   background: none;
   color: var(--sent);
   font: inherit;
-  font-weight: 600;
+  font-size: 15px;
   cursor: pointer;
 }
-.push-action:disabled {
+.push-actions button + button {
+  border-left: 0.5px solid var(--hairline);
+}
+.push-action {
+  font-weight: 600;
+}
+.push-actions button:disabled {
   opacity: 0.55;
   cursor: default;
-}
-.push-banner.denied {
-  color: var(--muted);
 }

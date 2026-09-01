@@ -1,6 +1,6 @@
 // Web-push permission and subscription state.
 //
-// The important boundary in this module is action(): when the banner's Enable
+// The important boundary in this module is action(): when the popup's Enable
 // button calls it, requestPermission is the first browser-facing operation.
 // The VAPID public key has already been loaded by check(), so the native prompt
 // stays on that tap's user-activation stack (required by iOS).
@@ -30,8 +30,10 @@ export interface PushDependencies<Subscription> {
 export interface PushSetup {
   /** Check and repair state without ever opening a native permission prompt. */
   check(): Promise<void>;
-  /** Run the banner action. Deliberately synchronous for iOS user activation. */
+  /** Run the popup's primary action. Deliberately synchronous for iOS activation. */
   action(): void;
+  /** Hide Paratrooper's popup for this controller/page session only. */
+  dismiss(): void;
   /** Invalidate pending work when the authenticated session ends. */
   stop(): void;
   state(): PushState;
@@ -44,13 +46,19 @@ export function createPushSetup<Subscription>(
   let publicKey: string | null = null;
   let generation = 0;
   let stopped = false;
+  let dismissed = false;
 
   const live = (mine: number): boolean => !stopped && mine === generation;
 
   const show = (next: PushState, mine = generation): void => {
     if (!live(mine)) return;
-    current = next;
-    deps.render(next);
+    // Not Now suppresses only Paratrooper's own prompt states. Checks keep
+    // running, and active/granted repair is never suppressed, so changing
+    // permission in iPhone Settings during this page session still converges.
+    const promptSuppressed = dismissed && ["enable", "denied", "retry"].includes(next.kind);
+    const visible: PushState = promptSuppressed ? { kind: "hidden" } : next;
+    current = visible;
+    deps.render(visible);
   };
 
   const permissionNow = (): PushPermission | null => {
@@ -170,6 +178,12 @@ export function createPushSetup<Subscription>(
     if (current.kind === "retry") void check();
   };
 
+  const dismiss = (): void => {
+    if (!["enable", "denied", "retry"].includes(current.kind)) return;
+    dismissed = true;
+    show({ kind: "hidden" });
+  };
+
   const stop = (): void => {
     generation++;
     stopped = true;
@@ -178,5 +192,5 @@ export function createPushSetup<Subscription>(
     deps.render(current);
   };
 
-  return { check, action, stop, state: () => current };
+  return { check, action, dismiss, stop, state: () => current };
 }

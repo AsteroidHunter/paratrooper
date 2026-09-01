@@ -144,7 +144,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.67"; // opt-in notification banner + reply excerpts
+const APP_VERSION = "0.3.68"; // centered, session-dismissible notification opt-in popup
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -454,14 +454,20 @@ function renderChat(): void {
         </div>
       </div>
     </div>
+    <div id="push-dialog" class="push-dialog" role="alertdialog" aria-modal="true"
+      aria-labelledby="push-copy" hidden>
+      <div class="push-card">
+        <p id="push-copy" class="push-copy"></p>
+        <div class="push-actions">
+          <button type="button" id="push-not-now" class="push-not-now">Not Now</button>
+          <button type="button" id="push-action" class="push-action">Enable</button>
+        </div>
+      </div>
+    </div>
     <main id="thread" class="thread">
       <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
     </main>
     <div id="pending" class="pending"></div>
-    <aside id="push-banner" class="push-banner" aria-live="polite" hidden>
-      <span id="push-copy" class="push-copy"></span>
-      <button type="button" id="push-action" class="push-action" hidden></button>
-    </aside>
     <form id="compose" class="compose">
       <button type="button" id="attach" class="attach" title="Attach">＋</button>
       <input id="files" type="file" accept="image/*" multiple
@@ -482,6 +488,9 @@ function renderChat(): void {
   // from that call so iOS credits the native prompt to this exact Enable tap.
   document.getElementById("push-action")!.addEventListener("click", () => {
     pushNotifications?.action();
+  });
+  document.getElementById("push-not-now")!.addEventListener("click", () => {
+    pushNotifications?.dismiss();
   });
   startPushNotifications();
   // Log Out is gated behind an iOS-style confirm so a stray tap can't log out:
@@ -4974,7 +4983,7 @@ async function publish(pr: string, btn: HTMLButtonElement): Promise<void> {
   }
 }
 
-// --- web push: inline opt-in banner, silent repair on later opens -----------
+// --- web push: centered opt-in popup, silent repair on later opens ----------
 
 function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
   const padding = "=".repeat((4 - (base64.length % 4)) % 4);
@@ -4989,14 +4998,19 @@ let pushRegistration: ServiceWorkerRegistration | null = null;
 let pushNotifications: PushSetup | null = null;
 
 function renderPushState(state: PushState): void {
-  const banner = document.getElementById("push-banner") as HTMLElement | null;
+  const dialog = document.getElementById("push-dialog") as HTMLElement | null;
   const copy = document.getElementById("push-copy") as HTMLElement | null;
+  const notNow = document.getElementById("push-not-now") as HTMLButtonElement | null;
   const action = document.getElementById("push-action") as HTMLButtonElement | null;
-  if (!banner || !copy || !action) return;
+  if (!dialog || !copy || !notNow || !action) return;
 
   const hidden = state.kind === "hidden" || state.kind === "checking" || state.kind === "active";
-  banner.hidden = hidden;
-  banner.classList.toggle("denied", state.kind === "denied");
+  // Keep it hidden while its label/actions are rewritten, then expose the
+  // complete alert-dialog state in one synchronous turn (without moving focus).
+  dialog.hidden = true;
+  dialog.setAttribute("aria-busy", String(state.kind === "requesting"));
+  notNow.hidden = false;
+  notNow.disabled = false;
   action.hidden = true;
   action.disabled = false;
   action.textContent = "";
@@ -5006,12 +5020,15 @@ function renderPushState(state: PushState): void {
   if (state.kind === "enable" || state.kind === "requesting") {
     copy.textContent = "Enable notifications from your Paratrooper?";
     action.hidden = false;
+    notNow.disabled = state.kind === "requesting";
     action.disabled = state.kind === "requesting";
-    action.textContent = state.kind === "requesting" ? "Enabling…" : "Enable";
+    action.textContent = "Enable";
+    dialog.hidden = false;
     return;
   }
   if (state.kind === "denied") {
     copy.textContent = "Notifications are off. Re-enable them in iPhone Settings.";
+    dialog.hidden = false;
     return;
   }
   // Permission was granted, but browser subscription or server registration
@@ -5019,6 +5036,7 @@ function renderPushState(state: PushState): void {
   copy.textContent = "Notifications couldn’t be enabled.";
   action.hidden = false;
   action.textContent = "Retry";
+  dialog.hidden = false;
 }
 
 function pushApisSupported(reg: ServiceWorkerRegistration): boolean {
