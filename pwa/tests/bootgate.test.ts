@@ -147,8 +147,18 @@ describe("wiring — no veil, no quiet timer (main.ts / styles.css)", () => {
     expect(main).toMatch(/isReplay\(m\.seq\)/);
   });
 
-  it("replay applies force stillness; a genuinely new frame flips animations on", () => {
-    expect(main).toMatch(/function applyReplay[\s\S]{0,700}suppressAnim = true/);
+  it("replay applies never glide; a genuinely new frame flips animations on", () => {
+    // The pin is the part that must never be a ride, and this is where it is
+    // forced: a settled layout is written to, never animated into place. The
+    // ENTRANCE is a separate question, and no longer flat — a reply that
+    // arrives on the replay path after the session is painted and on screen is
+    // new to the eye (resume.ts owns that boundary, tests/resume.test.ts pins
+    // it). The cold open, which is what this pin has always been about, is
+    // still silent: the cover has not lifted, so the condition reads false.
+    expect(main).toMatch(/function applyReplay[\s\S]{0,900}pinInstant = true/);
+    expect(main).toMatch(
+      /function applyReplay[\s\S]{0,900}suppressAnim = !replayAnimates\(isTail, loadingScreen\.lifted\(\), pageVisible\(\)\)/,
+    );
     // the window spans the buffering branch that now sits between the two
     expect(main).toMatch(/isReplay\(m\.seq\)[\s\S]{0,800}suppressAnim = false/);
   });

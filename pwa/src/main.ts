@@ -51,6 +51,17 @@ import { receiptFor } from "./receipts";
 import { createPushSetup } from "./push";
 import type { PushSetup, PushState } from "./push";
 import {
+  KEEPALIVE_MS,
+  PIN_QUIET_MS,
+  RESUME_WINDOW_MS,
+  keepAliveAction,
+  keepAliveSchedule,
+  pinFlipGuard,
+  reconnectOnVisible,
+  replayAnimates,
+  resumePinDecision,
+} from "./resume";
+import {
   ENTER_RISE_PX,
   FLIGHT_EASE,
   FLIGHT_MS,
@@ -143,7 +154,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.76"; // compose pill sits in a shadow well and lights under the finger
+const APP_VERSION = "0.3.77"; // returning to the app reconnects and lands on the new reply
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -641,12 +652,29 @@ function renderChat(): void {
     // the ONE place following flips: away from the bottom = reading history,
     // back at the bottom = following again (programmatic pins land here too).
     // While the composer is focused, an away reading needs a real gesture to
-    // unfollow — shove/pin scroll events hold the line (viewport.ts explains)
-    const flip = followFlipDecision(
-      nearBottom(), document.activeElement?.id === "text", userScrollIntent(),
+    // unfollow — shove/pin scroll events hold the line (viewport.ts explains).
+    // The resume's own instant pin gets the same protection for the couple of
+    // frames its write takes to settle, whatever the composer is doing: an
+    // away reading there is the pin landing, not a reader (resume.ts).
+    const flip = pinFlipGuard(
+      performance.now() - pinWroteAt < PIN_QUIET_MS,
+      followFlipDecision(
+        nearBottom(), document.activeElement?.id === "text", userScrollIntent(),
+      ),
     );
     if (flip === "follow") setFollowTail(true, "scroll-bottom");
-    else if (flip === "unfollow") setFollowTail(false, "scroll-away");
+    else if (flip === "unfollow") {
+      // a real gesture took the view off the tail: this is a READER up in the
+      // history, and a resume must not yank him back down (resume.ts). Every
+      // other way following goes off — a mid-glide event, an image landing
+      // under a pin — leaves this false, which is the distinction the resume
+      // landing turns on.
+      if (userScrollIntent()) {
+        scrolledUpByHand = true;
+        closeResumeWindow(); // he is reading: the landing window is his to end
+      }
+      setFollowTail(false, "scroll-away");
+    }
     else holdDiagRecord("ft-suppress", { st: Math.round(thread.scrollTop) });
     // TEMP DIAGNOSTIC (scroll-ghost, scrollghost.ts owns the banner): the look,
     // not a clamp — this handler writes nothing and must not start (the note at
@@ -1385,9 +1413,21 @@ const threadEl = () => document.getElementById("thread")!;
 // little further on device. Every flip is recorded with its trigger.
 let followTail = true;
 
+// Why following is off, which is a different question from whether it is. The
+// resume landing is the one place that has to tell a READER — a finger that
+// deliberately dragged the thread up into history — from the several ways the
+// flag latches false with nobody touching anything: a scroll event arriving
+// mid-glide, an unsized image growing the thread under a pin, a caret shove.
+// Set only where the flip carried real gesture evidence, cleared wherever
+// following resumes (the bottom, a jump tap, your own message), so it is never
+// stale by more than the scroll event that ends the reading. resume.ts owns
+// what it is for.
+let scrolledUpByHand = false;
+
 function setFollowTail(next: boolean, trigger: string): void {
   if (next !== followTail) holdDiagRecord("followtail", { to: next, trigger });
   followTail = next;
+  if (next) scrolledUpByHand = false; // back at the tail: nothing is being read up there
 }
 
 // ===================== TEMP DIAGNOSTIC (remove after the keyboard-fall session) =====================
@@ -1461,11 +1501,28 @@ function nearBottom(): boolean {
   return nearBottomOf(t.scrollHeight, t.scrollTop, t.clientHeight, flightInflation(t));
 }
 
+// The glide is for a live message landing in front of a watching user, and
+// there are two eras where the same pin must be a plain write instead. This
+// flag is the replay path's, scoped to one apply and saved/restored around it:
+// a settled layout is never ridden into place, animated entrance or not. The
+// other era is the RESUME window, which asks for itself below (resumeWindowOpen)
+// rather than writing this, so the two can never leave a stray era behind
+// between them. That window is the one this was added for: coming back on
+// screen, the app is still publishing its own geometry — the visual viewport's
+// height, the safe-area inset, sometimes a whole extra launch frame — and each
+// of those settles the tail with an instant write that cancels whatever ride is
+// in the air. A glide asked for in that window is cut half way and, worse, its
+// own mid-flight scroll events read "away from the bottom" and take following
+// down with them, which is the whole failure. resume.ts explains.
+let pinInstant = false;
+
 function scrollToBottom(force = false): void {
   const t = threadEl();
   const top = t.scrollHeight;
-  // replay bursts (suppressAnim) jump instantly; live messages glide
-  t.scrollTo({ top, behavior: suppressAnim || force ? "auto" : "smooth" });
+  // replay bursts (suppressAnim) and the resume window jump instantly; live
+  // messages in a settled session glide
+  const instant = suppressAnim || force || pinInstant || resumeWindowOpen();
+  t.scrollTo({ top, behavior: instant ? "auto" : "smooth" });
   // TEMP DIAGNOSTIC (scroll-ghost): the TARGET, not a read-back — a gliding pin
   // arrives over a beat, and the watch explains every frame of it by that target
   scrollGhostWrite("bottom", top);
@@ -2058,6 +2115,10 @@ function applyEvent(m: ServerMsg): void {
   // applies drive the scroll rule (the chevron is scroll-pause-only, downbtn.ts)
   if (isTail && wrapper.childElementCount > 0) {
     if (m.role === "user") setFollowTail(true, "apply-user"); // your own message snaps you back
+    // a message landing while the app is coming back on screen may re-take the
+    // bottom that a spurious unfollow lost; before the pin below, so the pin
+    // finds following already asserted (the resume block owns the rule)
+    resumeArrival();
     if (followTail) scrollToBottom();
   }
   if (m.kind === "published") flipCorrelatedPr(m);
@@ -3256,23 +3317,35 @@ async function reconcileRetracts(): Promise<void> {
   for (const s of dropped) applyRetract(s);
 }
 
-// replay frames NEVER animate and NEVER animated-scroll, however late they
-// arrive. A straggler that a live frame overtook is no longer the tail: it
-// inserts above the fold with the bottom pin compensating in the same frame
-// (drainOlder's own pattern), so the settled view just gains content out of
-// sight with zero visible motion. Tail frames pin instantly via the usual
-// followTail path (suppressAnim makes that pin behavior:"auto").
+// replay frames NEVER animated-scroll, however late they arrive. A straggler
+// that a live frame overtook is no longer the tail: it inserts above the fold
+// with the bottom pin compensating in the same frame (drainOlder's own
+// pattern), so the settled view just gains content out of sight with zero
+// visible motion. Tail frames pin instantly through the usual followTail path.
+//
+// The ENTRANCE is the one thing this path no longer forces flat, because the
+// path carries two different things. While the app is still opening — the
+// loading cover up, the thread being built — replay is history and lands as one
+// still picture; that is what the batch commit exists for. Once the cover has
+// lifted and the page is on screen, the same path is carrying a reply that
+// arrived while the app was away, which is new to the eye and enters like a
+// live message. resume.ts (replayAnimates) owns that boundary and the reasons
+// for each of its three conditions. The pin stays instant either way, so an
+// entrance can animate with no glide underneath it.
 function applyReplay(m: ServerMsg): void {
   const prevSuppress = suppressAnim;
-  suppressAnim = true;
+  const prevInstant = pinInstant;
   const t = threadEl();
   const prevScroll = t.scrollTop;
   const prevHeight = t.scrollHeight;
   const isTail = (m.seq ?? 0) > lastSeq;
+  pinInstant = true; // a settled layout is written to, never ridden into place
+  suppressAnim = !replayAnimates(isTail, loadingScreen.lifted(), pageVisible());
   applyEvent(m);
   if (!isTail) t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
   scrollGhostWrite("replay", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
   suppressAnim = prevSuppress;
+  pinInstant = prevInstant;
 }
 
 // A truly fresh open must LAND at the very bottom with zero visible motion.
@@ -3303,6 +3376,12 @@ async function bootSettlePin(): Promise<void> {
 }
 
 function connect(): void {
+  // One socket at a time. Two callers can now land here in the same beat — the
+  // resume's immediate reconnect and a blind two-second retry armed before the
+  // page was frozen — and this used to leave the loser's socket open with its
+  // handlers still attached, delivering duplicate frames and arming yet another
+  // retry when it eventually closed.
+  dropSocket();
   closingOnPurpose = false;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/ws?token=${encodeURIComponent(token)}&thread=${THREAD_ID}&since=${lastSeq}`;
@@ -3371,6 +3450,173 @@ function connect(): void {
     setTimeout(connect, 2000); // dropped: reconnect; catch-up via ?since=
   };
 }
+
+// --- the app coming back on screen --------------------------------------------
+//
+// One block, because the failure was one thing seen from four sides: tap a push
+// banner for a new reply and the app comes back without the reply, then the
+// reply appears out of nowhere somewhere below the fold. resume.ts holds the
+// reasoning for each decision; this is the wiring.
+//
+//   the socket, which iOS may have taken away without telling anyone
+//   a keep-alive, which is the only way to find out that it did
+//   the landing, which must be an instant pin the app's own writes cannot undo
+//   the entrance, so the reply arrives rather than materialising
+//
+// Nothing here touches sending, the keyboard choreography, or the reply hold:
+// those own the foreground and are not what goes wrong on the way back in.
+
+function pageVisible(): boolean {
+  return document.visibilityState === "visible";
+}
+
+// Close a socket we are finished with WITHOUT its onclose arming the blind
+// two-second retry — the caller is connecting again in the same task, and two
+// reconnects racing is how one dead socket becomes three.
+function dropSocket(): void {
+  const stale = ws;
+  ws = null;
+  if (!stale) return;
+  stale.onclose = null;
+  stale.onmessage = null;
+  stale.onopen = null;
+  try {
+    stale.close();
+  } catch {
+    /* already gone; nothing to close */
+  }
+}
+
+/** true if this resume replaced the socket */
+function resumeReconnect(): boolean {
+  if (!token) return false; // logged out: the gate is showing and nothing reconnects
+  if (reconnectOnVisible(ws ? ws.readyState : null) === "keep") return false;
+  connect(); // the usual ?since=lastSeq catch-up, now instead of in two seconds
+  return true;
+}
+
+// The keep-alive. One byte on a slow interval, which the server's /ws loop
+// already awaits (receive_text, "client keepalive / pings"), for the single
+// purpose of making a half-open socket admit it: nothing else the client does
+// ever writes to this socket, so nothing else can discover that the writes go
+// nowhere. Runs only while the page is on screen.
+const KEEPALIVE_FRAME = "p";
+let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+
+function keepAliveTick(): void {
+  if (!token) return;
+  const act = keepAliveAction(pageVisible(), ws ? ws.readyState : null, ws?.bufferedAmount ?? 0);
+  if (act === "idle") return;
+  if (act === "drop") {
+    // pings piling up unsent: the connection is gone whatever readyState says
+    holdDiagRecord("resume", { reconnect: true, pinned: false, reason: "stall" });
+    connect(); // replaces the wedged socket; catch-up via ?since=
+    return;
+  }
+  try {
+    ws?.send(KEEPALIVE_FRAME);
+  } catch {
+    connect(); // send() on a socket the engine has already given up on
+  }
+}
+
+function keepAliveSync(): void {
+  const act = keepAliveSchedule(pageVisible(), keepAliveTimer !== null);
+  if (act === "start") keepAliveTimer = setInterval(keepAliveTick, KEEPALIVE_MS);
+  else if (act === "stop" && keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+}
+
+// The resume's own pin. Instant, following asserted BEFORE the write so the
+// settles that follow it pin rather than clamp, and stamped so its own scroll
+// event is credited to it instead of read as a reader leaving the tail
+// (pinFlipGuard, in the thread's scroll handler). The second write a frame
+// later is the same re-assert the cached boot makes and for the same reason:
+// iOS can re-size the box between a write and its paint, and a settle landing
+// in between has already answered for the fresh box, so this stands down rather
+// than pinning over it.
+let pinWroteAt = -Infinity;
+
+/** true if there was a thread to pin (the token gate has none) */
+function pinBottomNow(via: string): boolean {
+  const t = document.getElementById("thread");
+  if (!t) return false;
+  setFollowTail(true, via);
+  pinWroteAt = performance.now();
+  t.scrollTop = t.scrollHeight;
+  scrollGhostWrite(via, t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
+  const armed = tailGen; // a settle between here and the next frame wins
+  requestAnimationFrame(() => {
+    const el = document.getElementById("thread");
+    if (!el || armed !== tailGen) return;
+    pinWroteAt = performance.now();
+    el.scrollTop = el.scrollHeight;
+    scrollGhostWrite(via, el.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
+  });
+  return true;
+}
+
+// The window in which the app is still landing: every bottom pin inside it is
+// instant (scrollToBottom asks resumeWindowOpen directly), and the first message
+// to arrive gets to re-take the bottom. It closes on its own clock, or early the
+// moment a real gesture takes the thread up — the reader has answered the
+// question himself. The timer IS the window, so there is one thing to be wrong.
+let resumeTimer: ReturnType<typeof setTimeout> | null = null;
+let resumeWasFollowing = true; // followTail the moment the app went hidden
+let resumeAwayByHand = false; // a reader had gone up by hand before leaving
+let resumeNewArrived = false; // a message has already claimed this resume's decision
+
+function resumeWindowOpen(): boolean {
+  return resumeTimer !== null;
+}
+
+function openResumeWindow(): void {
+  if (resumeTimer) clearTimeout(resumeTimer);
+  resumeNewArrived = false;
+  resumeTimer = setTimeout(closeResumeWindow, RESUME_WINDOW_MS);
+}
+
+function closeResumeWindow(): void {
+  if (!resumeTimer) return;
+  clearTimeout(resumeTimer);
+  resumeTimer = null;
+}
+
+// A tail frame applied while the app is still coming back. Once per resume: the
+// first message decides, and a decision to hold holds for the rest of it.
+function resumeArrival(): void {
+  if (!resumeWindowOpen() || resumeNewArrived) return;
+  resumeNewArrived = true;
+  const verdict = resumePinDecision(resumeWasFollowing, true, resumeAwayByHand);
+  const pinned = verdict !== "hold" && pinBottomNow("resume-new");
+  holdDiagRecord("resume", { reconnect: false, pinned, reason: verdict });
+}
+
+function resumeVisible(): void {
+  openResumeWindow();
+  const reconnect = resumeReconnect();
+  keepAliveSync();
+  const verdict = resumePinDecision(resumeWasFollowing, false, resumeAwayByHand);
+  const pinned = verdict !== "hold" && pinBottomNow("resume");
+  holdDiagRecord("resume", { reconnect, pinned, reason: verdict });
+}
+
+function resumeHidden(): void {
+  // where the reader actually was, taken while the answer is still true
+  resumeWasFollowing = followTail;
+  resumeAwayByHand = scrolledUpByHand;
+  closeResumeWindow();
+  keepAliveSync();
+}
+
+// A back-forward-cache restore hands the page back with no visibilitychange at
+// all. The plain load-time pageshow (persisted false) is the boot, which
+// bootFromCache owns, and must not be treated as a return.
+window.addEventListener("pageshow", (e) => {
+  if (e.persisted) resumeVisible();
+});
 
 // A retract frame landed: the server deleted this reply at the owner's send
 // (another client's take-back — or our own echoing back, already clean).
@@ -5150,14 +5396,21 @@ function clearBadge(): void {
   if ("clearAppBadge" in navigator) void navigator.clearAppBadge().catch(() => {});
   navigator.serviceWorker?.controller?.postMessage("badge-clear");
 }
+// The one lifecycle edge the app comes back on. The resume half — socket,
+// keep-alive, landing — is the block above connect(); this only delivers the
+// edge to it, alongside the badge and push work that were already here.
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     clearBadge();
     void pushNotifications?.check();
+    resumeVisible();
+  } else {
+    cacheWrites.flush(); // hidden: the pending snapshot lands before iOS can freeze the page
+    resumeHidden(); // remember where the reader was, and stop the keep-alive
   }
-  else cacheWrites.flush(); // hidden: the pending snapshot lands before iOS can freeze the page
 });
 clearBadge();
+keepAliveSync(); // the page opens visible, so the heartbeat starts with it
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {

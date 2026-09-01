@@ -268,6 +268,14 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // cancel only arms one while the conversation is still gliding, so it cannot
   // churn. TEMP DIAGNOSTIC (blank-thread): remove this entry and this paragraph
   // with the blankprobe.ts block.
+  //
+  // "resume" is IN because the whole point of it is being readable in a deploy
+  // log after the fact: it is one record per return to the screen (two at the
+  // most, when a message lands inside the landing window), it says whether the
+  // socket was replaced and whether the bottom was taken and why, and a resume
+  // that goes wrong is exactly the case where nothing else on the trail fires
+  // near it — a banner tap on a quiet thread arms no keyboard edge, no send and
+  // no picker. One record per resume means arming here cannot churn.
   if (
     ev === "held" || ev === "release" || ev === "pass" || ev === "reset" ||
     ev === "snapback" || ev === "followtail" || ev === "flight" ||
@@ -278,7 +286,8 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "kb-focusing" || ev === "kb-glide" || ev === "kb-edge" ||
     ev === "pick-anchor" || ev === "tail-gap" ||
     ev === "scroll-jank" || ev === "tail-settle" || ev === "pick-timing" ||
-    ev === "thread-blank" || ev === "kb-restore" || ev === "scroll-ghost"
+    ev === "thread-blank" || ev === "kb-restore" || ev === "scroll-ghost" ||
+    ev === "resume"
   ) {
     diagPost();
   }

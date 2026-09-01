@@ -261,6 +261,8 @@ describe("the wiring: every writer announces itself, and the looks read nothing"
       'scrollGhostWrite("replay", t.scrollTop)',
       'scrollGhostWrite("boot-repin", t.scrollTop)',
       'scrollGhostWrite("cache-pin", el.scrollTop)',
+      'scrollGhostWrite(via, t.scrollTop)', // the resume's pin, and
+      'scrollGhostWrite(via, el.scrollTop)', // its re-assert a frame later
     ]) {
       expect(src, `${call} is missing`).toContain(call);
     }
