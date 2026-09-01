@@ -307,7 +307,9 @@ def test_concurrent_terminal_pushes_keep_each_thread_and_job_payload_isolated(
             self.finished.append(thread_id)
 
     monkeypatch.setenv("VAPID_PRIVATE_KEY", "private")
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "public")
     monkeypatch.setenv("VAPID_SUBJECT", "mailto:push@example.test")
+    monkeypatch.setattr(push, "_public_key_for_private", lambda _private: "public")
     sent = []
 
     def record_send(_subscription, payload, _cfg):
@@ -440,17 +442,70 @@ def test_owner_repo_from_remote():
 def test_push_config_off_when_unset(monkeypatch):
     from paratrooper.web import push
 
+    monkeypatch.setattr(push, "_public_key_for_private", lambda _private: "pub")
     monkeypatch.delenv("VAPID_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("VAPID_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("VAPID_SUBJECT", raising=False)
     assert push.config() is None  # feature is a no-op without VAPID
     monkeypatch.setenv("VAPID_PRIVATE_KEY", "priv")
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "pub")
     monkeypatch.setenv("VAPID_SUBJECT", "mailto:a@b.c")
     cfg = push.config()
-    assert cfg and cfg.subject == "mailto:a@b.c"
+    assert cfg and cfg.subject == "mailto:a@b.c" and cfg.public_key == "pub"
     assert push.notification_text("pr") and push.notification_text("log") is None
     # screenshots buzz too (user decision 20260708, overturning the plan-era
     # behavior-preservation): a board preview is worth a notification on its own
     assert push.notification_text("screenshot")
+
+
+def test_push_config_rejects_invalid_or_mismatched_vapid_pair(monkeypatch, caplog):
+    from paratrooper.web import push
+
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "priv")
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "wrong-public")
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:a@b.c")
+    monkeypatch.setattr(push, "_public_key_for_private", lambda _private: "actual-public")
+    assert push.config() is None
+    assert "do not match" in caplog.text
+
+
+def test_vapid_public_key_is_derived_from_web_push_raw_private_format():
+    from base64 import urlsafe_b64encode
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    from paratrooper.web import push
+
+    private_value = 1
+    private_key = urlsafe_b64encode(private_value.to_bytes(32, "big")).rstrip(b"=").decode()
+    public_point = ec.derive_private_key(private_value, ec.SECP256R1()).public_key().public_bytes(
+        Encoding.X962, PublicFormat.UncompressedPoint
+    )
+    expected = urlsafe_b64encode(public_point).rstrip(b"=").decode()
+    assert push._public_key_for_private(private_key) == expected
+
+
+def test_push_send_uses_a_delivery_window_and_immediate_urgency(monkeypatch):
+    from paratrooper.web import push
+
+    sent = {}
+
+    class Accepted:
+        status_code = 201
+
+    def accept(**kwargs):
+        sent.update(kwargs)
+        return Accepted()
+
+    monkeypatch.setattr("pywebpush.webpush", accept)
+    cfg = push.VapidConfig(private_key="private", public_key="public", subject="mailto:a@b.c")
+    subscription = {"endpoint": "https://push.example/device", "keys": {}}
+    assert push.send_push(subscription, "reply text", cfg)
+    assert sent["ttl"] == push.PUSH_TTL_SECONDS
+    assert sent["headers"] == {"Urgency": "high"}
+    assert sent["timeout"] == 10
+    assert sent["subscription_info"] is subscription
 
 
 def test_terminal_push_uses_user_facing_message_excerpt():
