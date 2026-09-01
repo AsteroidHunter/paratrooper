@@ -17,11 +17,15 @@
      (the grey impression comes from the hairline + placeholder). ~2% below
      pure white keeps a sliver of glow headroom, like their rendered glass. */
   --glass-bg: rgba(120, 120, 128, 0.03);
+  /* Hold target = the old white veil source-over the resting face:
+     alpha = .55 + .03 * (1 - .55) = .5635; premultiplied RGB rounds to 252.
+     Baking that composite into the field background keeps the same flat light
+     behind Safari's native text/selection layer instead of painting over it. */
+  --glass-bg-glow: rgba(252, 252, 252, 0.5635);
   --glass-edge: rgba(0, 0, 0, 0.1); /* the opaque menu's hairline only */
   /* The glass lighting stacks, v6 — iMessage-faithful edges: definition comes
      from the canonical hairline ring (no layout-affecting border, so the ＋
-     centering math holds), with a white top catch over it and a 2px melt.
-     The hold-brighten veil lives on the .field::before overlay, not here. */
+     centering math holds), with a white top catch over it and a 2px melt. */
   --glass-stack:
     inset 0 1px 0 rgba(255, 255, 255, 0.9),
     inset 0 0 0 1px var(--hairline),
@@ -40,8 +44,6 @@
   --bar-grad-bottom: rgba(249, 249, 249, 0.45);
   --menu-bg: #f2f2f4; /* fully opaque dropdown / alert card */
   --accent: #432bff; /* sent bubbles, compose caret, and the ↑ send button */
-  /* hold-brighten: the flat white veil that evens up the whole pill face */
-  --pill-veil: rgba(255, 255, 255, 0.55);
   /* jump chevron arrow: ONE fixed color per scheme, drawn over the disc's
      translucent glass face (--glass-bg) — never blended with the backdrop */
   --jump-fg: var(--accent);
@@ -64,6 +66,8 @@
     --error-bg: #3a1214;
     --error-text: #ff453a;
     --glass-bg: rgba(255, 255, 255, 0.14); /* lighter lean in dark mode too */
+    /* Old .12 white veil over .14 white glass: .12 + .14 * .88 = .2432. */
+    --glass-bg-glow: rgba(255, 255, 255, 0.2432);
     --glass-edge: rgba(255, 255, 255, 0.14);
     --glass-stack:
       inset 0 1px 0 rgba(255, 255, 255, 0.3),
@@ -80,8 +84,6 @@
     --bar-grad-top: rgba(22, 22, 24, 1);
     --bar-grad-bottom: rgba(22, 22, 24, 0.45);
     --menu-bg: #2c2c2e;
-    --pill-veil: rgba(255, 255, 255, 0.12); /* faint lift on dark glass — any
-      stronger and the veil reads as a grey slab, not light */
     --jump-fg: #ffffff; /* the accent sinks into dark glass; white stays legible */
     --jump-rim: rgba(0, 0, 0, 0.7); /* dark hair under the white arrow — saves
       it over a pale photo showing through the glass */
@@ -652,37 +654,16 @@ html, body {
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
   box-shadow: var(--glass-stack);
-  transition: opacity 0.3s ease; /* the settling re-enable fade */
+  /* release: restore the resting material gently; keep the settling fade */
+  transition: opacity 0.3s ease, background-color 0.5s ease;
 }
-/* Hold-brighten: ONE flat veil revealed by ONE opacity fade (the only
-   animated property — composite-only, so the text/caret layer never repaints;
-   ::before paints above the material, below the letters). While a finger
-   rests on the pill the whole face brightens EVENLY: a uniform white-ish
-   veil, no gradient, no shadow, nothing positional — nothing that suggests
-   a light source or the pill growing/lifting. (Replaced the v0.1.51
-   three-channel glow — touch-point spot + rim flare + under-shadow — whose
-   spot hid under the finger and whose stack read as the box growing.)
-   HARD RULE, learned via caret drift: never animate, transform, or filter
-   the textarea's own layer while it is in use — only this overlay's opacity
-   may move. Two narrow carve-outs, both load-bearing iOS fixes and both a
-   single frame the eye cannot catch: the 0.02s focus blink below, over
-   before the keyboard even starts to rise, and the same blink re-armed via
-   WAAPI on every keystroke while the keyboard is up (autosize, main.ts),
-   which is what stops the caret reveal from shoving the view on the second
-   word of a line and past the box's height cap. */
-.field::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 18px;
-  background: var(--pill-veil); /* one even color across the face */
-  opacity: 0;
-  transition: opacity 0.5s ease; /* release: fades off gently */
-  pointer-events: none;
-}
-.field.glow::before {
-  opacity: 1;
-  transition: opacity 0.25s ease-out; /* touch: eases on */
+/* Hold-brighten: animate only the field's own uniform material, behind its
+   children. No overlay, gradient, shadow, transform, or positional source can
+   cross Safari's atomic native text/selection paint. The endpoint is the old
+   veil composite above, so only the paint order changes, not the flat look. */
+.field.glow {
+  background-color: var(--glass-bg-glow);
+  transition: opacity 0.3s ease, background-color 0.25s ease-out;
 }
 .compose textarea {
   flex: 1;

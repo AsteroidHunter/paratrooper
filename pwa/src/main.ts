@@ -141,7 +141,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.65"; // restore Safari-native composer selection and caret placement
+const APP_VERSION = "0.3.66"; // move the composer shine behind native text selection
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

@@ -16,8 +16,8 @@ function withoutComments(body: string): string {
 }
 
 describe("composer hold-brighten preserves Safari-native text interaction", () => {
-  const veil = withoutComments(rule(".field::before"));
-  const glow = withoutComments(rule(".field.glow::before"));
+  const field = withoutComments(rule(".field"));
+  const glow = withoutComments(rule(".field.glow"));
   const textarea = withoutComments(rule(".compose textarea"));
 
   it("does not put the textarea into a positioned stacking layer", () => {
@@ -26,13 +26,28 @@ describe("composer hold-brighten preserves Safari-native text interaction", () =
     expect(css).not.toContain("::selection");
   });
 
-  it("keeps the shine on its pointer-transparent veil", () => {
-    expect(veil).toContain('content: ""');
-    expect(veil).toContain("position: absolute");
-    expect(veil).toContain("pointer-events: none");
-    expect(veil).not.toMatch(/z-index\s*:/);
-    expect(glow).toContain("opacity: 1");
-    expect(glow).toContain("transition: opacity 0.25s ease-out");
+  it("brightens only the field background, behind native text and selection", () => {
+    expect(css).not.toMatch(/\.field(?:\.glow)?::(?:before|after)/);
+    expect(glow).toContain("background-color: var(--glass-bg-glow)");
+    expect(glow).not.toMatch(
+      /(?:^|;)\s*(?:position|z-index|isolation|transform|filter|opacity|animation|background|background-image|box-shadow)\s*:/,
+    );
+    expect(glow).not.toMatch(/gradient\s*\(/);
+  });
+
+  it("preserves the press, release, and settling fade timings", () => {
+    expect(field).toContain("transition: opacity 0.3s ease, background-color 0.5s ease");
+    expect(glow).toContain("transition: opacity 0.3s ease, background-color 0.25s ease-out");
+  });
+
+  it("uses the source-over equivalents of the former light and dark veils", () => {
+    expect(css).toContain("--glass-bg-glow: rgba(252, 252, 252, 0.5635)");
+    expect(css).toContain("--glass-bg-glow: rgba(255, 255, 255, 0.2432)");
+  });
+
+  it("keeps the existing pointer gesture hook", () => {
     expect(main).toMatch(/t\.id === "text"[\s\S]{0,120}classList\.add\("glow"\)/);
+    expect(main).toContain('document.addEventListener("pointerup", unglow, true)');
+    expect(main).toContain('document.addEventListener("pointercancel", unglow, true)');
   });
 });
