@@ -17,11 +17,24 @@
      (the grey impression comes from the hairline + placeholder). ~2% below
      pure white keeps a sliver of glow headroom, like their rendered glass. */
   --glass-bg: rgba(120, 120, 128, 0.03);
-  /* Hold target = the old white veil source-over the resting face:
-     alpha = .55 + .03 * (1 - .55) = .5635; premultiplied RGB rounds to 252.
-     Baking that composite into the field background keeps the same flat light
-     behind Safari's native text/selection layer instead of painting over it. */
-  --glass-bg-glow: rgba(252, 252, 252, 0.5635);
+  /* Hold BODY — the tone the pill's far end settles to while a finger is on
+     it, and the reason the hold is visible at all in light mode. A brighter
+     hold on a white canvas is a contradiction in terms: the resting face
+     already composites to 251/255, so the old white-veil target only reached
+     253 and read as nothing. The light has to be RELATIVE, so the body takes
+     a cooler, slightly deeper glass tone (composites to 238/238/241 over
+     white) and the touch bloom below writes white back over it. */
+  --glass-bg-glow: rgba(96, 104, 128, 0.11);
+  /* Peak alpha of that white bloom, per scheme. Over the light body it goes
+     nearly opaque, so the core under the fingertip returns to paper white;
+     the same alpha over black would be a headlight, so dark mode uses about a
+     fifth of it (see the dark block). */
+  --glow-peak: 0.95;
+  /* Hold EDGE: a thin lit rim seated just inside the hairline, plus the two
+     soft casts that pick the pill up off the canvas while it is held. */
+  --glass-rim-glow: rgba(255, 255, 255, 0.6);
+  --glass-lift-glow-a: rgba(58, 66, 96, 0.13);
+  --glass-lift-glow-b: rgba(58, 66, 96, 0.1);
   --glass-edge: rgba(0, 0, 0, 0.1); /* the opaque menu's hairline only */
   /* The glass lighting stacks, v6 — iMessage-faithful edges: definition comes
      from the canonical hairline ring (no layout-affecting border, so the ＋
@@ -66,8 +79,18 @@
     --error-bg: #3a1214;
     --error-text: #ff453a;
     --glass-bg: rgba(255, 255, 255, 0.14); /* lighter lean in dark mode too */
-    /* Old .12 white veil over .14 white glass: .12 + .14 * .88 = .2432. */
+    /* Old .12 white veil over .14 white glass: .12 + .14 * .88 = .2432. Dark
+       mode never had the light mode problem — black leaves all the headroom
+       there is — so the body keeps that same tone and the bloom is added on
+       top of it, brightening past it rather than instead of it. */
     --glass-bg-glow: rgba(255, 255, 255, 0.2432);
+    /* a fifth of the light-mode peak: over a body that composites to 62/255,
+       this lands the core near 101/255 — a clear bloom, not a headlight */
+    --glow-peak: 0.2;
+    --glass-rim-glow: rgba(255, 255, 255, 0.28);
+    /* no cast reads on black, so the lift is a faint halo instead of a shadow */
+    --glass-lift-glow-a: rgba(255, 255, 255, 0.14);
+    --glass-lift-glow-b: rgba(255, 255, 255, 0.09);
     --glass-edge: rgba(255, 255, 255, 0.14);
     --glass-stack:
       inset 0 1px 0 rgba(255, 255, 255, 0.3),
@@ -641,6 +664,35 @@ html, body {
   align-items: flex-end;
   padding: 0.5rem 0.75rem var(--pad-b);
 }
+/* The two dials the touch bloom is drawn with, and the point it is drawn
+   from. They HAVE to be registered: an unregistered custom property
+   transitions discretely, and the whole point of the effect is that the light
+   grows out from under the fingertip instead of arriving whole. inherits:
+   false keeps all four off the textarea entirely — they exist to feed one
+   background layer on .field and nothing else can see them. (@property is
+   Safari 16.4+; the phone is on 26.) --tx/--ty are registered for a second
+   reason: a junk value from the hook falls back to the pill's centre instead
+   of invalidating the whole gradient. */
+@property --glow-a {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 0;
+}
+@property --glow-r {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 24px;
+}
+@property --tx {
+  syntax: "<length-percentage>";
+  inherits: false;
+  initial-value: 50%;
+}
+@property --ty {
+  syntax: "<length-percentage>";
+  inherits: false;
+  initial-value: 50%;
+}
 /* The field IS the glass now: pill-shaped material (tint + sheen + lighting
    stack + inert-for-now backdrop blur) with the naked textarea floating above
    it, so text is drawn ON TOP of the light like the native material draws
@@ -650,20 +702,63 @@ html, body {
   display: flex;
   flex: 1;
   border-radius: 18px;
-  background-color: var(--glass-bg); /* uniform face — no gradients, no texture */
+  background-color: var(--glass-bg); /* the body tone */
+  --glow-a: 0; /* bloom intensity: 0 at rest, 1 while held */
+  --glow-r: 24px; /* bloom radius: a fingertip at rest, spread while held */
+  /* THE LIGHT. It is the field's own background layer, which by definition
+     paints beneath every in-flow child: Safari draws the text, the caret and
+     the selection on top of it by the same rule that already draws them on
+     top of the body tone, so nothing here can reach them. That is the whole
+     reason the effect lives here and not in an overlay — the 55% white veil
+     that used to sit over the textarea washed the letters grey, and lifting
+     the textarea out from under it with position/z-index cost double-tap word
+     selection and tap-to-place-caret. At rest --glow-a is 0, every stop is
+     fully transparent, and this layer composites to exactly nothing: the
+     resting pill is the pill that shipped. The border-radius clips it. */
+  background-image: radial-gradient(
+    circle var(--glow-r) at var(--tx) var(--ty),
+    rgba(255, 255, 255, calc(var(--glow-a) * var(--glow-peak))) 0%,
+    rgba(255, 255, 255, calc(var(--glow-a) * var(--glow-peak) * 0.55)) 40%,
+    rgba(255, 255, 255, calc(var(--glow-a) * var(--glow-peak) * 0.16)) 72%,
+    rgba(255, 255, 255, 0) 100%
+  );
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
-  box-shadow: var(--glass-stack);
+  /* The three dormant slots are what make box-shadow interpolable instead of
+     discrete: a transition between two shadow lists only animates when the
+     lists are the same length AND inset at the same positions, so the resting
+     list carries empty stand-ins for the rim and the two casts .field.glow
+     fills in. They are zero-size and transparent, so they paint nothing. */
+  box-shadow:
+    var(--glass-stack),
+    inset 0 0 0 0 transparent,
+    0 0 0 0 transparent,
+    0 0 0 0 transparent;
   /* release: restore the resting material gently; keep the settling fade */
-  transition: opacity 0.3s ease, background-color 0.5s ease;
+  transition: opacity 0.3s ease, background-color 0.5s ease, box-shadow 0.5s ease,
+    --glow-a 0.5s ease, --glow-r 0.5s ease;
 }
-/* Hold-brighten: animate only the field's own uniform material, behind its
-   children. No overlay, gradient, shadow, transform, or positional source can
-   cross Safari's atomic native text/selection paint. The endpoint is the old
-   veil composite above, so only the paint order changes, not the flat look. */
+/* Hold: the light. Everything below is a paint on the field's own layers —
+   background, background-image, box-shadow — and nothing is added above the
+   textarea, given a position or a z-index, or allowed to open a stacking
+   context around it. That is the line the two earlier attempts crossed.
+   In light mode the pill cannot get brighter than the white canvas it sits
+   on, so the light is made of a difference rather than an increase: the body
+   sinks to a cooler tone, a white bloom lands under the fingertip and spreads
+   through the pill, a lit rim appears just inside the hairline, and the pill
+   picks up a soft cast. In dark mode the same shape simply brightens. */
 .field.glow {
+  --glow-a: 1;
+  --glow-r: 180px; /* wide enough to flood the pill, tight enough that the far
+    end still falls back to the body tone — the light keeps an origin */
   background-color: var(--glass-bg-glow);
-  transition: opacity 0.3s ease, background-color 0.25s ease-out;
+  box-shadow:
+    var(--glass-stack),
+    inset 0 0 0 2px var(--glass-rim-glow),
+    0 2px 10px var(--glass-lift-glow-a),
+    0 12px 30px var(--glass-lift-glow-b);
+  transition: opacity 0.3s ease, background-color 0.25s ease-out, box-shadow 0.25s ease-out,
+    --glow-a 0.25s ease-out, --glow-r 0.25s ease-out;
 }
 .compose textarea {
   flex: 1;
