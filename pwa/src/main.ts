@@ -143,11 +143,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-<<<<<<< HEAD
-const APP_VERSION = "0.3.75"; // keyboard close waits for the phone's report, and opening the app clears untapped banners
-=======
 const APP_VERSION = "0.3.76"; // compose pill sits in a shadow well and lights under the finger
->>>>>>> paratrooper-worktree-composer-glass
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

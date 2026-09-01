@@ -341,12 +341,7 @@ describe("the gesture hook owns the glow and its origin, and forces no layout", 
     expect(main).not.toMatch(/textEl\.addEventListener\("(?:pointer|touch|mouse)/);
   });
 
-<<<<<<< HEAD
-  it("ships as 0.3.75", () => {
-    expect(main).toMatch(/^const APP_VERSION = "0\.3\.75"; \/\/ \S/m);
-=======
   it("ships as 0.3.76", () => {
     expect(main).toMatch(/^const APP_VERSION = "0\.3\.76"; \/\/ \S/m);
->>>>>>> paratrooper-worktree-composer-glass
   });
 });
