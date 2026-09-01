@@ -73,9 +73,7 @@ self.addEventListener("push", (event) => {
         icon: "/icon-192.png",
         badge: "/icon-192.png",
       }),
-      "setAppBadge" in self.navigator
-        ? self.navigator.setAppBadge(unread).catch(() => {})
-        : Promise.resolve(),
+      "setAppBadge" in navigator ? navigator.setAppBadge(unread).catch(() => {}) : Promise.resolve(),
     ])
   );
 });
@@ -83,7 +81,7 @@ self.addEventListener("push", (event) => {
 self.addEventListener("message", (event) => {
   if (event.data === "badge-clear") {
     unread = 0;
-    if ("clearAppBadge" in self.navigator) self.navigator.clearAppBadge().catch(() => {});
+    if ("clearAppBadge" in navigator) navigator.clearAppBadge().catch(() => {});
   }
 });
 

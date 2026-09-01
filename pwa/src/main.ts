@@ -144,7 +144,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.69"; // iOS-shaped notification prompt and repaired push delivery
+const APP_VERSION = "0.3.68"; // centered, session-dismissible notification opt-in popup
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -484,28 +484,12 @@ function renderChat(): void {
     document.getElementById("menu")!.classList.toggle("open");
   });
   // action() reaches Notification.requestPermission synchronously when the
-  // current state is "enable". Keep that call first in the listener so iOS
-  // credits the native prompt to this exact Enable tap.
-  const pushAction = document.getElementById("push-action")!;
-  const pushNotNow = document.getElementById("push-not-now")!;
-  for (const control of [pushNotNow, pushAction]) {
-    // Begin the visual exit on touch-down. Apple's sheet can cover the page as
-    // soon as click calls requestPermission(), so waiting for that promise
-    // leaves our dialog visibly stranded underneath it.
-    control.addEventListener("pointerdown", beginPushDialogExit);
-    control.addEventListener("pointercancel", cancelPushDialogExit);
-    control.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") beginPushDialogExit();
-    });
-  }
-  pushAction.addEventListener("click", () => {
-    // Keep action() first on the click stack: it synchronously reaches Apple's
-    // permission API and therefore retains the iOS user activation.
+  // current state is "enable". Keep this listener synchronous and empty apart
+  // from that call so iOS credits the native prompt to this exact Enable tap.
+  document.getElementById("push-action")!.addEventListener("click", () => {
     pushNotifications?.action();
-    beginPushDialogExit();
   });
-  pushNotNow.addEventListener("click", () => {
-    beginPushDialogExit();
+  document.getElementById("push-not-now")!.addEventListener("click", () => {
     pushNotifications?.dismiss();
   });
   startPushNotifications();
@@ -5012,45 +4996,6 @@ function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
 
 let pushRegistration: ServiceWorkerRegistration | null = null;
 let pushNotifications: PushSetup | null = null;
-const PUSH_DIALOG_EXIT_MS = 220;
-let pushDialogHideTimer: number | null = null;
-let pushDialogShowFrame: number | null = null;
-
-function beginPushDialogExit(): void {
-  const dialog = document.getElementById("push-dialog") as HTMLElement | null;
-  if (dialog && !dialog.hidden) dialog.classList.add("push-dialog-leaving");
-}
-
-function cancelPushDialogExit(): void {
-  const dialog = document.getElementById("push-dialog") as HTMLElement | null;
-  const kind = pushNotifications?.state().kind;
-  if (dialog && kind && ["enable", "denied", "retry"].includes(kind)) {
-    dialog.classList.remove("push-dialog-leaving");
-  }
-}
-
-function hidePushDialog(dialog: HTMLElement, state: PushState): void {
-  dialog.setAttribute("aria-hidden", "true");
-  if (dialog.hidden) {
-    dialog.classList.remove("push-dialog-leaving");
-    return;
-  }
-  dialog.classList.add("push-dialog-leaving");
-  pushDialogHideTimer = window.setTimeout(() => {
-    if (dialog.dataset.pushState === state.kind) dialog.hidden = true;
-  }, PUSH_DIALOG_EXIT_MS);
-}
-
-function showPushDialog(dialog: HTMLElement): void {
-  const shouldEnter = dialog.hidden || dialog.classList.contains("push-dialog-leaving");
-  dialog.hidden = false;
-  dialog.setAttribute("aria-hidden", "false");
-  if (!shouldEnter) return;
-  dialog.classList.add("push-dialog-leaving");
-  pushDialogShowFrame = requestAnimationFrame(() => {
-    dialog.classList.remove("push-dialog-leaving");
-  });
-}
 
 function renderPushState(state: PushState): void {
   const dialog = document.getElementById("push-dialog") as HTMLElement | null;
@@ -5059,11 +5004,10 @@ function renderPushState(state: PushState): void {
   const action = document.getElementById("push-action") as HTMLButtonElement | null;
   if (!dialog || !copy || !notNow || !action) return;
 
-  if (pushDialogHideTimer !== null) window.clearTimeout(pushDialogHideTimer);
-  if (pushDialogShowFrame !== null) cancelAnimationFrame(pushDialogShowFrame);
-  pushDialogHideTimer = null;
-  pushDialogShowFrame = null;
-  dialog.dataset.pushState = state.kind;
+  const hidden = state.kind === "hidden" || state.kind === "checking" || state.kind === "active";
+  // Keep it hidden while its label/actions are rewritten, then expose the
+  // complete alert-dialog state in one synchronous turn (without moving focus).
+  dialog.hidden = true;
   dialog.setAttribute("aria-busy", String(state.kind === "requesting"));
   notNow.hidden = false;
   notNow.disabled = false;
@@ -5071,22 +5015,20 @@ function renderPushState(state: PushState): void {
   action.disabled = false;
   action.textContent = "";
   copy.textContent = "";
-  const hidden = state.kind === "hidden" || state.kind === "checking" || state.kind === "active";
-  if (hidden || state.kind === "requesting") {
-    hidePushDialog(dialog, state);
-    return;
-  }
+  if (hidden) return;
 
-  if (state.kind === "enable") {
+  if (state.kind === "enable" || state.kind === "requesting") {
     copy.textContent = "Enable notifications from your Paratrooper?";
     action.hidden = false;
+    notNow.disabled = state.kind === "requesting";
+    action.disabled = state.kind === "requesting";
     action.textContent = "Enable";
-    showPushDialog(dialog);
+    dialog.hidden = false;
     return;
   }
   if (state.kind === "denied") {
     copy.textContent = "Notifications are off. Re-enable them in iPhone Settings.";
-    showPushDialog(dialog);
+    dialog.hidden = false;
     return;
   }
   // Permission was granted, but browser subscription or server registration
@@ -5094,7 +5036,7 @@ function renderPushState(state: PushState): void {
   copy.textContent = "Notifications couldn’t be enabled.";
   action.hidden = false;
   action.textContent = "Retry";
-  showPushDialog(dialog);
+  dialog.hidden = false;
 }
 
 function pushApisSupported(reg: ServiceWorkerRegistration): boolean {
@@ -5125,22 +5067,7 @@ function startPushNotifications(): void {
       if (typeof body.key !== "string" || !body.key) throw new Error("invalid push key");
       return body.key;
     },
-    getSubscription: async (publicKey) => {
-      const subscription = await reg.pushManager.getSubscription();
-      if (!subscription) return null;
-      const saved = subscription.options.applicationServerKey;
-      const expected = urlBase64ToUint8Array(publicKey);
-      const actual = saved ? new Uint8Array(saved) : null;
-      const matches = !!actual && actual.length === expected.length &&
-        actual.every((byte, index) => byte === expected[index]);
-      if (matches) return subscription;
-
-      // A PushSubscription is permanently bound to the application-server
-      // key used to create it. Reusing one after VAPID keys change makes setup
-      // look successful but the push service rejects every signed send.
-      await subscription.unsubscribe();
-      return null;
-    },
+    getSubscription: () => reg.pushManager.getSubscription(),
     subscribe: (publicKey) =>
       reg.pushManager.subscribe({
         userVisibleOnly: true,

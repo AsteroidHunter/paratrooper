@@ -93,7 +93,6 @@ describe("push state check", () => {
     const h = harness({ permission: "granted", subscription: existing });
     await h.setup.check();
     expect(h.subscribe).not.toHaveBeenCalled();
-    expect(h.getSubscription).toHaveBeenCalledWith("public-key");
     expect(h.registerSubscription).toHaveBeenCalledWith(existing);
     expect(h.setup.state()).toEqual({ kind: "active" });
   });
@@ -210,15 +209,13 @@ describe("the direct user-gesture permission action", () => {
     await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "enable" }));
   });
 
-  it("hides after Do Not Allow instead of revealing a second Paratrooper popup", async () => {
+  it("moves to Settings guidance after Do Not Allow and does not prompt twice", async () => {
     const h = harness({ answer: "denied" });
     await h.setup.check();
     h.setup.action();
-    await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "hidden" }));
+    await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "denied" }));
     h.setup.action();
     expect(h.requestPermission).toHaveBeenCalledTimes(1);
-    await h.setup.check();
-    expect(h.setup.state()).toEqual({ kind: "hidden" });
   });
 
   it("keeps Enable retryable when the browser permission call rejects", async () => {
@@ -367,10 +364,6 @@ describe("centered notification popup wiring", () => {
     expect(PUSH_CSS_RULES).toMatch(/\.push-dialog \{[\s\S]*?inset:\s*0;/);
     expect(PUSH_CSS_RULES).toMatch(/\.push-dialog \{[\s\S]*?place-items:\s*center;/);
     expect(PUSH_CSS_RULES).toContain(".push-dialog[hidden]");
-    expect(PUSH_CSS_RULES).toMatch(/\.push-card \{[\s\S]*?border-radius:\s*30px;/);
-    expect(PUSH_CSS_RULES).toMatch(/\.push-actions button \{[\s\S]*?border-radius:\s*20px;/);
-    expect(PUSH_CSS_RULES).toContain(".push-dialog.push-dialog-leaving");
-    expect(PUSH_CSS_RULES).not.toMatch(/\.push-dialog\.push-dialog-leaving\s*\{[^}]*pointer-events/);
     expect(PUSH_CSS_RULES).not.toMatch(/\.compose\b/);
   });
 
@@ -406,13 +399,13 @@ describe("centered notification popup wiring", () => {
   it("routes Enable directly into the synchronous action boundary", () => {
     const render = sourceBetween("function renderChat()", "async function loadOlder(");
     expect(render).toMatch(
-      /pushAction\.addEventListener\("click", \(\) => \{[\s\S]*?pushNotifications\?\.action\(\);[\s\S]*?beginPushDialogExit\(\);/,
+      /getElementById\("push-action"\)[\s\S]*?addEventListener\("click", \(\) => \{\s*pushNotifications\?\.action\(\);/,
     );
   });
 
   it("routes Not Now only to session dismissal and has no backdrop dismiss handler", () => {
     const render = sourceBetween("function renderChat()", "async function loadOlder(");
-    const at = render.indexOf('pushNotNow.addEventListener("click"');
+    const at = render.indexOf('getElementById("push-not-now")');
     const notNowBinding = render.slice(at, render.indexOf("});", at) + 3);
     expect(notNowBinding).toContain("pushNotifications?.dismiss()");
     expect(notNowBinding).not.toMatch(/requestPermission|subscribe|localStorage|\.action\(/);
@@ -422,15 +415,12 @@ describe("centered notification popup wiring", () => {
     expect(notNowBinding).not.toContain(".focus(");
   });
 
-  it("fades and conceals Paratrooper's popup while Apple's request is in flight", () => {
+  it("disables both visible request actions in flight without relabeling Enable", () => {
     const renderState = sourceBetween("function renderPushState(", "function pushApisSupported(");
-    const hide = sourceBetween("function hidePushDialog(", "function showPushDialog(");
-    const render = sourceBetween("function renderChat()", "async function loadOlder(");
-    expect(renderState).toContain('state.kind === "requesting"');
-    expect(renderState).toContain("hidePushDialog(dialog, state)");
-    expect(hide).toContain('classList.add("push-dialog-leaving")');
-    expect(render).toContain('control.addEventListener("pointerdown", beginPushDialogExit)');
+    expect(renderState).toContain('notNow.disabled = state.kind === "requesting"');
+    expect(renderState).toContain('action.disabled = state.kind === "requesting"');
     expect(renderState).toContain('action.textContent = "Enable"');
+    expect(renderState).not.toContain("Enabling…");
     expect(renderState).not.toContain(".focus(");
   });
 
@@ -458,14 +448,6 @@ describe("centered notification popup wiring", () => {
     expect(start).toContain("...authHeaders()");
     expect(start).not.toContain("private");
   });
-
-  it("drops a browser subscription made with a different VAPID public key", () => {
-    const start = sourceBetween("function startPushNotifications(", "// --- boot");
-    expect(start).toContain("subscription.options.applicationServerKey");
-    expect(start).toContain("actual.every((byte, index) => byte === expected[index])");
-    expect(start).toContain("await subscription.unsubscribe()");
-    expect(start).toMatch(/getSubscription:\s*async \(publicKey\)/);
-  });
 });
 
 type WorkerListener = (event: Record<string, unknown>) => void;
@@ -483,7 +465,6 @@ function serviceWorkerHarness() {
     clients: { matchAll, openWindow, claim: vi.fn(async () => undefined) },
     skipWaiting: vi.fn(),
     location: { origin: "https://example.test" },
-    navigator: { setAppBadge, clearAppBadge },
   };
   runInNewContext(SW_SOURCE, {
     self: workerSelf,

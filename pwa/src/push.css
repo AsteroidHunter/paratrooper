@@ -1,100 +1,57 @@
 /* Fixed overlay: it consumes no flex space, so showing or hiding notification
-   UI cannot resize the thread or move the composer. The card follows the large
-   rounded sheet and inset pill controls of current iOS confirmations. */
+   UI cannot resize the thread or move the composer. No selector here reaches
+   into composer controls or their interaction layers. */
 .push-dialog {
   position: fixed;
   inset: 0;
   z-index: 18;
   display: grid;
   place-items: center;
-  padding: 18px;
-  background: rgba(0, 0, 0, 0.18);
-  opacity: 1;
-  transition: opacity 220ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.24);
 }
 .push-dialog[hidden],
 .push-actions [hidden] {
   display: none;
 }
-.push-dialog.push-dialog-leaving {
-  opacity: 0;
-}
 .push-card {
-  width: min(350px, calc(100vw - 36px));
+  width: min(290px, calc(100vw - 40px));
   overflow: hidden;
-  padding: 26px 18px 18px;
-  border: 1px solid rgba(255, 255, 255, 0.72);
-  border-radius: 30px;
-  background: rgba(246, 246, 248, 0.94);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    0 18px 50px rgba(0, 0, 0, 0.2);
-  backdrop-filter: blur(34px) saturate(180%);
-  -webkit-backdrop-filter: blur(34px) saturate(180%);
+  border-radius: 14px;
+  background: var(--menu-bg);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22);
   color: var(--text);
-  text-align: left;
-  transform: scale(1);
-  transition: transform 220ms cubic-bezier(0.22, 0.61, 0.36, 1);
-}
-.push-dialog.push-dialog-leaving .push-card {
-  transform: scale(0.97);
+  text-align: center;
 }
 .push-copy {
   margin: 0;
-  padding: 0 6px 24px;
-  font-size: 24px;
-  font-weight: 700;
-  line-height: 1.16;
-  letter-spacing: -0.025em;
+  padding: 18px 18px 15px;
+  font-size: 15px;
+  line-height: 1.35;
 }
 .push-actions {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 1fr;
-  gap: 10px;
+  display: flex;
+  border-top: 0.5px solid var(--hairline);
 }
 .push-actions button {
   min-width: 0;
-  min-height: 54px;
-  padding: 10px 12px;
+  min-height: 44px;
+  flex: 1;
+  padding: 9px 12px;
   border: none;
-  border-radius: 20px;
+  background: none;
+  color: var(--sent);
   font: inherit;
-  font-size: 18px;
-  font-weight: 500;
+  font-size: 15px;
   cursor: pointer;
 }
-.push-not-now {
-  background: rgba(118, 118, 128, 0.12);
-  color: var(--sent);
+.push-actions button + button {
+  border-left: 0.5px solid var(--hairline);
 }
 .push-action {
-  background: var(--sent);
-  color: #ffffff;
   font-weight: 600;
 }
 .push-actions button:disabled {
   opacity: 0.55;
   cursor: default;
-}
-
-@media (prefers-color-scheme: dark) {
-  .push-dialog { background: rgba(0, 0, 0, 0.34); }
-  .push-card {
-    border-color: rgba(255, 255, 255, 0.12);
-    background: rgba(44, 44, 46, 0.94);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.16),
-      0 18px 50px rgba(0, 0, 0, 0.48);
-  }
-  .push-not-now {
-    background: rgba(118, 118, 128, 0.32);
-    color: #0a84ff;
-  }
-  .push-action { background: #0a84ff; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .push-dialog,
-  .push-card { transition-duration: 1ms; }
 }

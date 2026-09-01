@@ -21,8 +21,7 @@ export interface PushDependencies<Subscription> {
   permission(): PushPermission;
   requestPermission(): Promise<PushPermission>;
   loadPublicKey(): Promise<string | null>;
-  /** Return only a subscription made with this public key, repairing stale keys upstream. */
-  getSubscription(publicKey: string): Promise<Subscription | null>;
+  getSubscription(): Promise<Subscription | null>;
   subscribe(publicKey: string): Promise<Subscription>;
   registerSubscription(subscription: Subscription): Promise<void>;
   render(state: PushState): void;
@@ -77,7 +76,7 @@ export function createPushSetup<Subscription>(
 
   const ensureSubscription = async (mine: number, key: string): Promise<void> => {
     try {
-      let subscription = await deps.getSubscription(key);
+      let subscription = await deps.getSubscription();
       if (!live(mine)) return;
       if (!subscription) subscription = await deps.subscribe(key);
       if (!live(mine)) return;
@@ -92,15 +91,10 @@ export function createPushSetup<Subscription>(
     permission: PushPermission,
     mine: number,
     key: string,
-    fromNativeRequest = false,
   ): Promise<void> => {
     if (!live(mine)) return;
     if (permission === "denied") {
-      // Apple's Do Not Allow sheet is already a complete answer. Do not reveal
-      // a second Paratrooper dialog underneath it as soon as it closes. A later
-      // app open/check can show the single Settings explanation directly.
-      if (fromNativeRequest) dismissed = true;
-      show(fromNativeRequest ? { kind: "hidden" } : { kind: "denied" }, mine);
+      show({ kind: "denied" }, mine);
       return;
     }
     if (permission === "default") {
@@ -171,7 +165,7 @@ export function createPushSetup<Subscription>(
     }
     show({ kind: "requesting" }, mine);
     void answer.then(
-      (permission) => handlePermission(permission, mine, key, true),
+      (permission) => handlePermission(permission, mine, key),
       () => show({ kind: "enable" }, mine),
     );
   };
