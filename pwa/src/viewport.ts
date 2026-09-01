@@ -220,13 +220,25 @@ export function settleMark(
 // engine re-clamp. The white strip between the last message and the compose bar
 // is that overhang, on screen.
 //
-// No app scroll writer requested it. Every scroll write in this app names
-// itself on the trail and none fired on that frame; the close's own correction
-// pass had already run; and the viewport was not lying, since all three closes
-// of that session were learned from focus with the full height admitted inside
-// 26-45ms. The wrong offset is therefore restored inside WebKit, but that does
-// not prove our close choreography cannot provoke it. One close in the same
-// session did not reproduce, so the page cannot rely on avoiding the trigger.
+// Nothing of ours wrote it. Every scroll write in this app names itself on the
+// trail and none fired on that frame, and the close's own correction pass had
+// already run. What restores the offset is WebKit, at the end of its own close
+// transition, and it restores it without clamping it into the range the new
+// box leaves.
+//
+// What the app CAN arrange is whether that offset is out of range when it
+// lands, and a later trail (2026-09-01, nine failures) says the app was the
+// one putting it out of range. Each of those closes was learned from focus
+// while the viewport still reported the keyboard-sized screen, so the shell
+// grew to full height 6 to 44ms before the phone agreed, and the offset the
+// engine handed back a moment later — the legitimate end of the range as it
+// stood while the keyboard was up — was suddenly 386px past the new one.
+// Closes learned from the viewport were all clean. shell.ts holds the box for
+// that gap now (holdsShellBox), so the restore lands inside the range it was
+// taken from and this correction should have nothing left to take back on that
+// path. It stays because a correction that never fires costs three property
+// reads a frame for six tenths of a second, and because it is the only thing
+// standing between the reader and an offset no gesture will re-clamp.
 //
 // So the app takes it back. Past the end of the range is a position that does
 // not exist, on a scroller nothing else may scroll, and settleBottom lands on
@@ -281,28 +293,6 @@ export function restoreVerdict(
   if (!settled) return "moving"; // a box mid-ease, with its own settle coming
   if (gesture) return "held"; // a gesture owns the scroll, rubber band and all
   return made < MAX_CLOSE_RESTORES ? "fix" : "spent";
-}
-
-// A different WebKit close failure leaves every page-visible number correct:
-// scrollTop already equals the fresh maximum, while the compositor keeps
-// painting the keyboard-era offset. Same-value settles do not make it catch up.
-// Once the close glide is over, a close on which no settle or correction moved
-// the thread gets one changed-value write and an immediate restore in main.ts.
-// This decision is deliberately narrower than near-bottom: a reader anywhere
-// but the exact followed tail, any active gesture, and a range too short to move
-// by a full pixel all stand aside.
-export function closeRedrawTarget(
-  g: BottomGeometry,
-  following: boolean,
-  settled: boolean,
-  moved: boolean,
-  corrected: boolean,
-  gesture: boolean,
-): number | null {
-  if (!following || !settled || moved || corrected || gesture) return null;
-  const bottom = maxScrollTop(g.sh, g.ch);
-  if (bottom < 1 || g.st !== bottom) return null;
-  return bottom - 1;
 }
 
 /**

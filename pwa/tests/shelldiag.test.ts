@@ -635,7 +635,7 @@ describe("wiring: the box records sit at the writes, and change none of them", (
 
   it("the edge flag is read before the toggle that would erase it", () => {
     expect(shell).toMatch(
-      /const atEdge = t\.kb !== appliedKb;[\s\S]{0,400}if \(t\.kb !== appliedKb\) \{\n\s*appliedKb = t\.kb;/,
+      /const atEdge = t\.kb !== appliedKb;[\s\S]{0,1000}if \(t\.kb !== appliedKb\) \{\n\s*appliedKb = t\.kb;/,
     );
   });
 
