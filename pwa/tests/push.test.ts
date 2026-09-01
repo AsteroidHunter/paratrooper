@@ -484,9 +484,10 @@ function serviceWorkerHarness() {
   const clearAppBadge = vi.fn(async () => undefined);
   const matchAll = vi.fn(async () => [] as Array<Record<string, unknown>>);
   const openWindow = vi.fn(async () => undefined);
+  const getNotifications = vi.fn(async () => [] as Array<{ close: () => void }>);
   const workerSelf = {
     addEventListener: (type: string, listener: WorkerListener) => listeners.set(type, listener),
-    registration: { showNotification },
+    registration: { showNotification, getNotifications },
     clients: { matchAll, openWindow, claim: vi.fn(async () => undefined) },
     skipWaiting: vi.fn(),
     location: { origin: "https://example.test" },
@@ -510,6 +511,7 @@ function serviceWorkerHarness() {
     clearAppBadge,
     matchAll,
     openWindow,
+    getNotifications,
     dispatch,
   };
 }
@@ -624,6 +626,53 @@ describe("service-worker notification behavior", () => {
     await h.dispatch("push", { data: { text: () => "after open" } });
     expect(h.clearAppBadge).toHaveBeenCalledTimes(1);
     expect(h.setAppBadge.mock.calls.map(([count]) => count)).toEqual([1, 1]);
+  });
+
+  it("closes every banner still standing when the page says the thread is on screen", async () => {
+    const h = serviceWorkerHarness();
+    const closes = [vi.fn(), vi.fn(), vi.fn()];
+    h.getNotifications.mockResolvedValue(closes.map((close) => ({ close })));
+    h.listeners.get("message")?.({ data: "badge-clear" });
+
+    await vi.waitFor(() => expect(closes[2]).toHaveBeenCalledTimes(1));
+    expect(h.getNotifications).toHaveBeenCalledTimes(1);
+    for (const close of closes) expect(close).toHaveBeenCalledTimes(1);
+    expect(h.clearAppBadge).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks for the whole list, unfiltered, so no banner is left behind by a tag", async () => {
+    const h = serviceWorkerHarness();
+    h.listeners.get("message")?.({ data: "badge-clear" });
+
+    await vi.waitFor(() => expect(h.getNotifications).toHaveBeenCalledTimes(1));
+    expect(h.getNotifications).toHaveBeenCalledWith();
+  });
+
+  it("clears the badge as usual when there is nothing left to close", async () => {
+    const h = serviceWorkerHarness();
+    h.getNotifications.mockResolvedValue([]);
+    h.listeners.get("message")?.({ data: "badge-clear" });
+
+    await vi.waitFor(() => expect(h.getNotifications).toHaveBeenCalledTimes(1));
+    expect(h.clearAppBadge).toHaveBeenCalledTimes(1);
+  });
+
+  it("shrugs off a refused notification lookup", async () => {
+    const h = serviceWorkerHarness();
+    h.getNotifications.mockRejectedValue(new Error("not supported here"));
+
+    expect(() => h.listeners.get("message")?.({ data: "badge-clear" })).not.toThrow();
+    await vi.waitFor(() => expect(h.getNotifications).toHaveBeenCalledTimes(1));
+    expect(h.clearAppBadge).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves notifications alone for messages that are not badge-clear", async () => {
+    const h = serviceWorkerHarness();
+    h.listeners.get("message")?.({ data: "something-else" });
+
+    await Promise.resolve();
+    expect(h.getNotifications).not.toHaveBeenCalled();
+    expect(h.clearAppBadge).not.toHaveBeenCalled();
   });
 
   it("closes and focuses an existing Paratrooper window on notification tap", async () => {

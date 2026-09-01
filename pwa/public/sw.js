@@ -90,6 +90,20 @@ self.addEventListener("message", (event) => {
   if (event.data === "badge-clear") {
     unread = 0;
     if ("clearAppBadge" in navigator) navigator.clearAppBadge().catch(() => {});
+    // Same moment, same reasoning as the badge: the thread is on screen, so the
+    // banners nobody tapped are stale. iOS parks them in Notification Center and
+    // on the lock screen until something closes them, and closing is what
+    // getNotifications + close() do — no tag filter, which would only narrow the
+    // list. Best-effort like the badge calls; WebKit refuses to close a
+    // notification younger than 30s, so a just-arrived one simply stays.
+    if ("getNotifications" in self.registration) {
+      self.registration
+        .getNotifications()
+        .then((notifications) => {
+          for (const notification of notifications) notification.close();
+        })
+        .catch(() => {});
+    }
   }
 });
 
