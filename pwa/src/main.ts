@@ -144,7 +144,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.74"; // opening the app clears the banners you never tapped
+const APP_VERSION = "0.3.76"; // compose pill sits in a shadow well and lights under the finger
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -294,18 +294,25 @@ interface ServerMsg {
 const app = document.getElementById("app")!;
 initShell(app); // keyboard/focus/picker state converges through shell.ts
 
-// editor hold-brighten: while a finger rests on the pill, a light blooms out
-// from under the fingertip and spreads through the glass, then fades back on
-// release (styles.css .field / .field.glow). This hook contributes the one
-// thing CSS cannot know — WHERE the finger landed — as --tx/--ty on the
-// FIELD, an offset inside its own box. Nothing is written to the textarea and
-// no listener is bound to it: the light is a background layer on its parent,
-// which paints beneath it, so Safari's native text, caret and selection are
-// untouched. The two writes and the class land in one style recalculation, so
-// the bloom never plays a frame at the previous touch point. Skipped during
-// the settling window — a held tap must not brighten a switched-off box.
-// Module-level with live lookups, like the menu-close below, so re-renders
-// can't stack listeners.
+// editor hold-brighten: while a finger rests on the pill, a soft white light
+// comes up under the fingertip and fades back on release (styles.css .field /
+// .field.glow). This hook contributes the one thing CSS cannot know — WHERE
+// the finger landed — as --tx/--ty on the FIELD, an offset inside its own box.
+// Nothing is written to the textarea and no listener is bound to it: the light
+// is a background layer on its parent, which paints beneath it, so Safari's
+// native text, caret and selection are untouched. The two writes and the class
+// land in one style recalculation, so the light never plays a frame at the
+// previous touch point.
+//   The offsets come straight off the event. offsetX/offsetY are measured from
+// the TARGET's padding edge, and the textarea is the field's only in-flow child
+// inside a flex box with no padding and no border, so its padding edge IS the
+// field's box: the numbers need no conversion and no measurement. That deletes
+// the getBoundingClientRect() this hook used to run — a synchronous layout
+// flush on the touch-start path, ahead of the engine's own tap handling, right
+// next to a caret placement, is the last thing this composer needs.
+// Skipped during the settling window — a held tap must not brighten a
+// switched-off box. Module-level with live lookups, like the menu-close below,
+// so re-renders can't stack listeners.
 document.addEventListener(
   "pointerdown",
   (e) => {
@@ -313,9 +320,8 @@ document.addEventListener(
     if (t instanceof HTMLElement && t.id === "text" && !app.classList.contains("settling")) {
       const field = t.parentElement;
       if (!field) return;
-      const box = field.getBoundingClientRect();
-      field.style.setProperty("--tx", `${Math.round(e.clientX - box.left)}px`);
-      field.style.setProperty("--ty", `${Math.round(e.clientY - box.top)}px`);
+      field.style.setProperty("--tx", `${Math.round(e.offsetX)}px`);
+      field.style.setProperty("--ty", `${Math.round(e.offsetY)}px`);
       field.classList.add("glow");
     }
   },
