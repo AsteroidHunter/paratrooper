@@ -287,6 +287,65 @@ def test_relay_discards_a_done_that_lost_the_race(tmp_path, monkeypatch):
     _run(scenario())
 
 
+def test_concurrent_terminal_pushes_keep_each_thread_and_job_payload_isolated(
+    tmp_path, monkeypatch
+):
+    """Overlapping relay tasks must build each push from their own result,
+    never from a process-global or store-level "latest reply" lookup."""
+    from paratrooper.web import push
+    from paratrooper.web.app import _relay_result
+    from paratrooper.web.models import ResultMessage
+
+    class Coordinator:
+        def __init__(self):
+            self.finished = []
+
+        def was_superseded(self, _thread_id, _job_id):
+            return False
+
+        async def job_finished(self, thread_id):
+            self.finished.append(thread_id)
+
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "private")
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:push@example.test")
+    sent = []
+
+    def record_send(_subscription, payload, _cfg):
+        sent.append(payload)
+        return True
+
+    monkeypatch.setattr(push, "send_push", record_send)
+
+    async def scenario():
+        coord = Coordinator()
+        state = _relay_state(tmp_path, coord)
+        state.store.add_subscription("https://push.example/device", '{"endpoint":"x"}')
+        alpha = "alpha reply " + "a" * 230
+        beta = "beta failure for this job"
+        await asyncio.gather(
+            _relay_result(
+                state, "thread-alpha",
+                ResultMessage(job_id="job-alpha", kind="done", payload=alpha),
+            ),
+            _relay_result(
+                state, "thread-beta",
+                ResultMessage(job_id="job-beta", kind="error", payload=beta),
+            ),
+        )
+
+        assert sorted(sent) == sorted([
+            push.notification_text("done", alpha),
+            push.notification_text("error", beta),
+        ])
+        [(_, alpha_event)] = state.store.messages("thread-alpha")
+        [(_, beta_event)] = state.store.messages("thread-beta")
+        assert alpha_event.payload == alpha and alpha_event.kind == "done"
+        assert beta_event.payload == beta and beta_event.kind == "error"
+        assert sorted(coord.finished) == ["thread-alpha", "thread-beta"]
+
+    _run(scenario())
+
+
 # --- uploads (4.3) ------------------------------------------------------------
 
 def test_save_upload_key_and_traversal(tmp_path):
@@ -392,6 +451,49 @@ def test_push_config_off_when_unset(monkeypatch):
     # screenshots buzz too (user decision 20260708, overturning the plan-era
     # behavior-preservation): a board preview is worth a notification on its own
     assert push.notification_text("screenshot")
+
+
+def test_terminal_push_uses_user_facing_message_excerpt():
+    from paratrooper.web import push
+
+    assert push.notification_text("done", "  fading\n because\tthis worked  ") == (
+        "fading because this worked"
+    )
+    assert push.notification_text("error", "  The update could not be completed.  ") == (
+        "The update could not be completed."
+    )
+
+
+def test_notification_excerpt_boundary_and_ellipsis_spacing():
+    from paratrooper.web import push
+
+    exact = "x" * push.NOTIFICATION_EXCERPT_CHARS
+    assert push.notification_text("done", exact) == exact  # no ellipsis at the boundary
+    assert push.notification_text("done", exact + "tail") == exact + " ..."
+
+    # The cut lands on normalized whitespace: rstrip + one explicit normal
+    # blank must produce exactly one space before the three dots.
+    spaced = "x" * (push.NOTIFICATION_EXCERPT_CHARS - 1) + "    tail"
+    excerpt = push.notification_text("done", spaced)
+    assert excerpt == "x" * (push.NOTIFICATION_EXCERPT_CHARS - 1) + " ..."
+    assert excerpt.endswith(" ...") and not excerpt.endswith("  ...")
+
+
+def test_notification_text_fallbacks_and_special_kinds_are_preserved():
+    from paratrooper.web import push
+
+    assert push.notification_text("done", None) == "Paratrooper finished your update."
+    assert push.notification_text("done", " \n\t ") == "Paratrooper finished your update."
+    assert push.notification_text("error", {"detail": "not user-facing text"}) == (
+        "Paratrooper hit a problem with your update."
+    )
+    assert push.notification_text("screenshot", "ignored") == (
+        "Paratrooper sent a board preview 📸"
+    )
+    assert push.notification_text("pr", "ignored") == (
+        "Your pin is ready — tap to review and publish 🪂"
+    )
+    assert push.notification_text("log", "ignored") is None
 
 
 def test_subscription_store(tmp_path):

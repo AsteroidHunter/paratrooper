@@ -1,0 +1,42 @@
+/* Notification opt-in: one quiet, nonblocking row immediately above the
+   composer. It participates in the shell's flex layout, so the composer keeps
+   its existing geometry and interaction layers; only the thread gives up this
+   small amount of height while guidance is needed. */
+.push-banner {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 12px 0;
+  padding: 5px 8px 5px 10px;
+  border-radius: 11px;
+  background: var(--received);
+  color: var(--received-text);
+  font-size: 12px;
+  line-height: 1.25;
+}
+.push-banner[hidden],
+.push-action[hidden] {
+  display: none;
+}
+.push-copy {
+  flex: 1;
+  min-width: 0;
+}
+.push-action {
+  flex: none;
+  padding: 3px 5px;
+  border: none;
+  background: none;
+  color: var(--sent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.push-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.push-banner.denied {
+  color: var(--muted);
+}

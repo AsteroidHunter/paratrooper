@@ -338,10 +338,10 @@ async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
             state.sockets.get(thread_id, set()).discard(ws)
 
 
-async def _maybe_push(state: AppState, kind: str) -> None:
+async def _maybe_push(state: AppState, kind: str, payload: object = None) -> None:
     """Wake a closed PWA on a notifying result (no-op if VAPID isn't configured)."""
     cfg = push.config()
-    text = push.notification_text(kind)
+    text = push.notification_text(kind, payload)
     if cfg is None or text is None:
         return
 
@@ -381,7 +381,9 @@ async def _relay_result(state: AppState, thread_id: str, result: ResultMessage) 
     # broadcast the STORED event (+seq so clients advance their
     # catch-up cursor on live pushes) — replay re-sends this frame
     await _send_to_sockets(state, thread_id, {"seq": seq, **event.model_dump()})
-    await _maybe_push(state, result.kind)
+    # Pass this result's payload directly: no shared "latest reply" lookup that
+    # could cross threads/jobs when relay tasks overlap.
+    await _maybe_push(state, result.kind, result.payload)
     if policy.terminal:
         # job_finished first: it re-arms the timer for any buffered
         # batch, so has_pending() correctly blocks the linger then

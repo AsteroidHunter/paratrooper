@@ -1,6 +1,7 @@
 // Paratrooper PWA — message the pinboard agent. Vanilla TS + DOM (lightest build).
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
+import "./push.css";
 import { BLUR_EDGE, decodeBlurhash } from "./blurhash";
 import { createBootGate } from "./bootgate";
 import { caretCountsAsComposing } from "./caret";
@@ -47,6 +48,8 @@ import {
 import type { Dims } from "./photofit";
 import { WAIT_CLASS, createPhotoQueue, nearMargin } from "./photolazy";
 import { receiptFor } from "./receipts";
+import { createPushSetup } from "./push";
+import type { PushSetup, PushState } from "./push";
 import {
   ENTER_RISE_PX,
   FLIGHT_EASE,
@@ -141,7 +144,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.66"; // move the composer shine behind native text selection
+const APP_VERSION = "0.3.67"; // opt-in notification banner + reply excerpts
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -455,6 +458,10 @@ function renderChat(): void {
       <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
     </main>
     <div id="pending" class="pending"></div>
+    <aside id="push-banner" class="push-banner" aria-live="polite" hidden>
+      <span id="push-copy" class="push-copy"></span>
+      <button type="button" id="push-action" class="push-action" hidden></button>
+    </aside>
     <form id="compose" class="compose">
       <button type="button" id="attach" class="attach" title="Attach">＋</button>
       <input id="files" type="file" accept="image/*" multiple
@@ -470,6 +477,13 @@ function renderChat(): void {
   document.getElementById("settings")!.addEventListener("click", () => {
     document.getElementById("menu")!.classList.toggle("open");
   });
+  // action() reaches Notification.requestPermission synchronously when the
+  // current state is "enable". Keep this listener synchronous and empty apart
+  // from that call so iOS credits the native prompt to this exact Enable tap.
+  document.getElementById("push-action")!.addEventListener("click", () => {
+    pushNotifications?.action();
+  });
+  startPushNotifications();
   // Log Out is gated behind an iOS-style confirm so a stray tap can't log out:
   // No (safe, bold blue) dismisses; Yes (destructive red) actually logs out.
   const confirmEl = document.getElementById("confirm")!;
@@ -484,6 +498,8 @@ function renderChat(): void {
     confirmEl.classList.remove("open");
   });
   document.getElementById("confirm-yes")!.addEventListener("click", () => {
+    pushNotifications?.stop();
+    pushNotifications = null;
     localStorage.removeItem(TOKEN_KEY);
     token = "";
     lastSeq = 0; // full replay on next login
@@ -4958,7 +4974,7 @@ async function publish(pr: string, btn: HTMLButtonElement): Promise<void> {
   }
 }
 
-// --- web push (Phase 6): subscribe, re-register on every reopen -------------
+// --- web push: inline opt-in banner, silent repair on later opens -----------
 
 function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
   const padding = "=".repeat((4 - (base64.length % 4)) % 4);
@@ -4969,31 +4985,87 @@ function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-async function setupPush(reg: ServiceWorkerRegistration): Promise<void> {
-  if (!("PushManager" in window) || !token) return;
-  let key: string | null;
-  try {
-    const r = await fetch("/api/push/key", { headers: authHeaders() });
-    if (!r.ok) return;
-    key = (await r.json()).key;
-  } catch {
+let pushRegistration: ServiceWorkerRegistration | null = null;
+let pushNotifications: PushSetup | null = null;
+
+function renderPushState(state: PushState): void {
+  const banner = document.getElementById("push-banner") as HTMLElement | null;
+  const copy = document.getElementById("push-copy") as HTMLElement | null;
+  const action = document.getElementById("push-action") as HTMLButtonElement | null;
+  if (!banner || !copy || !action) return;
+
+  const hidden = state.kind === "hidden" || state.kind === "checking" || state.kind === "active";
+  banner.hidden = hidden;
+  banner.classList.toggle("denied", state.kind === "denied");
+  action.hidden = true;
+  action.disabled = false;
+  action.textContent = "";
+  copy.textContent = "";
+  if (hidden) return;
+
+  if (state.kind === "enable" || state.kind === "requesting") {
+    copy.textContent = "Enable notifications from your Paratrooper?";
+    action.hidden = false;
+    action.disabled = state.kind === "requesting";
+    action.textContent = state.kind === "requesting" ? "Enabling…" : "Enable";
     return;
   }
-  if (!key) return; // push not configured server-side
-  let sub = await reg.pushManager.getSubscription();
-  if (!sub) {
-    if (Notification.permission === "denied") return;
-    if ((await Notification.requestPermission()) !== "granted") return;
-    sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(key),
-    });
+  if (state.kind === "denied") {
+    copy.textContent = "Notifications are off. Re-enable them in iPhone Settings.";
+    return;
   }
-  await fetch("/api/push/subscribe", {
-    method: "POST",
-    headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify(sub),
+  // Permission was granted, but browser subscription or server registration
+  // failed. This retries setup without reopening the native permission prompt.
+  copy.textContent = "Notifications couldn’t be enabled.";
+  action.hidden = false;
+  action.textContent = "Retry";
+}
+
+function pushApisSupported(reg: ServiceWorkerRegistration): boolean {
+  return (
+    "Notification" in window &&
+    "PushManager" in window &&
+    typeof Notification.requestPermission === "function" &&
+    !!reg.pushManager
+  );
+}
+
+function startPushNotifications(): void {
+  pushNotifications?.stop();
+  pushNotifications = null;
+  renderPushState({ kind: "hidden" });
+  const reg = pushRegistration;
+  if (!reg || !token) return;
+
+  pushNotifications = createPushSetup<PushSubscription>({
+    supported: () => pushApisSupported(reg),
+    permission: () => Notification.permission,
+    requestPermission: () => Notification.requestPermission(),
+    loadPublicKey: async () => {
+      const response = await fetch("/api/push/key", { headers: authHeaders() });
+      if (!response.ok) throw new Error(`push key: ${response.status}`);
+      const body = (await response.json()) as { key?: unknown };
+      if (body.key === null) return null;
+      if (typeof body.key !== "string" || !body.key) throw new Error("invalid push key");
+      return body.key;
+    },
+    getSubscription: () => reg.pushManager.getSubscription(),
+    subscribe: (publicKey) =>
+      reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      }),
+    registerSubscription: async (subscription) => {
+      const response = await fetch("/api/push/subscribe", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify(subscription),
+      });
+      if (!response.ok) throw new Error(`push subscribe: ${response.status}`);
+    },
+    render: renderPushState,
   });
+  void pushNotifications.check();
 }
 
 // --- boot --------------------------------------------------------------------
@@ -5004,7 +5076,10 @@ function clearBadge(): void {
   navigator.serviceWorker?.controller?.postMessage("badge-clear");
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") clearBadge();
+  if (document.visibilityState === "visible") {
+    clearBadge();
+    void pushNotifications?.check();
+  }
   else cacheWrites.flush(); // hidden: the pending snapshot lands before iOS can freeze the page
 });
 clearBadge();
@@ -5012,8 +5087,8 @@ clearBadge();
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {
     try {
-      const reg = await navigator.serviceWorker.register("/sw.js");
-      await setupPush(reg);
+      pushRegistration = await navigator.serviceWorker.register("/sw.js");
+      startPushNotifications();
     } catch {
       /* push/SW are best-effort */
     }

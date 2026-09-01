@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 from .models import EVENT_POLICY
 
 logger = logging.getLogger(__name__)
+
+NOTIFICATION_EXCERPT_CHARS = 200
 
 
 @dataclass
@@ -58,7 +61,34 @@ def send_push(subscription: dict, payload: str, cfg: VapidConfig) -> bool:
         return True
 
 
-def notification_text(kind: str) -> str | None:
-    """Short push body per the kind's policy; None for non-notifying kinds."""
+def _message_excerpt(payload: object) -> str | None:
+    """A compact push-safe projection of a user-facing terminal message.
+
+    Pushes are a preview, not a second copy of the conversation: normalize
+    display whitespace and retain roughly the first 200 characters. The four
+    suffix characters are added only when content remains, with exactly one
+    ordinary space before the ellipsis.
+    """
+    if not isinstance(payload, str):
+        return None
+    text = re.sub(r"\s+", " ", payload).strip()
+    if not text:
+        return None
+    if len(text) <= NOTIFICATION_EXCERPT_CHARS:
+        return text
+    return f"{text[:NOTIFICATION_EXCERPT_CHARS].rstrip()} ..."
+
+
+def notification_text(kind: str, payload: object = None) -> str | None:
+    """Push body for one result; None for kinds that do not notify.
+
+    The terminal result carries its own job's user-facing reply/error into this
+    call, so concurrent runs never consult shared "last reply" state. Special
+    screenshot and PR wording remains policy-owned.
+    """
     policy = EVENT_POLICY.get(kind)
-    return policy.push_text if policy else None
+    if policy is None or policy.push_text is None:
+        return None
+    if kind in {"done", "error"}:
+        return _message_excerpt(payload) or policy.push_text
+    return policy.push_text
