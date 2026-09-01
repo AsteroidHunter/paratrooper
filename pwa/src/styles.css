@@ -656,8 +656,8 @@ html, body {
 }
 /* Hold-brighten: ONE flat veil revealed by ONE opacity fade (the only
    animated property — composite-only, so the text/caret layer never repaints;
-   ::before paints above the material, below the letters). While a finger
-   rests on the pill the whole face brightens EVENLY: a uniform white-ish
+   ::before is stack level 0 and the native control is stack level 1). While a
+   finger rests on the pill the whole face brightens EVENLY: a uniform white-ish
    veil, no gradient, no shadow, nothing positional — nothing that suggests
    a light source or the pill growing/lifting. (Replaced the v0.1.51
    three-channel glow — touch-point spot + rim flare + under-shadow — whose
@@ -673,6 +673,7 @@ html, body {
 .field::before {
   content: "";
   position: absolute;
+  z-index: 0; /* above the field material, below the textarea's native selection */
   inset: 0;
   border-radius: 18px;
   background: var(--pill-veil); /* one even color across the face */
@@ -685,6 +686,10 @@ html, body {
   transition: opacity 0.25s ease-out; /* touch: eases on */
 }
 .compose textarea {
+  position: relative;
+  /* A textarea's glyphs, caret and iOS-native selection paint atomically. Keep
+     that whole foreground above the fading veil instead of washing it out. */
+  z-index: 1;
   flex: 1;
   resize: none;
   overflow-y: auto;
@@ -840,6 +845,7 @@ html, body {
    bottom edge as the field grows, exactly like iMessage's. */
 .compose .send {
   position: absolute;
+  z-index: 1; /* share the foreground plane; its later tree order keeps it tappable */
   right: 5px;
   bottom: 5px;
   width: 28px;

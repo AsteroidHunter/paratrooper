@@ -141,7 +141,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.63"; // redraw a stale Safari tail after a no-move keyboard close
+const APP_VERSION = "0.3.64"; // keep native composer selection above the hold-brighten veil
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -293,9 +293,10 @@ initShell(app); // keyboard/focus/picker state converges through shell.ts
 
 // editor hold-brighten: while a finger rests on the pill its face brightens
 // evenly (one flat veil, styles.css .field::before — overlay opacity only,
-// nothing positional) and fades back on release. Skipped during the settling
-// window — a held tap must not brighten a switched-off box. Module-level with
-// live lookups, like the menu-close below, so re-renders can't stack listeners.
+// stacked below the textarea's native selection) and fades back on release.
+// Skipped during the settling window — a held tap must not brighten a
+// switched-off box. Module-level with live lookups, like the menu-close below,
+// so re-renders can't stack listeners.
 document.addEventListener(
   "pointerdown",
   (e) => {
