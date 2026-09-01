@@ -18,6 +18,7 @@ from .models import EVENT_POLICY
 logger = logging.getLogger(__name__)
 
 NOTIFICATION_EXCERPT_CHARS = 200
+PUSH_TIMEOUT_SECONDS = 10
 
 
 @dataclass
@@ -46,11 +47,16 @@ def send_push(subscription: dict, payload: str, cfg: VapidConfig) -> bool:
     from pywebpush import WebPushException, webpush
 
     try:
-        webpush(
+        response = webpush(
             subscription_info=subscription,
             data=payload,
             vapid_private_key=cfg.private_key,
             vapid_claims={"sub": cfg.subject},  # fresh each call (pywebpush mutates it)
+            timeout=PUSH_TIMEOUT_SECONDS,
+        )
+        logger.info(
+            "web push accepted by provider (status %s)",
+            getattr(response, "status_code", "unknown"),
         )
         return True
     except WebPushException as exc:
@@ -58,6 +64,12 @@ def send_push(subscription: dict, payload: str, cfg: VapidConfig) -> bool:
         if status in (404, 410):
             return False  # expired/unsubscribed — drop it
         logger.warning("web push failed (status %s): %s", status, exc)
+        return True
+    except Exception as exc:
+        # Network timeouts and local encryption/key errors are not guaranteed
+        # to be WebPushException instances. Push is best-effort: retain the
+        # subscription for a later retry and never let it kill the relay.
+        logger.warning("web push failed without provider response (%s)", type(exc).__name__)
         return True
 
 

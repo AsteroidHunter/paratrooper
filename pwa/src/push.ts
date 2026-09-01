@@ -91,10 +91,15 @@ export function createPushSetup<Subscription>(
     permission: PushPermission,
     mine: number,
     key: string,
+    fromNativeRequest = false,
   ): Promise<void> => {
     if (!live(mine)) return;
     if (permission === "denied") {
-      show({ kind: "denied" }, mine);
+      // Apple's Do Not Allow sheet is already a complete answer. Do not reveal
+      // a second Paratrooper dialog underneath it as soon as it closes. A later
+      // app open/check can show the single Settings explanation directly.
+      if (fromNativeRequest) dismissed = true;
+      show(fromNativeRequest ? { kind: "hidden" } : { kind: "denied" }, mine);
       return;
     }
     if (permission === "default") {
@@ -165,7 +170,7 @@ export function createPushSetup<Subscription>(
     }
     show({ kind: "requesting" }, mine);
     void answer.then(
-      (permission) => handlePermission(permission, mine, key),
+      (permission) => handlePermission(permission, mine, key, true),
       () => show({ kind: "enable" }, mine),
     );
   };

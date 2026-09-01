@@ -4,6 +4,7 @@ publish parsing, and the FastAPI routes (with injected state, no Redis)."""
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -293,7 +294,7 @@ def test_concurrent_terminal_pushes_keep_each_thread_and_job_payload_isolated(
     """Overlapping relay tasks must build each push from their own result,
     never from a process-global or store-level "latest reply" lookup."""
     from paratrooper.web import push
-    from paratrooper.web.app import _relay_result
+    from paratrooper.web.app import _relay_result, _settle_push_tasks
     from paratrooper.web.models import ResultMessage
 
     class Coordinator:
@@ -332,6 +333,7 @@ def test_concurrent_terminal_pushes_keep_each_thread_and_job_payload_isolated(
                 ResultMessage(job_id="job-beta", kind="error", payload=beta),
             ),
         )
+        await _settle_push_tasks(state)
 
         assert sorted(sent) == sorted([
             push.notification_text("done", alpha),
@@ -342,6 +344,284 @@ def test_concurrent_terminal_pushes_keep_each_thread_and_job_payload_isolated(
         assert alpha_event.payload == alpha and alpha_event.kind == "done"
         assert beta_event.payload == beta and beta_event.kind == "error"
         assert sorted(coord.finished) == ["thread-alpha", "thread-beta"]
+
+    _run(scenario())
+
+
+def test_terminal_bookkeeping_and_linger_start_before_push_finishes(tmp_path, monkeypatch):
+    """A slow notification provider must not hold worker shutdown bookkeeping hostage."""
+    from paratrooper.web import push
+    from paratrooper.web.app import _cancel_linger, _relay_result, _settle_push_tasks
+    from paratrooper.web.models import ResultMessage
+
+    class Coordinator:
+        finished = False
+
+        def was_superseded(self, _thread_id, _job_id):
+            return False
+
+        async def job_finished(self, _thread_id):
+            self.finished = True
+
+        def has_pending(self):
+            return not self.finished
+
+    class Queue:
+        async def pending_jobs(self):
+            return 0
+
+    class Render:
+        async def suspend_worker(self):
+            return True
+
+    push_started = threading.Event()
+    release_push = threading.Event()
+
+    def blocked_send(_subscription, _payload, _cfg):
+        push_started.set()
+        assert release_push.wait(timeout=1)
+        return True
+
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "private")
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:push@example.test")
+    monkeypatch.setattr(push, "send_push", blocked_send)
+
+    async def scenario():
+        coord = Coordinator()
+        state = AppState(
+            config=None,
+            store=ThreadStore(tmp_path / "order.sqlite"),
+            queue=Queue(),
+            coordinator=coord,
+            inbox=DiskInbox(tmp_path / "ib-order"),
+            render=Render(),
+            linger_s=60,
+        )
+        state.store.add_subscription("https://push.example/device", '{"endpoint":"x"}')
+        relay = asyncio.create_task(_relay_result(
+            state,
+            "default",
+            ResultMessage(job_id="job", kind="done", payload="finished"),
+        ))
+        try:
+            for _ in range(100):
+                if push_started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert push_started.is_set()
+            assert coord.finished
+            assert state.linger_task is not None and not state.linger_task.done()
+        finally:
+            release_push.set()
+            await relay
+            await _settle_push_tasks(state)
+            _cancel_linger(state)
+            await asyncio.sleep(0)
+
+    _run(scenario())
+
+
+def test_slow_push_does_not_block_the_next_threads_terminal(tmp_path, monkeypatch):
+    """One provider stall must not hold the sole Redis result relay."""
+    from paratrooper.web import push
+    from paratrooper.web.app import _relay_result, _settle_push_tasks
+    from paratrooper.web.models import ResultMessage
+
+    class Coordinator:
+        def __init__(self):
+            self.finished = []
+
+        def was_superseded(self, _thread_id, _job_id):
+            return False
+
+        async def job_finished(self, thread_id):
+            self.finished.append(thread_id)
+
+    push_started = threading.Event()
+    release_push = threading.Event()
+
+    def send(_subscription, payload, _cfg):
+        if payload == "slow reply":
+            push_started.set()
+            assert release_push.wait(timeout=1)
+        return True
+
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "private")
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:push@example.test")
+    monkeypatch.setattr(push, "send_push", send)
+
+    async def scenario():
+        coord = Coordinator()
+        state = _relay_state(tmp_path, coord)
+        state.store.add_subscription("https://push.example/device", '{"endpoint":"x"}')
+        first = asyncio.create_task(_relay_result(
+            state,
+            "alpha",
+            ResultMessage(job_id="job-alpha", kind="done", payload="slow reply"),
+        ))
+        try:
+            for _ in range(100):
+                if push_started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert push_started.is_set()
+            assert first.done()
+            await first
+            await _relay_result(
+                state,
+                "beta",
+                ResultMessage(job_id="job-beta", kind="done", payload="fast reply"),
+            )
+            assert coord.finished == ["alpha", "beta"]
+        finally:
+            release_push.set()
+            await _settle_push_tasks(state)
+
+    _run(scenario())
+
+
+def test_push_fanout_starts_subscriptions_in_parallel(tmp_path, monkeypatch):
+    from paratrooper.web import push
+    from paratrooper.web.app import _maybe_push
+
+    started = []
+    lock = threading.Lock()
+    all_started = threading.Event()
+    release = threading.Event()
+
+    def send(subscription, _payload, _cfg):
+        with lock:
+            started.append(subscription["endpoint"])
+            if len(started) == 2:
+                all_started.set()
+        assert release.wait(timeout=1)
+        return True
+
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "private")
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:push@example.test")
+    monkeypatch.setattr(push, "send_push", send)
+
+    async def scenario():
+        state = _relay_state(tmp_path, object())
+        state.store.add_subscription("one", '{"endpoint":"one"}')
+        state.store.add_subscription("two", '{"endpoint":"two"}')
+        task = asyncio.create_task(_maybe_push(state, "done", "reply"))
+        try:
+            for _ in range(100):
+                if all_started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert all_started.is_set()
+            assert sorted(started) == ["one", "two"]
+        finally:
+            release.set()
+            await task
+
+    _run(scenario())
+
+
+def test_redis_idle_check_failure_does_not_skip_push(tmp_path, monkeypatch):
+    from redis import exceptions as redis_exc
+
+    from paratrooper.web import push
+    from paratrooper.web.app import _relay_result, _settle_push_tasks
+    from paratrooper.web.models import ResultMessage
+
+    class Coordinator:
+        def was_superseded(self, _thread_id, _job_id):
+            return False
+
+        async def job_finished(self, _thread_id):
+            pass
+
+        def has_pending(self):
+            return False
+
+    class BrokenQueue:
+        async def pending_jobs(self):
+            raise redis_exc.ConnectionError("redis unavailable")
+
+    class Render:
+        async def suspend_worker(self):
+            return True
+
+    sent = []
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "private")
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:push@example.test")
+    monkeypatch.setattr(
+        push,
+        "send_push",
+        lambda _subscription, payload, _cfg: sent.append(payload) or True,
+    )
+
+    async def scenario():
+        state = AppState(
+            config=None,
+            store=ThreadStore(tmp_path / "redis-push.sqlite"),
+            queue=BrokenQueue(),
+            coordinator=Coordinator(),
+            inbox=DiskInbox(tmp_path / "ib-redis-push"),
+            render=Render(),
+        )
+        state.store.add_subscription("https://push.example/device", '{"endpoint":"x"}')
+        with pytest.raises(redis_exc.ConnectionError):
+            await _relay_result(
+                state,
+                "default",
+                ResultMessage(job_id="job", kind="done", payload="still notify"),
+            )
+        await _settle_push_tasks(state)
+        assert sent == ["still notify"]
+
+    _run(scenario())
+
+
+def test_cancelling_push_cannot_touch_store_after_close(tmp_path, monkeypatch):
+    from paratrooper.web import push
+    from paratrooper.web.app import _schedule_push, _settle_push_tasks
+
+    push_started = threading.Event()
+    release_push = threading.Event()
+    push_finished = threading.Event()
+    post_close_removals = []
+
+    def expired(_subscription, _payload, _cfg):
+        push_started.set()
+        assert release_push.wait(timeout=1)
+        push_finished.set()
+        return False
+
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "private")
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:push@example.test")
+    monkeypatch.setattr(push, "send_push", expired)
+
+    async def scenario():
+        state = _relay_state(tmp_path, object())
+        state.store.add_subscription("https://push.example/device", '{"endpoint":"x"}')
+        closed = False
+        original_remove = state.store.remove_subscription
+
+        def track_remove(endpoint):
+            if closed:
+                post_close_removals.append(endpoint)
+            else:
+                original_remove(endpoint)
+
+        monkeypatch.setattr(state.store, "remove_subscription", track_remove)
+        _schedule_push(state, "done", "reply")
+        for _ in range(100):
+            if push_started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert push_started.is_set()
+        await _settle_push_tasks(state, cancel=True)
+        assert state.push_tasks == set()
+        closed = True
+        state.store.close()
+        release_push.set()
+        assert await asyncio.to_thread(push_finished.wait, 1)
+        await asyncio.sleep(0.05)
+        assert post_close_removals == []
 
     _run(scenario())
 
@@ -451,6 +731,40 @@ def test_push_config_off_when_unset(monkeypatch):
     # screenshots buzz too (user decision 20260708, overturning the plan-era
     # behavior-preservation): a board preview is worth a notification on its own
     assert push.notification_text("screenshot")
+
+
+def test_push_send_has_a_bounded_provider_wait(monkeypatch):
+    from paratrooper.web import push
+
+    sent = {}
+
+    class Accepted:
+        status_code = 201
+
+    def accept(**kwargs):
+        sent.update(kwargs)
+        return Accepted()
+
+    monkeypatch.setattr("pywebpush.webpush", accept)
+    cfg = push.VapidConfig(private_key="private", subject="mailto:a@b.c")
+    subscription = {"endpoint": "https://push.example/device", "keys": {}}
+    assert push.send_push(subscription, "reply text", cfg)
+    assert sent["timeout"] == push.PUSH_TIMEOUT_SECONDS
+    assert sent["subscription_info"] is subscription
+
+
+def test_push_timeout_is_logged_and_does_not_escape(monkeypatch, caplog):
+    from paratrooper.web import push
+
+    def time_out(**_kwargs):
+        raise TimeoutError("endpoint token must not reach logs")
+
+    monkeypatch.setattr("pywebpush.webpush", time_out)
+    cfg = push.VapidConfig(private_key="private", subject="mailto:a@b.c")
+    subscription = {"endpoint": "https://push.example/secret-device-token", "keys": {}}
+    assert push.send_push(subscription, "reply text", cfg)
+    assert "TimeoutError" in caplog.text
+    assert "secret-device-token" not in caplog.text
 
 
 def test_terminal_push_uses_user_facing_message_excerpt():

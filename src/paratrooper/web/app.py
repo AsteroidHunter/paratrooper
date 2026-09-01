@@ -244,6 +244,7 @@ class AppState:
     linger_task: asyncio.Task | None = None  # armed countdown to suspend (at most one)
     sockets: dict[str, set[WebSocket]] = field(default_factory=dict)
     relay_task: asyncio.Task | None = None
+    push_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
 
 async def _enqueue_job(
@@ -339,18 +340,51 @@ async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
 
 
 async def _maybe_push(state: AppState, kind: str, payload: object = None) -> None:
-    """Wake a closed PWA on a notifying result (no-op if VAPID isn't configured)."""
+    """Deliver one notifying result without doing database work in send threads."""
     cfg = push.config()
     text = push.notification_text(kind, payload)
     if cfg is None or text is None:
         return
 
-    def _send() -> None:
-        for sub in state.store.subscriptions():
-            if not push.send_push(sub, text, cfg):
-                state.store.remove_subscription(sub.get("endpoint", ""))
+    # Snapshot subscriptions before entering provider threads. Cancellation can
+    # stop awaiting a thread but cannot stop the thread itself; keeping all
+    # store access on the event-loop task makes shutdown safe to close SQLite.
+    subscriptions = state.store.subscriptions()
+    results = await asyncio.gather(
+        *(asyncio.to_thread(push.send_push, sub, text, cfg) for sub in subscriptions),
+        return_exceptions=True,
+    )
+    for sub, result in zip(subscriptions, results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning("web push task failed without result (%s)", type(result).__name__)
+        elif not result:
+            state.store.remove_subscription(sub.get("endpoint", ""))
 
-    await asyncio.to_thread(_send)
+
+def _schedule_push(state: AppState, kind: str, payload: object = None) -> None:
+    """Start best-effort delivery without backpressuring the sole result relay."""
+    task = asyncio.create_task(_maybe_push(state, kind, payload))
+    state.push_tasks.add(task)
+
+    def finished(done: asyncio.Task[None]) -> None:
+        state.push_tasks.discard(done)
+        if done.cancelled():
+            return
+        if exc := done.exception():
+            logger.warning("web push delivery task failed (%s)", type(exc).__name__)
+
+    task.add_done_callback(finished)
+
+
+async def _settle_push_tasks(state: AppState, *, cancel: bool = False) -> None:
+    """Wait for tracked deliveries, optionally abandoning them during shutdown."""
+    while state.push_tasks:
+        tasks = tuple(state.push_tasks)
+        if cancel:
+            for task in tasks:
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        state.push_tasks.difference_update(tasks)
 
 
 async def _relay_result(state: AppState, thread_id: str, result: ResultMessage) -> None:
@@ -381,14 +415,19 @@ async def _relay_result(state: AppState, thread_id: str, result: ResultMessage) 
     # broadcast the STORED event (+seq so clients advance their
     # catch-up cursor on live pushes) — replay re-sends this frame
     await _send_to_sockets(state, thread_id, {"seq": seq, **event.model_dump()})
-    # Pass this result's payload directly: no shared "latest reply" lookup that
-    # could cross threads/jobs when relay tasks overlap.
-    await _maybe_push(state, result.kind, result.payload)
     if policy.terminal:
-        # job_finished first: it re-arms the timer for any buffered
-        # batch, so has_pending() correctly blocks the linger then
+        # Release the job before any notification work. A Redis failure while
+        # checking whether to arm the idle timer still propagates so the relay
+        # reconnects, but notification delivery is scheduled in either case.
         await state.coordinator.job_finished(thread_id)
-        await _maybe_suspend_worker(state)
+        try:
+            await _maybe_suspend_worker(state)
+        finally:
+            # Pass this result's payload directly: no shared "latest reply"
+            # lookup that could cross threads/jobs when deliveries overlap.
+            _schedule_push(state, result.kind, result.payload)
+    else:
+        _schedule_push(state, result.kind, result.payload)
 
 
 async def _result_relay(state: AppState) -> None:
@@ -452,7 +491,9 @@ def _lifespan(injected: AppState | None):
         finally:
             if state.relay_task:
                 state.relay_task.cancel()
+                await asyncio.gather(state.relay_task, return_exceptions=True)
             _cancel_linger(state)
+            await _settle_push_tasks(state, cancel=True)
             store.close()
 
     return lifespan
