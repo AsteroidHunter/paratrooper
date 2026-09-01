@@ -515,18 +515,106 @@ function serviceWorkerHarness() {
 }
 
 describe("service-worker notification behavior", () => {
-  it("uses the Paratrooper title and current PWA icon, then increments the app badge", async () => {
+  it("titles every notification New message and keeps the server's text as the body", async () => {
     const h = serviceWorkerHarness();
     await h.dispatch("push", { data: { text: () => "first reply" } });
     await h.dispatch("push", { data: { text: () => "second reply" } });
 
-    expect(h.showNotification).toHaveBeenNthCalledWith(1, "Paratrooper", {
+    expect(h.showNotification).toHaveBeenNthCalledWith(1, "New message", {
       body: "first reply",
       icon: "/icon-192.png",
       badge: "/icon-192.png",
     });
+    expect(h.showNotification).toHaveBeenNthCalledWith(2, "New message", {
+      body: "second reply",
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+    });
+    expect(h.showNotification.mock.calls.map(([title]) => title)).not.toContain("Paratrooper");
     expect(MANIFEST.icons.some((icon) => icon.src === "/icon-192.png")).toBe(true);
     expect(h.setAppBadge.mock.calls.map(([count]) => count)).toEqual([1, 2]);
+  });
+
+  it("stays silent while a window is on screen, banner and badge both", async () => {
+    const h = serviceWorkerHarness();
+    h.matchAll.mockResolvedValue([{ visibilityState: "visible" }]);
+    await h.dispatch("push", { data: { text: () => "read it in the thread" } });
+
+    expect(h.showNotification).not.toHaveBeenCalled();
+    expect(h.setAppBadge).not.toHaveBeenCalled();
+  });
+
+  it("ignores hidden windows and notifies as usual", async () => {
+    const h = serviceWorkerHarness();
+    h.matchAll.mockResolvedValue([{ visibilityState: "hidden" }]);
+    await h.dispatch("push", { data: { text: () => "away reply" } });
+
+    expect(h.showNotification).toHaveBeenNthCalledWith(1, "New message", {
+      body: "away reply",
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+    });
+    expect(h.setAppBadge.mock.calls.map(([count]) => count)).toEqual([1]);
+  });
+
+  it("notifies when the app is not open at all", async () => {
+    const h = serviceWorkerHarness();
+    h.matchAll.mockResolvedValue([]);
+    await h.dispatch("push", { data: { text: () => "nobody home" } });
+
+    expect(h.showNotification).toHaveBeenNthCalledWith(1, "New message", {
+      body: "nobody home",
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+    });
+    expect(h.setAppBadge.mock.calls.map(([count]) => count)).toEqual([1]);
+  });
+
+  it("still notifies when one window is hidden alongside no visible one", async () => {
+    const h = serviceWorkerHarness();
+    h.matchAll.mockResolvedValue([{ visibilityState: "hidden" }, { visibilityState: "prerender" }]);
+    await h.dispatch("push", { data: { text: () => "two backgrounded tabs" } });
+
+    expect(h.showNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses when any one of several windows is visible", async () => {
+    const h = serviceWorkerHarness();
+    h.matchAll.mockResolvedValue([{ visibilityState: "hidden" }, { visibilityState: "visible" }]);
+    await h.dispatch("push", { data: { text: () => "one tab is up front" } });
+
+    expect(h.showNotification).not.toHaveBeenCalled();
+    expect(h.setAppBadge).not.toHaveBeenCalled();
+  });
+
+  it("asks for window clients including ones this worker does not control", async () => {
+    const h = serviceWorkerHarness();
+    await h.dispatch("push", { data: { text: () => "any window" } });
+
+    expect(h.matchAll).toHaveBeenCalledWith({ type: "window", includeUncontrolled: true });
+  });
+
+  it("leaves the unread count untouched while the app is on screen", async () => {
+    const h = serviceWorkerHarness();
+    h.matchAll.mockResolvedValue([{ visibilityState: "visible" }]);
+    await h.dispatch("push", { data: { text: () => "seen live" } });
+    h.matchAll.mockResolvedValue([]);
+    await h.dispatch("push", { data: { text: () => "arrived after leaving" } });
+
+    expect(h.setAppBadge.mock.calls.map(([count]) => count)).toEqual([1]);
+  });
+
+  it("keeps the whole visibility-and-notify chain inside waitUntil", () => {
+    const at = SW_SOURCE.indexOf('self.addEventListener("push"');
+    const until = SW_SOURCE.indexOf('self.addEventListener("message"', at);
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(until).toBeGreaterThan(at);
+    const push = SW_SOURCE.slice(at, until);
+
+    expect(push).toContain('self.clients.matchAll({ type: "window", includeUncontrolled: true })');
+    expect(push.indexOf("event.waitUntil(")).toBeGreaterThanOrEqual(0);
+    expect(push.indexOf("event.waitUntil(")).toBeLessThan(push.indexOf("self.clients.matchAll"));
+    expect(push.indexOf("event.waitUntil(")).toBeLessThan(push.indexOf("showNotification"));
   });
 
   it("clears unread state on the page message and restarts the next badge at one", async () => {

@@ -65,16 +65,24 @@ let unread = 0;
 
 self.addEventListener("push", (event) => {
   const body = event.data ? event.data.text() : "Paratrooper update";
-  unread += 1;
+  // One waitUntil around the whole chain: the client lookup is async, so the
+  // worker must stay alive from the visibility check through the notification.
   event.waitUntil(
-    Promise.all([
-      self.registration.showNotification("Paratrooper", {
-        body,
-        icon: "/icon-192.png",
-        badge: "/icon-192.png",
-      }),
-      "setAppBadge" in navigator ? navigator.setAppBadge(unread).catch(() => {}) : Promise.resolve(),
-    ])
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      // Reading the app already puts the message on screen. A banner and a badge
+      // on top of that are noise, so a visible window suppresses both — and the
+      // unread count stays put so the badge never counts a message you just read.
+      if (clients.some((client) => client.visibilityState === "visible")) return undefined;
+      unread += 1;
+      return Promise.all([
+        self.registration.showNotification("New message", {
+          body,
+          icon: "/icon-192.png",
+          badge: "/icon-192.png",
+        }),
+        "setAppBadge" in navigator ? navigator.setAppBadge(unread).catch(() => {}) : Promise.resolve(),
+      ]);
+    })
   );
 });
 
