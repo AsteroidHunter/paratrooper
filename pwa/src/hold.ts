@@ -219,8 +219,10 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // arms lands ~620ms after the edge, past the last close frame at 60fps; the
   // raise's longer thinned tail outruns that post, and its late frames simply
   // ride the next armed mark (a shove clear or the close), whole-ring as
-  // below. kb-close and kb-glide fire at the edge itself and would settle at
-  // ~600ms, which is the tighter window of the two. A slower phone simply
+  // below. kb-close fires at the edge itself and would settle at ~600ms, which
+  // is the tighter window of the two; kb-lift's landing record fires one
+  // keyboard animation later and re-arms the post, so the landing and the
+  // frames leading to it arrive together. A slower phone simply
   // posts mid-run and the rest rides the next post: the payload is the whole
   // ring buffer, not a delta, so nothing is ever lost, only later.
   //
@@ -249,17 +251,14 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // by. A box that changes over a beat writes a short burst of them and the
   // settle below folds a burst into one post, so this cannot churn either.
   //
-  // "kb-restore" is IN because the correction it names can fire at the close's
-  // LATE checkpoint, 2.1 seconds after the edge, by which time every post the
-  // edge's own marks armed has long gone. Four records per close at the very
-  // most (the correction's budget stands it down past that), and closes are
-  // rare, so arming here cannot churn. "scroll-ghost" is IN for the sharper
-  // version of the same reason: a scroll nobody wrote can land in a stretch
+  // "scroll-ghost" is IN because a scroll nobody wrote can land in a stretch
   // where nothing else records at all, which is exactly the stretch that makes
   // it worth having. An unexplained RUN is one record, not one per event, so a
   // gesture cannot churn it either. TEMP DIAGNOSTIC (scroll-ghost): remove that
-  // entry and this second half with the scrollghost.ts block; the kb-restore
-  // entry stays with the correction.
+  // entry and this paragraph with the scrollghost.ts block. "lift-pad" is IN
+  // beside "kb-lift" for the same reason the landing is: it is the one scroll
+  // write the keyboard asks for, made once per landing, and it must arrive on
+  // the same post as the landing that asked for it.
   //
   // "thread-blank" is IN for the same reason and more sharply: its record is
   // built at the first touch AFTER the photo cancel that armed it, which may be
@@ -291,10 +290,10 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "kb-close" || ev === "send-motion" || ev === "receipt-hold" ||
     ev === "boot-motion" || ev === "boot-repin" || ev === "boot-blank" ||
     ev === "grow-blink" || ev === "kb-shove" ||
-    ev === "kb-focusing" || ev === "kb-glide" || ev === "kb-edge" ||
+    ev === "kb-focusing" || ev === "kb-lift" || ev === "lift-pad" || ev === "kb-edge" ||
     ev === "pick-anchor" || ev === "tail-gap" ||
     ev === "scroll-jank" || ev === "tail-settle" || ev === "pick-timing" ||
-    ev === "thread-blank" || ev === "kb-restore" || ev === "scroll-ghost" ||
+    ev === "thread-blank" || ev === "scroll-ghost" ||
     ev === "resume" || ev === "resume-ride"
   ) {
     diagPost();

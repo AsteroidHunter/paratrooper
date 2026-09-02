@@ -237,21 +237,23 @@ def test_holddiag_viewport_digest_carries_typing_shove_marks(client, caplog):
 def test_holddiag_viewport_digest_carries_keyboard_dynamics_marks(client, caplog):
     """The keyboard-dynamics card's marks ride the viewport digest line:
     kb-focusing for the tap-time choreography signal's lifecycle (focus,
-    keyboard handover, hardware-keyboard lapse, blur) and kb-glide for the
-    open/close edges that scope the shell's transition window — so deploy
-    logs alone reconstruct how an open and a close played out.
-
-    kb-glide's `step` is what tells the two edges apart now that they move
-    differently: the open glides its box over 0.2s, the close writes the full
-    height in ONE frame (pwa/src/shell.ts boxMotion), and a trail recorded
-    before that build carries a close with no `step` on the line at all."""
+    keyboard handover, hardware-keyboard lapse, blur), kb-lift for the lift's
+    arm and landing on each edge (pwa/src/shell.ts: the thread and the compose
+    bar ride a transform, so the landing record says how far they stand lifted
+    and whether any scroll write of the app's landed inside the keyboard's
+    motion, which the lift exists to make impossible), and lift-pad for the
+    thread's reachability padding written at that landing — so deploy logs
+    alone reconstruct how an open and a close played out."""
     trail = {
         "build": "b",
         "events": [
             {"t": 1, "ev": "kb-focusing", "d": {"phase": "focus"}},
-            {"t": 2, "ev": "kb-glide", "d": {"edge": "open", "step": False}},
+            {"t": 2, "ev": "kb-lift", "d": {"edge": "open", "via": "arm", "inset": 412}},
             {"t": 3, "ev": "kb-focusing", "d": {"phase": "kb"}},
-            {"t": 4, "ev": "kb-glide", "d": {"edge": "close", "step": True, "held": True}},
+            {"t": 4, "ev": "kb-lift", "d": {"edge": "open", "via": "end", "ms": 251.2,
+                                            "lift": 386, "writes": 0}},
+            {"t": 5, "ev": "lift-pad", "d": {"pad": 386, "from": 3163, "to": 3549}},
+            {"t": 6, "ev": "kb-lift", "d": {"edge": "close", "via": "arm", "inset": 0}},
         ],
     }
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
@@ -259,11 +261,11 @@ def test_holddiag_viewport_digest_carries_keyboard_dynamics_marks(client, caplog
     vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
     assert len(vp) == 1
     assert '"kb-focusing"' in vp[0] and '"phase": "focus"' in vp[0]
-    assert '"kb-glide"' in vp[0] and '"edge": "open"' in vp[0] and '"edge": "close"' in vp[0]
-    # the close's own line says the growth was one step, and that it waited for
-    # the viewport before taking it
-    assert '"step": true' in vp[0] and '"held": true' in vp[0]
-    assert '"step": false' in vp[0]  # and the raise says it still glided
+    assert '"kb-lift"' in vp[0] and '"edge": "open"' in vp[0] and '"edge": "close"' in vp[0]
+    # the landing's own line says how far the list stands lifted and that
+    # nothing scrolled inside the motion; the padding write beside it
+    assert '"via": "end"' in vp[0] and '"lift": 386' in vp[0] and '"writes": 0' in vp[0]
+    assert '"lift-pad"' in vp[0] and '"pad": 386' in vp[0]
 
 
 def test_holddiag_digest_carries_the_resume_landing(client, caplog):
@@ -329,21 +331,22 @@ def test_holddiag_boot_digest_carries_boot_motion_head_first(client, caplog):
 
 
 def _rise_trail():
-    """One raise as the phone records it: the glide edge, the edge's own box
-    write, the kb-edge mark, thirty kb-rise frames, and the pin drop at the end
-    of the settle window."""
+    """One raise as the phone records it: the lift's arm, the edge's own box
+    write (the top from the viewport, the height the full screen), the kb-edge
+    mark, thirty kb-rise frames, and the pin drop at the end of the settle
+    window."""
     events = [
         {"t": 1, "ev": "kb-focusing", "d": {"phase": "focus"}},
-        {"t": 2, "ev": "kb-glide", "d": {"edge": "open"}},
+        {"t": 2, "ev": "kb-lift", "d": {"edge": "open", "via": "arm", "inset": 336}},
         {"t": 3, "ev": "shell-size",
-         "d": {"top": 412, "h": 508, "glide": True, "edge": True, "ems": 0.3}},
+         "d": {"top": 412, "h": 844, "edge": True, "ems": 0.3}},
         {"t": 4, "ev": "kb-edge",
          "d": {"edge": "open", "n": 7, "src": "resize", "evt": 0.4, "armed": 9.6,
-               "frame": 20.2, "read": 24.1, "dTop": 140, "dH": -144, "dPad": -26,
-               "sx": 0, "sy": 412, "vvTop": 412, "vvH": 508, "foc": 260,
-               "boxTop": 412, "boxH": 508, "seed": True}},
+               "frame": 20.2, "read": 24.1, "dTop": 140, "dH": 0, "dPad": 0,
+               "sx": 0, "sy": 412, "vvTop": 412, "vvH": 508, "inset": 336,
+               "foc": 260, "boxTop": 412, "boxH": 844}},
         {"t": 5, "ev": "shell-size",
-         "d": {"top": 0, "h": 508, "glide": True, "edge": False, "ems": 16.9}},
+         "d": {"top": 0, "h": 844, "edge": False, "ems": 16.9}},
     ]
     events += [
         {"t": 10 + i, "ev": "kb-rise",
@@ -373,7 +376,7 @@ def test_holddiag_rise_trail_gets_its_own_line(client, caplog):
     # thirty frames in the trail, and all of them survive
     vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
     assert len(vp) == 1
-    assert '"kb-glide"' in vp[0] and '"edge": "open"' in vp[0]
+    assert '"kb-lift"' in vp[0] and '"edge": "open"' in vp[0]
     assert '"kb-focusing"' in vp[0]
     assert '"shell-size"' in vp[0] and '"boxTop"' not in vp[0]
     assert '"shell-pin"' in vp[0] and '"ems": 471.6' in vp[0]
@@ -396,13 +399,15 @@ def test_holddiag_edge_marks_get_their_own_line(client, caplog):
     assert len(edge) == 1
     assert "events=1" in edge[0]
     assert '"armed": 9.6' in edge[0] and '"frame": 20.2' in edge[0] and '"read": 24.1' in edge[0]
-    assert '"dTop": 140' in edge[0] and '"dH": -144' in edge[0] and '"dPad": -26' in edge[0]
+    # the top moved with the pan; the height and the gap did not move at all,
+    # which is the lift design's own claim on the line
+    assert '"dTop": 140' in edge[0] and '"dH": 0' in edge[0] and '"dPad": 0' in edge[0]
     assert '"sy": 412' in edge[0] and '"boxTop": 412' in edge[0]  # the double-write edge
-    assert '"seed": true' in edge[0] and '"foc": 260' in edge[0]
+    assert '"inset": 336' in edge[0] and '"foc": 260' in edge[0]
     # twenty-five keystrokes after the raise have taken the viewport tail whole
     vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
     assert len(vp) == 1
-    assert '"kb-glide"' not in vp[0]
+    assert '"kb-lift"' not in vp[0]
     # and the mark rode through it anyway, which is the point of the split
     assert '"kb-edge"' in edge[0]
 
@@ -778,54 +783,49 @@ def test_holddiag_thread_blank_gets_its_own_line(client, caplog):
     assert '"thread-blank"' not in settle[0]
 
 
-def test_holddiag_ghost_line_carries_the_correction_and_the_unexplained_move(client, caplog):
-    """The white strip after a keyboard close, both halves of it. kb-restore is
-    the correction taking back a position past the end of the thread's range,
-    and scroll-ghost is the move that put it there with no write of the app's to
-    account for it: the pair only means anything read together — the ghost says
-    the app asked for 6151 and the scroller went to 6537, the correction says it
-    was 386px past an end that had already settled — so they share one line, and
-    a busy typing session must not push either off the viewport tail."""
+def test_holddiag_ghost_line_carries_the_unexplained_move(client, caplog):
+    """scroll-ghost is a move of the thread's scroll with no write of the app's
+    to account for it: the ghost says the app asked for 6151 and the scroller
+    went to 6537. It gets a line of its own so a busy typing session cannot push
+    it off the viewport tail. (kb-restore, the correction that used to share the
+    line, is gone with the box change it corrected: the thread's box no longer
+    changes at a keyboard edge, pwa/src/viewport.ts.)"""
     trail = {"build": "b", "events": [
         # the move nobody made: 6775 of content in a 624 box ends at 6151, and
         # 6537 is that same content less the 238 of box the keyboard had left it
         {"t": 1, "ev": "scroll-ghost",
-         "d": {"at": "frame", "from": 6151, "to": 6537, "over": 386, "pre": 6537,
+         "d": {"at": "scroll", "from": 6151, "to": 6537, "over": 386, "pre": 6537,
                "stale": True, "via": "box", "want": 6151, "wms": 16, "kms": 224,
                "gest": False}},
-        # and the app taking it straight back
-        {"t": 2, "ev": "kb-restore",
-         "d": {"via": "frame", "act": "fix", "ms": 224, "over": 386, "from": 6537,
-               "to": 6151, "sh": 6775, "ch": 624, "pre": 6537, "n": 1}},
-        # the correction writes through the one settle, which records as usual
-        {"t": 3, "ev": "tail-settle",
-         "d": {"via": "kb-restore", "mode": "follow", "from": 6537, "to": 6151,
+        # an ordinary settle beside it does not ride the ghost line
+        {"t": 2, "ev": "tail-settle",
+         "d": {"via": "box", "mode": "follow", "from": 6537, "to": 6151,
                "over": 386, "sh": 6775, "ch": 624, "cut": False, "air": 0}},
     ]}
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
         assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
     ghost = [r.message for r in caplog.records if "holddiag ghost" in r.message]
     assert len(ghost) == 1
-    assert "events=2" in ghost[0]
-    # the correction: how big the strip was, and how long after the close
-    assert '"kb-restore"' in ghost[0]
-    assert '"act": "fix"' in ghost[0] and '"over": 386' in ghost[0] and '"ms": 224' in ghost[0]
-    assert '"pre": 6537' in ghost[0] and '"to": 6151' in ghost[0]
+    assert "events=1" in ghost[0]
+    assert '"scroll-ghost"' in ghost[0]
+    assert '"from": 6151' in ghost[0] and '"to": 6537' in ghost[0] and '"over": 386' in ghost[0]
+    assert '"kb-restore"' not in ghost[0] and '"tail-settle"' not in ghost[0]
+    assert '"pre": 6537' in ghost[0]
     # the accusation: an intention of 6151 sixteen milliseconds old, a scroller
     # at 6537, and no gesture anywhere near it
     assert '"scroll-ghost"' in ghost[0]
     assert '"want": 6151' in ghost[0] and '"wms": 16' in ghost[0]
     assert '"stale": true' in ghost[0] and '"gest": false' in ghost[0]
-    assert '"at": "frame"' in ghost[0]
-    # and both also ride the viewport line, like every other motion mark, so a
-    # log read either way finds them
+    assert '"at": "scroll"' in ghost[0]
+    # and it also rides the viewport line, like every other motion mark, so a
+    # log read either way finds it
     vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
     assert len(vp) == 1
-    assert '"kb-restore"' in vp[0] and '"scroll-ghost"' in vp[0]
-    # the settle they caused stays on its own line and clips neither
+    assert '"scroll-ghost"' in vp[0] and '"kb-restore"' not in vp[0]
+    # the settle beside it stays on its own line and clips nothing
     assert '"tail-settle"' not in ghost[0]
     settle = [r.message for r in caplog.records if "holddiag settle" in r.message]
-    assert len(settle) == 1 and '"via": "kb-restore"' in settle[0]
+    assert len(settle) == 1 and '"via": "box"' in settle[0]
 
 
 def test_holddiag_tail_gap_carries_the_overscroll(client, caplog):

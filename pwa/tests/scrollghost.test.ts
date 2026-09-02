@@ -262,6 +262,7 @@ describe("the wiring: every writer announces itself, and the looks read nothing"
       'scrollGhostWrite("glide", pos)',
       'scrollGhostWrite("keep-view", t.scrollTop)',
       'scrollGhostWrite("give-up", t.scrollTop)',
+      'scrollGhostWrite("lift-pad", top)', // the keyboard's one write, at the lift's landing
       'scrollGhostWrite("drain", t.scrollTop)',
       'scrollGhostWrite("replay", t.scrollTop)',
       'scrollGhostWrite("boot-repin", t.scrollTop)',
@@ -305,11 +306,18 @@ describe("the wiring: every writer announces itself, and the looks read nothing"
     expect(body).not.toMatch(/scrollTop\s*=/);
   });
 
-  it("the post-close look is handed the numbers the correction already read", () => {
-    const fix = fnBody("fixCloseTail");
-    expect(fix).toContain("scrollGhostLook(via, g, ghostCtx())");
-    // one read of the three numbers serves both, so the look costs nothing
-    expect(fix.match(/scrollHeight/g)).toHaveLength(1);
+  it("the keyboard's edges neither look nor write: the post-close stretch is ordinary now", () => {
+    // the post-close look and the correction it rode are gone with the box
+    // change they watched (viewport.ts); the edge stamps the two facts the
+    // remaining looks read and touches the scroll not at all
+    const gate = src.slice(src.indexOf("watchKeyboard((up) => {"));
+    const body = gate.slice(0, gate.indexOf("\n});"));
+    expect(body).toContain("closeAt = up ? -1 : performance.now()");
+    expect(body).toContain("closeBottom = !up && t ? maxScrollTop(t.scrollHeight, t.clientHeight) : -1");
+    expect(body).not.toContain("scrollGhostLook(");
+    expect(body).not.toContain("settleTail(");
+    expect(body).not.toMatch(/scrollTop\s*=|scrollTo\(/);
+    expect(src).not.toContain("fixCloseTail");
   });
 
   it("the context is gathered in one place, from state the app already keeps", () => {

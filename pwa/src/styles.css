@@ -146,99 +146,87 @@ html, body {
   display: flex;
   flex-direction: column;
   background: var(--bg);
-  /* bottom clearance for the home indicator — collapses while the keyboard is
-     up (.kb, set by shell.ts) so the compose bar hugs the keyboard like
-     iMessage instead of floating a dead band above it */
+  /* bottom clearance for the home indicator. It no longer collapses while the
+     keyboard is up: the lift below carries the bar the clearance's worth
+     further down behind the keyboard instead, which is the same hug with no
+     padding change and so no thread-box change at the edge */
   --pad-b: max(0.5rem, env(safe-area-inset-bottom));
-  /* the glide's one clock: its duration and easing are written down ONCE, so
-     everything that has to arrive with the shell's box spells this token
-     rather than carrying its own copy of the same two words. Two properties
-     agreeing by copy can be edited apart; two properties reading one token
-     cannot. See #app.gliding below for what rides it. */
-  --glide: 0.2s ease-out;
+  /* the gap the pill keeps above the keyboard while it is up (iMessage's) */
+  --kb-gap: 0.5rem;
+  /* the keyboard's inset, written by shell.ts from the visual viewport (the
+     learned full-screen baseline less the viewport's height) while the
+     keyboard is provably up, 0 otherwise. The lift is derived from it below;
+     nothing in this sheet is a pixel measured off a phone. */
+  --kb-inset: 0px;
+  --kb-lift: 0px;
+  /* The keyboard's own animation, as the lift plays it: iOS animates the
+     keyboard over 0.25s (Apple, UIResponder.keyboardAnimationDurationUserInfoKey)
+     on a private spring curve (UIView.AnimationCurve raw value 7). A page gets
+     no frames of that animation — WebKit reports the viewport once, at the
+     end — so the transition plays the platform's curve on its own clock. The
+     control points are the approximation published on Apple's developer
+     forums, thread 48088 (jpdery, 2016; the same thread later identified the
+     underlying CASpringAnimation), and against a close recorded frame by
+     frame on device they sit within a few percent of the keyboard's travel
+     on every frame. shell.ts KB_ANIM_MS carries the same 250ms for the settle
+     window's clock; a test holds the two together. */
+  --kb-anim: 0.25s cubic-bezier(0.38, 0.7, 0.125, 1);
 }
-/* Keyboard provably up (shell.ts's baseline-tested signal): the shell box IS
-   the visual viewport. top translates the fixed shell into the visible region
-   when iOS slides the layout viewport (shrink-AND-pan), and top+height ends
-   the shell at the keyboard's top edge (overlay); in window-shrink mode the
-   numbers equal the pin, so ONE rule serves all three iOS 26 modes.
-   Over-constrained absolute positioning drops `bottom` while top+height are
-   set; shell.ts rewrites the vars from fresh visual-viewport numbers on every
-   vv event and removes them at rest, returning to the measurement-free pin
-   above. The home-indicator clearance also collapses, so the compose bar hugs
-   the keyboard like iMessage instead of floating a dead band above it. */
+/* Keyboard provably up (shell.ts's baseline-tested signal): the lift. The
+   message list and the compose bar (.lift below) translate up by the keyboard's
+   inset, less the home-indicator clearance the bar no longer sheds, so the
+   pill sits --kb-gap above the keyboard exactly as it did when the clearance
+   collapsed, and the clearance itself is behind the keyboard. Every term is a
+   CSS length the engine resolves; the shell writes only --kb-inset. */
 #app.kb {
-  --pad-b: 0.5rem;
+  --kb-lift: calc(var(--pad-b) - var(--kb-gap) - var(--kb-inset));
 }
-/* the box vars apply while the keyboard is provably up AND through the close's
-   own window (.gliding without .kb): the close writes the full screen INTO the
-   box rather than dropping to the pin, because the pin has no height of its own
-   to write it into. shell.ts drops both class and vars when the settle window
-   ends, landing back on the pin — and since the step already put the box on the
-   pin's own geometry, that drop moves nothing. */
+/* The shell box while the keyboard is up, and through the close's own settle
+   window (.lifting without .kb). top translates the fixed shell into the
+   visible region when iOS slides the layout viewport (shrink-AND-pan); the
+   height is the learned full-screen BASELINE, never the viewport's: in the two
+   modes where innerHeight shrinks with the keyboard the four-edge pin would
+   shrink the shell with it, and the lift needs a full-size shell so the bar it
+   carries lands at the keyboard's top edge in every mode. The box therefore
+   never changes size at a keyboard edge — that change was the white band and
+   the snap (shell.ts header) — and shell.ts drops the vars when the window
+   ends, landing back on the pin the box was already sitting on. */
 #app.kb,
-#app.gliding {
+#app.lifting {
   top: var(--shell-top, 0px);
   height: var(--shell-h, 100vh);
 }
-/* The keyboard OPEN glide, and the one edge that has it (shell.ts arms
-   .gliding on either .kb edge, for GLIDE_SETTLE_MS; boxMotion there holds the
-   whole reason). A rise WebKit publishes as one geometry jump reads as motion,
-   and a mid-typing write outside the window stays instant so an active-growth
-   frame never smears.
-   The CLOSE is .gliding WITHOUT .kb, and it is deliberately left out of this
-   selector: an animated close gave iOS thirteen to fifteen frames in which to
-   keep compositing the thread at its pre-close offset while the box grew under
-   it — a white band opening under the last message to about 386px, then one
-   frame of snap when the overhang correction took it back. So the close's box
-   is written once, at full height, and travels no distance at all. */
-#app.gliding.kb {
-  transition: top var(--glide), height var(--glide);
+/* The clip: a static box from the header's bottom edge to the bottom of the
+   shell. Lifted, the top of the message list rises under the header and is cut
+   off here rather than showing through its translucent face. `clip`, not
+   `hidden`: a hidden box is a scroll container, which is exactly the thing
+   iOS's caret reveal would grab and scroll (the html/body note above). */
+.liftclip {
+  flex: 1;
+  min-height: 0; /* a flex item's automatic minimum is its content, i.e. the whole thread */
+  display: flex;
+  flex-direction: column;
+  overflow: clip;
 }
-/* The bottom gap eases home on the shell's own clock and the shell's own gate.
-   applyShell (shell.ts) toggles .kb and .gliding inside ONE style
-   recalculation, so a transition written here is armed by the very write that
-   moves the value, and the readers below can only be started apart from each
-   other by someone splitting that toggle.
-   What they are no longer guaranteed to arrive WITH is the shell's box, and
-   only on the close: the box steps to full height in a single frame there
-   (shell.ts boxMotion) while this gap keeps easing, so the pill settles the
-   last 26px of home-indicator inset after the shell has landed. That is the
-   deliberate half of the trade — the box travelling is what let iOS paint a
-   keyboard-sized band, and 26px of gap cannot — and it stays an EASE because
-   the thread re-pins on every frame of it, so the last message rides the settle
-   down with the bar rather than standing while it moves. The open edge is
-   untouched: there the box and the gap still glide together.
-   Left untransitioned, --pad-b delivered the whole home-indicator
-   inset in a single frame while the shell had not begun to move: a close
-   recorded frame by frame on device read padding 8.5px then 34px with the
-   shell height still 400px, so the pill hopped about 26px up and only then
-   rode the glide back down. At the bottom of the thread the messages re-pin
-   every frame and take the hop with it, which reads as the whole view
-   twitching; scrolled away nothing re-pins, so the bar jumps alone against
-   still messages and reads as the keyboard itself moving. The open leg had
-   the same break mirrored (the gap collapsing in one frame while the shell
-   shrinks over 0.2s), and it is armed on the same edge, so it is fixed here
-   too.
-   The GATE earns its place next to the clock: --pad-b changes for exactly one
-   reason, the .kb toggle, and that toggle is what arms .gliding. Gating on it
-   means the gap can never animate at boot, on a rotation that moves the
-   safe-area inset, or on any other write the shell is not animating alongside.
-   All THREE readers of --pad-b ride it, because one left stepping only moves
-   the hop to a different element: .compose's padding carries the pill and the
-   ＋; .jump's seat is measured up from the same gap, and the chevron is on
-   screen precisely when the thread is scrolled away from the bottom; .filepick
-   is invisible and is parked on the ＋, so it has to ride the same clock
-   mid-glide as at rest or it steps while everything else glides. That parking
-   is a leftover of the disproved theory that iOS anchors the picker sheet to
-   this rect (see the .filepick rule below for what actually places the sheet),
-   and it costs nothing as long as it moves with the rest. */
-#app.gliding .compose {
-  transition: padding-bottom var(--glide);
-}
-#app.gliding .filepick,
-#app.gliding .jump {
-  transition: bottom var(--glide);
+/* The lift: the thread, the photo drawer and the compose bar as one piece,
+   full-height inside the clip, translated by --kb-lift. A transform is a
+   compositor animation: the recording that built this showed layer changes
+   landing on screen while the keyboard was still sliding, on the frame after
+   they were written, while the page's scroll writes were dropped for the whole
+   slide. Nothing in here changes size and no scroll offset is written at
+   either edge, so there is nothing for the phone to drop or hand back. The
+   chevron and the file input are inside .compose and the drawer is a flex
+   sibling, so all of them ride. will-change keeps the layer standing between
+   edges so the close starts on the frame it is asked for instead of on the one
+   after a layer is built. */
+.lift {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(var(--kb-lift));
+  transition: transform var(--kb-anim);
+  will-change: transform;
 }
 
 /* --- token gate --- */
@@ -440,7 +428,12 @@ html, body {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden; /* the time rail lives past the right edge — never a bar */
-  padding: 0.75rem 1rem;
+  /* --lift-pad: the top of the lifted list sits under the header inside the
+     clip, so once the keyboard's open has landed the thread is given that much
+     top padding (main.ts setLiftPad writes it, and moves the scroll by the same
+     amount in the same frame) and the earliest messages stay reachable behind
+     the keyboard; the close's landing takes it back the same way */
+  padding: calc(0.75rem + var(--lift-pad, 0px)) 1rem 0.75rem;
   display: flex;
   flex-direction: column;
   gap: 2px;

@@ -995,8 +995,14 @@ describe("send teardown: the strip closes on the beat with its squares aboard", 
     const anim = body.indexOf("box.animate(");
     expect(fix).toBeGreaterThan(-1);
     expect(fix).toBeLessThan(anim);
-    // bottom-anchored, so the top edge glides down the way the in-flow close moves
-    expect(body).toContain("window.innerHeight - rect.bottom");
+    // bottom-anchored, so the top edge glides down the way the in-flow close
+    // moves — against the lift wrapper's box, which is a fixed descendant's
+    // containing block because the wrapper carries a transform (styles.css
+    // .lift), never against the viewport
+    expect(body).toContain('const home = (box.closest(".lift") ?? app).getBoundingClientRect()');
+    expect(body).toContain("home.bottom - rect.bottom");
+    expect(body).toContain("rect.left - home.left");
+    expect(body).not.toContain("window.innerHeight");
   });
 
   it("the squares leave the ledger on the tap, and the teardown owns them", () => {

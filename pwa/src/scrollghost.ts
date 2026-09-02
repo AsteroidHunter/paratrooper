@@ -1,15 +1,15 @@
 // ===================== TEMP DIAGNOSTIC (remove after the keyboard-restore session) =====================
 // The scroll writes nobody in this app made.
 //
-// The correction beside it (viewport.ts, restoreVerdict) takes back a position
-// the thread cannot legitimately hold after a keyboard close, and the case for
-// blaming the engine for that position is currently an argument from absence:
-// every scroll writer in this app records what it wrote, and on the frame the
-// scroller jumped 386px past its own end none of them had recorded anything.
-// An argument from absence is exactly as good as the completeness of the list it
-// is drawn from, and that list is eleven call sites across three files. This
-// channel turns it into a measurement: the app states what it asked the scroll
-// to do, the position is looked at, and a move no statement of ours accounts for
+// The post-close correction this was built beside is gone (viewport.ts holds
+// the account: the thread's box no longer changes at a keyboard edge, so the
+// engine has no 386px-past-the-end offset to hand back). The channel stays,
+// because the case it makes is still the one worth making: every scroll writer
+// in this app records what it wrote, and a move no writer accounts for is the
+// engine's. That used to be an argument from absence, exactly as good as the
+// completeness of the list it was drawn from, eleven call sites across three
+// files. This channel turns it into a measurement: the app states what it asked
+// the scroll to do, the position is looked at, and a move no statement of ours accounts for
 // is written down with everything needed to convict — where it went, how far
 // past the end that is, whether it landed on the bottom the range had while the
 // keyboard was up, what the app's last intention was and how long ago, and
@@ -67,14 +67,16 @@
 // a run that began under a finger is not recorded at all.
 //
 // TO REMOVE, every call site: delete this file and tests/scrollghost.test.ts; in
-// main.ts delete the scrollghost import, the ghostCtx helper, the
-// scrollGhostWrite calls in settleTail, scrollToBottom, startGlide, keepView,
-// autosize, drainOlder, applyReplay, armBootFrameGuard and bootFromCache's
-// re-assert, and the two scrollGhostLook calls (the thread's scroll handler and
-// fixCloseTail); in hold.ts delete the "scroll-ghost" entry with its paragraph
-// in the post-now list; and in web/app.py drop "scroll-ghost" from the viewport
-// tuple and from the ghost digest block, whose kb-restore half stays with the
-// correction. Nothing else refers to any of it.
+// main.ts delete the scrollghost import, the ghostCtx helper and the two
+// close stamps it reads (closeAt, closeBottom, written in the keyboard
+// watcher), the scrollGhostWrite calls in settleTail, scrollToBottom,
+// startGlide, keepView, autosize, setLiftPad, drainOlder, applyReplay,
+// armBootFrameGuard and bootFromCache's re-assert, the scrollGhostLook call in
+// the thread's scroll handler, and the watchScrollWrites wiring (shell.ts's
+// kb-lift record reads the counter below; it then reports -1); in hold.ts
+// delete the "scroll-ghost" entry with its paragraph in the post-now list; and
+// in web/app.py drop "scroll-ghost" from the viewport tuple and delete the
+// ghost digest block. Nothing else refers to any of it.
 
 import { holdDiagRecord } from "./hold";
 import { tailOverhang } from "./viewport";
@@ -213,11 +215,21 @@ export function createScrollWatch(now: () => number = () => performance.now()): 
 }
 
 const watch = createScrollWatch();
+let writes = 0; // every announced write, counted; the keyboard probe reads the difference
 
 /** the app's own scroll writes, as intentions: called at every site that writes
     the thread's scrollTop, with the top that site asked for */
 export function scrollGhostWrite(via: string, top: number): void {
+  writes += 1;
   watch.wrote(via, top);
+}
+
+/** how many scroll writes the app has announced since load; shell.ts's
+    keyboard probe reads it at an edge and again when the lift lands, so a
+    kb-lift record states outright whether a write happened inside the
+    keyboard's own animation, which is the one thing the lift exists to avoid */
+export function scrollWriteCount(): number {
+  return writes;
 }
 
 /** one look, from a site that already holds the scroller's three numbers */

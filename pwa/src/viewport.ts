@@ -94,20 +94,21 @@ export function nearBottomOf(
 // The bottom geometry moved: where the scroll has to land now.
 //
 // The scroller's usable range is its content less its box, so anything that
-// changes the BOX changes the end of the range. Two of those changes leave a
-// band of empty white under the last message, and they are one bug wearing two
-// coats:
-//
-//   the keyboard leaving. While it is up iOS gives the thread a much shorter
-//   box, so the end of the range sits far lower in the content; a position
-//   that was the end then is past the end once the full box comes back. The
-//   device trail measured it: 4329 of content in a 624 box ends at 3705, and
-//   the stuck position was 4091, which is that same content less the 238 of
-//   box the keyboard had left it.
+// changes the BOX changes the end of the range, and a change that SHRINKS the
+// range leaves a band of empty white under the last message:
 //
 //   the photo drawer collapsing. It hands its own height back to the thread,
 //   which lowers the end of the range by exactly the drawer, and the position
 //   that was correct while the drawer stood is past the end the moment it goes.
+//
+//   the keyboard leaving USED to be the other coat of the same bug: iOS gave
+//   the thread a much shorter box while it was up, and a position that was the
+//   end then was past the end once the full box came back (the device trail:
+//   4329 of content in a 624 box ends at 3705, and the stuck position was 4091,
+//   that same content less the 238 of box the keyboard had left it). The
+//   keyboard no longer changes the box at all — shell.ts lifts the list with a
+//   transform — so that case cannot arise, and the numbers stay in the tests
+//   only as the arithmetic's own pins.
 //
 // The same end of the same range also moves when the CONTENT shrinks rather
 // than the box: the typing dots leaving take their height out from under a
@@ -205,138 +206,37 @@ export function settleMark(
   };
 }
 
-// The scroll offset the app never wrote, and the one state this scroller can
-// never legitimately be in.
+// There was a post-close overhang watch here (boxSettled, restoreVerdict,
+// restoreMark, MAX_CLOSE_RESTORES: six tenths of a second of per-frame looks
+// after every keyboard close, plus two late checkpoints, taking back an offset
+// WebKit handed the thread at the end of its own close transition, 386px past
+// the end of the range the grown box left). It is gone on purpose, with the
+// thing it corrected. The thread's box no longer changes at a keyboard edge
+// (shell.ts: the list is lifted by a transform instead), so the end of its
+// range never moves under an offset the phone is holding, and the offset the
+// phone hands back at the end of the keyboard's motion is the one the thread
+// already had. A watch with nothing to catch was three reads a frame for the
+// most delicate stretch the app has, and its one write, had it ever fired,
+// would have been exactly the scroll write inside the keyboard's animation that
+// the lift exists to refuse.
+
+// The thread's top padding changing under a reader: the scroll that keeps the
+// view still.
 //
-// The keyboard's close hands the thread its full box back and the settle above
-// lands the scroll on the end of the range that new box makes. The device trail
-// (v0.3.58, two occurrences) says it lands there correctly and then does not
-// stay. At the close transition's end, ms 208, the scroller sat at 6151:
-// exactly scrollHeight less the clientHeight that had just grown from 238 to
-// 624. ONE FRAME LATER, ms 224, it read 6537 — that same scrollHeight less the
-// OLD 238, which is the bottom of the range as it stood while the keyboard was
-// still up. That is 386px past a maximum the scroller cannot hold, and it stayed
-// there: still 6537 at 600ms and at 2100ms, until the next gesture made the
-// engine re-clamp. The white strip between the last message and the compose bar
-// is that overhang, on screen.
+// While the keyboard is up the lifted list's top sits under the header inside
+// the clip, so the thread is given that much top padding once the open lands
+// (and it is taken back once the close lands), which keeps the earliest
+// messages reachable behind the keyboard. Padding moves every row down by the
+// amount added while the scroller keeps its offset, so without a matching write
+// the view would slip by exactly that amount at the instant the padding lands.
+// The write is the offset plus the change, floored at the top of the range; the
+// engine floors it at the range's end on its own, since a removal can only ever
+// leave the offset past an end that just moved up.
 //
-// Nothing of ours wrote it. Every scroll write in this app names itself on the
-// trail and none fired on that frame, and the close's own correction pass had
-// already run. What restores the offset is WebKit, at the end of its own close
-// transition, and it restores it without clamping it into the range the new
-// box leaves.
-//
-// What the app CAN arrange is whether that offset is out of range when it
-// lands, and a later trail (2026-09-01, nine failures) says the app was the
-// one putting it out of range. Each of those closes was learned from focus
-// while the viewport still reported the keyboard-sized screen, so the shell
-// grew to full height 6 to 44ms before the phone agreed, and the offset the
-// engine handed back a moment later — the legitimate end of the range as it
-// stood while the keyboard was up — was suddenly 386px past the new one.
-// Closes learned from the viewport were all clean. shell.ts holds the box for
-// that gap now (holdsShellBox), so the restore lands inside the range it was
-// taken from and this correction should have nothing left to take back on that
-// path. It stays because a correction that never fires costs three property
-// reads a frame for six tenths of a second, and because it is the only thing
-// standing between the reader and an offset no gesture will re-clamp.
-//
-// So the app takes it back. Past the end of the range is a position that does
-// not exist, on a scroller nothing else may scroll, and settleBottom lands on
-// the SAME number whichever way following happens to be pointing — the follow
-// arm pins to the end, the clamp arm cannot go past it — so the correction IS
-// the settle that already exists rather than a second writer. What is new is
-// only when it is asked: on the frames right after a close, which is the one
-// stretch nothing else watches. The thread's resize observer sees every frame
-// of the box's glide and then goes quiet at ms 208, sixteen milliseconds before
-// the restore lands.
-//
-// The clamp on every scroll event that the note above warns about is not coming
-// back with it: this is asked inside a close's own window and at that close's
-// later checkpoints, never on a scroll event, and never while a finger is on the
-// glass, where the same reading is a rubber band being stretched on purpose.
-
-/** corrections one close may make before it stands down (the loop guard, the
-    shape shell.ts's shove budget uses: two writers fighting over one number is
-    the failure the retired kb-vv counter shipped) */
-export const MAX_CLOSE_RESTORES = 4;
-
-/**
- * The box this look reads is the box the last one read, so nothing is easing.
- *
- * This is the whole difference between the fault and the ordinary frame, and
- * without it the correction would fire on every close. A box that GROWS lowers
- * the end of the range under a position that was legitimately on the old end,
- * so for the instant between the growth and the settle that answers it the
- * scroller reads past the end. That instant is already owned: the thread's
- * resize observer is delivered on the growing frame and settles before anything
- * paints. It used to be a dozen such frames, one per frame of the shell's glide
- * home; the close now grows the box in ONE step (shell.ts boxMotion), so it is
- * a single frame, and this predicate stands the correction down on exactly that
- * one. What nothing owns is an overhang that appears while the box is holding
- * still, which is exactly the shape of the restore (ms 208 the box stops, ms
- * 224 the offset comes back).
- *
- * A first look has nothing to compare against and is therefore never settled,
- * which costs one frame at the start of a window that runs for six hundred ms.
- */
-export function boxSettled(now: BottomGeometry, was: BottomGeometry | null): boolean {
-  return was !== null && now.sh === was.sh && now.ch === was.ch;
-}
-
-export type RestoreVerdict = "none" | "moving" | "held" | "fix" | "spent";
-
-export function restoreVerdict(
-  g: BottomGeometry,
-  settled: boolean,
-  made: number,
-  gesture: boolean,
-): RestoreVerdict {
-  if (tailOverhang(g) === 0) return "none"; // at or inside the end: the ordinary frame
-  if (!settled) return "moving"; // a box mid-ease, with its own settle coming
-  if (gesture) return "held"; // a gesture owns the scroll, rubber band and all
-  return made < MAX_CLOSE_RESTORES ? "fix" : "spent";
-}
-
-/**
- * One correction, as the trail carries it: which checkpoint caught it, how long
- * after the close edge, how far past the end the scroller was sitting, and the
- * end of the range both now and as it stood while the keyboard was up. `pre` is
- * the accusation stated as a number — a `from` equal to it is the pre-dismissal
- * bottom handed back, which no box change and no write of ours can produce.
- */
-export type RestoreMark = {
-  via: string;
-  act: RestoreVerdict;
-  ms: number;
-  over: number; // the strip he can see, in pixels
-  from: number;
-  to: number; // the end of the range this frame's numbers make
-  sh: number;
-  ch: number;
-  pre: number; // that end as it stood with the keyboard up; -1 = never measured
-  n: number; // corrections this close has made, this one counted
-};
-
-export function restoreMark(
-  via: string,
-  act: RestoreVerdict,
-  ms: number,
-  g: BottomGeometry,
-  n: number,
-  pre: number,
-): RestoreMark {
-  return {
-    via,
-    act,
-    ms: Math.round(ms),
-    over: Math.round(tailOverhang(g)),
-    from: Math.round(g.st),
-    to: Math.round(maxScrollTop(g.sh, g.ch)),
-    sh: Math.round(g.sh),
-    ch: Math.round(g.ch),
-    pre: Math.round(pre),
-    n,
-  };
+// Never asked inside a keyboard edge: main.ts calls it from the lift's own
+// landing, after the motion, which is where the engine takes the page's writes.
+export function padShift(scrollTop: number, delta: number): number {
+  return Math.max(0, scrollTop + delta);
 }
 
 // ===================== TEMP DIAGNOSTIC (remove after the blank-thread session) =====================

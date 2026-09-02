@@ -799,9 +799,9 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                                   "shell-size", "kb-close", "send-motion",
                                   "receipt-hold", "boot-motion", "boot-repin",
                                   "grow-blink", "kb-shove",
-                                  "kb-focusing", "kb-glide", "shell-pin",
+                                  "kb-focusing", "kb-lift", "lift-pad", "shell-pin",
                                   "dom-census", "pick-anchor", "tail-gap",
-                                  "kb-restore", "scroll-ghost",
+                                  "scroll-ghost",
                                   "resume", "resume-ride")]
         if vp:
             _diag.info("holddiag viewport events=%d tail=%s",
@@ -910,21 +910,19 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         tb = [e for e in events if isinstance(e, dict) and e.get("ev") == "thread-blank"]
         if tb:
             _diag.info("holddiag blank events=%d tail=%s", len(tb), json.dumps(tb[-6:]))
-        # the white strip after a keyboard close, and the scroll writes nobody
-        # made. kb-restore is the correction taking back a position past the end
-        # of the thread's range (viewport.ts restoreVerdict); scroll-ghost is
-        # every move of that scroll no app write accounts for, which is what
-        # decides whether the engine or one of our own unannounced writers put
-        # it there. They ride the viewport tuple above like every motion mark,
-        # AND this line of their own: both are few — four corrections per close
-        # at the very most, one record per unexplained run — and the viewport
-        # tail keeps only the last twenty marks of every kind, so a busy typing
-        # session would push exactly the answer off the end of it.
+        # the scroll writes nobody made: scroll-ghost is every move of the
+        # thread's scroll no app write accounts for, which is what decides
+        # whether the engine or one of our own unannounced writers put it
+        # there. It rides the viewport tuple above like every motion mark, AND
+        # this line of its own: one record per unexplained run, and the
+        # viewport tail keeps only the last twenty marks of every kind, so a
+        # busy typing session would push exactly the answer off the end of it.
+        # (kb-restore, the post-close correction that used to share this line,
+        # is gone with the box change it corrected: pwa/src/viewport.ts.)
         # TEMP DIAGNOSTIC (scroll-ghost, pwa/src/scrollghost.ts owns the
-        # banner): drop "scroll-ghost" from both here and the tuple above when
-        # that block goes; the kb-restore half stays with the correction.
-        kr = [e for e in events if isinstance(e, dict)
-              and e.get("ev") in ("kb-restore", "scroll-ghost")]
+        # banner): drop "scroll-ghost" from the tuple above and delete this
+        # block when that block goes.
+        kr = [e for e in events if isinstance(e, dict) and e.get("ev") == "scroll-ghost"]
         if kr:
             _diag.info("holddiag ghost events=%d tail=%s", len(kr), json.dumps(kr[-16:]))
         return {"ok": True}

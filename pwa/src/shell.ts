@@ -17,31 +17,46 @@
 //   The old regime chose a correction per mode off an innerHeight comparison
 //   that transiently lies mid-animation, so the choice was latched per
 //   session — and the modes still fought iOS mid-typing (the kb-vv counter
-//   era, retired 2026-08). The regime NOW (the prevention architecture,
-//   research 2026-08-18; Telegram Web Z's vv-sized shell adapted to
-//   position:fixed): while the keyboard is provably up the shell box IS the
-//   visual viewport — top: vv.offsetTop, height: vv.height, rewritten from
-//   fresh numbers on EVERY vv event — and at rest the box is dropped for the
-//   measurement-free four-edge pin. One rule serves all three modes: in
-//   window-shrink the box equals the pin (top 0, height = the shrunken
-//   layout viewport), in the other two it is exactly the correction they
-//   always needed; a stale mid-animation number self-heals on the next event
-//   instead of being latched around. "Is there a keyboard" stays measured
-//   against a BASELINE full-screen height captured while no editor is
-//   focused, never innerHeight - vvHeight (that reads 0 in window-shrink
-//   mode, and 10 of 14 taps landed there). "Provably up" is an AND over focus
-//   and the viewport, so it can go false while the keyboard is still on the
-//   screen: the editor loses focus, the viewport is still publishing the
-//   keyboard-sized height, and a shell that grew there resized ahead of the
-//   phone by 6 to 44ms and left the thread scrolled a keyboard past its own
-//   end (nine closes, 2026-09-01). The box therefore waits out that gap
-//   (holdsShellBox below): one shell resize per close, taken when the viewport
-//   says the screen is whole. And that one resize is a STEP rather than a
-//   glide (boxMotion below): an animated close handed iOS thirteen to fifteen
-//   frames in which to go on compositing the thread at its pre-close offset
-//   while the box grew under it, which is the white band that opens under the
-//   last message and the snap that takes it back (2026-09-01, fourteen
-//   production closes and eight recorded frame by frame, all one shape).
+//   era, retired 2026-08). The regime after it sized the shell box FROM the
+//   visual viewport (Telegram Web Z's vv-sized shell adapted to
+//   position:fixed): height = vv.height while the keyboard was up, the full
+//   screen again at the close, first glided, then held until the viewport
+//   agreed, then stepped, with an overhang correction watching afterwards. It
+//   was retired on 2026-09-02, after a recording of thirty-four closes read
+//   frame by frame against the trail showed why no version of it could be
+//   smooth: while the keyboard animates, the thread's scroll offset is the UI
+//   process's to set, not the page's. A box that changes height at a keyboard
+//   edge moves the end of the scroll range, the page then has to rewrite the
+//   offset, and iOS either drops that write for the whole animation (the
+//   messages freeze at the old offset, white opens under them, and the offset
+//   handed back at the end is the snap) or applies it on the first frame (the
+//   whole list jumps before the keyboard has moved). Holding, gliding, stepping
+//   and correcting only chose between those two.
+//   The regime NOW: the shell box never changes height at a keyboard edge.
+//   While the keyboard is provably up the box is top: vv.offsetTop (the
+//   shrink-and-pan correction, rewritten from fresh numbers on every vv event)
+//   and height: the BASELINE full-screen height; at rest the vars are dropped
+//   for the measurement-free four-edge pin, whose geometry the box already sits
+//   on. What moves is a TRANSFORM: the message list, the photo drawer and the
+//   compose bar sit in one wrapper (main.ts .lift, clipped by .liftclip at the
+//   header's bottom edge) that translates up by the keyboard's inset less the
+//   home-indicator gap the bar hugs the keyboard by, as a compositor transition
+//   on the system keyboard's own clock and curve (styles.css --kb-anim). The
+//   thread's box and its scroll offset are the same numbers with the keyboard
+//   up or down, so there is nothing for the phone to drop or hand back, and the
+//   close's transition starts at the focus loss, the moment the app learns of
+//   it, 6 to 13ms before the viewport reports (device trail 2026-09-01). One
+//   rule serves all three modes: an explicit baseline height keeps the shell
+//   full-size when innerHeight shrinks, so the lifted bar lands at the bottom
+//   of the visible area in overlay, window-shrink and shrink-and-pan alike.
+//   "Is there a keyboard" stays measured against that baseline, captured while
+//   no editor is focused, never innerHeight - vvHeight (that reads 0 in
+//   window-shrink mode, and 10 of 14 taps landed there). The top of the lifted
+//   list disappears under the header inside the clip, so once the open lands
+//   the thread is given that much top padding with the scroll moved by the same
+//   amount in the same frame, and it is taken back the same way once the close
+//   lands (main.ts setLiftPad): never at an edge, where a scroll write is the
+//   very thing this regime refuses.
 // - Corrections run at CLOSE, never mid-typing (Telegram never fights the
 //   keyboard): a window.scrollTo(0,0) conditional on displacement being
 //   actually stuck — iOS 26 can leave vv.offsetTop nonzero after dismissal
@@ -138,97 +153,41 @@ export function computeShell(w: World): ShellTarget {
   };
 }
 
-// The shell box while the keyboard is up IS the visual viewport. top =
-// vv.offsetTop translates a fixed shell into the visible region when iOS
-// slides the layout viewport; height ends it at the keyboard's top edge —
-// the Telegram Web Z height+pageTop invariant (shell bottom = keyboard top)
-// expressed for position:fixed. At rest there is no box: the four-edge pin
-// needs no measurement, so cold-start height misreports can't touch it.
-export function shellBox(t: ShellTarget): { top: number; height: number } | null {
-  return t.kb ? { top: t.vvTop, height: t.vvHeight } : null;
+// The shell box while the keyboard is up, and through the close's own settle
+// window. top = vv.offsetTop translates a fixed shell into the visible region
+// when iOS slides the layout viewport (shrink-and-pan); the height is the
+// learned full-screen BASELINE and never the viewport's own. In the two modes
+// where innerHeight shrinks with the keyboard a four-edge pin would shrink the
+// shell with it, and the lift (styles.css .lift) needs the shell to stay
+// full-size so the bar it carries lands exactly at the keyboard's top edge;
+// in overlay mode the baseline and the pin are the same number anyway. The
+// box therefore never changes size at a keyboard edge, which is the whole of
+// the design (the header): a box that changed size moved the end of the
+// thread's scroll range and made the page rewrite an offset the phone was not
+// taking writes for. At rest there is no box: the four-edge pin needs no
+// measurement, so cold-start height misreports can't touch it, and since the
+// box is written at the pin's own geometry the drop back moves nothing. It
+// stays through the close's window because the pin has no height to hand the
+// close to, and because in shrink-and-pan the top must stand until iOS un-pans.
+export function shellBox(
+  t: ShellTarget,
+  baseline: number,
+  lifting: boolean,
+): { top: number; height: number } | null {
+  return t.kb || lifting ? { top: t.vvTop, height: baseline } : null;
 }
 
-// The close the VIEWPORT has not admitted yet, and the one moment the shell
-// must not act on its own decision (device trail 2026-09-01, nine closes, all
-// the same shape).
-//
-// "Is there a keyboard" is an AND: an editor holds focus AND the viewport is
-// short of the learned baseline. Either input can flip first (closeCause names
-// which one did, per close), and when FOCUS flips first the AND is already
-// false while the keyboard is still standing on the screen and the viewport is
-// still publishing the short height. All nine failures were that close, and
-// closeMark's vvStale said so on the line. The shell grew to full height
-// there, 6 to 44ms before the phone agreed. That growth drops the end of the
-// thread's scroll range by a whole keyboard under an offset that was
-// legitimately sitting on the old end, and when the engine finished its own
-// close transition it handed that
-// pre-dismissal offset back: 386px past an end that had just moved, which is
-// the white band, and the overhang correction taking it back on the next frame
-// is the snap that follows it. Every close in the same trail that was learned
-// from the VIEWPORT was clean, because that one grows the shell at the instant
-// the screen is really whole again.
-//
-// So a close learned from focus alone keeps the box it already has, and the
-// viewport's own catch-up releases it through the very path a viewport-learned
-// close takes. One resize per close, when the keyboard is really gone.
-//
-// Nothing is latched and no clock is started: every evaluation asks the two
-// live numbers again, so the first viewport reading that admits the full
-// screen drops the box, and a viewport that never admits it is a screen that
-// really is still short. The bar's own choreography is not held with it — .kb
-// comes off at the focus edge exactly as before, so the close still feels
-// immediate; it is only the SHELL's box that waits for the phone to agree.
-export function holdsShellBox(kb: boolean, hasBox: boolean, inset: number): boolean {
-  return !kb && hasBox && inset > 0;
-}
-
-// How the shell's box MOVES when it is written, and why the close is the one
-// edge that must not travel (production trail and a frame-by-frame screen
-// recording, 2026-09-01: fourteen closes and eight, every one the same shape).
-//
-// The close used to ride the same 0.2s glide the open does. The box was written
-// once — keyboard height to full height — and .gliding animated it there over
-// about 220ms. Through that whole window the app's own bookkeeping was perfect
-// and the screen was still wrong: the thread's resize observer was delivered on
-// every frame and every one of them settled and read "already at the bottom,
-// moved 0", because the engine clamps scrollTop as the box grows, so there was
-// never anything for a settle to correct — while iOS went on compositing the
-// message list at the offset it held before the close and republished only at
-// the end. On screen that is the compose bar sliding down with the keyboard,
-// the message area's bottom edge following it, and the messages not moving at
-// all: a white band opening under the last message and growing to about 386px
-// over thirteen to fifteen frames, taken back in a single frame by the overhang
-// correction (main.ts's kb-restore, act fix, over 386) once the phone caught up.
-//
-// The WINDOW is the whole of it. An engine that lags by one frame is invisible;
-// an engine given thirteen frames to lag paints a band the height of a
-// keyboard. So the close is given no window to lag in: the box goes to its
-// final full height in ONE step, on the frame the viewport admits the screen is
-// whole (holdsShellBox above still owns when that is, and the 0.3.73 hold is
-// untouched by this), and there is no stretch in which the app's geometry and
-// the phone's compositing can disagree at all. The thread's own settle pins the
-// bottom on that same frame — one box change, one resize callback, one pin — so
-// the last message stays glued above the compose bar and the overhang
-// correction has nothing left to take back.
-//
-// The OPEN edge keeps its glide exactly as it was. It SHRINKS the box, which
-// can never strand a scroll position past the end of the range, and WebKit can
-// publish the keyboard's whole rise as one event, which a one-step write would
-// render as a jump cut.
-//
-// Everything outside a settle window stays instant, as before: a mid-typing box
-// write must never smear an active-growth frame.
-//
-// Two readers, one rule. styles.css carries the same decision on the classes —
-// #app.gliding.kb carries the box transition, and a close is .gliding WITHOUT
-// .kb, so it carries none — and the trail reads it here, so the shell-size
-// record's `glide` flag says whether the write really animated instead of only
-// whether a window happened to be open.
-export type BoxMotion = "glide" | "step" | "instant";
-
-export function boxMotion(kb: boolean, gliding: boolean): BoxMotion {
-  if (!gliding) return "instant";
-  return kb ? "glide" : "step";
+// The keyboard's inset as the lift is driven by it: the learned baseline less
+// the viewport, filtered through the same threshold "is there a keyboard" is,
+// and 0 the moment the keyboard is no longer provably up. It is the one number
+// the shell writes for the lift (--kb-inset); styles.css turns it into the
+// translate, less the gap the bar hugs the keyboard by, which is the
+// difference between the home-indicator clearance and the keyboard-time gap,
+// both of them CSS lengths the engine resolves. The close therefore reads 0
+// here at the focus loss, before the viewport has reported anything, and that
+// is what starts the close's transition 6 to 13ms ahead of the report.
+export function liftInset(t: ShellTarget, baseline: number): number {
+  return t.kb ? keyboardInset(baseline, t.vvHeight) : 0;
 }
 
 // The box top at a keyboard edge, and the one case where the freshest number
@@ -418,21 +377,19 @@ export function focusingActive(
   return editorFocused && !kb && sinceFocusMs < FOCUSING_MAX_MS;
 }
 
-// The settle window a .kb edge opens, and it is now two different things on the
-// two edges (boxMotion above owns why).
-//
-// On the OPEN it is the glide: WebKit can publish a keyboard's whole geometry
-// change as ONE vv event, and a shell box applied in one write is a jump cut, so
-// box writes landing inside the window animate (styles.css #app.gliding.kb,
-// 0.2s ease-out). Outside it — every mid-typing write — they stay instant, so
-// an active-growth frame never smears.
-//
-// On the CLOSE the box does not travel at all, and the window is still needed
-// for two things that are not the box's motion: the numeric box has to stay
-// APPLIED (the four-edge pin has no height to write a full screen into, so the
-// vars must outlive the .kb class), and the bar's own bottom gap still eases
-// home on this same clock, which is the one animation the close keeps.
-export const GLIDE_SETTLE_MS = 450;
+// The system keyboard's animation, as the lift plays it. Apple reports 0.25s
+// on keyboardAnimationDurationUserInfoKey, and styles.css --kb-anim carries
+// that duration with the curve (the sources are cited there). A page gets no
+// frames of the keyboard's motion, so the lift's transition plays the
+// platform's curve on its own, and the settle window below OUTLASTS it: through
+// the window the numeric box stays applied (the four-edge pin has no height to
+// write, and in shrink-and-pan the top must stand until iOS un-pans), and at
+// its end reconcile drops the vars, landing on the pin the box already sits on.
+// The lift element's own transitionend closes the window early and exactly
+// (liftLanded); this clock is the backstop for a transition that never fires
+// one, such as an element rebuilt mid-flight.
+export const KB_ANIM_MS = 250;
+export const LIFT_SETTLE_MS = KB_ANIM_MS + 200;
 
 // The teardown window cannot be shortened, survived, or recovered from (three
 // shipped mechanisms and the v0.1.21 focus-cycle all falsified on device), so
@@ -581,6 +538,12 @@ let baselineWidth = 0;
 // writes and records nothing; null = at rest, on the four-edge pin
 let appliedTop: number | null = null;
 let appliedHeight: number | null = null;
+// the viewport height the box was last applied under, so a mid-typing shove
+// clear can hand applyShell the applied numbers and change nothing (the box's
+// own height is the baseline now, which no viewport event moves)
+let appliedVvHeight: number | null = null;
+// the keyboard inset as written to --kb-inset: the lift's one driver
+let appliedInset = 0;
 // the applied keyboard state; the true->false edge is the close, and the
 // close is the ONLY moment corrections may run
 let kbUp = false;
@@ -593,11 +556,22 @@ let shoveClears = 0;
 let focusStartAt = -Infinity;
 // the focusing class as applied, so its edges record to the trail once each
 let appliedFocusing = false;
-// the .kb class as applied; its edges (and only they) open the glide window
+// the .kb class as applied; its edges (and only they) open the settle window
 let appliedKb = false;
-// box writes animate until this deadline — the kb-edge settle window
-let glideUntil = 0;
-let glideTimer: ReturnType<typeof setTimeout> | null = null;
+// the lift's settle window: the numeric box stays applied until this deadline,
+// which the landing closes early and the clock closes at the latest
+let liftUntil = 0;
+let liftTimer: ReturnType<typeof setTimeout> | null = null;
+let liftRun = 0; // one per edge; a landing belongs to the run that armed it
+let liftLandedRun = 0; // the run whose landing has been recorded
+let landedLift = NaN; // the translate the last landing read, so a re-aim mid-session lands again
+let liftEl: HTMLElement | null = null; // the .lift wrapper, rebuilt by every chat render
+let onLiftLanding: ((up: boolean, lift: number) => void) | null = null;
+// the app's scroll-write counter (scrollghost.ts), read at the edge and at the
+// landing so the kb-lift record can say whether anything wrote inside the
+// keyboard's own animation
+let readScrollWrites: (() => number) | null = null;
+let liftWritesAtEdge = 0;
 // "the keyboard is on its way up or already up", as applied: the focus tap's
 // own signal ORed with the proven keyboard, so the up edge lands with the tap
 // and the down edge only once the screen is really clear again. Watchers hear
@@ -609,6 +583,39 @@ let onKeyboard: ((up: boolean) => void) | null = null;
 // never be visible while the keyboard is up (downbtn.ts owns the rule).
 export function watchKeyboard(cb: (up: boolean) => void): void {
   onKeyboard = cb;
+}
+
+// The lift wrapper (main.ts renders it around the thread, the drawer and the
+// compose bar, and re-binds it on every render since the render rebuilds it).
+// Its transitionend is the one exact signal that the keyboard's motion, as the
+// page plays it, is over: the box can drop to the pin and the thread's top
+// padding can change, neither of which may happen inside the motion.
+export function bindLift(el: HTMLElement): void {
+  liftEl = el;
+  el.addEventListener("transitionend", (e) => {
+    if (e.target !== el || e.propertyName !== "transform") return;
+    liftLanded("end");
+  });
+}
+
+// Register the one listener for a landing. main.ts uses it for the thread's
+// reachability padding: `up` says which edge landed and `lift` is how far the
+// wrapper is translated now, in px, read from its computed transform rather
+// than re-derived from the inset, so the number is the engine's own.
+export function watchLiftLanding(cb: (up: boolean, lift: number) => void): void {
+  onLiftLanding = cb;
+}
+
+// Register the app's scroll-write counter (scrollghost.ts scrollWriteCount);
+// unregistered, the landing record simply leaves the count off.
+export function watchScrollWrites(read: () => number): void {
+  readScrollWrites = read;
+}
+
+// the Y translate a computed transform carries; 0 for none. DOMMatrixReadOnly
+// parses the matrix() string the engine reports, so no arithmetic of ours.
+function matrixY(transform: string): number {
+  return transform === "none" ? 0 : new DOMMatrixReadOnly(transform).f;
 }
 
 function readWorld(): World {
@@ -634,71 +641,87 @@ function readWorld(): World {
   };
 }
 
-// a .kb edge opens the settle window: on the OPEN, box writes inside it animate
-// (styles.css #app.gliding.kb), so a rise WebKit publishes as one event still
-// reads as motion; on the CLOSE the window only keeps the numeric box applied
-// and carries the bar's bottom gap home, while the box itself steps. The timer
-// re-converges once the window ends — reconcile drops .gliding (and the close's
-// numeric rest box) through the one writer; a stale or duplicate fire
-// reconciles an already-converged state, harmlessly.
-function armGlide(edge: "open" | "close", held: boolean): void {
-  glideUntil = performance.now() + GLIDE_SETTLE_MS;
-  // Which of the two windows this is, said outright rather than inferred from
-  // the edge name by a reader who would have to know the rule: `step` is the
-  // close's one-frame growth, and a trail carrying it can be told apart at a
-  // glance from one recorded before this build, where the same edge glided.
-  const step = edge === "close";
-  // `held` marks the close that is standing on its keyboard-era box until the
-  // viewport catches up (holdsShellBox). It rides this record rather than one
-  // of its own because this line is already written once per edge and already
-  // digested, and because the release needs no second record: the shell-size
-  // write a few ms later carries the wait in its own ems, and its `glide` flag
-  // says the growth was one frame.
-  holdDiagRecord("kb-glide", held ? { edge, step, held } : { edge, step });
-  if (glideTimer) clearTimeout(glideTimer);
-  glideTimer = setTimeout(() => {
-    glideTimer = null;
-    reconcile();
-  }, GLIDE_SETTLE_MS + 20);
+// a .kb edge opens the settle window: the numeric box stays applied through it
+// (styles.css #app.lifting), and the lift's own transitionend or, failing that,
+// this clock closes it through liftLanded, which re-converges through the one
+// writer. A stale or duplicate fire lands an already-landed edge, harmlessly.
+function armLift(edge: "open" | "close", inset: number): void {
+  liftUntil = performance.now() + LIFT_SETTLE_MS;
+  liftRun += 1;
+  liftWritesAtEdge = readScrollWrites?.() ?? 0;
+  if (liftTimer) clearTimeout(liftTimer);
+  liftTimer = setTimeout(() => {
+    liftTimer = null;
+    liftLanded("clock");
+  }, LIFT_SETTLE_MS + 20);
+  // TEMP DIAGNOSTIC (kb-lift, block at the bottom): the moment the transition
+  // is armed and the inset it is armed with (0 on a close: the lift goes home);
+  // the landing is its own record on the same channel
+  holdDiagRecord("kb-lift", { edge, via: "arm", inset });
 }
 
-// THE one writer of shell presentation: four mode classes plus the measured
-// box. styles.css owns what they mean (.kb collapses --pad-b and vanishes the
-// ＋; .focusing runs that same bar choreography from the focus tap itself;
-// .kb/.gliding size the shell from --shell-top/--shell-h, .gliding.kb carries
-// the box's own transition — the OPEN edge alone, since a close that travelled
-// is the white band (boxMotion) — and .gliding carries the matching one on
-// everything --pad-b moves, so every reader of the gap is armed by the single
-// class recalculation below and none of them can be given a clock of its own;
-// .settling
-// greys the bar for the whole picker session). Every vv event lands here, so
-// the box is always the freshest numbers iOS has published — no latch,
-// nothing to retract.
+// The lift has landed: the transform's transition ended (bindLift), or the
+// settle clock ran out on one that never said so. Both close the settle window
+// so the next reconcile drops the box to the pin after a close, and both hand
+// main.ts the landing for the thread's reachability padding, once per edge —
+// or once more mid-session when the keyboard itself changed height (an
+// accessory bar), which re-aims the lift and lands it again at a new value.
+function liftLanded(via: "end" | "clock"): void {
+  // the translate as the engine holds it now: negative while lifted, 0 at rest
+  const y = liftEl ? matrixY(getComputedStyle(liftEl).transform) : NaN;
+  if (liftLandedRun !== liftRun || (Number.isFinite(y) && y !== landedLift)) {
+    liftLandedRun = liftRun;
+    landedLift = y;
+    // TEMP DIAGNOSTIC (kb-lift, block at the bottom): when the keyboard's
+    // motion ended as the page played it, how far the wrapper stands lifted,
+    // and whether any scroll write of the app's landed inside the motion, which
+    // is the one thing the lift exists to make impossible
+    holdDiagRecord("kb-lift", {
+      edge: appliedKb ? "open" : "close",
+      via,
+      ms: px(edgeAge()),
+      lift: px(y),
+      writes: readScrollWrites ? readScrollWrites() - liftWritesAtEdge : -1,
+    });
+    onLiftLanding?.(appliedKb, Number.isFinite(y) ? Math.abs(y) : 0);
+  }
+  // The window closes here for an open, and for a close whose viewport already
+  // reads whole and unpanned. A close the phone has not finished reporting
+  // keeps the clock instead, so the box's top stands until iOS un-pans the
+  // layout viewport (shrink-and-pan) rather than dropping to the pin ahead of
+  // it; the clock's own fire closes it regardless.
+  const w = readWorld();
+  const whole = keyboardInset(w.baseline, w.vvHeight) === 0 && w.vvTop <= 1;
+  if (via === "clock" || appliedKb || whole) liftUntil = 0;
+  reconcile();
+}
+
+// THE one writer of shell presentation: four mode classes, the lift's inset
+// and the measured box. styles.css owns what they mean (.kb derives the lift
+// from --kb-inset and vanishes the ＋; .focusing runs that same bar choreography
+// from the focus tap itself; .kb/.lifting size the shell from
+// --shell-top/--shell-h; .settling greys the bar for the whole picker
+// session). Every vv event lands here, so the box's top is always the freshest
+// number iOS has published — no latch, nothing to retract — and the box's
+// height is the baseline, which no vv event moves.
 function applyShell(t: ShellTarget, settling: boolean): void {
   if (!appEl) return;
   // TEMP DIAGNOSTIC (kb-edge, block at the bottom): this call is the edge, so
   // the box written further down is the edge's own target rather than a
   // mid-session resize
   const atEdge = t.kb !== appliedKb;
-  // The keyboard has left the app's decision but not the screen: this frame
-  // keeps the box it already applied, and the viewport's own catch-up is what
-  // grows the shell (holdsShellBox owns the whole reason). Read here, ahead of
-  // every write below, so the box it asks about is the one standing now.
-  const held = holdsShellBox(
-    t.kb,
-    appliedTop !== null || appliedHeight !== null,
-    keyboardInset(baseline, t.vvHeight),
-  );
+  const inset = liftInset(t, baseline);
   // TEMP DIAGNOSTIC (kb-fall, block at the bottom): the last frame with the
   // keyboard still up, sampled on the close edge and BEFORE the class toggle
-  // below collapses --pad-b — after it, the comparison the bug turns on is gone
+  // below starts the lift home — after it, the frame the motion is measured
+  // against is gone
   if (!t.kb && appliedKb) fallEdge();
   if (t.kb && !appliedKb) riseEdge(); // TEMP DIAGNOSTIC (kb-rise): the same, mirrored
   if (t.kb !== appliedKb) {
     appliedKb = t.kb;
-    armGlide(t.kb ? "open" : "close", held);
+    armLift(t.kb ? "open" : "close", inset);
   }
-  const gliding = performance.now() < glideUntil;
+  const lifting = performance.now() < liftUntil;
   const editorFocused = isEditable(document.activeElement);
   const focusing = focusingActive(editorFocused, t.kb, performance.now() - focusStartAt);
   if (focusing !== appliedFocusing) {
@@ -711,77 +734,49 @@ function applyShell(t: ShellTarget, settling: boolean): void {
   }
   appEl.classList.toggle("kb", t.kb);
   appEl.classList.toggle("settling", settling);
-  appEl.classList.toggle("gliding", gliding);
+  appEl.classList.toggle("lifting", lifting);
   appEl.classList.toggle("focusing", focusing);
 
-  // Whether a box write on THIS frame really animates, which since the close
-  // stopped travelling is no longer the same question as whether a window is
-  // open: the open edge's window glides the box, the close's steps it, and
-  // outside a window every write is instant (boxMotion owns the whole reason,
-  // and styles.css keys the identical rule off .gliding.kb). The trail's glide
-  // flag is this, never the window alone.
-  const glides = boxMotion(t.kb, gliding) === "glide";
+  // The lift's driver, written in the same style recalculation as the class
+  // that reads it, so the transition is armed by the very write that moves the
+  // value. A shove clear hands this function the applied numbers and so writes
+  // nothing here; a keyboard that changed height mid-session (an accessory
+  // bar) re-aims the lift, and the transition retargets from wherever it is.
+  if (inset !== appliedInset) {
+    appliedInset = inset;
+    appEl.style.setProperty("--kb-inset", `${inset}px`);
+  }
 
-  // The box: the visual viewport while the keyboard is up, the pin's own
-  // geometry in one step once it is gone — and, on a close the viewport has not
-  // admitted yet, neither. A held close is the one way a numeric box outlives
-  // the .kb class without being written on; it stands exactly where it is until
-  // the viewport reports the full screen, and the step then runs once, on the
-  // same reading a viewport-learned close would have run it on.
-  const box = shellBox(t);
+  // The box: top from the viewport while the keyboard is up and through the
+  // close's window, height the baseline throughout, dropped for the pin once
+  // the window ends. The height never changes at an edge, so no frame here can
+  // move the end of the thread's scroll range (the header owns why).
+  const box = shellBox(t, baseline, lifting);
   if (box) {
     const top = Math.round(box.top);
     const height = Math.round(box.height);
     if (top !== appliedTop || height !== appliedHeight) {
-      if (gliding && appliedTop === null && appliedHeight === null) {
-        // entering from the four-edge pin, a glide has no numeric FROM value
-        // (the pin's height is `auto`, which no transition interpolates):
-        // seed the pin's own geometry and commit it with a reflow so the
-        // real write below animates from rest instead of snapping
-        appEl.style.setProperty("--shell-top", "0px");
-        appEl.style.setProperty("--shell-h", `${Math.round(baseline)}px`);
-        void appEl.offsetHeight;
-        edgeSeeded = true; // TEMP DIAGNOSTIC (kb-edge): this edge paid for that reflow
-      }
       appliedTop = top;
       appliedHeight = height;
-      appEl.style.setProperty("--shell-top", `${box.top}px`);
-      appEl.style.setProperty("--shell-h", `${box.height}px`);
-      // the device's read-back for every shell resize the keyboard causes
-      recordShellSize(top, height, glides, atEdge);
+      appEl.style.setProperty("--shell-top", `${top}px`);
+      appEl.style.setProperty("--shell-h", `${height}px`);
+      // the device's read-back for every box write the keyboard causes
+      recordShellSize(top, height, atEdge);
     }
-  } else if (!held && (appliedTop !== null || appliedHeight !== null)) {
-    if (gliding) {
-      // The close's ONE step: the pin's own geometry, written into the numeric
-      // box in a single frame. It is written rather than dropped because the
-      // window still holds the box vars applied and the pin has no height of
-      // its own to fall back to; armGlide's timer drops them below once the
-      // window ends, landing on the measurement-free pin as before, and since
-      // this write already put the box exactly on the pin's geometry that drop
-      // moves nothing. No transition is armed here (styles.css scopes the box
-      // transition to .gliding.kb), so the growth is the frame it lands on and
-      // no other — boxMotion owns the whole reason.
-      const restH = Math.round(baseline);
-      if (appliedTop !== 0 || appliedHeight !== restH) {
-        appliedTop = 0;
-        appliedHeight = restH;
-        appEl.style.setProperty("--shell-top", "0px");
-        appEl.style.setProperty("--shell-h", `${restH}px`);
-        recordShellSize(0, restH, glides, atEdge);
-      }
-    } else {
-      const wasTop = appliedTop;
-      const wasH = appliedHeight;
-      appliedTop = null;
-      appliedHeight = null;
-      appEl.style.removeProperty("--shell-top");
-      appEl.style.removeProperty("--shell-h");
-      // TEMP DIAGNOSTIC (shell-pin, block at the bottom): the numeric box is
-      // gone and the four-edge pin takes over. If the ride home had not landed
-      // exactly on the pin's own geometry this is the frame it snaps, and
-      // nothing else in the trail marks the moment.
-      recordShellPin(wasTop, wasH);
-    }
+    appliedVvHeight = Math.round(t.vvHeight);
+  } else if (appliedTop !== null || appliedHeight !== null) {
+    const wasTop = appliedTop;
+    const wasH = appliedHeight;
+    appliedTop = null;
+    appliedHeight = null;
+    appliedVvHeight = null;
+    appEl.style.removeProperty("--shell-top");
+    appEl.style.removeProperty("--shell-h");
+    // TEMP DIAGNOSTIC (shell-pin, block at the bottom): the numeric box is
+    // gone and the four-edge pin takes over. The box was written at the pin's
+    // own geometry, so this frame moves nothing; if a baseline had lied, this
+    // is the frame it would snap, and nothing else in the trail marks it.
+    recordShellPin(wasTop, wasH);
   }
 
   // last, so a watcher reading geometry sees this frame's box and not the
@@ -915,27 +910,28 @@ export function reconcile(): void {
   if (appEl) {
     const x = Math.round(window.scrollX);
     const y = Math.round(window.scrollY);
-    const heightChanged = appliedHeight === null || Math.round(t.vvHeight) !== appliedHeight;
+    const heightChanged =
+      appliedVvHeight === null || Math.round(t.vvHeight) !== appliedVvHeight;
     const verdict = shoveVerdict(wasUp, t.kb, x, y, heightChanged, shoveClears);
     // TEMP DIAGNOSTIC (kb-rise, block at the bottom): en on both records below
     // is the edge counter the kb-edge record carries as n, so a clear names the
     // open it landed inside and frames, edge summary and clears join on one
     // timeline. It goes when that block goes.
-    if (verdict === "clear" && appliedTop !== null && appliedHeight !== null) {
+    if (verdict === "clear" && appliedTop !== null && appliedVvHeight !== null) {
       shoveClears += 1;
       window.scrollTo(0, 0);
-      target = { kb: t.kb, vvTop: appliedTop, vvHeight: appliedHeight };
+      target = { kb: t.kb, vvTop: appliedTop, vvHeight: appliedVvHeight };
       holdDiagRecord("kb-shove", { act: "clear", n: shoveClears, en: edgeRun, x, y, top: Math.round(t.vvTop) });
     } else if (verdict === "yield") {
       holdDiagRecord("kb-shove", { act: "yield", n: shoveClears, en: edgeRun, x, y, top: Math.round(t.vvTop) });
     }
-    // The edges stay the shell's own business, and they still resize with the
-    // viewport: only the TOP an edge writes is held back, and only when the
-    // window is scrolled under it (edgeBoxTop owns the whole reason). This can
-    // never overlap the verdict above, because shoveVerdict returns "track" at
-    // both edges by design, and it can never touch the close edge, which writes
-    // no box at all. scrollX plays no part: a sideways scroll cannot inflate
-    // offsetTop.
+    // The edges stay the shell's own business, and the open still reads the
+    // keyboard's height from the fresh viewport for the lift: only the TOP an
+    // edge writes is held back, and only when the window is scrolled under it
+    // (edgeBoxTop owns the whole reason). This can never overlap the verdict
+    // above, because shoveVerdict returns "track" at both edges by design, and
+    // it can never touch the close edge, which writes no new box. scrollX plays
+    // no part: a sideways scroll cannot inflate offsetTop.
     if (t.kb && wasUp !== t.kb) {
       target = { kb: t.kb, vvTop: edgeBoxTop(t.vvTop, y, appliedTop), vvHeight: t.vvHeight };
     }
@@ -1370,17 +1366,16 @@ export function currentFileInput(): HTMLInputElement | null {
 //                 the viewport finally admitted the full screen. It is a
 //                 separate record rather than a delayed one because the edge
 //                 record must not wait on the very viewport it is accusing.
-//                 Such a close now writes no box at its own edge (the shell
-//                 waits for that same viewport: holdsShellBox), so its boxTop
-//                 and boxH read null and the write it would have carried
-//                 arrives on shell-size a few ms later, with the wait in its
-//                 ems. The kb-glide record beside it carries `held`.
+//                 A close writes no new box at its own edge now (the box it
+//                 has is the baseline-height one the open wrote, and the lift
+//                 goes home instead), so its boxTop and boxH read null; the
+//                 `inset` beside vvH is what the viewport still claimed at
+//                 that instant, and the kb-lift records carry the motion.
 //   shell-pin   : the one frame the shell leaves its numeric box for the
-//                 four-edge pin, at the end of the glide's settle window. The
-//                 pin cannot be animated, so if the ride home had not landed
-//                 exactly on the pin's geometry this is where it snaps, about
-//                 470ms after the close edge. Nothing recorded that moment, and
-//                 an eighteen-frame probe stopped before it.
+//                 four-edge pin, at the end of the lift's settle window. The
+//                 box is written at the pin's own geometry (the baseline), so
+//                 the frame moves nothing unless the baseline lied, and this
+//                 is the one record that would say so.
 //   pick-anchor : the file input's rect against the ＋ button's at the instant
 //                 the picker presents. The pair was recorded to test the
 //                 theory that iOS anchors WKFileUploadPanel to the INPUT's
@@ -1416,29 +1411,43 @@ export function currentFileInput(): HTMLInputElement | null {
 // forces at most the one style/layout the glide's animated top/height was
 // going to need on that frame anyway.
 //
+//   kb-lift     : the lift's arm and landing, one record each per edge. The
+//                 arm carries the inset the transition was armed with (0 on a
+//                 close) and lands on the same frame as the edge record; the
+//                 landing carries how the window closed (the transform's own
+//                 transitionend, or the settle clock), how long after the edge,
+//                 how far the wrapper stands lifted by the engine's own
+//                 computed transform, and how many scroll writes the app made
+//                 between the two — the number that has to read 0 for the
+//                 design to be doing what it claims. The frames above carry
+//                 the same translate per frame as `lift`, so the motion itself
+//                 is on the trail beside the pill and thread edges it moves.
+//
 // TO REMOVE: delete this block plus the call sites above marked TEMP
-// DIAGNOSTIC (the atEdge flag, the two edge samples and the seeding-reflow mark
-// in applyShell, the shell-size and shell-pin records in the same function, the
-// census in correctionPass, the probe start in keyboardClosed and the mirror
-// one in reconcile, reconcile's world/height/late-close stamp block along with
-// the world split at its top — `const w = readWorld()` goes back to being
-// `computeShell(readWorld())` — the en field on reconcile's two kb-shove records, the
-// anchor record in the picker's present effect plus the
-// held swallow's record in pickerTapOpen, the four pickEndRecord calls (the
-// three hand-back handlers in initShell and the expiry backstop), the two
-// markViewportEvent listeners and the safe-area probe in initShell), the
-// watchFollowTail wiring in main.ts, "pick-anchor" and "kb-edge" in hold.ts's
-// post-now list, and the kb-fall/kb-rise/kb-edge/shell-pin/dom-census/
-// pick-anchor/safe-area names in web/app.py's digest filters.
+// DIAGNOSTIC (the atEdge flag and the two edge samples in applyShell, the
+// shell-size and shell-pin records in the same function, the kb-lift records in
+// armLift and liftLanded along with the write counter they read
+// (watchScrollWrites, liftWritesAtEdge), the census in correctionPass, the
+// probe start in keyboardClosed and the mirror one in reconcile, reconcile's
+// world/height/late-close stamp block along with the world split at its top —
+// `const w = readWorld()` goes back to being `computeShell(readWorld())` — the
+// en field on reconcile's two kb-shove records, the anchor record in the
+// picker's present effect plus the held swallow's record in pickerTapOpen, the
+// four pickEndRecord calls (the three hand-back handlers in initShell and the
+// expiry backstop), the two markViewportEvent listeners and the safe-area probe
+// in initShell), the watchFollowTail and watchScrollWrites wiring in main.ts,
+// "pick-anchor", "kb-edge" and "kb-lift" in hold.ts's post-now list, and the
+// kb-fall/kb-rise/kb-edge/kb-lift/shell-pin/dom-census/pick-anchor/safe-area
+// names in web/app.py's digest filters.
 
 /**
  * Frames one edge probe samples, on either edge: about 0.5s at 60fps. The
  * budget has to OUTLIVE the motion it is measuring, and the motion is longer
- * than the 0.2s transition: the shell holds its numeric box for the whole of
- * GLIDE_SETTLE_MS and drops it for the four-edge pin about 470ms after the
- * edge, so a probe that stops at eighteen frames cannot see whether the ride
- * home landed on the pin or snapped onto it. The first eighteen frames are
- * unchanged, so trails recorded either side of this read against each other.
+ * than the 0.25s transition: the shell holds its numeric box for the whole of
+ * LIFT_SETTLE_MS and drops it for the four-edge pin about 470ms after the
+ * edge at the latest, so a probe that stops at eighteen frames cannot see
+ * whether the drop moved anything. The first eighteen frames are unchanged, so
+ * trails recorded either side of this read against each other.
  */
 export const EDGE_FRAMES = 30;
 
@@ -1518,6 +1527,7 @@ export type EdgeFrame = {
   st: number | null;
   sy: number | null;
   vvTop: number | null;
+  lift: number | null;
   ft?: boolean;
 };
 
@@ -1531,6 +1541,7 @@ export interface EdgeReader {
   st(): number;
   sy(): number; // window.scrollY: one displacement source of a shove
   vvTop(): number; // visualViewport.offsetTop: the other one
+  lift(): number; // the lift wrapper's live translateY: the motion itself, per frame
   fts(): number | undefined; // absent on the edge sample, which is not in a frame
   ft(): boolean | undefined; // absent when nothing registered a follow reader
 }
@@ -1569,6 +1580,7 @@ export function edgeFrame(ms: number, r: EdgeReader): EdgeFrame {
     st: px(r.st()),
     sy: px(r.sy()),
     vvTop: px(r.vvTop()),
+    lift: px(r.lift()),
   };
   const fts = r.fts();
   if (fts !== undefined) frame.fts = Math.round(fts);
@@ -1681,11 +1693,10 @@ export function closeMark(
 export function sizeRecord(
   top: number,
   h: number,
-  glide: boolean,
   edge: boolean,
   ems: number,
 ): Record<string, unknown> {
-  return { top, h, glide, edge, ems: px(ems) };
+  return { top, h, edge, ems: px(ems) };
 }
 
 /** the box the shell held at the instant it went back to the four-edge pin */
@@ -1776,7 +1787,7 @@ let edgeRun = 0; // a newer edge inside the window owns the frames from there on
 let edgeChannel = "kb-fall"; // which of the two trails this run is writing
 let edgeZero: EdgeFrame | null = null; // the ms 0 sample: the deltas' FROM value
 let edgeHead: Record<string, unknown> | null = null; // this edge's record, half built
-let edgeSeeded = false; // the edge's box write had to seed the pin's geometry
+let edgeLiftStyle: CSSStyleDeclaration | null = null; // .lift's live computed style
 let edgeVvAt = -1; // the last viewport event's own dispatch time
 let edgeVvSrc = "other";
 // The two worlds a close edge is read from. Kept as a pair advanced together
@@ -1834,6 +1845,9 @@ function edgeSample(ms: number, fts: number | undefined): EdgeFrame {
     // engine, so neither read can force a layout
     sy: () => window.scrollY,
     vvTop: () => window.visualViewport?.offsetTop ?? NaN,
+    // the lift's live translate, off the computed style resolved at the edge:
+    // the transition's own frame-by-frame value, which is the motion itself
+    lift: () => (edgeLiftStyle ? matrixY(edgeLiftStyle.transform) : NaN),
     fts: () => fts,
     ft: () => readFollowTail?.(),
   });
@@ -1852,8 +1866,8 @@ function edgeStart(kind: "open" | "close"): void {
   edgeStyle = compose ? getComputedStyle(compose) : null;
   edgePill = document.querySelector(".compose .field");
   edgeThread = document.getElementById("thread");
+  edgeLiftStyle = liftEl ? getComputedStyle(liftEl) : null;
   edgeChannel = kind === "open" ? "kb-rise" : "kb-fall";
-  edgeSeeded = false;
   edgeT0 = performance.now();
   edgeRun += 1;
   const vv = window.visualViewport;
@@ -1887,6 +1901,10 @@ function edgeStart(kind: "open" | "close"): void {
     // sit side by side and the subtraction is on the line rather than in the
     // reader's head
     ...(close ?? {}),
+    // the inset the viewport reads at the edge, which on an open is the lift's
+    // target and on a close is what it is coming home from (the viewport is
+    // still publishing it: closeMark's vvStale above says so)
+    inset: Math.round(keyboardInset(baseline, vv?.height ?? baseline)),
     // how much of the keyboard's rise had already happened: styles.css starts
     // the ＋ collapse and the pill widen from the focus tap (.focusing) and the
     // shell's own glide only from this edge, so this is how far apart the two
@@ -1908,12 +1926,12 @@ function riseEdge(): void {
 
 // the box the edge's own write aimed at, kept on the edge record so one line
 // says where the shell was told to go as well as where it got to
-function recordShellSize(top: number, h: number, glide: boolean, edge: boolean): void {
+function recordShellSize(top: number, h: number, edge: boolean): void {
   if (edge && edgeHead) {
     edgeHead.boxTop = top;
     edgeHead.boxH = h;
   }
-  holdDiagRecord("shell-size", sizeRecord(top, h, glide, edge, edgeAge()));
+  holdDiagRecord("shell-size", sizeRecord(top, h, edge, edgeAge()));
 }
 
 function recordShellPin(top: number | null, h: number | null): void {
@@ -1942,7 +1960,6 @@ function startEdgeProbe(): void {
       const started = fts >= 0 ? fts - edgeT0 : undefined;
       const frame = edgeSample(read, started);
       if (i === 0 && edgeHead && edgeZero) {
-        edgeHead.seed = edgeSeeded; // the seeding reflow, if any, has happened by now
         holdDiagRecord(
           "kb-edge",
           edgeMark(edgeHead, { armed, frame: started ?? read, read }, edgeZero, frame),

@@ -8,11 +8,12 @@ import { holdDiagEvents, holdDiagReset } from "../src/hold";
 import {
   FOCUSING_MAX_MS,
   HEAL_THRESHOLD_PX,
+  KB_ANIM_MS,
+  LIFT_SETTLE_MS,
   MAX_SHOVE_CLEARS,
   MIN_KEYBOARD_PX,
   SETTLE_GUARD_MS,
   TEARDOWN_MAX_MS,
-  boxMotion,
   closeCorrectionNeeded,
   composerTapVerdict,
   computeShell,
@@ -22,13 +23,12 @@ import {
   focusingActive,
   healNeeded,
   holdsBarTap,
-  holdsShellBox,
   keyboardInset,
+  liftInset,
   plusClickVerdict,
   preservesFocus,
   shellBox,
   shoveVerdict,
-  type BoxMotion,
   type World,
 } from "../src/shell";
 
@@ -59,25 +59,35 @@ describe("keyboardInset — the iOS 26 lie filter (webkit bug 297779)", () => {
 });
 
 describe("computeShell + shellBox — one rule for iOS 26's keyboard modes (taplogs 2026-07-25/30)", () => {
-  it("overlay mode: only the visual viewport shrank — the shell box IS the visual viewport", () => {
+  const BASE = 844;
+
+  it("overlay mode: only the visual viewport shrank — the box is the full screen, top from the pan", () => {
     const t = computeShell(world({ editorFocused: true, vvHeight: 508, vvTop: 40 }));
     expect(t.kb).toBe(true);
-    expect(shellBox(t)).toEqual({ top: 40, height: 508 });
+    expect(shellBox(t, BASE, false)).toEqual({ top: 40, height: 844 });
   });
 
-  it("window-shrink mode: STILL a keyboard (v0.1.16 bug: read as none), and the box equals the pin", () => {
-    // innerHeight shrank to match the viewport, so top 0 / height 508 is
-    // exactly what the four-edge pin already renders — writing it moves
-    // nothing, which is why one rule can serve every mode
+  it("window-shrink mode: STILL a keyboard (v0.1.16 bug: read as none), and the box is NOT the pin", () => {
+    // innerHeight shrank to match the viewport, so the four-edge pin would
+    // render 508 tall and carry the lifted compose bar 336px above the
+    // keyboard; the explicit baseline height keeps the shell full-size under
+    // it, which is the reason the box is written at all in this mode
     const t = computeShell(world({ editorFocused: true, vvHeight: 508, vvTop: 0 }));
     expect(t.kb).toBe(true);
-    expect(shellBox(t)).toEqual({ top: 0, height: 508 });
+    expect(shellBox(t, BASE, false)).toEqual({ top: 0, height: 844 });
   });
 
   it("shrink-AND-pan: top rides the pan, so the header stays on screen (the 2026-07-30 hidden-header session)", () => {
     const t = computeShell(world({ editorFocused: true, vvHeight: 400, vvTop: 362 }));
     expect(t.kb).toBe(true);
-    expect(shellBox(t)).toEqual({ top: 362, height: 400 });
+    expect(shellBox(t, BASE, false)).toEqual({ top: 362, height: 844 });
+  });
+
+  it("the height is the baseline in every mode: no keyboard can change the thread's box", () => {
+    for (const vvHeight of [508, 400, 458]) {
+      const t = computeShell(world({ editorFocused: true, vvHeight }));
+      expect(shellBox(t, BASE, false)?.height).toBe(844);
+    }
   });
 
   it("baseline decides there is a keyboard — no innerHeight comparison exists to lie mid-animation", () => {
@@ -90,13 +100,24 @@ describe("computeShell + shellBox — one rule for iOS 26's keyboard modes (tapl
   it("focusin before the keyboard moves (delta 0): no box — the four-edge pin holds", () => {
     const t = computeShell(world({ editorFocused: true }));
     expect(t.kb).toBe(false);
-    expect(shellBox(t)).toBeNull();
+    expect(shellBox(t, BASE, false)).toBeNull();
   });
 
   it("no editor focused: a shrunken viewport is never trusted (stale after blur)", () => {
     const t = computeShell(world({ vvHeight: 508 }));
     expect(t.kb).toBe(false);
-    expect(shellBox(t)).toBeNull();
+    expect(shellBox(t, BASE, false)).toBeNull();
+  });
+
+  it("through the close's settle window the box stands at the same height, top still from the viewport", () => {
+    // the pin has no height to hand the close to, and in shrink-and-pan the
+    // top must stand until iOS un-pans; the moment the window ends the box goes
+    const closing = computeShell(world({ editorFocused: false, vvHeight: 400, vvTop: 362 }));
+    expect(closing.kb).toBe(false);
+    expect(shellBox(closing, BASE, true)).toEqual({ top: 362, height: 844 });
+    const unpanned = computeShell(world({ editorFocused: false, vvHeight: 844, vvTop: 0 }));
+    expect(shellBox(unpanned, BASE, true)).toEqual({ top: 0, height: 844 });
+    expect(shellBox(unpanned, BASE, false)).toBeNull();
   });
 
   it("parked file-input focus is not 'keyboard up' — no shell resize for the picker", () => {
@@ -104,153 +125,97 @@ describe("computeShell + shellBox — one rule for iOS 26's keyboard modes (tapl
   });
 });
 
-// The white band and the snap that follows it (production trail 2026-09-01,
-// nine failures, every one the same shape). "Is there a keyboard" is an AND, so
-// it goes false on whichever input flips first, and on all nine that was FOCUS:
-// the close was learned from the editor losing it while the viewport was still
-// publishing the keyboard-sized height, the shell grew to full height there,
-// and 6 to 44ms later the engine handed back the offset the range had held
-// while the keyboard was up — 386px past an end the app had already moved. The
-// band is that overhang and the snap is the correction taking it back. Closes
-// learned from the viewport were clean, all of them, because those grow the
-// shell at the instant the screen is whole. So the box waits for the viewport.
-describe("holdsShellBox — the close the phone has not admitted yet", () => {
-  const UP = 458; // the visual viewport with the keyboard up: 844 less 386
-  const inset = (vvHeight: number): number => keyboardInset(844, vvHeight);
-
-  it("the failing close: focus gone, viewport still short — the box stands", () => {
-    expect(holdsShellBox(false, true, inset(UP))).toBe(true);
+// The white band and the snap that follows it, and the abrupt cut that was its
+// twin (a recording of thirty-four closes read frame by frame against the
+// trail, 2026-09-01/02). Every version of the box-resize design — the glide,
+// the hold, the step, the overhang correction — changed the thread's box at
+// the keyboard edge, which moved the end of its scroll range and made the page
+// rewrite an offset the phone was not taking writes for while the keyboard
+// animated. So the box no longer changes at an edge at all, and the inset
+// below is the ONE number the shell writes for the keyboard: the lift's driver.
+describe("liftInset — the one number the shell writes for the keyboard", () => {
+  it("the keyboard's inset, while the keyboard is provably up", () => {
+    expect(liftInset(computeShell(world({ editorFocused: true, vvHeight: 458 })), 844)).toBe(386);
+    expect(liftInset(computeShell(world({ editorFocused: true, vvHeight: 400 })), 844)).toBe(444);
   });
 
-  it("a viewport-learned close never holds: the screen is whole when it is asked", () => {
-    // kb went false because the height came back, so there is no gap to wait out
-    expect(holdsShellBox(false, true, inset(844))).toBe(false);
+  it("0 the moment focus leaves, before the viewport has said a word: the close starts there", () => {
+    // the trail's every close: the editor loses focus 6 to 13ms before the
+    // viewport reports the full screen, and the lift goes home on the focus
+    expect(liftInset(computeShell(world({ editorFocused: false, vvHeight: 458 })), 844)).toBe(0);
   });
 
-  it("the wait is drawn on the same threshold the inset filter is", () => {
-    expect(holdsShellBox(false, true, inset(844 - MIN_KEYBOARD_PX))).toBe(true);
-    expect(holdsShellBox(false, true, inset(844 - MIN_KEYBOARD_PX + 1))).toBe(false);
+  it("the iOS 26 stale-viewport lie is not an inset, so it lifts nothing", () => {
+    expect(liftInset(computeShell(world({ editorFocused: true, vvHeight: 820 })), 844)).toBe(0);
   });
 
-  it("a keyboard that is up sizes from the viewport as it always did", () => {
-    expect(holdsShellBox(true, true, inset(UP))).toBe(false);
+  it("the threshold is the keyboard filter's own", () => {
+    const at = (vvHeight: number): number =>
+      liftInset(computeShell(world({ editorFocused: true, vvHeight })), 844);
+    expect(at(844 - MIN_KEYBOARD_PX)).toBe(MIN_KEYBOARD_PX);
+    expect(at(844 - MIN_KEYBOARD_PX + 1)).toBe(0);
   });
 
-  it("nothing to hold at rest: the four-edge pin is never held onto", () => {
-    expect(holdsShellBox(false, false, inset(UP))).toBe(false);
-  });
-
-  it("the iOS 26 stale-viewport lie is not a keyboard, so it cannot hold the box", () => {
-    // a ~24px-short viewport after dismissal reads as no inset at all
-    // (keyboardInset's own filter), which is what ends the wait
-    expect(holdsShellBox(false, true, inset(820))).toBe(false);
-  });
-
-  it("mid-retraction the keyboard is still on the screen, so the wait continues", () => {
-    expect(holdsShellBox(false, true, inset(600))).toBe(true);
+  it("the parked file input lifts nothing: the picker's sheet is not a keyboard", () => {
+    expect(liftInset(computeShell(world({ fileFocused: true, vvHeight: 458 })), 844)).toBe(0);
   });
 });
 
-// The band the hold above did NOT fix, and the second half of the same close
-// (production trail and a frame-by-frame recording, 2026-09-01: fourteen closes
-// and eight, every one the same shape). The hold ran correctly on all of them —
-// the shell waited for the viewport and grew once — and the band still came,
-// because the growth ANIMATED. Over the 220ms it took, the app's own settle ran
-// on every frame and read "already at the bottom, moved 0" every time, since the
-// engine clamps scrollTop as the box grows; iOS meanwhile kept compositing the
-// message list at its pre-close offset and republished only at the end. So the
-// compose bar slid down, the message area's bottom edge followed it, the
-// messages did not move, and white opened under the last message to about 386px
-// over thirteen to fifteen frames before one frame of snap took it back.
-//
-// The window is the fault. An engine one frame behind is invisible; an engine
-// thirteen frames behind paints a keyboard of white. The close therefore gets no
-// window: one write, at the full height, on the frame the viewport admits the
-// screen is whole.
-describe("boxMotion — the close steps, the open still glides", () => {
-  it("the close's write lands in one frame: no window for the engine to lag in", () => {
-    expect(boxMotion(false, true)).toBe("step");
+describe("the keyboard's clock", () => {
+  it("is the platform's 0.25s, and the settle window outlasts it", () => {
+    expect(KB_ANIM_MS).toBe(250);
+    expect(LIFT_SETTLE_MS).toBeGreaterThan(KB_ANIM_MS);
+    expect(LIFT_SETTLE_MS).toBe(KB_ANIM_MS + 200);
   });
 
-  it("the open still glides: WebKit can publish a whole rise as one event", () => {
-    expect(boxMotion(true, true)).toBe("glide");
-  });
-
-  it("outside a settle window nothing animates, whichever edge it belongs to", () => {
-    // a mid-typing write must never smear an active-growth frame
-    expect(boxMotion(true, false)).toBe("instant");
-    expect(boxMotion(false, false)).toBe("instant");
-  });
-
-  it("only the raise ever animates the box — the one thing the band turns on", () => {
-    const animated = [true, false].flatMap((kb) =>
-      [true, false]
-        .filter((gliding) => boxMotion(kb, gliding) === "glide")
-        .map((gliding) => [kb, gliding]),
-    );
-    expect(animated).toEqual([[true, true]]);
-  });
-
-  it("a close that arrives inside the raise's own window still steps", () => {
-    // dismissing within GLIDE_SETTLE_MS of the tap re-arms the window as a
-    // close, and .kb is off from that edge on, so nothing can inherit a glide
-    // the raise opened
-    expect(boxMotion(false, true)).toBe("step");
+  it("styles.css plays the same duration: the two copies are held together here", () => {
+    const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+    const anim = css.match(/--kb-anim: ([\d.]+)s cubic-bezier\(([^)]*)\);/);
+    expect(anim).not.toBeNull();
+    expect(Number(anim![1]) * 1000).toBe(KB_ANIM_MS);
+    // the published approximation of the keyboard's spring (Apple forums 48088)
+    expect(anim![2].split(",").map((n) => Number(n.trim()))).toEqual([0.38, 0.7, 0.125, 1]);
   });
 });
 
-// The same rule played through a whole close, because the property that matters
-// is not one verdict but the sequence: ONE shell resize per close, never two,
-// and never one before the phone agrees. The stand-in below is applyShell's box
-// branch and nothing else — the wiring pins further down hold it to the source
-// it mirrors.
-describe("the close's writes: one resize, taken when the viewport says so", () => {
+// The rule played through a whole open and close, because the property that
+// matters is the sequence: ONE box write per keyboard session, at the open, at
+// the full-screen height; NONE at the close; the drop to the pin when the
+// window ends, on a box that is already the pin's geometry. The stand-in below
+// is applyShell's box branch and nothing else — the wiring pins further down
+// hold it to the source it mirrors.
+describe("the box's writes: one at the open, none at the close, the pin at the end", () => {
   const UP = 458;
 
   function shellWriter() {
     let top: number | null = null;
     let height: number | null = null;
     const writes: (readonly [number | null, number | null])[] = [];
-    // how each of those writes MOVED, taken from the same decision the real
-    // writer records it with, so the sequence pins say not only that the close
-    // writes once but that the one write does not travel
-    const motions: BoxMotion[] = [];
+    const insets: number[] = []; // every --kb-inset write, in order
+    let appliedInset = 0;
     return {
       writes,
-      motions,
+      insets,
       box: () => [top, height] as const,
       /** one viewport reading, exactly as reconcile hands it to applyShell */
-      read(w: World, gliding = true): void {
+      read(w: World, lifting = true): void {
         const t = computeShell(w);
-        const held = holdsShellBox(
-          t.kb,
-          top !== null || height !== null,
-          keyboardInset(w.baseline, w.vvHeight),
-        );
-        const motion = boxMotion(t.kb, gliding);
-        const box = shellBox(t);
+        const inset = liftInset(t, w.baseline);
+        if (inset !== appliedInset) {
+          appliedInset = inset;
+          insets.push(inset);
+        }
+        const box = shellBox(t, w.baseline, lifting);
         if (box) {
           if (Math.round(box.top) !== top || Math.round(box.height) !== height) {
             top = Math.round(box.top);
             height = Math.round(box.height);
             writes.push([top, height]);
-            motions.push(motion);
           }
-        } else if (!held && (top !== null || height !== null)) {
-          if (gliding) {
-            const restH = Math.round(w.baseline);
-            if (top !== 0 || height !== restH) {
-              top = 0;
-              height = restH;
-              writes.push([top, height]);
-              motions.push(motion);
-            }
-          } else {
-            top = null;
-            height = null;
-            writes.push([null, null]); // the vars go, the four-edge pin takes over
-            motions.push(motion);
-          }
+        } else if (top !== null || height !== null) {
+          top = null;
+          height = null;
+          writes.push([null, null]); // the vars go, the four-edge pin takes over
         }
       },
     };
@@ -262,49 +227,29 @@ describe("the close's writes: one resize, taken when the viewport says so", () =
     return s;
   };
 
-  it("the raise still sizes the shell from the viewport, once", () => {
-    expect(raised().writes).toEqual([[0, UP]]);
+  it("the open writes the box once, at the full screen, and arms the lift with the inset", () => {
+    const s = raised();
+    expect(s.writes).toEqual([[0, 844]]);
+    expect(s.insets).toEqual([386]);
   });
 
-  it("focus leaves under a stale viewport: nothing is written, the box stays keyboard-sized", () => {
+  it("focus leaves under a stale viewport: the lift goes home, the box is untouched", () => {
+    const s = raised();
+    s.read(world({ editorFocused: false, vvHeight: UP })); // the focus edge, 6-13ms ahead of the viewport
+    expect(s.insets).toEqual([386, 0]); // the close's transition starts here
+    expect(s.writes).toEqual([[0, 844]]); // still only the open's write
+    expect(s.box()).toEqual([0, 844]);
+  });
+
+  it("the viewport catching up writes nothing either: the box was already the full screen", () => {
     const s = raised();
     s.read(world({ editorFocused: false, vvHeight: UP }));
-    expect(s.writes).toEqual([[0, UP]]); // still only the raise's own write
-    expect(s.box()).toEqual([0, UP]);
-  });
-
-  it("the viewport catches up and the shell grows exactly once", () => {
-    const s = raised();
-    s.read(world({ editorFocused: false, vvHeight: UP })); // the focus edge
-    s.read(world({ editorFocused: false, vvHeight: 844 })); // 6-44ms later
-    expect(s.writes).toEqual([
-      [0, UP],
-      [0, 844],
-    ]);
-  });
-
-  it("every held reading in between is silent, however many arrive", () => {
-    const s = raised();
-    s.read(world({ editorFocused: false, vvHeight: UP }));
-    s.read(world({ editorFocused: false, vvHeight: UP })); // a scroll event on the same numbers
-    s.read(world({ editorFocused: false, vvHeight: 600 })); // the keyboard half retracted
-    expect(s.writes).toHaveLength(1);
     s.read(world({ editorFocused: false, vvHeight: 844 }));
-    expect(s.writes).toHaveLength(2);
+    s.read(world({ editorFocused: false, vvHeight: 844 })); // a scroll event on the same numbers
+    expect(s.writes).toEqual([[0, 844]]);
   });
 
-  it("a viewport-learned close is untouched: it grows on its own reading, once", () => {
-    const s = raised();
-    s.read(world({ editorFocused: true, vvHeight: 844 })); // the height came back first
-    expect(s.writes).toEqual([
-      [0, UP],
-      [0, 844],
-    ]);
-    s.read(world({ editorFocused: false, vvHeight: 844 })); // focus follows it down
-    expect(s.writes).toHaveLength(2);
-  });
-
-  it("no close writes the box twice, whichever signal taught it", () => {
+  it("a viewport-learned close is the same: no write, whichever input taught it", () => {
     for (const close of [
       [world({ editorFocused: false, vvHeight: UP }), world({ editorFocused: false, vvHeight: 844 })],
       [world({ editorFocused: true, vvHeight: 844 }), world({ editorFocused: false, vvHeight: 844 })],
@@ -312,122 +257,108 @@ describe("the close's writes: one resize, taken when the viewport says so", () =
     ]) {
       const s = raised();
       for (const w of close) s.read(w);
-      // one write for the raise, one for the close, and no third
-      expect(s.writes).toHaveLength(2);
-      expect(s.box()).toEqual([0, 844]);
+      expect(s.writes).toEqual([[0, 844]]);
+      expect(s.insets.at(-1)).toBe(0);
     }
   });
 
-  it("the step still lands on the pin's own geometry when the window ends", () => {
+  it("the window's end drops the box, and the drop moves nothing: it was the pin's geometry all along", () => {
     const s = raised();
-    s.read(world({ editorFocused: false, vvHeight: UP }));
     s.read(world({ editorFocused: false, vvHeight: 844 }));
+    expect(s.box()).toEqual([0, 844]); // the pin's geometry, written at the open
     s.read(world({ editorFocused: false, vvHeight: 844 }), false); // the window expired
     expect(s.writes).toEqual([
-      [0, UP],
       [0, 844],
       [null, null],
     ]);
-  });
-
-  // The same sequence read for the other property: not how many writes, but how
-  // far each one travelled. This is the whole of the change, played through a
-  // close.
-  it("the close's one write is a STEP — the full height, arrived at in a frame", () => {
-    const s = raised();
-    s.read(world({ editorFocused: false, vvHeight: UP })); // the focus edge: held
-    s.read(world({ editorFocused: false, vvHeight: 844 })); // the viewport agrees
-    expect(s.writes.at(-1)).toEqual([0, 844]); // the final full height, not a stage of it
-    expect(s.motions).toEqual(["glide", "step"]);
-  });
-
-  it("the raise is untouched: its own write still glides", () => {
-    expect(raised().motions).toEqual(["glide"]);
-  });
-
-  it("a viewport-learned close steps too — one rule, whichever input taught it", () => {
-    const s = raised();
-    s.read(world({ editorFocused: true, vvHeight: 844 }));
-    expect(s.motions).toEqual(["glide", "step"]);
-  });
-
-  it("no close animates the box, and none writes it twice", () => {
-    for (const close of [
-      [world({ editorFocused: false, vvHeight: UP }), world({ editorFocused: false, vvHeight: 844 })],
-      [world({ editorFocused: true, vvHeight: 844 }), world({ editorFocused: false, vvHeight: 844 })],
-      [world({ editorFocused: false, vvHeight: 844 })],
-    ]) {
-      const s = raised();
-      for (const w of close) s.read(w);
-      expect(s.motions.slice(1)).toEqual(["step"]); // past the raise's own glide
-    }
-  });
-
-  it("the drop to the pin moves nothing, because the step already sat on it", () => {
-    // the window ends about 470ms later and the vars go; if the step had landed
-    // anywhere but the pin's own geometry, THAT frame would be the snap
-    const s = raised();
-    s.read(world({ editorFocused: false, vvHeight: UP }));
-    s.read(world({ editorFocused: false, vvHeight: 844 }));
-    expect(s.box()).toEqual([0, 844]); // the pin's geometry, written in full
-    s.read(world({ editorFocused: false, vvHeight: 844 }), false);
     expect(s.box()).toEqual([null, null]);
+  });
+
+  it("shrink-and-pan: the top follows the viewport through the close, and un-pans before the drop", () => {
+    const s = shellWriter();
+    s.read(world({ editorFocused: true, vvHeight: 400, vvTop: 362 }));
+    expect(s.writes).toEqual([[362, 844]]);
+    s.read(world({ editorFocused: false, vvHeight: 400, vvTop: 362 })); // the focus edge, still panned
+    expect(s.writes).toHaveLength(1);
+    s.read(world({ editorFocused: false, vvHeight: 844, vvTop: 0 })); // iOS un-pans, inside the window
+    expect(s.writes).toEqual([
+      [362, 844],
+      [0, 844],
+    ]);
+    s.read(world({ editorFocused: false, vvHeight: 844, vvTop: 0 }), false);
+    expect(s.box()).toEqual([null, null]);
+  });
+
+  it("a keyboard that changes height mid-session re-aims the lift and leaves the box alone", () => {
+    const s = raised();
+    s.read(world({ editorFocused: true, vvHeight: 400 })); // an accessory bar came up
+    expect(s.insets).toEqual([386, 444]);
+    expect(s.writes).toEqual([[0, 844]]);
   });
 });
 
-// Wiring pins for the wait. The decision is one line, so what needs holding
-// down is where it sits: it must be read from the box that is actually applied
-// and the viewport's own fresh inset, it must gate the box-drop branch and
-// NOTHING else — the .kb class, the glide, the close's correction pass and the
-// keyboard edge all still fire at the focus edge, which is what keeps a close
-// feeling immediate — and it must add no clock, since a wait that could time
-// out would resize twice again on exactly the closes this is for.
-describe("wiring: the shell box waits for the viewport, and only the box does", () => {
+// Wiring pins for the lift. What needs holding down is that the shell writes
+// ONE number for the keyboard and never a box height off the viewport, that the
+// transition is armed by the same style recalculation that reads it, that the
+// bar's own choreography still turns at the focus edge, and that the landing
+// (the transform's own transitionend, with the clock as a backstop) is what
+// closes the window and hands main.ts the padding — never the edge.
+describe("wiring: the lift is the keyboard's one write, and the landing is its one clock", () => {
   const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+  const apply = shell.match(/function applyShell\([\s\S]*?\n\}/)?.[0] ?? "";
 
-  it("read once per pass, from the applied box and the fresh inset", () => {
-    expect(shell).toMatch(
-      /const held = holdsShellBox\(\n\s*t\.kb,\n\s*appliedTop !== null \|\| appliedHeight !== null,\n\s*keyboardInset\(baseline, t\.vvHeight\),\n\s*\);/,
-    );
-    expect(shell.match(/holdsShellBox\(/g)).toHaveLength(2); // the definition and the call
+  it("the box is read from the baseline and the window, never from the viewport's height", () => {
+    expect(apply).toContain("const box = shellBox(t, baseline, lifting);");
+    expect(shell).toMatch(/return t\.kb \|\| lifting \? \{ top: t\.vvTop, height: baseline \} : null;/);
+    expect(apply).not.toMatch(/height: t\.vvHeight|vvHeight\}px|restH/);
   });
 
-  it("it gates the drop alone: the keyboard-up branch writes from the viewport as before", () => {
-    expect(shell).toMatch(
-      /\} else if \(!held && \(appliedTop !== null \|\| appliedHeight !== null\)\) \{/,
+  it("the inset is written in the same pass as the classes, and only when it changed", () => {
+    expect(apply).toContain("const inset = liftInset(t, baseline);");
+    expect(apply).toMatch(
+      /if \(inset !== appliedInset\) \{\n\s*appliedInset = inset;\n\s*appEl\.style\.setProperty\("--kb-inset", `\$\{inset\}px`\);/,
     );
-    expect(shell).toMatch(/const box = shellBox\(t\);\n\s*if \(box\) \{/);
+    expect(shell.match(/setProperty\("--kb-inset"/g)).toHaveLength(1); // one writer
   });
 
-  it("the bar's own choreography is not held: the classes still turn at the focus edge", () => {
-    expect(shell).toMatch(/appEl\.classList\.toggle\("kb", t\.kb\);/);
-    expect(shell).toMatch(/appEl\.classList\.toggle\("gliding", gliding\);/);
+  it("the bar's own choreography still turns at the focus edge", () => {
+    expect(apply).toContain('appEl.classList.toggle("kb", t.kb);');
+    expect(apply).toContain('appEl.classList.toggle("lifting", lifting);');
     expect(shell).toMatch(/if \(wasUp && !t\.kb\) keyboardClosed\(\);/);
   });
 
-  it("no clock and no latch: the wait is two live numbers, asked again every pass", () => {
-    const decide = shell.slice(
-      shell.indexOf("export function holdsShellBox"),
-      shell.indexOf("// The DOM half"),
+  it("the edge arms the window with the inset, and the clock is only a backstop", () => {
+    expect(apply).toMatch(
+      /if \(t\.kb !== appliedKb\) \{\n\s*appliedKb = t\.kb;\n\s*armLift\(t\.kb \? "open" : "close", inset\);/,
     );
-    expect(decide).toMatch(
-      /export function holdsShellBox\([\s\S]{0,160}return !kb && hasBox && inset > 0;\n\}/,
-    );
-    expect(shell).not.toMatch(/heldUntil|holdTimer|HOLD_MAX_MS|releaseHold/);
+    expect(shell).toMatch(/liftUntil = performance\.now\(\) \+ LIFT_SETTLE_MS;/);
+    expect(shell).toMatch(/LIFT_SETTLE_MS \+ 20/);
   });
 
-  it("a held close says so on the trail, beside the window it armed", () => {
-    expect(shell).toMatch(/function armGlide\(edge: "open" \| "close", held: boolean\): void \{/);
+  it("the landing is the transform's own transitionend, on the wrapper alone", () => {
     expect(shell).toMatch(
-      /holdDiagRecord\("kb-glide", held \? \{ edge, step, held \} : \{ edge, step \}\);/,
+      /el\.addEventListener\("transitionend", \(e\) => \{\n\s*if \(e\.target !== el \|\| e\.propertyName !== "transform"\) return;\n\s*liftLanded\("end"\);/,
     );
-    expect(shell).toMatch(/armGlide\(t\.kb \? "open" : "close", held\);/);
   });
 
-  it("and the same line says the close's growth was one step, not a glide", () => {
-    // the trail's own answer to "did this build's close travel", without which
-    // a device session would have to infer it from the edge name and a version
-    expect(shell).toMatch(/const step = edge === "close";/);
+  it("the landing closes the window, hands main.ts the lift, and reconverges — once per edge", () => {
+    const landed = shell.match(/function liftLanded\([\s\S]*?\n\}/)?.[0] ?? "";
+    expect(landed).toContain(
+      "if (liftLandedRun !== liftRun || (Number.isFinite(y) && y !== landedLift)) {",
+    );
+    expect(landed).toContain("onLiftLanding?.(appliedKb, Number.isFinite(y) ? Math.abs(y) : 0);");
+    // a close the phone has not finished reporting keeps the clock, so the top
+    // stands until the un-pan; the clock's own fire closes it regardless
+    expect(landed).toContain("const whole = keyboardInset(w.baseline, w.vvHeight) === 0 && w.vvTop <= 1;");
+    expect(landed).toContain('if (via === "clock" || appliedKb || whole) liftUntil = 0;');
+    expect(landed).toMatch(/reconcile\(\);\n\}$/);
+    // and no scroll of its own: the padding write is main.ts's, at the landing
+    expect(landed).not.toMatch(/scrollTo\(|scrollTop/);
+  });
+
+  it("nothing of the retired design survives: no hold, no step, no glide, no seed", () => {
+    expect(shell).not.toMatch(/holdsShellBox|boxMotion|GLIDE_SETTLE_MS|armGlide|edgeSeeded|"gliding"|kb-glide/);
+    expect(apply).not.toContain("offsetHeight");
   });
 });
 
@@ -466,11 +397,12 @@ describe("edgeBoxTop: the edge's box top, refusing a displacement the window scr
     expect(edgeBoxTop(0, 0, null)).toBe(0);
   });
 
-  it("through the box: the edge still writes the keyboard's height, only the top is held", () => {
+  it("through the box: the edge still holds the top alone, and the lift still reads the fresh height", () => {
     const t = computeShell(world({ editorFocused: true, vvHeight: 400, vvTop: 362 }));
-    expect(shellBox(t)).toEqual({ top: 362, height: 400 }); // as the fresh read has it
+    expect(shellBox(t, 844, false)).toEqual({ top: 362, height: 844 }); // as the fresh read has it
     const held = { ...t, vvTop: edgeBoxTop(t.vvTop, 412, null) };
-    expect(shellBox(held)).toEqual({ top: 0, height: 400 });
+    expect(shellBox(held, 844, false)).toEqual({ top: 0, height: 844 });
+    expect(liftInset(held, 844)).toBe(444); // the keyboard's height, off the fresh viewport
   });
 });
 
@@ -771,7 +703,7 @@ describe("wiring: same-frame clear, per-keystroke budget, per-keystroke blink", 
 
   it("a cleared shove writes the scroll, not the box: the stable target reuses the applied numbers", () => {
     expect(shell).toMatch(
-      /verdict === "clear"[\s\S]{0,200}window\.scrollTo\(0, 0\);\n\s*target = \{ kb: t\.kb, vvTop: appliedTop, vvHeight: appliedHeight \};/,
+      /verdict === "clear"[\s\S]{0,200}window\.scrollTo\(0, 0\);\n\s*target = \{ kb: t\.kb, vvTop: appliedTop, vvHeight: appliedVvHeight \};/,
     );
     expect(shell).toMatch(/holdDiagRecord\("kb-shove", \{ act: "clear", n: shoveClears/);
     expect(shell).toMatch(/holdDiagRecord\("kb-shove", \{ act: "yield", n: shoveClears/);
@@ -840,7 +772,7 @@ describe("wiring: the edge holds its top, and only where the window is scrolled 
 
   it("one call site, and shellBox is otherwise untouched", () => {
     expect(shell.match(/edgeBoxTop\(/g)).toHaveLength(2); // the definition and the call
-    expect(shell).toMatch(/return t\.kb \? \{ top: t\.vvTop, height: t\.vvHeight \} : null;/);
+    expect(shell).toMatch(/return t\.kb \|\| lifting \? \{ top: t\.vvTop, height: baseline \} : null;/);
   });
 
   it("the verdict still hands both edges to the shell: that line is load-bearing history", () => {
@@ -884,125 +816,103 @@ describe("focusingActive — the tap-time choreography signal (the pop-then-expa
   });
 });
 
-// Presentation pins for the glide's scoping: the box transition lives on
-// .gliding.kb ALONE — the OPEN edge, since a close that travelled is the white
-// band — so a raise glides, a close steps, and every mid-typing box write stays
-// instant. The box vars must still survive into .gliding without .kb (the close
-// holds its keyboard-era box, then writes the full screen into it), and the
-// focusing class must key the same bar choreography as .kb.
-describe("presentation — glide scoped to the open edge, focusing keys the choreography", () => {
+// Presentation pins for the lift: the thread, the drawer and the compose bar
+// ride one transformed wrapper on the keyboard's own clock, inside a clip that
+// is not a scroll container; the shell box is applied under .kb and through
+// .lifting and NOTHING transitions it; and the home-indicator gap no longer
+// collapses at the edge — the lift carries the bar the gap's worth further down
+// instead, so no reader of --pad-b changes at a keyboard edge and none may be
+// given a clock. The focusing class must still key the bar choreography.
+describe("presentation — the lift rides the keyboard's clock; the box and the gap hold still", () => {
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
-  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
-
-  it("only .gliding.kb carries the top/height transition, 0.2s ease-out", () => {
-    expect(css).toMatch(
-      /\n#app\.gliding\.kb \{\n  transition: top var\(--glide\), height var\(--glide\);\n\}/,
-    );
-    expect(css).toMatch(/\n#app \{[^}]*--glide: 0\.2s ease-out;/); // and that token IS the clock
-    const kbRule = css.match(/\n#app\.kb \{([^}]*)\}/)?.[1] ?? "";
-    expect(kbRule).toContain("--pad-b: 0.5rem"); // the keyboard hug is untouched
-    expect(kbRule).not.toContain("transition"); // .kb alone never animates the box
-    expect(kbRule).not.toContain("top:"); // the box moved to the shared rule below
-    const appRule = css.match(/\n#app \{([^}]*)\}/)?.[1] ?? "";
-    expect(appRule).not.toContain("transition"); // the rest pin stays inert
-  });
-
-  it("the close carries no box transition at all — .gliding without .kb animates nothing", () => {
-    // the whole change, as one pin: every rule that transitions top or height
-    // has to demand .kb, so the state a close is actually in cannot match one.
-    // Without this the box could travel again from any rule added later, and
-    // the 386px band would come back with it.
-    const bare = css.replace(/\/\*[\s\S]*?\*\//g, "");
-    // the animated property is the FIRST token of each transition entry, so a
-    // max-height elsewhere in the sheet is not a shell box travelling
-    const boxAnimators = [...bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
-      .filter((m) =>
-        (m[2].match(/transition:([^;]*);/)?.[1] ?? "")
-          .split(",")
-          .some((entry) => ["top", "height"].includes(entry.trim().split(/\s+/)[0])),
-      )
-      .map((m) => m[1].trim());
-    expect(boxAnimators).toEqual(["#app.gliding.kb"]);
-  });
-
-  it("the box vars apply under .kb and stay through .gliding, so the close has one to step", () => {
-    // the four-edge pin has no height of its own to write the full screen into,
-    // so the step is written INTO the numeric box and the vars must outlive .kb
-    expect(css).toMatch(
-      /#app\.kb,\n#app\.gliding \{\n  top: var\(--shell-top, 0px\);\n  height: var\(--shell-h, 100vh\);\n\}/,
-    );
-  });
-
-  it("shell.ts arms the glide on the .kb edge alone and lets the window expire by clock", () => {
-    expect(shell).toMatch(
-      /if \(t\.kb !== appliedKb\) \{[\s\S]{0,80}armGlide\(t\.kb \? "open" : "close", held\)/,
-    );
-    expect(shell).toMatch(/GLIDE_SETTLE_MS \+ 20/); // the expiry reconverges via reconcile
-  });
-
-  it("an open from the pin seeds a numeric FROM box — `auto` interpolates with nothing", () => {
-    expect(shell).toMatch(
-      /gliding && appliedTop === null && appliedHeight === null[\s\S]{0,700}void appEl\.offsetHeight;/,
-    );
-  });
-
-  it("the focusing class keys the same bar choreography as .kb", () => {
-    expect(css).toMatch(/#app\.kb \.compose textarea,\n#app\.focusing \.compose textarea \{/);
-    expect(css).toMatch(/#app\.kb \.compose \.attach,\n#app\.focusing \.compose \.attach \{/);
-  });
-});
-
-// The bar's bottom gap and the shell's bottom edge are ONE move. A close
-// recorded frame by frame on device caught them apart: --pad-b stepped 8.5px
-// to 34px while the shell height was still 400px, so the pill hopped 25.5px
-// up in a single frame and only then rode the glide home. These pins say the
-// gap can no longer be given its own clock or its own trigger, and that EVERY
-// reader of --pad-b rides with it, since one left stepping just moves the hop
-// to another element.
-describe("presentation — the home-indicator gap rides the shell's own clock", () => {
   // comments carry the prose about durations, so strip them: a pin must never
   // be satisfied by an explanation of the thing it is checking for
-  const bare = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const bare = css.replace(/\/\*[\s\S]*?\*\//g, "");
   // innermost brace pairs, which for this sheet is every plain rule (the two
   // at-rules that wrap anything hold ordinary rules inside them)
   const rules = [...bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
     sel: m[1].trim().replace(/\s*\n\s*/g, "\n"),
     body: m[2],
   }));
-  const selectors = (sel: string): string[] => sel.split(",").map((s) => s.trim());
-  const glideRules = rules.filter((r) =>
-    selectors(r.sel).every((s) => s.startsWith("#app.gliding")),
-  );
+  const rule = (sel: string): string => rules.find((r) => r.sel === sel)?.body ?? "";
   const transitionOf = (body: string): string => body.match(/transition:([^;]*);/)?.[1] ?? "";
 
-  it("one clock, written once: every glided property spells the same token", () => {
-    expect(glideRules.length).toBeGreaterThan(1); // the box alone is not enough
-    for (const r of glideRules) {
-      const entries = transitionOf(r.body).split(",").map((e) => e.trim());
-      expect(entries.length).toBeGreaterThan(0);
-      // "<property> var(--glide)" and nothing else: a literal duration here
-      // would be a second clock, free to drift from the shell's on any edit
-      for (const entry of entries) expect(entry).toMatch(/^[a-z-]+ var\(--glide\)$/);
-    }
+  it("the wrapper translates by --kb-lift and transitions the transform on --kb-anim, nothing else", () => {
+    const lift = rule(".lift");
+    expect(lift).toContain("transform: translateY(var(--kb-lift))");
+    expect(transitionOf(lift).trim()).toBe("transform var(--kb-anim)");
+    expect(lift).toContain("will-change: transform");
+    expect(lift).toContain("min-height: 0"); // a flex item's automatic minimum is the whole thread
   });
 
-  it("every --pad-b reader glides: the bar, the chevron's seat, the picker anchor", () => {
+  it("the clip is `clip`, not `hidden`: a hidden box is a scroll container for the caret reveal to grab", () => {
+    const clip = rule(".liftclip");
+    expect(clip).toContain("overflow: clip");
+    expect(clip).not.toContain("hidden");
+    expect(clip).toContain("min-height: 0");
+  });
+
+  it("the lift is derived in CSS from the inset and two CSS lengths; the shell writes only the inset", () => {
+    expect(rule("#app.kb")).toContain("--kb-lift: calc(var(--pad-b) - var(--kb-gap) - var(--kb-inset))");
+    expect(rule("#app")).toContain("--kb-inset: 0px");
+    expect(rule("#app")).toContain("--kb-lift: 0px");
+    expect(rule("#app")).toContain("--kb-gap: 0.5rem");
+    expect(bare).not.toMatch(/--kb-lift: -?[1-9]/); // never a written-down pixel lift; 0px is rest
+  });
+
+  it("the home-indicator gap no longer collapses under .kb, so no reader of it moves at an edge", () => {
+    expect(rule("#app.kb")).not.toMatch(/--pad-b:/); // it reads the gap for the lift, never sets it
+    expect(rule("#app")).toContain("--pad-b: max(0.5rem, env(safe-area-inset-bottom))");
     const consumers = rules.filter((r) => r.body.includes("var(--pad-b)")).map((r) => r.sel);
     expect(consumers).toContain(".compose"); // the pill and the ＋
     expect(consumers).toContain(".jump"); // on screen exactly when the thread is scrolled away
-    expect(consumers).toContain(".filepick"); // invisible, but the rect iOS anchors the sheet to
-    const glided = new Set(glideRules.flatMap((r) => selectors(r.sel)));
-    for (const sel of consumers) expect([...glided]).toContain(`#app.gliding ${sel}`);
-  });
-
-  it("the gap is gated on the shell's own class — nothing animates it elsewhere", () => {
+    expect(consumers).toContain(".filepick"); // invisible, parked on the ＋
     for (const r of rules) {
-      if (selectors(r.sel).every((s) => s.startsWith("#app.gliding"))) continue;
       const decl = transitionOf(r.body);
       expect(decl).not.toContain("padding-bottom");
       expect(decl).not.toMatch(/(^|,)\s*bottom\s/);
     }
+  });
+
+  it("the box vars apply under .kb and stay through .lifting, and nothing transitions top or height", () => {
+    expect(css).toMatch(
+      /#app\.kb,\n#app\.lifting \{\n  top: var\(--shell-top, 0px\);\n  height: var\(--shell-h, 100vh\);\n\}/,
+    );
+    // the animated property is the FIRST token of each transition entry, so a
+    // max-height elsewhere in the sheet is not a shell box travelling
+    const boxAnimators = rules
+      .filter((r) =>
+        transitionOf(r.body)
+          .split(",")
+          .some((entry) => ["top", "height"].includes(entry.trim().split(/\s+/)[0])),
+      )
+      .map((r) => r.sel);
+    expect(boxAnimators).toEqual([]);
+    expect(bare).not.toMatch(/\.gliding|--glide\b/);
+  });
+
+  it("one keyboard clock, written once: the only transition on the keyboard's path spells the token", () => {
+    const onToken = rules.filter((r) => transitionOf(r.body).includes("--kb-anim")).map((r) => r.sel);
+    expect(onToken).toEqual([".lift"]);
+    expect(rule("#app")).toMatch(/--kb-anim: 0\.25s cubic-bezier\(0\.38, 0\.7, 0\.125, 1\);/);
+  });
+
+  it("the thread's top padding is the reachability pad, and only that pad moves it", () => {
+    expect(rule(".thread")).toContain("padding: calc(0.75rem + var(--lift-pad, 0px)) 1rem 0.75rem");
+    expect(bare.match(/--lift-pad/g)).toHaveLength(1); // one reader; main.ts is the one writer
+  });
+
+  it("the focusing class keys the same bar choreography as .kb", () => {
+    expect(css).toMatch(/#app\.kb \.compose textarea,\n#app\.focusing \.compose textarea \{/);
+    expect(css).toMatch(/#app\.kb \.compose \.attach,\n#app\.focusing \.compose \.attach \{/);
+  });
+
+  it("the wrapper is what the app renders around the thread, the drawer and the bar, and it is bound", () => {
+    const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+    expect(main).toMatch(
+      /<div class="liftclip">\n\s*<div class="lift">\n\s*<main id="thread" class="thread">[\s\S]*?<div id="pending" class="pending"><\/div>\n\s*<form id="compose" class="compose">[\s\S]*?<\/form>\n\s*<\/div>\n\s*<\/div>`;/,
+    );
+    expect(main).toContain('bindLift(app.querySelector<HTMLElement>(".lift")!);');
   });
 });
 

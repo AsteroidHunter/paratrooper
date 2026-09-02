@@ -481,7 +481,14 @@ describe("wiring — the landing holds, then rides, and its own motion cannot di
     expect(pin).toContain(
       "const instant = suppressAnim || force || pinInstant || resumeWindowOpen()",
     );
-    expect(pin).toContain('behavior: instant ? "auto" : "smooth"');
+    // an instant pin is the one native scroll left on the thread; a live
+    // message outside the window rides the app's own spring instead of the
+    // browser's smooth scroll (retired on 2026-09-02: one such scroll put the
+    // engine into dropping the page's offset writes around every box change
+    // for the rest of the session)
+    expect(pin).toContain('if (instant) {\n    t.scrollTo({ top, behavior: "auto" });');
+    expect(pin).not.toContain('"smooth"');
+    expect(pin).toContain("startGlide()");
     // the replay path's own era is scoped and restored; the window asks for
     // itself, so neither can leave the other's era behind
     const replay = fnBody("applyReplay");

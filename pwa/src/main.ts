@@ -90,6 +90,7 @@ import {
 import type { MorphBox } from "./shift";
 import { zoomClipCuts, zoomClipInset, zoomClipRest, zoomFit, zoomReturn } from "./zoom";
 import {
+  bindLift,
   bindPicker,
   bindSendShield,
   closeCorrectionNeeded,
@@ -97,13 +98,13 @@ import {
   initShell,
   watchFollowTail,
   watchKeyboard,
+  watchLiftLanding,
+  watchScrollWrites,
 } from "./shell";
 import { bootBlankGap, installLoadingScreen, installStartupImage, watchQuiet } from "./splash";
 import {
-  MAX_CLOSE_RESTORES,
   SETTLE_BURST_GAP_MS,
   USER_SCROLL_INTENT_MS,
-  boxSettled,
   compensationFor,
   createSettleBurst,
   flightOverflow,
@@ -112,8 +113,7 @@ import {
   laidOutRows,
   maxScrollTop,
   nearBottomOf,
-  restoreMark,
-  restoreVerdict,
+  padShift,
   rowName,
   settleBottom,
   settleMark,
@@ -159,13 +159,13 @@ import { blankProbeEdge, blankProbeFollow, blankProbeSettle } from "./blankprobe
 // looks — the scroller's own scroll handler and the frames after a keyboard
 // close — hand back any move no statement of ours accounts for. TO REMOVE: this
 // import and the calls named in that banner's list.
-import { scrollGhostLook, scrollGhostWrite } from "./scrollghost";
+import { scrollGhostLook, scrollGhostWrite, scrollWriteCount } from "./scrollghost";
 import type { GhostContext } from "./scrollghost";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.81"; // the keyboard close grows the shell in one step instead of gliding it
+const APP_VERSION = "0.3.82"; // the keyboard lifts the thread and the bar with a transform; the shell never resizes at an edge
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -251,33 +251,55 @@ const downBtn = createDownButton((show) =>
 // verdict the scroll handler feeds it, so the ordinary stillness window
 // decides whether it comes back.
 //
-// The same edge is also the loudest bottom-geometry change the app has, so it
-// settles the scroll (settleTail below). The edge is delivered from inside the
-// visual-viewport resize that carries it, which is the event this has to run
-// in; the next frame runs it again because iOS can still be reporting the old
-// numbers at event time, and that is one frame of looking, not a delay. On a
-// close both of those run while the shell is still holding its keyboard-era box
-// (shell.ts holdsShellBox), so the growth itself is not theirs: it lands a few
-// ms later, in one step, and the thread's resize observer settles that frame.
+// Nothing about the thread's scroll is touched here, on purpose. This edge used
+// to be the loudest bottom-geometry change the app had, and it settled the
+// scroll in the event and again on the next frame; it is no geometry change at
+// all now. The thread's box is the same size with the keyboard up or down
+// (shell.ts lifts the list with a transform instead of resizing it), so the end
+// of its range never moves, and a scroll write inside the keyboard's motion is
+// the one thing iOS drops or mis-times (the header in shell.ts). The one scroll
+// the keyboard asks for lands when the lift lands (setLiftPad below).
 watchKeyboard((up) => {
   downBtn.keyboard(up, followTail);
-  const via = up ? "kb-open" : "kb-close";
-  // the close's own window opens BEFORE the settle below, so the bottom it
-  // remembers is the one the keyboard-era box made — the number the engine
-  // hands back a fifth of a second later (closeTailWatch owns the whole reason)
-  if (up) closeTailStop();
-  else closeTailStart();
-  settleTail(via);
-  requestAnimationFrame(() => settleTail(via));
+  // TEMP DIAGNOSTIC (scroll-ghost): the close's clock and the end of the range
+  // as it stood at the edge, for the looks that follow (ghostCtx)
+  closeAt = up ? -1 : performance.now();
+  const t = document.getElementById("thread");
+  closeBottom = !up && t ? maxScrollTop(t.scrollHeight, t.clientHeight) : -1;
   // TEMP DIAGNOSTIC (tail-gap, block at the foot of this file): the band under
-  // the last message, read at the edge he actually sees it at. Every reading in
-  // the trail so far is taken on a SEND, and all of them come back healthy,
-  // while his screenshots show 408px and 270px of white standing after a
-  // keyboard close. So the failing state has never once been measured, and
-  // guessing into that hole has been wrong twice. This reads it where he sees
-  // it, and names what is sitting below the last message when it happens.
+  // the last message, read at the edge he actually sees it at, so the trail
+  // says in numbers whether a close left any white at all
   if (!up) recordTailGapNow("kb-close");
 });
+
+// The lift's landing (shell.ts watchLiftLanding): the thread's reachability
+// padding, and the one scroll write the keyboard asks for. Lifted, the top of
+// the message list sits under the header inside the clip, so the earliest
+// messages could not be reached by scrolling up; the thread is given that much
+// top padding, with its scroll moved by the same amount in the same frame so
+// nothing on screen moves (viewport.ts padShift), and the close's landing takes
+// both back the same way. It runs at the landing and never at the edge: the
+// landing is after the keyboard's motion, where the engine takes the page's
+// writes, and the edge is inside it, where it does not.
+let liftPad = 0; // the padding as applied, so a repeated landing writes nothing
+
+function setLiftPad(next: number): void {
+  const t = document.getElementById("thread");
+  if (!t || next === liftPad) return;
+  const delta = next - liftPad;
+  liftPad = next;
+  const st = t.scrollTop; // before the padding lands, so the shift is off the old offset
+  app.style.setProperty("--lift-pad", `${next}px`);
+  const top = padShift(st, delta);
+  t.scrollTop = top; // same frame as the padding, so the two paint as one
+  scrollGhostWrite("lift-pad", top); // TEMP DIAGNOSTIC (scroll-ghost)
+  holdDiagRecord("lift-pad", { pad: Math.round(next), from: Math.round(st), to: Math.round(top) });
+}
+
+watchLiftLanding((up, lift) => setLiftPad(up ? lift : 0));
+// TEMP DIAGNOSTIC (kb-lift, shell.ts): the app's write counter, so a landing
+// record can say whether anything scrolled inside the keyboard's motion
+watchScrollWrites(scrollWriteCount);
 
 // boot-replay ledger (bootgate.ts owns it): the honest replay marker. Every
 // socket frame at or below the server's tail-at-connect is backlog and must
@@ -506,22 +528,29 @@ function renderChat(): void {
         </div>
       </div>
     </div>
-    <main id="thread" class="thread">
-      <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
-    </main>
-    <div id="pending" class="pending"></div>
-    <form id="compose" class="compose">
-      <button type="button" id="attach" class="attach" title="Attach">＋</button>
-      <input id="files" type="file" accept="image/*" multiple
-        class="filepick" tabindex="-1" aria-hidden="true" />
-      <div class="field">
-        <textarea id="text" rows="1"
-          placeholder="${PROMPTS[Math.floor(Math.random() * PROMPTS.length)]}"></textarea>
-        <button type="submit" id="sendbtn" class="send">↑</button>
+    <div class="liftclip">
+      <div class="lift">
+        <main id="thread" class="thread">
+          <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
+        </main>
+        <div id="pending" class="pending"></div>
+        <form id="compose" class="compose">
+          <button type="button" id="attach" class="attach" title="Attach">＋</button>
+          <input id="files" type="file" accept="image/*" multiple
+            class="filepick" tabindex="-1" aria-hidden="true" />
+          <div class="field">
+            <textarea id="text" rows="1"
+              placeholder="${PROMPTS[Math.floor(Math.random() * PROMPTS.length)]}"></textarea>
+            <button type="submit" id="sendbtn" class="send">↑</button>
+          </div>
+          <button type="button" id="jump" class="jump" title="Jump to latest"><span
+            class="jump-glyph">↓</span></button>
+        </form>
       </div>
-      <button type="button" id="jump" class="jump" title="Jump to latest"><span
-        class="jump-glyph">↓</span></button>
-    </form>`;
+    </div>`;
+  // the keyboard lift (shell.ts): the thread, the drawer and the compose bar
+  // ride one transformed wrapper, rebuilt with the rest of the shell here
+  bindLift(app.querySelector<HTMLElement>(".lift")!);
   document.getElementById("settings")!.addEventListener("click", () => {
     document.getElementById("menu")!.classList.toggle("open");
   });
@@ -790,7 +819,10 @@ function renderChat(): void {
   receiptPending = false;
   restoredOutbox = false; // a fresh shell re-reads the durable outbox
   threadObserver?.disconnect(); // the old shell's thread element is gone
-  threadObserver?.observe(thread);
+  // the border box: the thread's own top padding changes when the lift lands
+  // (setLiftPad), and that write already answers for the scroll it moves, so a
+  // content-box observation would only add a second write to the same frame
+  threadObserver?.observe(thread, { box: "border-box" });
   threadWidthObserver?.disconnect(); // and so are the bubbles it was refitting
   threadWidthObserver?.observe(thread);
   lastThreadWidth = 0; // a fresh shell has measured nothing yet
@@ -1174,12 +1206,18 @@ function dismissSent(): void {
   refreshSend(); // the ↑ answers the tap; the strip answers over the beat below
   const rect = box.getBoundingClientRect();
   const padTop = parseFloat(getComputedStyle(box).paddingTop) || 0;
+  // The strip's containing block is the lift wrapper, not the viewport: a
+  // transformed ancestor positions fixed descendants against its own box, and
+  // the wrapper carries a transform at all times (styles.css .lift). So the
+  // rect is expressed against the wrapper's, and the strip stays where it stood
+  // whether the wrapper is lifted for the keyboard or at rest.
+  const home = (box.closest(".lift") ?? app).getBoundingClientRect();
   // anchored by its bottom edge so the top edge glides down, which is the way
   // the in-flow close moves (the thread grows and the strip's top descends)
   box.style.position = "fixed";
-  box.style.left = `${rect.left}px`;
+  box.style.left = `${rect.left - home.left}px`;
   box.style.width = `${rect.width}px`;
-  box.style.bottom = `${window.innerHeight - rect.bottom}px`;
+  box.style.bottom = `${home.bottom - rect.bottom}px`;
   box.classList.add("closing"); // clips the full-size squares while the box goes past them
   // The strip has just left the layout, so the thread has its room back in one
   // hop: the scroll answers for that hop here, in the hop's own frame.
@@ -1549,22 +1587,23 @@ function userScrollIntent(): boolean {
   return threadTouching || performance.now() - lastGestureAt < USER_SCROLL_INTENT_MS;
 }
 
-// Re-establish when the THREAD BOX resizes (keyboard up/down, compose growth,
-// the photo drawer's height); content growth inside it re-pins via applyEvent
-// and the image onload hooks. This used to re-pin the bottom while following
-// and do nothing at all otherwise, which left the one case that shows as white:
-// a box that GREW under a scroll position sitting at the old end. Routed
-// through the settle, the follow arm is the same instant pin it always was and
-// the other arm clamps, so an out-of-range position cannot survive a resize
-// whichever way following happens to be pointing.
+// Re-establish when the THREAD BOX resizes (compose growth, the photo drawer's
+// height); content growth inside it re-pins via applyEvent and the image onload
+// hooks. This used to re-pin the bottom while following and do nothing at all
+// otherwise, which left the one case that shows as white: a box that GREW under
+// a scroll position sitting at the old end. Routed through the settle, the
+// follow arm is the same instant pin it always was and the other arm clamps, so
+// an out-of-range position cannot survive a resize whichever way following
+// happens to be pointing.
 //
 // This is also the only signal that sees every FRAME of a box that changes over
-// a beat rather than in one hop: the shell's glide on a keyboard OPEN and the
-// drawer's own height easing both move the edge frame by frame, and the observer
-// is delivered on each of those frames, before it paints. The keyboard CLOSE is
-// the one-hop case now (shell.ts boxMotion), and this is what pins its single
-// frame: the box grows, layout runs, this settle writes, and only then does
-// anything paint, so the last message never leaves the bar.
+// a beat rather than in one hop: the drawer's own height easing moves the edge
+// frame by frame, and the observer is delivered on each of those frames, before
+// it paints. The keyboard's edges are NOT among its callers any more, and that
+// is the design: the shell lifts the list with a transform (shell.ts) and never
+// changes this box at a keyboard edge, so there is nothing here to settle while
+// the keyboard moves, which is the one stretch a settle's write cannot be trusted
+// to land in.
 const threadObserver =
   "ResizeObserver" in window
     ? new ResizeObserver(() => settleTail("box", true))
@@ -1643,12 +1682,26 @@ function scrollToBottom(force = false): void {
   const t = threadEl();
   const top = t.scrollHeight;
   // replay bursts (suppressAnim) and the resume window jump instantly; live
-  // messages in a settled session glide
+  // messages in a settled session ride
   const instant = suppressAnim || force || pinInstant || resumeWindowOpen();
-  t.scrollTo({ top, behavior: instant ? "auto" : "smooth" });
-  // TEMP DIAGNOSTIC (scroll-ghost): the TARGET, not a read-back — a gliding pin
-  // arrives over a beat, and the watch explains every frame of it by that target
-  scrollGhostWrite("bottom", top);
+  if (instant) {
+    t.scrollTo({ top, behavior: "auto" });
+    scrollGhostWrite("bottom", top); // TEMP DIAGNOSTIC (scroll-ghost)
+    return;
+  }
+  // A live message lands in front of a watching reader on the app's own ride
+  // (startGlide, the chevron's spring), never the browser's smooth scroll. The
+  // recording that retired the box-resize keyboard design (shell.ts) also
+  // showed what one native smooth scroll does to this thread: from the first
+  // reply of a session on, every keyboard close was the kind where the engine
+  // dropped the page's offset writes for the whole animation, and before it
+  // every close was the other kind. WebKit runs that scroll in its UI process
+  // and lets it override the page's offset while its scroll view animates, and
+  // the reply's pin was the one native smooth scroll the thread had. A ride
+  // already in the air re-reads the bottom every frame, so a second landing
+  // stretches it instead of restarting it.
+  if (glide && !glide.done() && glideOwner === "jump") return;
+  startGlide();
 }
 
 // the jump tap's glide: one rAF-driven ride, full cruise speed while far out,
@@ -1716,19 +1769,16 @@ function cancelGlide(): void {
 // scroll events. All of them come here, and two things happen in the caller's
 // own frame, in this order.
 //
-// First, whatever scroll the app still has in the air stops counting. A smooth
-// scroll aims at a target measured when it was ASKED for, and the engine keeps
-// that target across a viewport change: the pin the send flight asks for as it
-// lands, asked for while the keyboard was still up, is exactly the write that
-// puts the thread past its own end once the keyboard has gone. An instant
-// write cancels a smooth one, so the re-establish below IS that cancellation,
-// and it is unconditional for that reason even when it lands on the value
-// already there. That leans on one thing staying true: nothing in styles.css
-// gives the thread a scroll-behavior, so the write below really is instant and
-// not the stylesheet's smooth one under another name (scrollToBottom's forced
-// pin has always leaned on the same). The app's own animated ride is cancelled
-// outright, but only when this pass has real work to do, because that ride
-// re-reads the geometry every frame and lands on the true bottom by itself.
+// First, whatever ride the app still has in the air stops counting when there
+// is real work: the app's own ride (startGlide) re-reads the bottom every frame
+// and lands on it by itself, so it is cancelled only when this pass corrects a
+// position — one past the end of the range was never a valid place to ride
+// from. Nothing else animates this scroll: the browser's smooth scroll was
+// retired from the thread on 2026-09-02 (scrollToBottom holds why), and nothing
+// in styles.css gives the thread a scroll-behavior, so the write below really
+// is instant and not the stylesheet's smooth one under another name. It stays
+// unconditional even when it lands on the value already there, so a settle is
+// one write whichever state it finds.
 //
 // Second, the scroll is re-established from numbers read HERE, never from
 // anything carried in: pinned to the fresh end while following the tail, and
@@ -1859,117 +1909,21 @@ function settleContent(what: string): void {
   settleTail(`content-${what}`);
 }
 
-// --- the keyboard's parting shot ----------------------------------------------
-// viewport.ts (restoreVerdict) holds the whole reason: after a close the engine
-// can hand the thread back the scroll offset it held while the keyboard was
-// still up — hundreds of pixels past where the conversation now ends — and
-// leave it there until the next gesture, which is the strip of white between
-// the last message and the compose bar. This half is the clock and the reads.
-//
-// WHEN IT LOOKS. Every frame for CLOSE_TAIL_MS after a close edge, because the
-// restore lands in the one stretch nothing else covers: the thread's resize
-// observer settles on the frame the shell's box changes and then goes quiet,
-// which on the trail that built this was ms 208 at the end of a glide, with the
-// restore arriving at ms 224. The shell no longer glides home — the close grows
-// the box in ONE step (shell.ts boxMotion), so there is one such settle rather
-// than a dozen and it lands the moment the viewport admits the screen is whole
-// — and the window is unchanged for it: it still runs on past the settle window
-// and the shell's drop back to the four-edge pin (~470ms), so a restore riding
-// either of those is caught as well. With the step there should be nothing left
-// for it to catch; it stays because it costs three reads a frame and is the only
-// thing standing between the reader and an offset no gesture will re-clamp. After it, the close's two later checkpoints ask the same
-// question again (recordTailGapNow, at 600ms and 2100ms), which is where a
-// restore delivered late, or one whose frames were throttled, is still taken
-// back — the trail says the state survives for seconds, so a late correction is
-// still the right correction.
-//
-// WHAT IT COSTS on the closes where nothing is wrong, which is most of them:
-// three property reads per frame for six tenths of a second, on frames the app
-// is already painting a shell glide into, and no write of any kind. The
-// correction itself goes through settleTail, so it cancels a ride aimed at the
-// old box, supersedes deferred writes and lands on the trail exactly like every
-// other settle; the kb-restore record beside it is what names the fault.
-// the same 600 the first checkpoint sits at (SEND_MOTION_WINDOW_MS), so the
-// frames hand straight over to it with no unwatched gap in between
-const CLOSE_TAIL_MS = 600;
-const CLOSE_TAIL_FRAMES = 90; // a callback backstop behind that clock, at 120Hz
-
-let closeAt = -1; // the last keyboard close, on the app's own clock
-let closeBottom = -1; // the end of the thread's range as that close began
-let closeFixes = 0; // corrections made since it (restoreVerdict's budget)
-let closeRun = 0; // a newer edge owns the frames from there on
-let closeBox: BottomGeometry | null = null; // the previous look's box, for boxSettled
-
-function closeTailStop(): void {
-  closeRun += 1; // a keyboard on its way back owns the geometry now
-  closeAt = -1;
-  closeBottom = -1;
-  closeBox = null;
-}
-
-function closeTailStart(): void {
-  const t = document.getElementById("thread");
-  closeAt = performance.now();
-  closeBox = null; // this close's first look has nothing to compare against
-  // taken at the edge, before this event's settle writes anything: with the
-  // shell still standing at its keyboard-era box this is the last position the
-  // scroller could hold, and a restore is that number handed back
-  closeBottom = t ? maxScrollTop(t.scrollHeight, t.clientHeight) : -1;
-  closeFixes = 0;
-  const run = (closeRun += 1);
-  const t0 = closeAt;
-  if (typeof requestAnimationFrame !== "function") return;
-  let i = 0;
-  const step = (): void => {
-    if (run !== closeRun) return; // a newer edge owns the frames
-    fixCloseTail("frame");
-    i += 1;
-    if (i < CLOSE_TAIL_FRAMES && performance.now() - t0 < CLOSE_TAIL_MS) {
-      requestAnimationFrame(step);
-    }
-  };
-  requestAnimationFrame(step);
-}
-
-function fixCloseTail(via: string): void {
-  if (closeAt < 0) return; // no close to be correcting after
-  const t = document.getElementById("thread");
-  if (!t) return; // shell torn down under a deferred call
-  const g = { sh: t.scrollHeight, st: t.scrollTop, ch: t.clientHeight };
-  // TEMP DIAGNOSTIC (scroll-ghost, scrollghost.ts owns the banner): the look
-  // nothing else can take, handed the numbers this pass has already read —
-  // these are the frames on which the app itself is writing nothing
-  scrollGhostLook(via, g, ghostCtx());
-  // the box is compared with the previous look's before anything else uses
-  // either, so a pass that returns early still leaves the next one a baseline
-  const settled = boxSettled(g, closeBox);
-  closeBox = g;
-  // A gesture owns the scroll, and which reading says so depends on when this
-  // pass is: on the FRAMES, only a finger currently on the glass, because the
-  // tap that dismissed the keyboard is itself inside the intent window and
-  // would otherwise stand the whole window down. At the two LATE checkpoints
-  // that tap's window has long expired, so intent there really does mean a
-  // fling still running — and the rubber band at the end of one reads exactly
-  // like the fault this corrects.
-  const gesture = threadTouching || (via !== "frame" && userScrollIntent());
-  const act = restoreVerdict(g, settled, closeFixes, gesture);
-  // "moving" is every frame of the shell's glide home and "held" repeats for as
-  // long as a finger is down: both are the ordinary state of a close, and
-  // neither is news. "spent" is recorded once, on the pass the budget runs out.
-  if (act === "none" || act === "moving" || act === "held") return;
-  if (act === "spent" && closeFixes > MAX_CLOSE_RESTORES) return; // one stand-down, not one a frame
-  closeFixes += 1;
-  holdDiagRecord(
-    "kb-restore",
-    restoreMark(via, act, performance.now() - closeAt, g, closeFixes, closeBottom),
-  );
-  // the settle is the writer: it lands on the end of the range whichever way
-  // following happens to be pointing, and it is the app's one scroll authority
-  if (act === "fix") settleTail("kb-restore");
-}
+// --- the keyboard's parting shot: gone ----------------------------------------
+// There was a post-close watch here: every frame for six tenths of a second
+// after a close, plus two late checkpoints, looking for the scroll offset the
+// engine hands the thread at the end of its own close transition, 386px past
+// the end of the range the grown box had left, and taking it back through the
+// settle. It went with the thing it corrected (viewport.ts holds the account):
+// the thread's box no longer changes at a keyboard edge, so the end of its range
+// never moves under an offset the phone is holding, and the offset the phone
+// hands back is the one the thread already had. The two stamps below are all
+// that remains, and only the scroll-ghost looks read them.
+let closeAt = -1; // TEMP DIAGNOSTIC (scroll-ghost): the last keyboard close, on the app's own clock
+let closeBottom = -1; // TEMP DIAGNOSTIC (scroll-ghost): the end of the thread's range as that close began
 
 // TEMP DIAGNOSTIC (scroll-ghost, scrollghost.ts owns the banner): what the app
-// knows that the scroller's three numbers do not, gathered once for both looks
+// knows that the scroller's three numbers do not, gathered once for the look
 function ghostCtx(): GhostContext {
   return {
     pre: closeBottom,
@@ -4644,15 +4598,6 @@ function recordTailGapNow(when: string): void {
           vvTop: one(window.visualViewport?.offsetTop ?? NaN),
           ih: window.innerHeight,
         });
-        // The close's two later checkpoints, and the ONE line here that is not
-        // a diagnostic: the correction asks its question again, after both
-        // readings above have described the state it is about to change. The
-        // trail says a restored offset survives for seconds, so these are where
-        // one delivered late — or one whose frames were throttled away — is
-        // still taken back. The pass itself lives outside this block (see the
-        // keyboard's parting shot); if this block goes, the frame window stays
-        // and only the two late looks are lost.
-        fixCloseTail(i === 0 ? "gap" : "late");
       }, delay),
     );
   });

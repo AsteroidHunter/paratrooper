@@ -47,7 +47,7 @@ function world(over: Partial<World> = {}): World {
 function reader(over: Partial<Record<keyof EdgeReader, unknown>> = {}): EdgeReader {
   const base = {
     padB: 34, shellH: 844, shellTop: 0, pillBot: 800.5, thBot: 760, st: 1200,
-    sy: 0, vvTop: 0,
+    sy: 0, vvTop: 0, lift: 0,
   };
   const ft = "ft" in over ? (over.ft as boolean | undefined) : true;
   const fts = "fts" in over ? (over.fts as number | undefined) : undefined;
@@ -60,6 +60,7 @@ function reader(over: Partial<Record<keyof EdgeReader, unknown>> = {}): EdgeRead
     st: () => (over.st as number) ?? base.st,
     sy: () => (over.sy as number) ?? base.sy,
     vvTop: () => (over.vvTop as number) ?? base.vvTop,
+    lift: () => (over.lift as number) ?? base.lift,
     fts: () => fts,
     ft: () => ft,
   };
@@ -69,8 +70,23 @@ describe("kb-fall / kb-rise: one record per frame, one builder for both edges", 
   it("carries every field an edge is read from, and nothing else", () => {
     expect(edgeFrame(16.7, reader())).toEqual({
       ms: 17, padB: 34, shellH: 844, shellTop: 0,
-      pillBot: 800.5, thBot: 760, st: 1200, sy: 0, vvTop: 0, ft: true,
+      pillBot: 800.5, thBot: 760, st: 1200, sy: 0, vvTop: 0, lift: 0, ft: true,
     });
+  });
+
+  it("the lift's own translate rides every frame, signed as the engine reports it", () => {
+    // the motion itself: negative while the list stands lifted, easing to 0 on
+    // a close, and a missing wrapper reads null rather than a 0 that says rest
+    const up = edgeFrame(0, reader({ lift: -386 }));
+    const mid = edgeFrame(50, reader({ lift: -161.34 }));
+    const home = edgeFrame(250, reader({ lift: 0 }));
+    expect(up.lift).toBe(-386);
+    expect(mid.lift).toBe(-161.3);
+    expect(home.lift).toBe(0);
+    expect(edgeFrame(0, reader({ lift: NaN })).lift).toBeNull();
+    // and the shell's own box does not move under it: the height a lifted
+    // frame reads is the full screen, which is the design's whole claim
+    expect(up.shellH).toBe(844);
   });
 
   it("the two displacement sources of a shove ride every frame, to a tenth of a pixel", () => {
@@ -380,8 +396,8 @@ describe("wiring: read-only, and each read on the right side of the writes", () 
     // and it is the frame the rest are measured against: ms 0, clock started
     // here. The window is a proximity pin on one function's body, not a byte
     // budget: it holds the head build between the two, and the head grew when
-    // the close learned to name its cause.
-    expect(shell).toMatch(/edgeT0 = performance\.now\(\);[\s\S]{0,2100}edgeSample\(0, undefined\);/);
+    // the close learned to name its cause, and again when it learned the inset.
+    expect(shell).toMatch(/edgeT0 = performance\.now\(\);[\s\S]{0,2600}edgeSample\(0, undefined\);/);
   });
 
   it("one probe serves both edges: the same start, the same builder, only the channel differs", () => {
@@ -516,8 +532,8 @@ describe("wiring: read-only, and each read on the right side of the writes", () 
 describe("kb-edge: where the delay between the edge and the first frame went", () => {
   const head = {
     edge: "open", n: 7, src: "resize", evt: 0.4,
-    sx: 0, sy: 412, vvTop: 412, vvH: 508,
-    foc: 260, boxTop: 412, boxH: 508, seed: true,
+    sx: 0, sy: 412, vvTop: 412, vvH: 508, inset: 336,
+    foc: 260, boxTop: 412, boxH: 844,
   };
   const zero = edgeFrame(0, reader({ padB: 34, shellH: 844, shellTop: 0, pillBot: 800 }));
 
@@ -566,9 +582,12 @@ describe("kb-edge: where the delay between the edge and the first frame went", (
     expect(m.vvTop).toBe(412);
     expect(m.boxTop).toBe(412);
     // and how far apart the two halves of the raise were started: styles.css
-    // runs the ＋ collapse from the focus tap, the shell's glide from here
+    // runs the ＋ collapse from the focus tap, the lift from here
     expect(m.foc).toBe(260);
-    expect(m.seed).toBe(true);
+    // the inset the lift was armed with, and the box the edge wrote: the top
+    // from the viewport, the height the full screen, never the viewport's
+    expect(m.inset).toBe(336);
+    expect(m.boxH).toBe(844);
   });
 
   it("a stale viewport stamp is refused rather than read as a fast dispatch", () => {
@@ -582,66 +601,55 @@ describe("kb-edge: where the delay between the edge and the first frame went", (
 
 // The box writes. A raise was seen writing the shell's box twice, first to a
 // top of 412 and then to 0 sixteen ms later, with a shove clear alongside, and
-// the old record could say neither whether those writes ANIMATED nor how far
-// into the motion they landed, which is the whole difference between a harmless
-// correction and a shell told to slide most of a screen and then re-aimed.
-describe("shell-size / shell-pin: what the box was set to, when, and whether it animated", () => {
-  it("keeps the fields the last session was read in and adds the three it lacked", () => {
-    expect(sizeRecord(412, 508, true, true, 0.2)).toEqual({
-      top: 412, h: 508, glide: true, edge: true, ems: 0.2,
-    });
+// the old record could say neither which of those was the edge's own write nor
+// how far into the motion they landed. The box no longer travels at all, so the
+// record no longer carries whether it animated; the edge flag and the clock stay.
+describe("shell-size / shell-pin: what the box was set to, and when", () => {
+  it("keeps the fields the last session was read in: the box, the edge flag, the clock", () => {
+    expect(sizeRecord(412, 844, true, 0.2)).toEqual({ top: 412, h: 844, edge: true, ems: 0.2 });
     // the same top/h a trail from before this build carries, so the two read
-    // against each other
-    expect(Object.keys(sizeRecord(0, 844, false, false, -1)).slice(0, 2)).toEqual(["top", "h"]);
+    // against each other; a record from this build reads the full screen as
+    // its h on every keyboard-time write, which is how it is told apart
+    expect(Object.keys(sizeRecord(0, 844, false, -1)).slice(0, 2)).toEqual(["top", "h"]);
+    expect("glide" in sizeRecord(0, 844, false, -1)).toBe(false);
   });
 
   it("the double write reads as two lines on one clock", () => {
-    const first = sizeRecord(412, 508, true, true, 0.3);
-    const second = sizeRecord(0, 508, true, false, 16.9);
+    const first = sizeRecord(412, 844, true, 0.3);
+    const second = sizeRecord(0, 844, false, 16.9);
     expect(first.edge).toBe(true); // the edge's own write
     expect(second.edge).toBe(false); // and the re-aim, one frame later
-    expect(second.ems).toBe(16.9); // still inside the glide, so it animates
-    expect(second.glide).toBe(true);
+    expect(second.ems).toBe(16.9);
   });
 
-  it("a mid-typing write reads instant and off the edge's clock", () => {
-    const r = sizeRecord(0, 508, false, false, 3200.4);
-    expect(r.glide).toBe(false); // no transition: an active-growth frame never smears
-    expect(r.ems).toBe(3200.4);
-  });
-
-  it("the close's growth reads as a step: full height, inside the window, not animated", () => {
-    // the line a healthy close now leaves — one write, at the full screen, a
-    // few ms after the edge (the wait for the viewport, holdsShellBox), and
-    // `glide` false because the box travelled no distance at all. A trail from
-    // before this build carries the same top/h with glide TRUE, which is how
-    // the two are told apart at a glance
-    const step = sizeRecord(0, 844, false, false, 22.4);
-    expect(step.glide).toBe(false);
-    expect(step.ems).toBe(22.4); // inside the window, so the window is not what it says
-    expect(step.top).toBe(0);
-    expect(step.h).toBe(844);
+  it("an open writes the box once, at the full screen; a close writes it not at all", () => {
+    // the line a healthy open now leaves: the top from the viewport, the height
+    // the baseline. A trail from before this build carries h 508 here, the
+    // keyboard-sized viewport, which is the whole of what changed
+    const open = sizeRecord(0, 844, true, 0.4);
+    expect(open.h).toBe(844);
+    expect(open.edge).toBe(true);
   });
 
   it("shell-pin marks the frame the numeric box is dropped for the four-edge pin", () => {
     expect(pinRecord(0, 844, 471.6)).toEqual({ top: 0, h: 844, ems: 471.6 });
-    // if the step had not landed on the pin's own geometry, this is the height
-    // it snapped FROM, and the probe's own last frames say what it snapped TO
+    // the box is written at the baseline, so if the baseline had lied this is
+    // the height it snapped FROM, and the probe's own last frames say what to
     expect(pinRecord(0, 820, 470)).toEqual({ top: 0, h: 820, ems: 470 });
   });
 
   it("ems reads -1 before there has ever been an edge, never 0", () => {
     // 0 would read as "at the edge", which is the one thing it is not
-    expect(sizeRecord(0, 844, false, false, -1).ems).toBe(-1);
+    expect(sizeRecord(0, 844, false, -1).ems).toBe(-1);
     const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
     expect(shell).toMatch(/return edgeT0 === 0 \? -1 : performance\.now\(\) - edgeT0;/);
   });
 });
 
-// The box records sit at the writes themselves, and the pin record at the one
-// place the box is taken away. Everything else about applyShell has to be
-// untouched: it is the app's one writer, and a probe that changed the order of
-// its writes would be measuring a different app.
+// The box record sits at the one write, and the pin record at the one place
+// the box is taken away. Everything else about applyShell has to be untouched:
+// it is the app's one writer, and a probe that changed the order of its writes
+// would be measuring a different app.
 describe("wiring: the box records sit at the writes, and change none of them", () => {
   const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
 
@@ -651,38 +659,49 @@ describe("wiring: the box records sit at the writes, and change none of them", (
     );
   });
 
-  it("both box writes record through the one builder, after the write, never before", () => {
+  it("the one box write records through the one builder, after the write, never before", () => {
     expect(shell).toMatch(
-      /appEl\.style\.setProperty\("--shell-h", `\$\{box\.height\}px`\);\n[^\n]*\n\s*recordShellSize\(top, height, glides, atEdge\);/,
+      /appEl\.style\.setProperty\("--shell-h", `\$\{height\}px`\);\n[^\n]*\n\s*recordShellSize\(top, height, atEdge\);/,
     );
-    expect(shell).toMatch(
-      /appEl\.style\.setProperty\("--shell-h", `\$\{restH\}px`\);\n\s*recordShellSize\(0, restH, glides, atEdge\);/,
-    );
-    expect(shell.match(/recordShellSize\(/g)?.length).toBe(3); // the definition and its two sites
+    expect(shell.match(/recordShellSize\(/g)?.length).toBe(2); // the definition and its one site
   });
 
-  // The flag has to be the MOTION, not the window. Since the close stopped
-  // travelling, "a settle window is open" and "this write animates" are
-  // different facts, and a trail that carried the window would say a one-frame
-  // growth glided — which is the exact claim the next device session has to be
-  // able to check.
-  it("the glide flag is read from boxMotion, so a stepped close cannot log as animated", () => {
-    expect(shell).toMatch(/const glides = boxMotion\(t\.kb, gliding\) === "glide";/);
-    expect(shell.match(/recordShellSize\([^)]*gliding[^)]*\)/g)).toBeNull();
-  });
-
-  it("the seeding reflow names itself on the edge record instead of being inferred", () => {
-    // it is a forced layout inside the write path, once per raise, right at the
-    // edge, a candidate for the very stall the edge record measures
-    expect(shell).toMatch(/void appEl\.offsetHeight;\n\s*edgeSeeded = true;/);
-    expect(shell).toMatch(/edgeHead\.seed = edgeSeeded;/);
+  it("no forced layout is left in the write path: the box never seeds a glide", () => {
+    // the raise used to pay a reflow to seed a numeric FROM box for a top and
+    // height transition; nothing transitions the box now, so nothing seeds
+    const apply = shell.match(/function applyShell\([\s\S]*?\n\}/)?.[0] ?? "";
+    expect(apply.length).toBeGreaterThan(0);
+    expect(apply).not.toContain("offsetHeight");
+    expect(shell).not.toMatch(/edgeSeeded|edgeHead\.seed/);
   });
 
   it("the pin record reads the box that was there, not the nulls that replace it", () => {
     expect(shell).toMatch(
       /const wasTop = appliedTop;\n\s*const wasH = appliedHeight;\n\s*appliedTop = null;/,
     );
-    expect(shell).toMatch(/appEl\.style\.removeProperty\("--shell-h"\);[\s\S]{0,300}recordShellPin\(wasTop, wasH\);/);
+    expect(shell).toMatch(/appEl\.style\.removeProperty\("--shell-h"\);[\s\S]{0,500}recordShellPin\(wasTop, wasH\);/);
+  });
+
+  it("the lift's records sit at the arm and the landing, and read the engine's own translate", () => {
+    expect(shell).toMatch(/holdDiagRecord\("kb-lift", \{ edge, via: "arm", inset \}\);/);
+    expect(shell).toMatch(
+      /holdDiagRecord\("kb-lift", \{\n\s*edge: appliedKb \? "open" : "close",\n\s*via,\n\s*ms: px\(edgeAge\(\)\),\n\s*lift: px\(y\),\n\s*writes: readScrollWrites \? readScrollWrites\(\) - liftWritesAtEdge : -1,\n\s*\}\);/,
+    );
+    // the landing's number is the computed transform, parsed by the engine's
+    // own matrix, never the inset re-derived by hand
+    expect(shell).toMatch(/const y = liftEl \? matrixY\(getComputedStyle\(liftEl\)\.transform\) : NaN;/);
+    expect(shell).toMatch(/return transform === "none" \? 0 : new DOMMatrixReadOnly\(transform\)\.f;/);
+    // and the frames read the same translate off a style resolved once, at the edge
+    expect(shell).toMatch(/edgeLiftStyle = liftEl \? getComputedStyle\(liftEl\) : null;/);
+    expect(shell).toMatch(/lift: \(\) => \(edgeLiftStyle \? matrixY\(edgeLiftStyle\.transform\) : NaN\),/);
+  });
+
+  it("the write counter is read at the edge and at the landing, so `writes` is the motion's own", () => {
+    expect(shell).toMatch(/liftWritesAtEdge = readScrollWrites\?\.\(\) \?\? 0;/);
+    const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+    expect(main).toMatch(/watchScrollWrites\(scrollWriteCount\);/);
+    const ghost = readFileSync(new URL("../src/scrollghost.ts", import.meta.url), "utf8");
+    expect(ghost).toMatch(/export function scrollGhostWrite\(via: string, top: number\): void \{\n\s*writes \+= 1;/);
   });
 
   it("neither record touches the writes it sits beside", () => {
