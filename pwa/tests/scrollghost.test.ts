@@ -254,15 +254,18 @@ describe("the wiring: every writer announces itself, and the looks read nothing"
     for (const call of [
       'scrollGhostWrite(via, plan.top)', // the settle
       'scrollGhostWrite("bottom", top)', // the bottom pin, target not read-back
-      'scrollGhostWrite("glide", pos)', // the jump chevron's ride
+      // the jump chevron's ride AND the resume landing's — one plan, one
+      // writer. The landing has no write of its own any more: it holds the
+      // position the phone hands back and then rides, which is why the two
+      // resume-pin entries that used to sit at the end of this list are gone
+      // (resume.ts, and resume.test.ts pins that armResumeRide writes nothing).
+      'scrollGhostWrite("glide", pos)',
       'scrollGhostWrite("keep-view", t.scrollTop)',
       'scrollGhostWrite("give-up", t.scrollTop)',
       'scrollGhostWrite("drain", t.scrollTop)',
       'scrollGhostWrite("replay", t.scrollTop)',
       'scrollGhostWrite("boot-repin", t.scrollTop)',
       'scrollGhostWrite("cache-pin", el.scrollTop)',
-      'scrollGhostWrite(via, t.scrollTop)', // the resume's pin, and
-      'scrollGhostWrite(via, el.scrollTop)', // its re-assert a frame later
     ]) {
       expect(src, `${call} is missing`).toContain(call);
     }

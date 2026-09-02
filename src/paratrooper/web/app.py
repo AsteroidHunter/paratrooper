@@ -739,10 +739,20 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         _holddiag_latest.clear()
         _holddiag_latest.update(payload)
         events = payload.get("events") or []
+        # "resume"/"resume-ride" ride BOTH this line and the viewport one below,
+        # and the duplication is deliberate. A return to the screen is at most
+        # four records, so it costs nothing; here it is the headline (a return
+        # happened at all, was the socket replaced, was the bottom taken and
+        # why), and below it sits in among the followTail flips and scroll
+        # ghosts that are the only things that can explain a landing that went
+        # wrong. Named in neither, they reached the deploy logs from nowhere —
+        # a record the client posts but no block here claims is dropped on
+        # arrival, which is exactly how the whole channel went missing before.
         marks = [e for e in events if isinstance(e, dict)
                  and e.get("ev") in ("held", "release", "pass", "reset", "vis",
                                      "retract-sent", "retract-applied", "cache-read",
-                                     "cache-applied", "batch-commit", "reconcile-drop")]
+                                     "cache-applied", "batch-commit", "reconcile-drop",
+                                     "resume", "resume-ride")]
         _diag.info("holddiag client build=%s events=%d marks=%s",
                    payload.get("build"), len(events), json.dumps(marks[-10:]))
         # viewport/flight digest, its own line so the hold pin above holds: the
@@ -757,7 +767,8 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                                   "grow-blink", "kb-shove",
                                   "kb-focusing", "kb-glide", "shell-pin",
                                   "dom-census", "pick-anchor", "tail-gap",
-                                  "kb-restore", "scroll-ghost")]
+                                  "kb-restore", "scroll-ghost",
+                                  "resume", "resume-ride")]
         if vp:
             _diag.info("holddiag viewport events=%d tail=%s",
                        len(vp), json.dumps(vp[-20:]))

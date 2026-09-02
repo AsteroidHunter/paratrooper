@@ -276,6 +276,14 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
   // that goes wrong is exactly the case where nothing else on the trail fires
   // near it — a banner tap on a quiet thread arms no keyboard edge, no send and
   // no picker. One record per resume means arming here cannot churn.
+  //
+  // "resume-ride" is IN alongside it, for the half the edge mark cannot carry.
+  // The landing's whole answer is in the TIMING — how long the phone held the
+  // scroll before it let go, how far the ride then had to go, and whether it
+  // reached the bottom — and every one of those numbers is only known some
+  // hundreds of milliseconds AFTER the resume record armed its post. Two
+  // records per return at the very most, arriving one beat apart, so this
+  // cannot churn either.
   if (
     ev === "held" || ev === "release" || ev === "pass" || ev === "reset" ||
     ev === "snapback" || ev === "followtail" || ev === "flight" ||
@@ -287,7 +295,7 @@ export function holdDiagRecord(ev: string, d?: Record<string, unknown>): void {
     ev === "pick-anchor" || ev === "tail-gap" ||
     ev === "scroll-jank" || ev === "tail-settle" || ev === "pick-timing" ||
     ev === "thread-blank" || ev === "kb-restore" || ev === "scroll-ghost" ||
-    ev === "resume"
+    ev === "resume" || ev === "resume-ride"
   ) {
     diagPost();
   }

@@ -745,7 +745,8 @@ describe("a photo that never arrives", () => {
 describe("the tail settle keeps its own job", () => {
   it("still owns the scroll while the view follows the end", () => {
     // keepView answers zero there (pinned above), and these are untouched
-    expect(fnBody("settleTail")).toContain("const plan = settleBottom(g, followTail)");
+    // (the resume landing's exception is tailsettle.test.ts's and resume.ts's)
+    expect(fnBody("settleTail")).toContain("const plan = settleBottom(g, followTail &&");
     expect(fnBody("renderUser")).toContain("if (followTail) scrollToBottom(true)");
   });
 

@@ -54,15 +54,18 @@ import { createPushSetup } from "./push";
 import type { PushSetup, PushState } from "./push";
 import {
   KEEPALIVE_MS,
-  PIN_QUIET_MS,
   RESUME_WINDOW_MS,
+  appOwnsScroll,
   keepAliveAction,
   keepAliveSchedule,
   pinFlipGuard,
   reconnectOnVisible,
   replayAnimates,
   resumePinDecision,
+  resumeRideDecision,
+  settleVerdict,
 } from "./resume";
+import type { ResumePin } from "./resume";
 import {
   ENTER_RISE_PX,
   FLIGHT_EASE,
@@ -156,7 +159,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.78"; // wrapped bubbles end at their longest line, not at the 75% cap
+const APP_VERSION = "0.3.79"; // the return holds the old position, then rides the spring to the reply
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -655,11 +658,12 @@ function renderChat(): void {
     // back at the bottom = following again (programmatic pins land here too).
     // While the composer is focused, an away reading needs a real gesture to
     // unfollow — shove/pin scroll events hold the line (viewport.ts explains).
-    // The resume's own instant pin gets the same protection for the couple of
-    // frames its write takes to settle, whatever the composer is doing: an
-    // away reading there is the pin landing, not a reader (resume.ts).
+    // The resume's own RIDE gets the same protection, whatever the composer is
+    // doing: every frame of it reads away-from-the-bottom on the way down, and
+    // that is the ride landing, not a reader leaving (resume.ts appOwnsScroll —
+    // and why the chevron's ride is pointedly not covered).
     const flip = pinFlipGuard(
-      performance.now() - pinWroteAt < PIN_QUIET_MS,
+      appOwnsScroll(performance.now() - appWroteAt, resumeRiding()),
       followFlipDecision(
         nearBottom(), document.activeElement?.id === "text", userScrollIntent(),
       ),
@@ -1620,6 +1624,12 @@ function nearBottom(): boolean {
 let pinInstant = false;
 
 function scrollToBottom(force = false): void {
+  // The resume landing owns the scroll while it is holding or riding, force and
+  // all. Holding, a write here IS the write iOS undoes seventy milliseconds
+  // later; riding, it is a teleport to a bottom the ride is already on its way
+  // to, and the ride re-reads that bottom every frame, so the reply landing
+  // right now is ridden to rather than jumped to (resume.ts).
+  if (resumeHolding()) return;
   const t = threadEl();
   const top = t.scrollHeight;
   // replay bursts (suppressAnim) and the resume window jump instantly; live
@@ -1642,7 +1652,47 @@ function scrollToBottom(force = false): void {
 let glide: Glide | null = null;
 let glideRaf = 0;
 
+// Whose ride is in the air. The jump chevron's and the resume landing's are the
+// same motion with the same physics, and the app has to be able to tell them
+// apart, because their relationship to following is opposite. The chevron's
+// ride is UNFOLLOWED by its own mid-flight scroll events on purpose: that is
+// what makes the settles clamp instead of pin and so leaves the ride alone. The
+// resume's ride is followed the whole way down (a reply is what it is riding
+// to), so its own events must not unfollow it, and the settles are told to
+// stand aside for it instead. resume.ts (appOwnsScroll) holds both halves.
+type GlideOwner = "jump" | "resume";
+let glideOwner: GlideOwner = "jump";
+
+// The resume landing owns the thread's scroll from the visible edge until its
+// ride lands: first HOLDING whatever position the phone hands back while the
+// engine finishes restoring it, then riding down to the new bottom. While this
+// is true nothing else writes the bottom — no pin, no settle — because a write
+// on that edge is the one thing iOS undoes and a pin mid-ride is the jump the
+// ride exists to replace. The resume block near connect() is the clock; this is
+// the flag the two scroll authorities above read.
+let landingHold = false;
+
+// performance.now() of the last scroll write the RESUME LANDING made. A write
+// fires its scroll event in the same frame or the next one, and that event
+// reads the geometry mid-motion — "away from the bottom" — so the couple of
+// frames after a write are credited to the app rather than to a reader
+// (resume.ts appOwnsScroll). It is what carries the credit across the ride's
+// own last frame, whose event lands after the ride has already ended. Starts at
+// -Infinity so a boot-time scroll event can never read as the app's write.
+let appWroteAt = -Infinity;
+
+/** the resume's ride is in the air right now (not the chevron's) */
+function resumeRiding(): boolean {
+  return glideOwner === "resume" && (glide !== null || glideRaf !== 0);
+}
+
+/** the resume landing owns the scroll: holding for the engine, or riding */
+function resumeHolding(): boolean {
+  return landingHold;
+}
+
 function cancelGlide(): void {
+  if (resumeRiding()) landingHold = false; // the landing ends with its ride
   glide?.cancel();
   glide = null;
   if (glideRaf) cancelAnimationFrame(glideRaf);
@@ -1730,10 +1780,27 @@ function settleTail(via: string, quiet = false): void {
   const jankT0 = performance.now();
   tailGen++;
   const g = { sh: t.scrollHeight, st: t.scrollTop, ch: t.clientHeight };
-  const plan = settleBottom(g, followTail);
+  // The resume landing is the one state where following the tail does not mean
+  // pinning it. Holding, the pin would be the write iOS hands straight back;
+  // riding, it would be the teleport the ride replaces — and the ride reaches
+  // the true bottom by itself, re-reading it every frame. So the landing gets
+  // the reader's rule instead: CLAMP. A position past the end of the content is
+  // white space whoever is riding, and a clamp with real work to do cuts the
+  // ride, which is right — that position was never a valid one to ride from.
+  const plan = settleBottom(g, followTail && !resumeHolding());
   const cut = plan.moved ? cancelTailRide() : false;
-  t.scrollTo({ top: plan.top, behavior: "auto" });
-  scrollGhostWrite(via, plan.top); // TEMP DIAGNOSTIC (scroll-ghost)
+  // The write is unconditional everywhere else on purpose (the paragraph above
+  // — it is also how a smooth scroll still in the air is cancelled), and inside
+  // a resume landing it is exactly the write that must not happen: a no-op
+  // scroll request on the visible edge is still a scroll request to an engine
+  // that is mid-restore, and there is no smooth scroll to cancel there anyway
+  // (scrollToBottom stands aside for the landing too). So while the landing
+  // holds, only a real correction is written.
+  const write = plan.moved || !resumeHolding();
+  if (write) {
+    t.scrollTo({ top: plan.top, behavior: "auto" });
+    scrollGhostWrite(via, plan.top); // TEMP DIAGNOSTIC (scroll-ghost)
+  }
   jankSpan("settle-tail", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
   blankProbeSettle(plan.moved); // TEMP DIAGNOSTIC (blank-thread): a counter, nothing read
   if (!quiet || plan.over > 0 || cut) {
@@ -1937,22 +2004,48 @@ function keepView(row: HTMLElement, change: () => void): void {
   });
 }
 
-function startGlide(): void {
+/**
+ * @param owner which ride this is — the chevron's jump, or the resume landing's
+ *              (the two differ only in how the app credits their scroll events
+ *              and whether the settles stand aside; the physics is one plan)
+ */
+function startGlide(owner: GlideOwner = "jump"): void {
   cancelGlide();
+  glideOwner = owner; // after the cancel: it reads the OLD owner to close it out
   const run = createGlide(performance.now());
   glide = run;
+  const t0 = performance.now();
   // float cursor: the DOM rounds scrollTop writes, and the brake's shrinking
   // steps would round away to a stall — the fractional position lives here
   let pos = threadEl().scrollTop;
   const step = (now: number): void => {
     const t = document.getElementById("thread");
-    if (!t || run.cancelled()) return; // shell torn down, or a gesture took over
+    if (!t || run.cancelled()) {
+      // a gesture leaves through cancelGlide, which has already cleared
+      // everything; a shell torn down under the ride has not, and a resume ride
+      // left dangling would hold landingHold true for the rest of the session,
+      // which is every bottom pin in the app switched off
+      if (!t && glide === run) cancelGlide();
+      return;
+    }
     pos += run.step(now, t.scrollHeight - t.clientHeight - pos, t.clientHeight);
     t.scrollTop = pos;
+    // the resume's ride is followed all the way down, so every frame of it is
+    // stamped and its scroll events are credited to the app rather than read as
+    // a reader leaving the tail. The chevron's ride is deliberately not stamped
+    // (resume.ts appOwnsScroll says why the two are opposite).
+    if (owner === "resume") appWroteAt = performance.now();
     scrollGhostWrite("glide", pos); // TEMP DIAGNOSTIC (scroll-ghost)
     if (run.done()) {
       glide = null;
       glideRaf = 0;
+      if (owner === "resume") {
+        landingHold = false; // the landing is over: the ordinary pins have it back
+        holdDiagRecord("resume-ride", {
+          phase: "land", ms: Math.round(performance.now() - t0), st: Math.round(pos),
+          sh: t.scrollHeight, ch: t.clientHeight, ft: followTail,
+        });
+      }
       return;
     }
     glideRaf = requestAnimationFrame(step);
@@ -3637,40 +3730,102 @@ function keepAliveSync(): void {
   }
 }
 
-// The resume's own pin. Instant, following asserted BEFORE the write so the
-// settles that follow it pin rather than clamp, and stamped so its own scroll
-// event is credited to it instead of read as a reader leaving the tail
-// (pinFlipGuard, in the thread's scroll handler). The second write a frame
-// later is the same re-assert the cached boot makes and for the same reason:
-// iOS can re-size the box between a write and its paint, and a settle landing
-// in between has already answered for the fresh box, so this stands down rather
-// than pinning over it.
-let pinWroteAt = -Infinity;
+// The resume's landing: hold, then ride. There is no instant pin here any more,
+// and there must not be one again — the trail from the version that had one is
+// in resume.ts, and it is the engine handing the old position straight back
+// seventy milliseconds after the write, with no gesture and nothing of ours in
+// between. So this writes NOTHING on the visible edge. It watches the scroller
+// frame by frame until the phone has finished restoring it (settleVerdict: a
+// rendering update has happened and two frames agree on the position, or the
+// bounded window runs out), and only then starts the chevron's own damped
+// spring toward the bottom — which re-reads the live bottom every frame, so the
+// reply that lands during the wait is ridden all the way to.
+//
+// Everything else stands aside for the whole of it (landingHold): no pin, no
+// settle pinning the bottom. What ends it early is a real gesture — checked
+// once at the moment the wait ends, and mid-ride by the thread's own
+// wheel/pointer/touch handlers, which cancel every ride the app runs.
+let rideRun = 0; // a newer resume owns the frames from there on
 
-/** true if there was a thread to pin (the token gate has none) */
-function pinBottomNow(via: string): boolean {
+/**
+ * Wait the phone's restore out, then ride down. No-op if a landing is already
+ * in the air, or if the verdict was to leave the reader where he is.
+ *
+ * @returns true if a landing was armed
+ */
+function armResumeRide(verdict: ResumePin): boolean {
+  if (verdict === "hold") return false; // a reader up in his history: untouched
+  if (resumeHolding()) return true; // this resume is already holding or riding
   const t = document.getElementById("thread");
-  if (!t) return false;
-  setFollowTail(true, via);
-  pinWroteAt = performance.now();
-  t.scrollTop = t.scrollHeight;
-  scrollGhostWrite(via, t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
-  const armed = tailGen; // a settle between here and the next frame wins
-  requestAnimationFrame(() => {
+  if (!t) return false; // no thread yet (the token gate is showing)
+  if (typeof requestAnimationFrame !== "function") return false;
+  landingHold = true;
+  const run = (rideRun += 1);
+  const t0 = performance.now();
+  // only a gesture made AFTER the app came back counts. lastGestureAt survives
+  // the freeze, and a flick a moment before the phone went in the pocket is not
+  // the reader answering a question he has not been asked yet.
+  const armedAt = lastGestureAt;
+  let frames = 0;
+  let still = 0;
+  let lastTop = Number.NaN;
+  const step = (): void => {
+    if (run !== rideRun) return; // a newer resume (or a hide) owns this now
     const el = document.getElementById("thread");
-    if (!el || armed !== tailGen) return;
-    pinWroteAt = performance.now();
-    el.scrollTop = el.scrollHeight;
-    scrollGhostWrite(via, el.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
-  });
+    if (!el) {
+      landingHold = false; // shell torn down under the wait
+      return;
+    }
+    const top = el.scrollTop;
+    frames += 1;
+    still = top === lastTop ? still + 1 : 1; // a run of frames that agree
+    lastTop = top;
+    const ms = performance.now() - t0;
+    if (settleVerdict(frames, still, ms) === "wait") {
+      requestAnimationFrame(step);
+      return;
+    }
+    // the engine has stopped moving it. Everything the decision needs is read
+    // HERE, after the wait: the reply this ride exists for usually landed
+    // inside it, and the bottom it moved is the bottom worth riding to.
+    const gestured = threadTouching || lastGestureAt > armedAt;
+    const remaining = maxScrollTop(el.scrollHeight, el.clientHeight) - top;
+    const mark = {
+      ms: Math.round(ms), frames, still,
+      st: Math.round(top), px: Math.round(remaining), gest: gestured,
+    };
+    if (resumeRideDecision(verdict, remaining, gestured) === "still") {
+      landingHold = false; // nothing to ride to, or the scroll is his again
+      holdDiagRecord("resume-ride", { phase: "still", ...mark });
+      return;
+    }
+    // following is asserted before the first frame of the ride, so the ride's
+    // own scroll events find it already true and the landing needs no second
+    // assertion after it (the bottom's own event re-derives it anyway)
+    setFollowTail(true, "resume-ride");
+    holdDiagRecord("resume-ride", { phase: "ride", ...mark });
+    startGlide("resume");
+  };
+  requestAnimationFrame(step);
   return true;
+}
+
+/** the page is going away, or a newer resume has come: drop the landing */
+function stopResumeRide(): void {
+  rideRun += 1; // the pending watcher's frames belong to nobody
+  if (resumeRiding()) cancelGlide(); // clears landingHold with the ride
+  landingHold = false;
 }
 
 // The window in which the app is still landing: every bottom pin inside it is
 // instant (scrollToBottom asks resumeWindowOpen directly), and the first message
-// to arrive gets to re-take the bottom. It closes on its own clock, or early the
-// moment a real gesture takes the thread up — the reader has answered the
-// question himself. The timer IS the window, so there is one thing to be wrong.
+// to arrive gets to ride down to the bottom it just moved. It closes on its own
+// clock, or early the moment a real gesture takes the thread up — the reader
+// has answered the question himself. The timer IS the window, so there is one
+// thing to be wrong. It is deliberately much longer than the landing itself:
+// the ride is over in well under a second, and the window has to outlast a
+// whole catch-up on a bad link so that the reply, whenever it arrives, still
+// finds a landing waiting for it.
 let resumeTimer: ReturnType<typeof setTimeout> | null = null;
 let resumeWasFollowing = true; // followTail the moment the app went hidden
 let resumeAwayByHand = false; // a reader had gone up by hand before leaving
@@ -3693,12 +3848,14 @@ function closeResumeWindow(): void {
 }
 
 // A tail frame applied while the app is still coming back. Once per resume: the
-// first message decides, and a decision to hold holds for the rest of it.
+// first message decides, and a decision to hold holds for the rest of it. If
+// the edge already armed a landing this only records — the ride re-reads the
+// bottom every frame, so the reply that just landed is already in front of it.
 function resumeArrival(): void {
   if (!resumeWindowOpen() || resumeNewArrived) return;
   resumeNewArrived = true;
   const verdict = resumePinDecision(resumeWasFollowing, true, resumeAwayByHand);
-  const pinned = verdict !== "hold" && pinBottomNow("resume-new");
+  const pinned = armResumeRide(verdict) && "ride";
   holdDiagRecord("resume", { reconnect: false, pinned, reason: verdict });
 }
 
@@ -3707,7 +3864,9 @@ function resumeVisible(): void {
   const reconnect = resumeReconnect();
   keepAliveSync();
   const verdict = resumePinDecision(resumeWasFollowing, false, resumeAwayByHand);
-  const pinned = verdict !== "hold" && pinBottomNow("resume");
+  // NOT a pin: the landing holds the position the phone handed back and rides
+  // down once the engine has let go of it (armResumeRide, and resume.ts)
+  const pinned = armResumeRide(verdict) && "ride";
   holdDiagRecord("resume", { reconnect, pinned, reason: verdict });
 }
 
@@ -3716,6 +3875,7 @@ function resumeHidden(): void {
   resumeWasFollowing = followTail;
   resumeAwayByHand = scrolledUpByHand;
   closeResumeWindow();
+  stopResumeRide(); // a landing half way through is not resumed on the far side
   keepAliveSync();
 }
 

@@ -10,10 +10,17 @@
 //   event, and a half-open socket produces none
 //   the keep-alive, which is the only thing that can make a half-open socket
 //   admit it, because nothing else the client does ever writes to that socket
-//   the landing: a reply arriving mid-resume asked for a SMOOTH pin, whose own
-//   mid-flight scroll events read "away from the bottom" and flipped following
-//   off, after which every re-pin in the app is gated shut and the resume's
-//   geometry settles CLAMP where they should pin
+//   the landing, which took two goes. A reply arriving mid-resume first asked
+//   for a SMOOTH pin, whose own mid-flight scroll events read "away from the
+//   bottom" and flipped following off, after which every re-pin in the app is
+//   gated shut and the resume's geometry settles CLAMP where they should pin.
+//   The instant pin that replaced it was undone by the phone: the device trail
+//   has the write landing on the new bottom and the scroller reading the old
+//   one back seventy milliseconds later with no gesture and no write of ours in
+//   between, which is iOS restoring a scrolling tree it rebuilt from the
+//   content size the page was frozen with. So the landing now writes nothing on
+//   that edge at all — it holds, waits for the engine to go still, and rides
+//   the chevron's spring down to the reply
 //   the entrance: replay frames render flat by construction, so the reply that
 //   arrived while the app was away materialised instead of landing
 //
@@ -29,16 +36,22 @@ import {
   KEEPALIVE_STALL_BYTES,
   PIN_QUIET_MS,
   RESUME_WINDOW_MS,
+  RIDE_MIN_PX,
+  SETTLE_STILL_FRAMES,
+  SETTLE_WINDOW_MS,
   SOCKET_CLOSED,
   SOCKET_CLOSING,
   SOCKET_CONNECTING,
   SOCKET_OPEN,
+  appOwnsScroll,
   keepAliveAction,
   keepAliveSchedule,
   pinFlipGuard,
   reconnectOnVisible,
   replayAnimates,
   resumePinDecision,
+  resumeRideDecision,
+  settleVerdict,
 } from "../src/resume";
 
 const src = readFileSync(
@@ -160,22 +173,103 @@ describe("resumePinDecision", () => {
   });
 });
 
+describe("settleVerdict", () => {
+  it("the visible edge itself is never written on: no frame, no verdict", () => {
+    // THE lesson of the ghost. A write made before the engine has rendered once
+    // is clamped against the content size the page was frozen with, and handed
+    // straight back a few frames later — so the bound below cannot fire either
+    // until something has actually painted.
+    expect(settleVerdict(0, 0, 0)).toBe("wait");
+    expect(settleVerdict(0, 0, SETTLE_WINDOW_MS + 1000)).toBe("wait");
+  });
+
+  it("one frame says nothing: it has agreed with nothing yet", () => {
+    expect(settleVerdict(1, 1, 8)).toBe("wait");
+  });
+
+  it("two frames reading the same position mean the engine has let go", () => {
+    expect(settleVerdict(2, SETTLE_STILL_FRAMES, 32)).toBe("settled");
+  });
+
+  it("a position still moving frame to frame is still the phone's, not ours", () => {
+    // the restore walking the offset back: every frame disagrees with the last,
+    // so the run of agreement never gets going
+    for (let f = 2; f < 12; f += 1) expect(settleVerdict(f, 1, f * 16)).toBe("wait");
+  });
+
+  it("a restore that never settles is not waited on for ever", () => {
+    expect(settleVerdict(20, 1, SETTLE_WINDOW_MS)).toBe("settled");
+    expect(settleVerdict(20, 1, SETTLE_WINDOW_MS - 1)).toBe("wait");
+  });
+
+  it("the bound is a beat before the motion, not a stall", () => {
+    expect(SETTLE_WINDOW_MS).toBeGreaterThanOrEqual(300);
+    expect(SETTLE_WINDOW_MS).toBeLessThanOrEqual(400);
+  });
+});
+
+describe("resumeRideDecision", () => {
+  it("following, with a reply waiting below: ride down to it", () => {
+    expect(resumeRideDecision("following", 120, false)).toBe("ride");
+    expect(resumeRideDecision("new-message", 120, false)).toBe("ride");
+  });
+
+  it("a reader up in his history is left exactly where the phone put him", () => {
+    expect(resumeRideDecision("hold", 4000, false)).toBe("still");
+  });
+
+  it("nothing new below: the position is not touched at all", () => {
+    // a return to a thread that did not move — the ordinary case, and the one
+    // where any motion at all would be the app fidgeting
+    expect(resumeRideDecision("following", 0, false)).toBe("still");
+    expect(resumeRideDecision("following", RIDE_MIN_PX, false)).toBe("still");
+    expect(resumeRideDecision("following", RIDE_MIN_PX + 1, false)).toBe("ride");
+  });
+
+  it("a real gesture since the return ends it before it starts", () => {
+    // he has answered the question himself; the app does not get a second
+    // opinion. Mid-ride the thread's own wheel/pointer/touch handlers do the
+    // same thing by cancelling the glide.
+    expect(resumeRideDecision("following", 4000, true)).toBe("still");
+    expect(resumeRideDecision("new-message", 4000, true)).toBe("still");
+  });
+});
+
 describe("pinFlipGuard", () => {
-  it("the resume's own pin cannot unfollow the app it is pinning", () => {
-    // the write fires a scroll event that reads the geometry a frame before the
-    // pin has settled; letting that disarm following disarms every re-pin after
+  it("the resume's own ride cannot unfollow the app it is riding down", () => {
+    // every frame of the ride reads away-from-the-bottom on the way there;
+    // letting that disarm following disarms every re-pin after it
     expect(pinFlipGuard(true, "unfollow")).toBe("hold");
   });
 
-  it("reaching the bottom still means following, pin or no pin", () => {
+  it("reaching the bottom still means following, ride or no ride", () => {
     expect(pinFlipGuard(true, "follow")).toBe("follow");
     expect(pinFlipGuard(false, "follow")).toBe("follow");
   });
 
-  it("outside the pin's own couple of frames nothing is held", () => {
+  it("outside the app's own motion nothing is held", () => {
     expect(pinFlipGuard(false, "unfollow")).toBe("unfollow");
     expect(pinFlipGuard(false, "hold")).toBe("hold");
     expect(pinFlipGuard(true, "hold")).toBe("hold");
+  });
+});
+
+describe("appOwnsScroll", () => {
+  it("a ride in the air owns every scroll event under it, however long it runs", () => {
+    // asked about directly rather than timed: a spring cruising two screens
+    // would run out of any stamp window
+    expect(appOwnsScroll(1e6, true)).toBe(true);
+  });
+
+  it("the stamp carries the credit past the ride's own last frame", () => {
+    // that write's scroll event arrives after the ride has already ended, and
+    // it is the one that used to undo the whole landing
+    expect(appOwnsScroll(PIN_QUIET_MS - 1, false)).toBe(true);
+  });
+
+  it("past the stamp window with nothing riding, a scroll is the reader's", () => {
+    expect(appOwnsScroll(PIN_QUIET_MS, false)).toBe(false);
+    expect(appOwnsScroll(5000, false)).toBe(false);
   });
 
   it("the credit window is a couple of frames, far short of a gesture's", () => {
@@ -217,7 +311,7 @@ describe("wiring — the resume edge reaches all four decisions", () => {
     expect(body).toContain("resumeReconnect()");
     expect(body).toContain("keepAliveSync()");
     expect(body).toContain("resumePinDecision(resumeWasFollowing, false, resumeAwayByHand)");
-    expect(body).toContain("pinBottomNow(\"resume\")");
+    expect(body).toContain("armResumeRide(verdict)");
   });
 
   it("going hidden takes the reading the decision needs while it is still true", () => {
@@ -225,6 +319,7 @@ describe("wiring — the resume edge reaches all four decisions", () => {
     expect(body).toContain("resumeWasFollowing = followTail");
     expect(body).toContain("resumeAwayByHand = scrolledUpByHand");
     expect(body).toContain("closeResumeWindow()");
+    expect(body).toContain("stopResumeRide()"); // a half-finished landing dies here
     expect(body).toContain("keepAliveSync()");
   });
 
@@ -303,33 +398,79 @@ describe("wiring — the keep-alive is one small frame, and only while on screen
   });
 });
 
-describe("wiring — the landing is instant, and its own writes do not disarm it", () => {
-  it("the pin asserts following BEFORE it writes, so the settles pin not clamp", () => {
-    const body = fnBody("pinBottomNow");
-    expect(body.indexOf("setFollowTail(true, via)")).toBeLessThan(
-      body.indexOf("t.scrollTop = t.scrollHeight"),
+describe("wiring — the landing holds, then rides, and its own motion cannot disarm it", () => {
+  it("NOTHING is written on the visible edge: the landing only watches", () => {
+    // the ghost's whole lesson. The instant pin that used to live here wrote
+    // the new bottom and the engine handed the old one back 70ms later.
+    const body = fnBody("armResumeRide");
+    expect(body).not.toContain("scrollTop =");
+    expect(body).not.toContain("scrollTo(");
+    // the first thing it does with a frame is READ
+    expect(body).toContain("const top = el.scrollTop");
+  });
+
+  it("the wait is the settle detector, driven a rendering update at a time", () => {
+    const body = fnBody("armResumeRide");
+    expect(body).toContain("settleVerdict(frames, still, ms)");
+    expect(body).toContain("still = top === lastTop ? still + 1 : 1");
+    // every check happens INSIDE a frame, which is what makes "the first
+    // rendering update has happened" true by construction rather than by clock
+    expect(body).toMatch(/=== "wait"\) \{\n\s*requestAnimationFrame\(step\);/);
+  });
+
+  it("only then does it ride, on the chevron's own spring", () => {
+    const body = fnBody("armResumeRide");
+    expect(body).toContain('startGlide("resume")');
+    // and the distance is read after the wait, not carried in from the edge:
+    // the reply it is riding to usually landed inside that wait
+    expect(body).toContain("maxScrollTop(el.scrollHeight, el.clientHeight) - top");
+    expect(body).toContain("resumeRideDecision(verdict, remaining, gestured)");
+  });
+
+  it("following is asserted before the first frame of the ride", () => {
+    const body = fnBody("armResumeRide");
+    expect(body.indexOf('setFollowTail(true, "resume-ride")')).toBeLessThan(
+      body.indexOf('startGlide("resume")'),
     );
   });
 
-  it("the pin is a plain write, never a ride or a smooth scroll", () => {
-    const body = fnBody("pinBottomNow");
-    expect(body).toContain("t.scrollTop = t.scrollHeight");
-    expect(body).not.toContain("behavior");
-    expect(body).not.toContain("startGlide");
+  it("a gesture since the return stands the landing down", () => {
+    const body = fnBody("armResumeRide");
+    // only a gesture AFTER the app came back: lastGestureAt survives the freeze
+    expect(body).toContain("const armedAt = lastGestureAt");
+    expect(body).toContain("threadTouching || lastGestureAt > armedAt");
+    // and mid-ride the thread's own handlers cancel it, as they do the chevron's
+    const at = src.indexOf('thread.addEventListener("wheel"');
+    expect(src.slice(at, src.indexOf('thread.addEventListener("scroll"', at)))
+      .toContain("cancelGlide()");
+    expect(fnBody("cancelGlide")).toContain("landingHold = false");
   });
 
-  it("the write is stamped, and the scroll handler credits the stamp", () => {
-    expect(fnBody("pinBottomNow")).toContain("pinWroteAt = performance.now()");
+  it("the ride's every frame is stamped, and the scroll handler credits it", () => {
+    // the chevron's ride is pointedly NOT stamped: it relies on unfollowing
+    // itself so the settles clamp and leave it alone
+    expect(fnBody("startGlide")).toContain(
+      'if (owner === "resume") appWroteAt = performance.now()',
+    );
     const at = src.indexOf('thread.addEventListener("scroll"');
     const body = src.slice(at, src.indexOf("if (hasScrollend)", at));
     expect(body).toContain("pinFlipGuard(");
-    expect(body).toContain("performance.now() - pinWroteAt < PIN_QUIET_MS");
+    expect(body).toContain("appOwnsScroll(performance.now() - appWroteAt, resumeRiding())");
   });
 
-  it("the re-assert a frame later stands down if a settle already answered", () => {
-    const body = fnBody("pinBottomNow");
-    expect(body).toContain("const armed = tailGen");
-    expect(body).toContain("armed !== tailGen");
+  it("no pin and no settle writes the bottom while the landing owns it", () => {
+    // a pin here is the write iOS undoes while holding, and the teleport the
+    // ride replaces while riding
+    expect(fnBody("scrollToBottom")).toContain("if (resumeHolding()) return");
+    const settle = fnBody("settleTail");
+    expect(settle).toContain("settleBottom(g, followTail && !resumeHolding())");
+    expect(settle).toContain("const write = plan.moved || !resumeHolding()");
+  });
+
+  it("the ride ends the landing, whichever way it ends", () => {
+    expect(fnBody("cancelGlide")).toContain("if (resumeRiding()) landingHold = false");
+    expect(fnBody("startGlide")).toContain("landingHold = false");
+    expect(fnBody("stopResumeRide")).toContain("landingHold = false");
   });
 
   it("every bottom pin inside the window is instant, glide included", () => {
@@ -368,11 +509,17 @@ describe("wiring — the landing is instant, and its own writes do not disarm it
     const arrival = fnBody("resumeArrival");
     expect(arrival).toContain("if (!resumeWindowOpen() || resumeNewArrived) return");
     expect(arrival).toContain("resumePinDecision(resumeWasFollowing, true, resumeAwayByHand)");
-    expect(arrival).toContain('pinBottomNow("resume-new")');
+    expect(arrival).toContain("armResumeRide(verdict)");
     const apply = fnBody("applyEvent");
     expect(apply.indexOf("resumeArrival()")).toBeLessThan(
       apply.indexOf("if (followTail) scrollToBottom()"),
     );
+  });
+
+  it("a landing already in the air is not restarted by the reply it is riding to", () => {
+    // the ride re-reads the live bottom every frame, so the message that just
+    // grew the thread is already in front of it
+    expect(fnBody("armResumeRide")).toContain("if (resumeHolding()) return true");
   });
 
   it("only a real gesture marks the reader as having gone up by hand", () => {
@@ -392,11 +539,36 @@ describe("wiring — the trail says what the resume decided", () => {
     }
   });
 
-  it("the mark arms an upload: a quiet thread's banner tap fires nothing else", () => {
+  it("the ride says how long the phone held on, how far it then went, and where it landed", () => {
+    // the edge mark cannot carry any of this: it is all known some hundreds of
+    // milliseconds later, which is the whole reason for a second record
+    const arm = fnBody("armResumeRide");
+    expect(arm).toMatch(/holdDiagRecord\("resume-ride", \{ phase: "ride", \.\.\.mark \}\)/);
+    expect(arm).toMatch(/holdDiagRecord\("resume-ride", \{ phase: "still", \.\.\.mark \}\)/);
+    expect(arm).toContain("ms: Math.round(ms), frames, still");
+    expect(arm).toContain("px: Math.round(remaining), gest: gestured");
+    expect(fnBody("startGlide")).toMatch(/holdDiagRecord\("resume-ride", \{\n\s*phase: "land"/);
+  });
+
+  it("both marks arm an upload: a quiet thread's banner tap fires nothing else", () => {
     const hold = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "../src/hold.ts"),
       "utf8",
     );
     expect(hold).toMatch(/ev === "resume"/);
+    expect(hold).toMatch(/ev === "resume-ride"/);
+  });
+
+  it("the server prints both, or the records die on arrival", () => {
+    // a mark no block in the digest claims never reaches the deploy logs at
+    // all, which is exactly how this channel went missing the first time
+    const app = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../src/paratrooper/web/app.py"),
+      "utf8",
+    );
+    const marks = app.slice(app.indexOf("marks = ["), app.indexOf("vp = ["));
+    expect(marks).toContain('"resume", "resume-ride"');
+    const vp = app.slice(app.indexOf("vp = ["), app.indexOf("holddiag viewport"));
+    expect(vp).toContain('"resume", "resume-ride"');
   });
 });

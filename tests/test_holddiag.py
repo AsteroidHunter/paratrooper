@@ -257,6 +257,41 @@ def test_holddiag_viewport_digest_carries_keyboard_dynamics_marks(client, caplog
     assert '"kb-glide"' in vp[0] and '"edge": "open"' in vp[0] and '"edge": "close"' in vp[0]
 
 
+def test_holddiag_digest_carries_the_resume_landing(client, caplog):
+    """The return-to-the-app marks reach the deploy logs, which for a while they
+    did not: the phone posted them and no block here claimed them, so every one
+    was dropped on arrival. Both names ride BOTH lines on purpose — the headline
+    line says a return happened at all and what it decided, and the viewport
+    line puts the same records in among the followTail flips and scroll ghosts,
+    which are the only things that can explain a landing that went wrong."""
+    trail = {
+        "build": "b",
+        "events": [
+            {"t": 1, "ev": "resume", "d": {"reconnect": True, "pinned": "ride",
+                                           "reason": "following"}},
+            {"t": 2, "ev": "resume-ride", "d": {"phase": "ride", "ms": 48, "frames": 3,
+                                                "still": 2, "st": 1617, "px": 120,
+                                                "gest": False}},
+            {"t": 3, "ev": "followtail", "d": {"to": True, "trigger": "resume-ride"}},
+            {"t": 4, "ev": "resume-ride", "d": {"phase": "land", "ms": 260, "st": 1737,
+                                                "sh": 2337, "ch": 600, "ft": True}},
+        ],
+    }
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        assert client.post("/api/debug/holddiag", headers=AUTH, json=trail).json() == {"ok": True}
+    digest = [r.message for r in caplog.records if "holddiag client" in r.message]
+    assert len(digest) == 1
+    assert '"resume"' in digest[0] and '"pinned": "ride"' in digest[0]
+    assert '"resume-ride"' in digest[0] and '"phase": "land"' in digest[0]
+    vp = [r.message for r in caplog.records if "holddiag viewport" in r.message]
+    assert len(vp) == 1
+    assert '"resume"' in vp[0] and '"reason": "following"' in vp[0]
+    # the settle numbers are the whole answer: how long the phone held the
+    # scroll before it let go, and how far the ride then had to carry it
+    assert '"ms": 48' in vp[0] and '"px": 120' in vp[0]
+    assert '"followtail"' in vp[0] and '"trigger": "resume-ride"' in vp[0]
+
+
 def test_holddiag_boot_digest_carries_boot_motion_head_first(client, caplog):
     """The boot-window motion recorder's records ride their own digest line,
     HEAD-first: the frame settles right after first paint, so the earliest

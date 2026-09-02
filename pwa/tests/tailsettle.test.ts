@@ -379,14 +379,25 @@ describe("the wiring in main.ts", () => {
   it("the settle reads the geometry itself and decides through viewport.ts", () => {
     expect(settle).toContain("t.scrollHeight");
     expect(settle).toContain("t.clientHeight");
-    expect(settle).toContain("settleBottom(g, followTail)");
+    // following the tail means pinning it, with one exception: a resume
+    // landing, where the pin is either the write iOS hands straight back or a
+    // teleport past a ride already on its way there, so the reader's own rule
+    // (clamp) applies instead until the landing is over (resume.ts)
+    expect(settle).toContain("settleBottom(g, followTail && !resumeHolding())");
     // never a number carried in from the caller: that is the whole bug
     expect(settle).not.toContain("plan.top +");
   });
 
-  it("the write is instant and unconditional, which is what kills a smooth one", () => {
+  it("the write is instant, and only a landing with nothing to correct holds it", () => {
     expect(settle).toContain('t.scrollTo({ top: plan.top, behavior: "auto" })');
-    // no gate between the plan and the write
+    // The one gate, and it is the resume landing's: while the phone is still
+    // restoring the scroll, a write that lands on the value already there is
+    // still a scroll request to an engine mid-restore, and there is no smooth
+    // scroll to cancel in that stretch anyway because scrollToBottom stands
+    // aside for the landing too. Everywhere else it stays unconditional, which
+    // is what kills a smooth scroll aimed at the old box.
+    expect(settle).toContain("const write = plan.moved || !resumeHolding()");
+    // and a real correction is never skipped, landing or not
     const plan = settle.indexOf("const plan =");
     const write = settle.indexOf("t.scrollTo(");
     expect(settle.slice(plan, write)).not.toContain("if (plan.moved) return");
