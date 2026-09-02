@@ -41,7 +41,7 @@ EVENT_POLICY: dict[str, EventPolicy] = {
     # pasted into the agent prompt as "context"
     "screenshot": EventPolicy(push_text="Paratrooper sent a board preview 📸", context="skip"),
     "pr": EventPolicy(
-        push_text="Your pin is ready — tap to review and publish 🪂", context="pr_ref"
+        push_text="Your pin is ready. Tap to review and publish 🪂", context="pr_ref"
     ),
     "done": EventPolicy(push_text="Paratrooper finished your update.", terminal=True),
     "error": EventPolicy(push_text="Paratrooper hit a problem with your update.", terminal=True),

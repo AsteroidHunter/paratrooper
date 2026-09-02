@@ -893,7 +893,7 @@ def test_notification_text_fallbacks_and_special_kinds_are_preserved():
         "Paratrooper sent a board preview 📸"
     )
     assert push.notification_text("pr", "ignored") == (
-        "Your pin is ready — tap to review and publish 🪂"
+        "Your pin is ready. Tap to review and publish 🪂"
     )
     assert push.notification_text("log", "ignored") is None
 
