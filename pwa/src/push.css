@@ -9,14 +9,24 @@
   padding: 24px;
   background: rgba(0, 0, 0, 0.14);
   opacity: 1;
-  transition: opacity 360ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  transition: opacity 260ms ease-in-out;
 }
 .push-dialog[hidden],
 .push-actions [hidden] {
   display: none;
 }
+/* Two timings, one class: removing push-dialog-leaving is the way in, adding
+   it is the way out, and a transition takes its duration and easing from the
+   style it lands ON. So the leaving rules below are not duplicates of the base
+   ones — they are the dismissal, kept exactly as it was, while the base rules
+   above now time only the entrance. The entrance used to borrow this same
+   curve and so arrived at speed: cubic-bezier(0.22, 0.61, 0.36, 1) leaves the
+   gate at nearly 3x and coasts, which is a card that is already moving the
+   instant it exists. It now starts from rest and settles into place instead —
+   ease-in-out, zero velocity at both ends, over the same short travel. */
 .push-dialog.push-dialog-leaving {
   opacity: 0;
+  transition: opacity 360ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 .push-card {
   width: min(304px, calc(100vw - 48px));
@@ -33,10 +43,11 @@
   color: var(--text);
   text-align: center;
   transform: scale(1);
-  transition: transform 360ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  transition: transform 260ms ease-in-out;
 }
 .push-dialog.push-dialog-leaving .push-card {
   transform: translateY(8px) scale(0.95);
+  transition: transform 360ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 .push-copy {
   margin: 0;
@@ -63,13 +74,20 @@
   font-weight: 500;
   cursor: pointer;
 }
+/* Both pills are painted out of the sent bubble, from the pair .msg.user
+   declares: --accent for the fill and --sent-text for the ink on it. Enable is
+   that bubble outright; Not Now stays secondary — a quiet neutral tint — and
+   takes the bubble's fill as its label, so the two read as one system instead
+   of a second blue floating over the thread. --sent, which both wore before,
+   is the legacy iOS blue the chrome outside the thread still uses, and is
+   deliberately not it. Neither is a copied hex, so neither can drift again. */
 .push-not-now {
   background: rgba(118, 118, 128, 0.12);
-  color: var(--sent);
+  color: var(--accent);
 }
 .push-action {
-  background: var(--sent);
-  color: #ffffff;
+  background: var(--accent);
+  color: var(--sent-text);
   font-weight: 600;
 }
 .push-actions button:disabled {
@@ -86,14 +104,17 @@
       inset 0 1px 0 rgba(255, 255, 255, 0.16),
       0 18px 50px rgba(0, 0, 0, 0.48);
   }
-  .push-not-now {
-    background: rgba(118, 118, 128, 0.32);
-    color: #0a84ff;
-  }
-  .push-action { background: #0a84ff; }
+  /* only the scrim behind the label, never the label: --accent and
+     --sent-text are one value each in both appearances, exactly as the bubble
+     resolves them, so nothing here may re-state a pill's colour. */
+  .push-not-now { background: rgba(118, 118, 128, 0.32); }
 }
 
+/* The leaving rules carry their own timing and outrank the base ones, so they
+   have to be named here too or the dismissal would keep its 360ms. */
 @media (prefers-reduced-motion: reduce) {
   .push-dialog,
-  .push-card { transition-duration: 1ms; }
+  .push-card,
+  .push-dialog.push-dialog-leaving,
+  .push-dialog.push-dialog-leaving .push-card { transition-duration: 1ms; }
 }

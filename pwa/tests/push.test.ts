@@ -585,7 +585,11 @@ describe("centered notification popup wiring", () => {
     );
     expect(render.indexOf("armPushDialogEntrance()"))
       .toBeLessThan(render.indexOf("startPushNotifications()"));
-    expect(PUSH_CSS_RULES).toMatch(/transition:\s*opacity 360ms/);
+    // the dismissal's own fade, which the hide timer above is cut to; the
+    // entrance has its own shorter ease and is pinned in pushcard.test.ts
+    expect(PUSH_CSS_RULES).toMatch(
+      /\.push-dialog\.push-dialog-leaving \{[^}]*transition:\s*opacity 360ms/,
+    );
     expect(PUSH_CSS_RULES).toMatch(/translateY\(8px\) scale\(0\.95\)/);
   });
 
