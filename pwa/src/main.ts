@@ -61,6 +61,7 @@ import type { PushSetup, PushState } from "./push";
 import {
   KEEPALIVE_MS,
   RESUME_WINDOW_MS,
+  SOCKET_OPEN,
   appOwnsScroll,
   keepAliveAction,
   keepAliveSchedule,
@@ -165,7 +166,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.85"; // the pull request notification reads as two plain sentences instead of an em dash
+const APP_VERSION = "0.3.86"; // no banner for a reply you are already looking at: the app tells the server where it is
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -3571,6 +3572,10 @@ function connect(): void {
   }, PROBE_FALLBACK_MS);
   ws = new WebSocket(url);
   ws.onopen = () => {
+    // presence first: a new socket has told the server nothing, and until it
+    // does, a reply finishing on this thread is pushed to a phone whose owner
+    // is looking straight at it. The interval's own first ping is 25s away.
+    if (pageVisible()) sendPresence(KEEPALIVE_FRAME);
     void probeReplayTail(); // the honest marker: the server's tail at connect
     // every (re)connect re-checks version: a deploy drops the socket, so the
     // reconnect is exactly when a live page may have gone stale
@@ -3665,13 +3670,40 @@ function resumeReconnect(): boolean {
   return true;
 }
 
-// The keep-alive. One byte on a slow interval, which the server's /ws loop
-// already awaits (receive_text, "client keepalive / pings"), for the single
-// purpose of making a half-open socket admit it: nothing else the client does
-// ever writes to this socket, so nothing else can discover that the writes go
+// The keep-alive, and the presence it now doubles as. One byte on a slow
+// interval, which the server's /ws loop awaits, for what was a single purpose:
+// making a half-open socket admit it, since nothing else the client does ever
+// writes to this socket and so nothing else can discover that the writes go
 // nowhere. Runs only while the page is on screen.
-const KEEPALIVE_FRAME = "p";
+//
+// That "only while on screen" is the second thing it says, and the server now
+// listens to it. The push used to be sent the moment a reply was finished, with
+// nobody asking where the reader was — so a banner and a badge could announce a
+// reply the app was deliberately HOLDING under his thumbs (replyHold), or one
+// his next message had already taken back, and a push Apple delivered late
+// arrived after he had left, where the service worker's own visible-window
+// check no longer suppresses anything. So the ping means "on screen now", the
+// frame below means "gone", and the server holds the notification back while
+// the freshest ping on this thread is recent and unretracted. The worker's rule
+// stays exactly where it is: it is the second line, not the first.
+const KEEPALIVE_FRAME = "p"; // on screen now
+const AWAY_FRAME = "a"; // off screen, said once on the way out
 let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+
+// One presence frame, or nothing at all. A socket that is not OPEN cannot carry
+// it — send() on a CONNECTING socket throws — and it does not need to: a fresh
+// socket announces itself from onopen, and a dead one is the resume path's
+// problem. Never queued, never retried: the next ping is twenty-five seconds
+// away and the server's freshness window is longer than that on purpose.
+function sendPresence(frame: typeof KEEPALIVE_FRAME | typeof AWAY_FRAME): void {
+  if (!token) return; // logged out: the gate is showing and there is nobody here
+  if (!ws || ws.readyState !== SOCKET_OPEN) return;
+  try {
+    ws.send(frame);
+  } catch {
+    /* the engine gave up on this socket between the check and the send */
+  }
+}
 
 function keepAliveTick(): void {
   if (!token) return;
@@ -3832,6 +3864,10 @@ function resumeVisible(): void {
   openResumeWindow();
   const reconnect = resumeReconnect();
   keepAliveSync();
+  // back on screen, said now rather than at the interval's first tick a whole
+  // twenty-five seconds from here. A reconnect just above leaves the socket
+  // CONNECTING, so this no-ops and that socket's onopen says it instead.
+  sendPresence(KEEPALIVE_FRAME);
   const verdict = resumePinDecision(resumeWasFollowing, false, resumeAwayByHand);
   // NOT a pin: the landing holds the position the phone handed back and rides
   // down once the engine has let go of it (armResumeRide, and resume.ts)
@@ -3845,6 +3881,10 @@ function resumeHidden(): void {
   resumeAwayByHand = scrolledUpByHand;
   closeResumeWindow();
   stopResumeRide(); // a landing half way through is not resumed on the far side
+  // the last word out, BEFORE the keep-alive stops: from here the page may be
+  // frozen mid-breath, and a ping that has already gone would otherwise leave
+  // the server believing he is still here for the length of its window
+  sendPresence(AWAY_FRAME);
   keepAliveSync();
 }
 

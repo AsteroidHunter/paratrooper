@@ -17,11 +17,21 @@
 //   browser still says OPEN because nothing has told it otherwise. Only SENDING
 //   discovers the truth — the bytes go nowhere, the retransmit timer runs out,
 //   and the socket errors into a close the reconnect above can act on. The
-//   server's /ws loop already awaits receive_text() for exactly this ("client
-//   keepalive / pings; sends go via POST"), so one tiny text frame on a slow
-//   interval is a supported no-op at the other end. It runs only while the page
-//   is on screen: a frozen page cannot fire timers anyway, and a page that CAN
-//   (a desktop tab in the background) has nobody watching it.
+//   server's /ws loop awaits receive_text() for exactly this, so one tiny text
+//   frame on a slow interval is cheap at the other end. It runs only while the
+//   page is on screen: a frozen page cannot fire timers anyway, and a page that
+//   CAN (a desktop tab in the background) has nobody watching it.
+//
+//   That last sentence is now the frame's SECOND job, and the server reads it.
+//   A ping means "the app is on screen", it stops the moment the page hides,
+//   and main.ts sends one last frame on the way out saying so outright. The
+//   push for a finished reply used to leave the instant the result arrived,
+//   with nobody asking where the reader was — so a banner announced a reply the
+//   app was deliberately holding back under his thumbs, or one his next message
+//   had already taken back, and a push Apple delivered late arrived after he had
+//   gone, where the service worker's own visible-window check no longer
+//   suppresses anything. The frame is no longer a no-op at the far end: the
+//   interval below is what the server's freshness window is built from.
 //
 //   THE LANDING. This is the visible half of the bug, and the device has now
 //   answered two attempts at it. The first was a SMOOTH pin, and a smooth
@@ -119,9 +129,15 @@ export function reconnectOnVisible(readyState: number | null): ResumeSocket {
 
 // --- the keep-alive ------------------------------------------------------------
 
-// Slow on purpose: this is a liveness probe, not a heartbeat anything depends
-// on. One tiny frame every 25 seconds costs nothing and still finds a wedged
-// socket inside a minute.
+// Slow on purpose. One tiny frame every 25 seconds costs nothing and still
+// finds a wedged socket inside a minute.
+//
+// Something does now depend on it: the server treats the last ping as "the app
+// is on screen" and holds the reply's push back while it is fresh, so its
+// window (PRESENCE_FRESH_S in src/paratrooper/web/app.py) is two of these plus
+// a margin — one ping may be dropped on a bad link without a reader being
+// declared absent. Changing this number moves that window, and a test pins the
+// two together across the files.
 export const KEEPALIVE_MS = 25000;
 
 // A ping still sitting in the send queue when the NEXT one comes due means the

@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -232,6 +233,50 @@ def _linger_seconds() -> float:
         return DEFAULT_LINGER_S
 
 
+# --- presence: is the app actually in front of the reader? ---------------------
+#
+# The push used to go out the instant a result arrived, and the server knew
+# nothing about where the reader was. Two failures came straight out of that.
+# The app deliberately HOLDS a finished reply while he is typing (pwa/src/hold.ts)
+# and can take it back entirely when the next message outruns it (the retract
+# path in /api/send) — so a banner and a badge announced a reply that was never
+# put on screen, or one that had already been deleted. And when Apple delivered a
+# push late, it landed after he had left the app, where the service worker's
+# "is a window visible right now" rule no longer suppresses anything.
+#
+# So the client says where it is, over the socket it already holds open. The
+# keep-alive frame it was already sending every 25s doubles as "on screen now",
+# and it sends one more frame on the way out. No beacon, no extra request: this
+# is the one channel that is open exactly when the app is running.
+PRESENCE_PING = "p"  # keep-alive AND "the app is on screen now" (pwa/src/main.ts)
+PRESENCE_AWAY = "a"  # sent once as the page goes hidden, before the keep-alive stops
+
+# How old the last "on screen now" may be and still be believed.
+#
+# Derived from the client's keep-alive interval, which the server cannot read:
+# pwa/src/resume.ts sets KEEPALIVE_MS = 25s, so this is two intervals (a ping may
+# be missed without the connection being gone) plus ten seconds of margin for a
+# slow cellular link. Anything longer and a phone whose "away" frame never made
+# it off the device stays "on screen" long enough to swallow a real
+# notification; anything shorter and one dropped ping on a bad link starts
+# pushing to a reader who is looking straight at the reply.
+PRESENCE_FRESH_S = 60.0
+
+
+@dataclass
+class Presence:
+    """What one socket last said about itself.
+
+    ``seen`` is a monotonic stamp — the wall clock can step under a long-lived
+    socket, and this is a duration question, never a date one. Only a ping
+    writes it: ``away`` is a flag over the top, so clearing the flag without a
+    fresh ping can never resurrect a stale reading.
+    """
+
+    seen: float
+    away: bool = False
+
+
 @dataclass
 class AppState:
     config: Config
@@ -243,8 +288,52 @@ class AppState:
     linger_s: float = field(default_factory=_linger_seconds)
     linger_task: asyncio.Task | None = None  # armed countdown to suspend (at most one)
     sockets: dict[str, set[WebSocket]] = field(default_factory=dict)
+    # keyed by the socket itself and scoped through ``sockets`` above, so thread
+    # membership is stated in exactly one place and the two cannot drift apart.
+    # A socket with no row here has never said anything: see _on_screen.
+    presence: dict[WebSocket, Presence] = field(default_factory=dict)
     relay_task: asyncio.Task | None = None
     push_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+
+
+def _note_presence(state: AppState, thread_id: str, ws: WebSocket, *, on_screen: bool) -> None:
+    """Record one presence frame, and put a line on the trail when it CHANGED
+    the answer. Every ping would otherwise write a line every 25 seconds per
+    socket, for ever, and bury the two edges that actually mean something."""
+    record = state.presence.get(ws)
+    if record is None:
+        record = state.presence[ws] = Presence(seen=time.monotonic())
+        changed = True
+    else:
+        changed = record.away != (not on_screen)
+    if on_screen:
+        record.seen = time.monotonic()
+    record.away = not on_screen
+    if changed:
+        _diag.info("holddiag presence thread=%s state=%s",
+                   thread_id, "on-screen" if on_screen else "away")
+
+
+def _on_screen(state: AppState, thread_id: str) -> float | None:
+    """Age in seconds of the freshest live "on screen now" for this thread, or
+    None if nothing on it is in front of the reader.
+
+    A socket that has never sent a ping counts as absent rather than present.
+    The two mistakes are not symmetric: a push sent to a reader who is already
+    looking at the reply is caught a second time by the service worker's own
+    visibility check (pwa/public/sw.js), while a push withheld from someone who
+    is not there is simply lost.
+    """
+    now = time.monotonic()
+    fresh: float | None = None
+    for ws in state.sockets.get(thread_id, set()):
+        record = state.presence.get(ws)
+        if record is None or record.away:
+            continue
+        age = now - record.seen
+        if age <= PRESENCE_FRESH_S and (fresh is None or age < fresh):
+            fresh = age
+    return fresh
 
 
 async def _enqueue_job(
@@ -339,11 +428,20 @@ async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
             state.sockets.get(thread_id, set()).discard(ws)
 
 
-async def _maybe_push(state: AppState, kind: str, payload: object = None) -> None:
+async def _maybe_push(state: AppState, thread_id: str, kind: str, payload: object = None) -> None:
     """Deliver one notifying result without doing database work in send threads."""
     cfg = push.config()
     text = push.notification_text(kind, payload)
     if cfg is None or text is None:
+        return
+
+    # The reader is looking at this thread right now, so the reply is already on
+    # its way onto his screen: no banner, no badge. Asked HERE rather than at
+    # schedule time so the reading is taken in the last moment before the send —
+    # and after the two guards above, so a kind that never notifies at all does
+    # not write a "skipped" line for every log frame a job emits.
+    if (fresh := _on_screen(state, thread_id)) is not None:
+        logger.info("web push skipped: app on screen (thread=%s, fresh=%.1fs)", thread_id, fresh)
         return
 
     # Snapshot subscriptions before entering provider threads. Cancellation can
@@ -372,9 +470,9 @@ async def _maybe_push(state: AppState, kind: str, payload: object = None) -> Non
             state.store.remove_subscription(endpoint)
 
 
-def _schedule_push(state: AppState, kind: str, payload: object = None) -> None:
+def _schedule_push(state: AppState, thread_id: str, kind: str, payload: object = None) -> None:
     """Start best-effort delivery without backpressuring the sole result relay."""
-    task = asyncio.create_task(_maybe_push(state, kind, payload))
+    task = asyncio.create_task(_maybe_push(state, thread_id, kind, payload))
     state.push_tasks.add(task)
 
     def finished(done: asyncio.Task[None]) -> None:
@@ -435,10 +533,12 @@ async def _relay_result(state: AppState, thread_id: str, result: ResultMessage) 
             await _maybe_suspend_worker(state)
         finally:
             # Pass this result's payload directly: no shared "latest reply"
-            # lookup that could cross threads/jobs when deliveries overlap.
-            _schedule_push(state, result.kind, result.payload)
+            # lookup that could cross threads/jobs when deliveries overlap. The
+            # thread rides along for the same reason: the notification is held
+            # back only if THIS thread is the one on screen.
+            _schedule_push(state, thread_id, result.kind, result.payload)
     else:
-        _schedule_push(state, result.kind, result.payload)
+        _schedule_push(state, thread_id, result.kind, result.payload)
 
 
 async def _result_relay(state: AppState) -> None:
@@ -743,11 +843,22 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                    thread_id, since, len(rows), len(state.sockets.get(thread_id, set())))
         try:
             while True:
-                await websocket.receive_text()  # client keepalive / pings; sends go via POST
+                # the only frames the client sends up this socket, and both are
+                # one byte: where the reader is. Sends still go via POST, and
+                # anything else is ignored exactly as it always was.
+                frame = await websocket.receive_text()
+                if frame == PRESENCE_PING:
+                    _note_presence(state, thread_id, websocket, on_screen=True)
+                elif frame == PRESENCE_AWAY:
+                    _note_presence(state, thread_id, websocket, on_screen=False)
         except WebSocketDisconnect:
             pass
         finally:
             state.sockets.get(thread_id, set()).discard(websocket)
+            # the record dies with the socket: a phone iOS took the connection
+            # away from has said nothing, which is not the same as being here
+            if state.presence.pop(websocket, None) is not None:
+                _diag.info("holddiag presence thread=%s state=closed", thread_id)
             _diag.info("holddiag ws close thread=%s sockets=%d",
                        thread_id, len(state.sockets.get(thread_id, set())))
 

@@ -398,6 +398,102 @@ describe("wiring — the keep-alive is one small frame, and only while on screen
   });
 });
 
+// --- presence: the server is told where the app is, not left to guess ----------
+//
+// The push for a finished reply used to leave the instant the result arrived,
+// with nothing in the server knowing whether the app was in front of the
+// reader. Two things came out of that. The app deliberately HOLDS a finished
+// reply while he is typing and can take it back entirely when the next message
+// outruns it, so a banner and a badge announced a reply that was never put on
+// screen or one that had already been deleted. And a push Apple delivered late
+// landed after he had left, where the service worker's "is a window visible
+// right now" rule no longer suppresses anything — that rule stays exactly where
+// it is, as the second line rather than the first.
+//
+// So the decision moved to the server and the app feeds it, over the socket it
+// already holds open. No beacon, no extra request: the keep-alive doubles as
+// "on screen now" and one more frame says "gone".
+
+describe("wiring — the app says where it is over the socket it already has", () => {
+  it("the away frame sits with the ping and is one byte like it", () => {
+    expect(src).toMatch(/const AWAY_FRAME = "\w";/);
+    // declared together, because they are one statement about the same thing
+    expect(src).toMatch(/const KEEPALIVE_FRAME = "\w";[^\n]*\nconst AWAY_FRAME = "\w";/);
+  });
+
+  it("both bytes mean the same thing at the far end", () => {
+    // the one wire contract this rides: two single-character frames, agreed
+    // across the two files by nothing but their spelling
+    const app = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../src/paratrooper/web/app.py"),
+      "utf8",
+    );
+    const ping = src.match(/const KEEPALIVE_FRAME = "(\w)";/);
+    const away = src.match(/const AWAY_FRAME = "(\w)";/);
+    expect(app).toContain(`PRESENCE_PING = "${ping?.[1]}"`);
+    expect(app).toContain(`PRESENCE_AWAY = "${away?.[1]}"`);
+  });
+
+  it("a frame goes out only on an OPEN socket, and never takes the page down", () => {
+    // send() on a CONNECTING socket throws, and the resume path replaces a
+    // socket in every other state — neither is this function's problem
+    const body = fnBody("sendPresence");
+    expect(body).toContain("if (!token) return");
+    expect(body).toContain("ws.readyState !== SOCKET_OPEN");
+    expect(body).toContain("ws.send(frame)");
+    expect(body).toMatch(/try \{[\s\S]*\} catch \{/);
+  });
+
+  it("going hidden says so once, BEFORE the keep-alive stops", () => {
+    // from that edge the page may be frozen mid-breath; a ping already sent
+    // would otherwise leave the server believing he is here for a whole window
+    const body = fnBody("resumeHidden");
+    expect(body).toContain("sendPresence(AWAY_FRAME)");
+    expect(body.indexOf("sendPresence(AWAY_FRAME)")).toBeLessThan(
+      body.indexOf("keepAliveSync()"),
+    );
+  });
+
+  it("coming back says so at once, not at the interval's first tick", () => {
+    // keepAliveSync only STARTS the clock: its first ping is KEEPALIVE_MS away,
+    // and a reply finishing inside that would have pushed a banner at a reader
+    // holding the phone
+    const body = fnBody("resumeVisible");
+    expect(body).toContain("sendPresence(KEEPALIVE_FRAME)");
+  });
+
+  it("a fresh socket announces itself, so presence is known from the handshake", () => {
+    const at = src.indexOf("ws.onopen = () => {");
+    expect(at).toBeGreaterThan(-1);
+    const body = src.slice(at, src.indexOf("\n  };", at));
+    expect(body).toContain("if (pageVisible()) sendPresence(KEEPALIVE_FRAME)");
+  });
+
+  it("the server's freshness window is built from this interval", () => {
+    // it cannot read the number, so the derivation is pinned here as well as in
+    // the python suite: two intervals (one ping may drop) plus a margin
+    const app = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../src/paratrooper/web/app.py"),
+      "utf8",
+    );
+    const window = app.match(/^PRESENCE_FRESH_S = ([\d.]+)$/m);
+    expect(window, "the server names its window").toBeTruthy();
+    const seconds = Number(window?.[1]);
+    expect(seconds).toBeGreaterThanOrEqual((2 * KEEPALIVE_MS) / 1000);
+    expect(seconds).toBeLessThanOrEqual((3 * KEEPALIVE_MS) / 1000);
+  });
+
+  it("the phone-side rule is untouched: it is the second line, not the first", () => {
+    // a late push still has to be caught on the device, and the worker's own
+    // visibility check is the only thing that can do it
+    const sw = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../public/sw.js"),
+      "utf8",
+    );
+    expect(sw).toContain('clients.some((client) => client.visibilityState === "visible")');
+  });
+});
+
 describe("wiring — the landing holds, then rides, and its own motion cannot disarm it", () => {
   it("NOTHING is written on the visible edge: the landing only watches", () => {
     // the ghost's whole lesson. The instant pin that used to live here wrote

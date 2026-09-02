@@ -505,7 +505,7 @@ def test_push_fanout_starts_subscriptions_in_parallel(tmp_path, monkeypatch):
         state = _relay_state(tmp_path, object())
         state.store.add_subscription("one", '{"endpoint":"one"}')
         state.store.add_subscription("two", '{"endpoint":"two"}')
-        task = asyncio.create_task(_maybe_push(state, "done", "reply"))
+        task = asyncio.create_task(_maybe_push(state, "d", "done", "reply"))
         try:
             for _ in range(100):
                 if all_started.is_set():
@@ -608,7 +608,7 @@ def test_cancelling_push_cannot_touch_store_after_close(tmp_path, monkeypatch):
                 original_remove(endpoint)
 
         monkeypatch.setattr(state.store, "remove_subscription", track_remove)
-        _schedule_push(state, "done", "reply")
+        _schedule_push(state, "d", "done", "reply")
         for _ in range(100):
             if push_started.is_set():
                 break
@@ -624,6 +624,234 @@ def test_cancelling_push_cannot_touch_store_after_close(tmp_path, monkeypatch):
         assert post_close_removals == []
 
     _run(scenario())
+
+
+# --- push presence: the app on screen is the reason NOT to push ---------------
+#
+# The push used to leave the instant a result arrived, and nothing in the server
+# knew where the reader was. So a banner and a badge could announce a reply the
+# app was deliberately HOLDING under his thumbs (pwa/src/hold.ts), or one his
+# next message had already taken back (the retract path in /api/send) — and a
+# push Apple delivered late landed after he had left the app, where the service
+# worker's "is a window visible right now" rule no longer suppresses anything.
+# The decision moved here, onto what the app itself says over its open socket.
+
+class _PresenceSocket:
+    """A socket stand-in. Hashable, because the presence map is keyed by the
+    object itself, and able to take a broadcast, because the relay fans the
+    event out before it notifies — a socket that raises there is discarded."""
+
+    def __init__(self):
+        self.sent = []
+
+    async def send_json(self, data):
+        self.sent.append(data)
+
+
+def _presence_probe(tmp_path, monkeypatch):
+    """A relay state with one registered device, and the list every push that
+    actually goes out lands in."""
+    from paratrooper.web import push
+
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "private")
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:push@example.test")
+    sent: list = []
+    monkeypatch.setattr(
+        push, "send_push", lambda _sub, payload, _cfg: sent.append(payload) or True
+    )
+    state = _relay_state(tmp_path, object())
+    state.store.add_subscription("https://push.example/device", '{"endpoint":"x"}')
+    return state, sent
+
+
+def _socket_on_screen(state, thread_id, age_s=0.0):
+    """A connected socket whose last "on screen now" is ``age_s`` seconds old."""
+    import time
+
+    from paratrooper.web.app import Presence
+
+    ws = _PresenceSocket()
+    state.sockets.setdefault(thread_id, set()).add(ws)
+    state.presence[ws] = Presence(seen=time.monotonic() - age_s)
+    return ws
+
+
+def _eventually(predicate, timeout=2.0):
+    """Wait for the socket loop to catch up. TestClient runs the app on its own
+    portal thread, so a frame that has been SENT has not necessarily been read."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_push_is_skipped_while_the_app_is_on_screen(tmp_path, monkeypatch, caplog):
+    """The banner this whole path exists to stop: a reply finishing while he is
+    reading the thread. The app said so over the socket a moment ago, so nothing
+    is sent at all — and the log says which thread and how fresh the reading was,
+    since a suppressed push and a push that never had anywhere to go otherwise
+    read exactly alike."""
+    import logging
+
+    from paratrooper.web.app import _maybe_push
+
+    state, sent = _presence_probe(tmp_path, monkeypatch)
+    _socket_on_screen(state, "d", age_s=1.0)
+    with caplog.at_level(logging.INFO, logger="paratrooper.web.app"):
+        _run(_maybe_push(state, "d", "done", "reply"))
+    assert sent == []
+    [line] = [r.message for r in caplog.records if "web push skipped" in r.message]
+    assert "app on screen" in line and "thread=d" in line and "fresh=" in line
+
+
+def test_a_stale_on_screen_reading_still_pushes(tmp_path, monkeypatch):
+    """Silence is not presence. iOS freezes a backgrounded page before it can
+    say anything and tears its socket down with no close event, so past the
+    freshness window the last ping means nothing and the notification goes."""
+    from paratrooper.web.app import PRESENCE_FRESH_S, _maybe_push
+
+    state, sent = _presence_probe(tmp_path, monkeypatch)
+    _socket_on_screen(state, "d", age_s=PRESENCE_FRESH_S + 1)
+    _run(_maybe_push(state, "d", "done", "reply"))
+    assert sent == ["reply"]
+
+
+def test_an_away_frame_pushes_without_waiting_the_window_out(tmp_path, monkeypatch):
+    """He left one second after the last ping. The away frame is the whole
+    reason the window does not have to run out first — this is the ordinary
+    case, and waiting a minute for it would be a minute of missed replies."""
+    from paratrooper.web.app import _maybe_push, _note_presence
+
+    state, sent = _presence_probe(tmp_path, monkeypatch)
+    ws = _socket_on_screen(state, "d", age_s=1.0)
+    _note_presence(state, "d", ws, on_screen=False)
+    _run(_maybe_push(state, "d", "done", "reply"))
+    assert sent == ["reply"]
+    # and coming back clears it again, on the SAME socket
+    _note_presence(state, "d", ws, on_screen=True)
+    _run(_maybe_push(state, "d", "done", "second reply"))
+    assert sent == ["reply"]
+
+
+def test_a_socket_that_never_pinged_does_not_suppress(tmp_path, monkeypatch):
+    """A connection is not a reader. The two mistakes are not symmetric: an
+    unnecessary push is caught a second time by the service worker's own
+    visibility check, and a withheld one is simply lost."""
+    from paratrooper.web.app import _maybe_push
+
+    state, sent = _presence_probe(tmp_path, monkeypatch)
+    state.sockets["d"] = {_PresenceSocket()}  # connected, has said nothing
+    _run(_maybe_push(state, "d", "done", "reply"))
+    assert sent == ["reply"]
+
+
+def test_a_reader_on_another_thread_does_not_hold_this_ones_push(tmp_path, monkeypatch):
+    """Scoped by thread, like state.sockets. Sitting in one conversation cannot
+    silence the notification for another."""
+    from paratrooper.web.app import _maybe_push
+
+    state, sent = _presence_probe(tmp_path, monkeypatch)
+    _socket_on_screen(state, "other", age_s=0.0)
+    _run(_maybe_push(state, "d", "done", "reply"))
+    assert sent == ["reply"]
+    _run(_maybe_push(state, "other", "done", "second reply"))  # its own thread: held
+    assert sent == ["reply"]
+
+
+def test_the_relay_hands_the_push_the_results_own_thread(tmp_path, monkeypatch):
+    """The end-to-end shape: the relay knows the thread from the pubsub channel
+    it read the result off, and that thread is what the decision is made against
+    — not "some socket somewhere is open"."""
+    from paratrooper.web.app import _relay_result, _settle_push_tasks
+    from paratrooper.web.models import ResultMessage
+
+    class Coordinator:
+        def was_superseded(self, _thread_id, _job_id):
+            return False
+
+        async def job_finished(self, _thread_id):
+            pass
+
+    state, sent = _presence_probe(tmp_path, monkeypatch)
+    state.coordinator = Coordinator()
+    reading = _socket_on_screen(state, "d", age_s=1.0)
+
+    async def scenario():
+        await _relay_result(state, "d", ResultMessage(job_id="j1", kind="done", payload="held"))
+        await _relay_result(
+            state, "elsewhere", ResultMessage(job_id="j2", kind="done", payload="sent")
+        )
+        await _settle_push_tasks(state)
+
+    _run(scenario())
+    assert sent == ["sent"]  # the thread he is reading is the only one held back
+    # the reply itself still reached the socket both times: this is the banner,
+    # not the message
+    assert [f["payload"] for f in reading.sent] == ["held"]
+
+
+def test_the_freshness_window_is_two_client_keepalives_plus_margin():
+    """PRESENCE_FRESH_S is derived from an interval the server cannot read, so
+    the derivation is pinned across the two files instead. Two intervals, so one
+    dropped ping on a bad link does not start pushing to a reader looking
+    straight at the reply — and not much more, so a phone whose away frame never
+    left it cannot swallow a real notification for long."""
+    import re
+    from pathlib import Path
+
+    from paratrooper.web.app import PRESENCE_FRESH_S
+
+    resume = (Path(__file__).resolve().parents[1] / "pwa" / "src" / "resume.ts").read_text()
+    match = re.search(r"export const KEEPALIVE_MS = (\d+);", resume)
+    assert match, "the client's keep-alive interval is what this window is built from"
+    keepalive_s = int(match.group(1)) / 1000
+    assert 2 * keepalive_s <= PRESENCE_FRESH_S <= 3 * keepalive_s
+
+
+def test_ws_reads_the_two_presence_frames_and_ignores_everything_else(client, caplog):
+    """The socket loop used to throw every frame away. It now reads exactly two
+    bytes' worth of meaning off it, in order, and anything else is the no-op it
+    always was — the loop must not be something a stray frame can kill."""
+    import logging
+
+    from paratrooper.web.app import PRESENCE_AWAY, PRESENCE_PING
+
+    state = client.app.state.app_state
+    with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
+        with client.websocket_connect("/ws?token=tok&thread=d&since=0") as sock:
+            sock.send_text(PRESENCE_PING)
+            assert _eventually(lambda: len(state.presence) == 1)
+            [record] = list(state.presence.values())
+            assert record.away is False
+            pinged_at = record.seen
+
+            sock.send_text("sends still go via POST")  # ignored, exactly as before
+            sock.send_text(PRESENCE_AWAY)
+            assert _eventually(lambda: record.away)
+            # frames are read in order, so the away landing proves the stray one
+            # was read too — and it moved nothing
+            assert record.seen == pinged_at
+            assert len(state.presence) == 1
+
+            sock.send_text(PRESENCE_PING)  # back on screen clears the flag
+            assert _eventually(lambda: not record.away)
+            assert record.seen > pinged_at
+
+        # the record dies with the socket: a phone iOS took the connection away
+        # from has said nothing, which is not the same as being here
+        assert _eventually(lambda: not state.presence)
+
+    trail = [r.message for r in caplog.records if "holddiag presence" in r.message]
+    assert trail == [
+        "holddiag presence thread=d state=on-screen",
+        "holddiag presence thread=d state=away",
+        "holddiag presence thread=d state=on-screen",
+        "holddiag presence thread=d state=closed",
+    ]
 
 
 # --- uploads (4.3) ------------------------------------------------------------
@@ -843,7 +1071,7 @@ def test_dropping_a_dead_subscription_is_logged_by_fingerprint(tmp_path, monkeyp
         endpoint = "https://push.example/secret-device-token"
         state.store.add_subscription(endpoint, json.dumps({"endpoint": endpoint}))
         with caplog.at_level(logging.INFO, logger="paratrooper.web.app"):
-            await _maybe_push(state, "done", "reply")
+            await _maybe_push(state, "d", "done", "reply")
         assert state.store.subscriptions() == []
         fingerprint = push.endpoint_fingerprint(endpoint)
         assert any(
