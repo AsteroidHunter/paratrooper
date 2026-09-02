@@ -767,6 +767,94 @@ def test_push_timeout_is_logged_and_does_not_escape(monkeypatch, caplog):
     assert "secret-device-token" not in caplog.text
 
 
+def test_every_send_is_logged_under_a_fingerprint_never_the_endpoint(monkeypatch, caplog):
+    """Reading the log has to answer WHICH address each push went to — that is
+    how two sends per result (one into a rotated-away address Apple still
+    accepts) becomes visible. The endpoint itself is a bearer capability and
+    never appears; its fingerprint is stable, so two lines about one device
+    match and two devices do not."""
+    import logging
+
+    from paratrooper.web import push
+
+    class Accepted:
+        status_code = 201
+
+    monkeypatch.setattr("pywebpush.webpush", lambda **_kwargs: Accepted())
+    cfg = push.VapidConfig(private_key="private", subject="mailto:a@b.c")
+    old = {"endpoint": "https://push.example/old-secret-device-token", "keys": {}}
+    new = {"endpoint": "https://push.example/new-secret-device-token", "keys": {}}
+
+    with caplog.at_level(logging.INFO, logger="paratrooper.web.push"):
+        assert push.send_push(old, "reply text", cfg)
+        assert push.send_push(new, "reply text", cfg)
+        assert push.send_push(old, "another reply", cfg)
+
+    old_print = push.endpoint_fingerprint(old["endpoint"])
+    new_print = push.endpoint_fingerprint(new["endpoint"])
+    assert len(old_print) == 8 and old_print != new_print
+    assert "secret-device-token" not in caplog.text
+    assert "push.example" not in caplog.text
+    accepted = [r.message for r in caplog.records if "accepted" in r.message]
+    assert len(accepted) == 3
+    assert [old_print in line for line in accepted] == [True, False, True]
+    assert [new_print in line for line in accepted] == [False, True, False]
+
+
+def test_a_gone_subscription_says_so_before_it_is_dropped(monkeypatch, caplog):
+    import logging
+
+    from paratrooper.web import push
+
+    class Gone:
+        status_code = 410
+        text = "unsubscribed"
+
+    def gone(**_kwargs):
+        from pywebpush import WebPushException
+
+        raise WebPushException("push failed", response=Gone())
+
+    monkeypatch.setattr("pywebpush.webpush", gone)
+    cfg = push.VapidConfig(private_key="private", subject="mailto:a@b.c")
+    subscription = {"endpoint": "https://push.example/secret-device-token", "keys": {}}
+    with caplog.at_level(logging.INFO, logger="paratrooper.web.push"):
+        assert push.send_push(subscription, "reply text", cfg) is False
+    fingerprint = push.endpoint_fingerprint(subscription["endpoint"])
+    assert any("gone" in r.message and fingerprint in r.message for r in caplog.records)
+    assert "secret-device-token" not in caplog.text
+
+
+def test_dropping_a_dead_subscription_is_logged_by_fingerprint(tmp_path, monkeypatch, caplog):
+    """The row leaving the database is its own line: a silent drop read exactly
+    like a delivery that worked."""
+    import json
+    import logging
+
+    from paratrooper.web import push
+    from paratrooper.web.app import _maybe_push
+
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "private")
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:push@example.test")
+    monkeypatch.setattr(push, "send_push", lambda *_args: False)  # gone
+
+    async def scenario():
+        state = _relay_state(tmp_path, object())
+        endpoint = "https://push.example/secret-device-token"
+        state.store.add_subscription(endpoint, json.dumps({"endpoint": endpoint}))
+        with caplog.at_level(logging.INFO, logger="paratrooper.web.app"):
+            await _maybe_push(state, "done", "reply")
+        assert state.store.subscriptions() == []
+        fingerprint = push.endpoint_fingerprint(endpoint)
+        assert any(
+            "dropping push subscription" in r.message and fingerprint in r.message
+            for r in caplog.records
+        )
+        assert "secret-device-token" not in caplog.text
+
+    _run(scenario())
+
+
 def test_terminal_push_uses_user_facing_message_excerpt():
     from paratrooper.web import push
 
@@ -1625,6 +1713,77 @@ def test_push_routes(client, monkeypatch):
     assert client.post("/api/push/subscribe", headers=auth, json=sub).json() == {"ok": True}
     assert client.app.state.app_state.store.subscriptions() == [sub]
     assert client.post("/api/push/subscribe", headers=auth, json={}).status_code == 400
+
+
+def _sub(name):
+    return {"endpoint": f"https://push.example/{name}", "keys": {"p256dh": "k", "auth": "a"}}
+
+
+def test_subscribing_with_replaces_drops_the_rotated_away_row(client, caplog):
+    """The whole point: a phone that rotated its address while the app was
+    closed leaves ONE row, not two. Two rows meant two sends per result — and
+    the stale one is not visibly dead, because Apple answers 201 for it and
+    shows nothing."""
+    import logging
+
+    auth = {"Authorization": "Bearer tok"}
+    store = client.app.state.app_state.store
+    old = _sub("old-address")
+    client.post("/api/push/subscribe", headers=auth, json=old)
+    assert store.subscriptions() == [old]
+
+    new = _sub("new-address")
+    with caplog.at_level(logging.INFO, logger="paratrooper.web.app"):
+        response = client.post(
+            "/api/push/subscribe", headers=auth, json={**new, "replaces": old["endpoint"]}
+        )
+    assert response.json() == {"ok": True}
+    # one row, the new address, and "replaces" stored nowhere — it is transport
+    assert store.subscriptions() == [new]
+
+    from paratrooper.web import push
+
+    assert any(
+        "replaces" in r.message
+        and push.endpoint_fingerprint(new["endpoint"]) in r.message
+        and push.endpoint_fingerprint(old["endpoint"]) in r.message
+        for r in caplog.records
+    )
+    assert "old-address" not in caplog.text and "new-address" not in caplog.text
+
+
+def test_re_registering_the_same_address_never_duplicates_or_deletes_itself(client):
+    """The page re-registers on every open. An unchanged address must upsert the
+    one row — and naming itself in `replaces` must not delete the row that same
+    request just wrote."""
+    auth = {"Authorization": "Bearer tok"}
+    store = client.app.state.app_state.store
+    sub = _sub("steady-address")
+    for _ in range(3):
+        client.post("/api/push/subscribe", headers=auth, json=sub)
+    assert store.subscriptions() == [sub]
+
+    client.post("/api/push/subscribe", headers=auth, json={**sub, "replaces": sub["endpoint"]})
+    assert store.subscriptions() == [sub]
+
+    # a device the server has never heard of is still just an add
+    client.post("/api/push/subscribe", headers=auth, json={**_sub("other"), "replaces": None})
+    assert len(store.subscriptions()) == 2
+
+
+def test_replaces_naming_an_unknown_address_is_a_harmless_no_op(client):
+    """A page whose memo is older than the server's row (the second rotation in
+    a row, a restored backup) must not fail the registration it came with."""
+    auth = {"Authorization": "Bearer tok"}
+    store = client.app.state.app_state.store
+    sub = _sub("current")
+    response = client.post(
+        "/api/push/subscribe",
+        headers=auth,
+        json={**sub, "replaces": "https://push.example/never-registered"},
+    )
+    assert response.json() == {"ok": True}
+    assert store.subscriptions() == [sub]
 
 
 def test_watchdog_clears_stuck_job():

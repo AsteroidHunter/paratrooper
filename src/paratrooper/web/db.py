@@ -412,6 +412,9 @@ class ThreadStore:
     # --- web push subscriptions (Phase 6) ---
 
     def add_subscription(self, endpoint: str, subscription_json: str) -> None:
+        """Upsert one device's push address. Idempotent per endpoint (the primary
+        key), so the page re-registering an unchanged address on every open can
+        never grow a second row for the same phone."""
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO push_subscriptions(endpoint, subscription) VALUES (?,?)",

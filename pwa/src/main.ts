@@ -50,7 +50,13 @@ import {
 import type { Dims } from "./photofit";
 import { WAIT_CLASS, createPhotoQueue, nearMargin } from "./photolazy";
 import { receiptFor } from "./receipts";
-import { createPushSetup } from "./push";
+import {
+  createPushSetup,
+  lastRegisteredEndpoint,
+  registerBody,
+  rememberRegisteredEndpoint,
+  savePushLink,
+} from "./push";
 import type { PushSetup, PushState } from "./push";
 import {
   KEEPALIVE_MS,
@@ -159,7 +165,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.79"; // the return holds the old position, then rides the spring to the reply
+const APP_VERSION = "0.3.80"; // a rotated push address replaces the old one instead of doubling it
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -5633,6 +5639,10 @@ function startPushNotifications(): void {
   const reg = pushRegistration;
   if (!reg || !token) return;
 
+  // The key this check fetched, held for the registration below: the worker's
+  // copy of it has to come from the page, and only the page may ask for it.
+  let publicKeyForWorker: string | null = null;
+
   pushNotifications = createPushSetup<PushSubscription>({
     supported: () => pushApisSupported(reg),
     permission: () => Notification.permission,
@@ -5643,6 +5653,7 @@ function startPushNotifications(): void {
       const body = (await response.json()) as { key?: unknown };
       if (body.key === null) return null;
       if (typeof body.key !== "string" || !body.key) throw new Error("invalid push key");
+      publicKeyForWorker = body.key;
       return body.key;
     },
     getSubscription: () => reg.pushManager.getSubscription(),
@@ -5652,12 +5663,26 @@ function startPushNotifications(): void {
         applicationServerKey: urlBase64ToUint8Array(publicKey),
       }),
     registerSubscription: async (subscription) => {
+      // Replace, never accumulate. If the phone rotated its address while the
+      // app was closed, this open is where the stale row goes — named, so the
+      // server can tell a rotation from a second device.
       const response = await fetch("/api/push/subscribe", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify(subscription),
+        body: registerBody(subscription, lastRegisteredEndpoint()),
       });
       if (!response.ok) throw new Error(`push subscribe: ${response.status}`);
+      rememberRegisteredEndpoint(subscription.endpoint);
+      // Only now, with a registration the server accepted, hand the worker what
+      // it needs to repeat this on its own after a rotation. Best-effort: a
+      // failed write only costs the fast path, never this registration.
+      if (publicKeyForWorker) {
+        void savePushLink({
+          key: publicKeyForWorker,
+          token,
+          endpoint: subscription.endpoint,
+        });
+      }
     },
     render: renderPushState,
   });

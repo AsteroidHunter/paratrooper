@@ -1,8 +1,19 @@
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
-import { describe, expect, it, vi } from "vitest";
-import { createPushSetup } from "../src/push";
-import type { PushPermission, PushState } from "../src/push";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import "fake-indexeddb/auto";
+import { IDBFactory } from "fake-indexeddb";
+import {
+  PUSH_LINK_DB,
+  PUSH_LINK_ID,
+  PUSH_LINK_STORE,
+  createPushSetup,
+  lastRegisteredEndpoint,
+  registerBody,
+  rememberRegisteredEndpoint,
+  savePushLink,
+} from "../src/push";
+import type { PushLink, PushPermission, PushState } from "../src/push";
 
 interface FakeSubscription {
   id: string;
@@ -332,6 +343,135 @@ describe("recoverable subscription setup failures", () => {
   });
 });
 
+// --- endpoint rotation, the page's half --------------------------------------
+// The address a push goes to can change while the app is closed, and the server
+// cannot tell a rotation from a second device. So a registration NAMES the
+// address it replaces. Getting this wrong is not visibly broken: Apple accepts
+// a push to a rotated-away address with 201 and shows nothing.
+
+function fakeLocalStorage(): { store: Map<string, string> } {
+  const store = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => { store.set(key, value); },
+      removeItem: (key: string) => { store.delete(key); },
+    },
+  });
+  return { store };
+}
+
+function refuseLocalStorage(): void {
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    get() { throw new Error("storage is disabled in this mode"); },
+  });
+}
+
+describe("naming the address a registration replaces", () => {
+  const subscription = {
+    endpoint: "https://push.example/new-address",
+    keys: { p256dh: "p", auth: "a" },
+  };
+
+  it("names the old address when the phone rotated to a new one", () => {
+    const body = JSON.parse(registerBody(subscription, "https://push.example/old-address"));
+    expect(body).toEqual({ ...subscription, replaces: "https://push.example/old-address" });
+  });
+
+  it("omits replaces when the endpoint has not changed", () => {
+    const body = JSON.parse(registerBody(subscription, subscription.endpoint));
+    expect(body).toEqual(subscription);
+    expect(body).not.toHaveProperty("replaces");
+  });
+
+  it("omits replaces on a first-ever registration", () => {
+    expect(JSON.parse(registerBody(subscription, null))).toEqual(subscription);
+    expect(JSON.parse(registerBody(subscription, ""))).toEqual(subscription);
+  });
+
+  it("reads a real subscription through toJSON, not a spread of its prototype", () => {
+    // A PushSubscription keeps endpoint and keys behind prototype getters, so
+    // { ...subscription } would post an empty object.
+    class FakePushSubscription {
+      get endpoint() { return "https://push.example/via-getter"; }
+      toJSON() { return { endpoint: this.endpoint, keys: { p256dh: "p", auth: "a" } }; }
+    }
+    const body = JSON.parse(registerBody(new FakePushSubscription(), "https://push.example/old"));
+    expect(body.endpoint).toBe("https://push.example/via-getter");
+    expect(body.keys).toEqual({ p256dh: "p", auth: "a" });
+    expect(body.replaces).toBe("https://push.example/old");
+  });
+});
+
+describe("the page's memory of its last registered endpoint", () => {
+  it("round-trips the endpoint so the next registration can name it", () => {
+    fakeLocalStorage();
+    expect(lastRegisteredEndpoint()).toBeNull();
+    rememberRegisteredEndpoint("https://push.example/first");
+    expect(lastRegisteredEndpoint()).toBe("https://push.example/first");
+    rememberRegisteredEndpoint("https://push.example/second");
+    expect(lastRegisteredEndpoint()).toBe("https://push.example/second");
+  });
+
+  it("degrades to no memo instead of throwing when storage is refused", () => {
+    refuseLocalStorage();
+    expect(() => rememberRegisteredEndpoint("https://push.example/x")).not.toThrow();
+    expect(lastRegisteredEndpoint()).toBeNull();
+    fakeLocalStorage(); // leave nothing throwing behind for later cases
+  });
+});
+
+describe("the record the service worker reads", () => {
+  const link: PushLink = {
+    key: "vapid-public-key",
+    token: "app-bearer-token",
+    endpoint: "https://push.example/current",
+  };
+
+  function readLink(): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const open = indexedDB.open(PUSH_LINK_DB, 1);
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const read = open.result
+          .transaction(PUSH_LINK_STORE, "readonly")
+          .objectStore(PUSH_LINK_STORE)
+          .get(PUSH_LINK_ID);
+        read.onsuccess = () => resolve(read.result ?? null);
+        read.onerror = () => reject(read.error);
+      };
+    });
+  }
+
+  beforeEach(() => {
+    globalThis.indexedDB = new IDBFactory();
+  });
+
+  it("leaves the key, the token and the current endpoint under one id", async () => {
+    await savePushLink(link);
+    expect(await readLink()).toEqual({ id: PUSH_LINK_ID, ...link });
+  });
+
+  it("overwrites the record instead of accumulating one per registration", async () => {
+    await savePushLink(link);
+    await savePushLink({ ...link, endpoint: "https://push.example/rotated" });
+    expect(await readLink()).toEqual({
+      id: PUSH_LINK_ID,
+      ...link,
+      endpoint: "https://push.example/rotated",
+    });
+  });
+
+  it("resolves quietly when IndexedDB is unavailable", async () => {
+    const factory = globalThis.indexedDB;
+    (globalThis as { indexedDB?: IDBFactory }).indexedDB = undefined;
+    await expect(savePushLink(link)).resolves.toBeUndefined();
+    globalThis.indexedDB = factory;
+  });
+});
+
 const MAIN_SOURCE = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const PUSH_CSS_SOURCE = readFileSync(new URL("../src/push.css", import.meta.url), "utf8");
 const PUSH_CSS_RULES = PUSH_CSS_SOURCE.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -473,10 +613,37 @@ describe("centered notification popup wiring", () => {
     expect(start).toContain("...authHeaders()");
     expect(start).not.toContain("private");
   });
+
+  it("registers by replacement and only then remembers what it registered", () => {
+    const start = sourceBetween("function startPushNotifications(", "// --- boot");
+    expect(start).toContain("body: registerBody(subscription, lastRegisteredEndpoint())");
+    // the memo and the worker's copy are written AFTER the server accepted, so
+    // a failed registration never claims an address the server does not hold
+    const okAt = start.indexOf("if (!response.ok) throw new Error(`push subscribe:");
+    expect(okAt).toBeGreaterThan(start.indexOf("registerBody(subscription"));
+    expect(start.indexOf("rememberRegisteredEndpoint(subscription.endpoint)")).toBeGreaterThan(okAt);
+    expect(start.indexOf("savePushLink({")).toBeGreaterThan(okAt);
+    expect(start).toContain("key: publicKeyForWorker");
+    expect(start).toContain("token,"); // the same bearer authHeaders() sends
+    expect(start).toContain("endpoint: subscription.endpoint");
+  });
+
+  it("gives the worker the key the page itself just fetched from the key route", () => {
+    const start = sourceBetween("function startPushNotifications(", "// --- boot");
+    const loadKey = start.slice(start.indexOf("loadPublicKey:"), start.indexOf("getSubscription:"));
+    expect(loadKey).toContain("publicKeyForWorker = body.key");
+    // never a null/invalid key: those paths return or throw above this line
+    expect(loadKey.indexOf("publicKeyForWorker = body.key")).toBeGreaterThan(
+      loadKey.indexOf("invalid push key"),
+    );
+  });
 });
 
 type WorkerListener = (event: Record<string, unknown>) => void;
 
+// The worker runs in its own realm, so anything it reaches for has to be handed
+// in: the rotation handler uses fetch, indexedDB and atob on top of the
+// notification globals the earlier tests supply.
 function serviceWorkerHarness() {
   const listeners = new Map<string, WorkerListener>();
   const showNotification = vi.fn(async () => undefined);
@@ -485,9 +652,14 @@ function serviceWorkerHarness() {
   const matchAll = vi.fn(async () => [] as Array<Record<string, unknown>>);
   const openWindow = vi.fn(async () => undefined);
   const getNotifications = vi.fn(async () => [] as Array<{ close: () => void }>);
+  const subscribe = vi.fn(async (_options: unknown) => ({
+    endpoint: "https://push.example/resubscribed",
+    keys: { p256dh: "fresh-p256dh", auth: "fresh-auth" },
+  }));
+  const fetchMock = vi.fn(async (_url: string, _init: unknown) => ({ ok: true, status: 200 }));
   const workerSelf = {
     addEventListener: (type: string, listener: WorkerListener) => listeners.set(type, listener),
-    registration: { showNotification, getNotifications },
+    registration: { showNotification, getNotifications, pushManager: { subscribe } },
     clients: { matchAll, openWindow, claim: vi.fn(async () => undefined) },
     skipWaiting: vi.fn(),
     location: { origin: "https://example.test" },
@@ -495,6 +667,9 @@ function serviceWorkerHarness() {
   runInNewContext(SW_SOURCE, {
     self: workerSelf,
     navigator: { setAppBadge, clearAppBadge },
+    fetch: fetchMock,
+    indexedDB: globalThis.indexedDB,
+    atob: (encoded: string) => Buffer.from(encoded, "base64").toString("binary"),
   });
   const dispatch = async (type: string, event: Record<string, unknown>): Promise<void> => {
     let waited: Promise<unknown> = Promise.resolve();
@@ -512,6 +687,8 @@ function serviceWorkerHarness() {
     matchAll,
     openWindow,
     getNotifications,
+    subscribe,
+    fetch: fetchMock,
     dispatch,
   };
 }
@@ -691,5 +868,171 @@ describe("service-worker notification behavior", () => {
     const h = serviceWorkerHarness();
     await h.dispatch("notificationclick", { notification: { close: vi.fn() } });
     expect(h.openWindow).toHaveBeenCalledWith("/");
+  });
+});
+
+// --- endpoint rotation, the worker's half ------------------------------------
+// The page repairs a rotation on its next open; this repairs it at the moment
+// it happens, with no page running. Everything the worker needs comes from the
+// one IndexedDB record the page writes at registration, because a worker can
+// reach neither localStorage nor the authenticated key route.
+
+describe("service-worker push address rotation", () => {
+  const link: PushLink = {
+    key: "dGVzdC12YXBpZC1rZXk", // base64url; the worker decodes it for subscribe
+    token: "app-bearer-token",
+    endpoint: "https://push.example/stored-address",
+  };
+  const rotated = {
+    endpoint: "https://push.example/handed-over",
+    keys: { p256dh: "handed-p256dh", auth: "handed-auth" },
+  };
+
+  function posted(h: ReturnType<typeof serviceWorkerHarness>) {
+    const [url, init] = h.fetch.mock.calls[0] as [string, Record<string, unknown>];
+    return {
+      url,
+      headers: init.headers as Record<string, string>,
+      body: JSON.parse(init.body as string),
+    };
+  }
+
+  beforeEach(() => {
+    globalThis.indexedDB = new IDBFactory();
+  });
+
+  it("takes the browser's new subscription and posts it naming the old address", async () => {
+    await savePushLink(link);
+    const h = serviceWorkerHarness();
+    await h.dispatch("pushsubscriptionchange", {
+      oldSubscription: { endpoint: link.endpoint },
+      newSubscription: rotated,
+    });
+
+    expect(h.subscribe).not.toHaveBeenCalled(); // the event already brought one
+    const sent = posted(h);
+    expect(sent.url).toBe("/api/push/subscribe");
+    expect(sent.headers.Authorization).toBe("Bearer app-bearer-token");
+    expect(sent.headers["Content-Type"]).toBe("application/json");
+    expect(sent.body).toEqual({ ...rotated, replaces: link.endpoint });
+  });
+
+  it("subscribes fresh with the stored key when the event brings no subscription", async () => {
+    await savePushLink(link);
+    const h = serviceWorkerHarness();
+    await h.dispatch("pushsubscriptionchange", {});
+
+    expect(h.subscribe).toHaveBeenCalledTimes(1);
+    const [options] = h.subscribe.mock.calls[0] as [Record<string, unknown>];
+    expect(options.userVisibleOnly).toBe(true);
+    expect(Array.from(options.applicationServerKey as Uint8Array)).toEqual(
+      Array.from(Buffer.from("test-vapid-key")),
+    );
+    const sent = posted(h);
+    expect(sent.body.endpoint).toBe("https://push.example/resubscribed");
+    expect(sent.body.replaces).toBe(link.endpoint); // the stored address, no oldSubscription
+  });
+
+  it("prefers the event's own old address over the stored one", async () => {
+    await savePushLink(link);
+    const h = serviceWorkerHarness();
+    await h.dispatch("pushsubscriptionchange", {
+      oldSubscription: { endpoint: "https://push.example/actually-previous" },
+      newSubscription: rotated,
+    });
+    expect(posted(h).body.replaces).toBe("https://push.example/actually-previous");
+  });
+
+  it("advances the stored address so a second rotation names the right predecessor", async () => {
+    await savePushLink(link);
+    const first = serviceWorkerHarness();
+    await first.dispatch("pushsubscriptionchange", { newSubscription: rotated });
+    expect(posted(first).body.replaces).toBe(link.endpoint);
+
+    const second = serviceWorkerHarness();
+    await second.dispatch("pushsubscriptionchange", {
+      newSubscription: { endpoint: "https://push.example/third", keys: {} },
+    });
+    expect(posted(second).body.replaces).toBe(rotated.endpoint);
+  });
+
+  it("sends no replaces when the address turns out to be unchanged", async () => {
+    await savePushLink(link);
+    const h = serviceWorkerHarness();
+    await h.dispatch("pushsubscriptionchange", {
+      newSubscription: { endpoint: link.endpoint, keys: {} },
+    });
+    expect(posted(h).body).not.toHaveProperty("replaces");
+  });
+
+  it("does nothing at all on a device the page has never registered from", async () => {
+    const h = serviceWorkerHarness();
+    await h.dispatch("pushsubscriptionchange", { newSubscription: rotated });
+    expect(h.subscribe).not.toHaveBeenCalled();
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet when the stored record has no token to authenticate with", async () => {
+    await savePushLink({ ...link, token: "" });
+    const h = serviceWorkerHarness();
+    await h.dispatch("pushsubscriptionchange", { newSubscription: rotated });
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it("swallows a refused re-subscribe and leaves the repair to the next app open", async () => {
+    await savePushLink(link);
+    const h = serviceWorkerHarness();
+    h.subscribe.mockRejectedValueOnce(new Error("push service unavailable"));
+    await expect(h.dispatch("pushsubscriptionchange", {})).resolves.toBeUndefined();
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it("swallows a failed post and keeps the old stored address for the retry", async () => {
+    await savePushLink(link);
+    const h = serviceWorkerHarness();
+    h.fetch.mockRejectedValueOnce(new Error("offline"));
+    await expect(
+      h.dispatch("pushsubscriptionchange", { newSubscription: rotated }),
+    ).resolves.toBeUndefined();
+
+    const retry = serviceWorkerHarness();
+    await retry.dispatch("pushsubscriptionchange", { newSubscription: rotated });
+    expect(posted(retry).body.replaces).toBe(link.endpoint); // memo never moved
+  });
+
+  it("keeps the stored address when the server rejects the registration", async () => {
+    await savePushLink(link);
+    const h = serviceWorkerHarness();
+    h.fetch.mockResolvedValueOnce({ ok: false, status: 401 });
+    await h.dispatch("pushsubscriptionchange", { newSubscription: rotated });
+
+    const retry = serviceWorkerHarness();
+    await retry.dispatch("pushsubscriptionchange", { newSubscription: rotated });
+    expect(posted(retry).body.replaces).toBe(link.endpoint);
+  });
+
+  it("survives IndexedDB being refused outright", async () => {
+    const factory = globalThis.indexedDB;
+    (globalThis as { indexedDB?: IDBFactory }).indexedDB = undefined;
+    const h = serviceWorkerHarness();
+    await expect(
+      h.dispatch("pushsubscriptionchange", { newSubscription: rotated }),
+    ).resolves.toBeUndefined();
+    expect(h.fetch).not.toHaveBeenCalled();
+    globalThis.indexedDB = factory;
+  });
+
+  it("opens the same database, store and record the page writes", () => {
+    expect(SW_SOURCE).toContain(`const LINK_DB = "${PUSH_LINK_DB}"`);
+    expect(SW_SOURCE).toContain(`const LINK_STORE = "${PUSH_LINK_STORE}"`);
+    expect(SW_SOURCE).toContain(`const LINK_ID = "${PUSH_LINK_ID}"`);
+  });
+
+  it("keeps the whole rotation chain inside waitUntil", () => {
+    const at = SW_SOURCE.indexOf('self.addEventListener("pushsubscriptionchange"');
+    expect(at).toBeGreaterThanOrEqual(0);
+    const handler = SW_SOURCE.slice(at);
+    expect(handler.indexOf("event.waitUntil(")).toBeLessThan(handler.indexOf("fetch("));
+    expect(handler).toContain("catch");
   });
 });

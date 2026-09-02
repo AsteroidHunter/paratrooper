@@ -5,6 +5,11 @@
 // The VAPID public key has already been loaded by check(), so the native prompt
 // stays on that tap's user-activation stack (required by iOS).
 
+// The other half of this module is the rotation bookkeeping at the bottom: the
+// address a push goes to can change while the app is closed, so every
+// registration names the address it replaces, and the service worker is left a
+// copy of what it needs to do the same repair on its own.
+
 export type PushPermission = "default" | "denied" | "granted";
 
 export type PushState =
@@ -198,4 +203,128 @@ export function createPushSetup<Subscription>(
   };
 
   return { check, action, dismiss, stop, state: () => current };
+}
+
+// --- endpoint rotation -------------------------------------------------------
+//
+// A push endpoint is where the server sends; the phone can be handed a NEW one
+// at any time, including while the app is closed. Nothing in a subscription
+// tells the server that a new address and an old row are the same device, so a
+// plain add left both rows standing — and the old one is not visibly dead:
+// Apple accepts pushes to a rotated-away address with 201 and displays nothing.
+// The result was a whole run of results delivered nowhere, and afterwards every
+// result sent twice.
+//
+// So the client names the address it is replacing. Two callers do it. The page
+// (registerBody below) remembers its last registered endpoint in localStorage
+// and sends it as `replaces` on the next registration. The service worker does
+// the same from its pushsubscriptionchange handler — but a worker cannot read
+// localStorage and cannot call the authenticated key route, so the page mirrors
+// the VAPID key, the app token and the current endpoint into IndexedDB here,
+// at every successful registration, and the worker reads that one record.
+//
+// Every step is best-effort. A device with no stored record, a browser that
+// refuses IndexedDB, a rotation event that never fires: all of them fall back
+// to what already worked, which is the next app open re-registering.
+
+const ENDPOINT_KEY = "paratrooper_push_endpoint";
+
+/** Names shared with public/sw.js, which reads this record without importing. */
+export const PUSH_LINK_DB = "paratrooper-push";
+export const PUSH_LINK_STORE = "link";
+export const PUSH_LINK_ID = "current";
+
+/** What the worker needs to re-register on its own, with no page running. */
+export interface PushLink {
+  key: string; // VAPID public key (applicationServerKey), base64url
+  token: string; // the app bearer token, for the authenticated POST
+  endpoint: string; // the address currently registered, the next `replaces`
+}
+
+/** The endpoint this page last told the server about, if any. */
+export function lastRegisteredEndpoint(): string | null {
+  try {
+    return localStorage.getItem(ENDPOINT_KEY);
+  } catch {
+    return null; // private mode can refuse storage outright
+  }
+}
+
+/** Remember an endpoint the server has now accepted. */
+export function rememberRegisteredEndpoint(endpoint: string): void {
+  try {
+    localStorage.setItem(ENDPOINT_KEY, endpoint);
+  } catch {
+    /* losing the memo only costs the next registration its `replaces` */
+  }
+}
+
+/**
+ * The JSON body for POST /api/push/subscribe: the subscription itself, plus
+ * `replaces` when this registration supersedes a different address.
+ *
+ * JSON round-trip rather than a spread — a real PushSubscription keeps endpoint
+ * and keys on its prototype and only surrenders them through toJSON().
+ * Registering an UNCHANGED endpoint sends no `replaces`; it is an upsert of the
+ * row that is already there, and naming itself would ask the server to delete
+ * the row it just wrote.
+ */
+export function registerBody(subscription: unknown, replaces: string | null): string {
+  const body = JSON.parse(JSON.stringify(subscription)) as Record<string, unknown>;
+  if (replaces && replaces !== body.endpoint) body.replaces = replaces;
+  return JSON.stringify(body);
+}
+
+function openLinkDB(): Promise<IDBDatabase | null> {
+  return new Promise((resolve) => {
+    if (typeof indexedDB === "undefined") {
+      resolve(null);
+      return;
+    }
+    let request: IDBOpenDBRequest;
+    try {
+      request = indexedDB.open(PUSH_LINK_DB, 1);
+    } catch {
+      resolve(null); // private mode can throw synchronously on open
+      return;
+    }
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(PUSH_LINK_STORE)) {
+        db.createObjectStore(PUSH_LINK_STORE, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+    request.onblocked = () => resolve(null);
+  });
+}
+
+/**
+ * Leave the worker what it needs to survive a rotation with no page running.
+ *
+ * Its own database, in threadcache.ts's mold: a version bump here must never
+ * fail another module's open. Resolves when the write commits, and resolves
+ * quietly on every failure — the page's registration already succeeded.
+ */
+export async function savePushLink(link: PushLink): Promise<void> {
+  const db = await openLinkDB();
+  if (!db) return;
+  await new Promise<void>((resolve) => {
+    let transaction: IDBTransaction;
+    try {
+      transaction = db.transaction(PUSH_LINK_STORE, "readwrite");
+    } catch {
+      resolve();
+      return;
+    }
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => resolve();
+    transaction.onabort = () => resolve();
+    try {
+      transaction.objectStore(PUSH_LINK_STORE).put({ id: PUSH_LINK_ID, ...link });
+    } catch {
+      resolve();
+    }
+  });
 }

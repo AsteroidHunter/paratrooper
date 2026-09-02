@@ -118,3 +118,127 @@ self.addEventListener("notificationclick", (event) => {
     })
   );
 });
+
+// --- push address rotation ---------------------------------------------------
+// The phone can be handed a NEW push endpoint at any time, including while the
+// app is closed. Until something re-registers, the server keeps sending to the
+// old address — and that failure is silent: Apple accepts a push to a
+// rotated-away address with 201 and shows nothing, so a whole run of results
+// lands nowhere. This handler repairs it at the moment of the rotation.
+//
+// The worker has no page and no page storage. It cannot read localStorage and
+// cannot call the authenticated key route, so src/push.ts writes one IndexedDB
+// record at every successful registration — the VAPID key, the app token, and
+// the address currently registered — and this reads it. Names must match that
+// module's PUSH_LINK_* exports.
+//
+// Everything here is best-effort, in the same spirit as the badge work above:
+// no record (a device that has not opened the app since this shipped), a
+// browser that refuses IndexedDB, a rejected subscribe, a failed POST — all of
+// them fall through to what has always worked, which is the next app open
+// re-registering and naming the address it replaces.
+const LINK_DB = "paratrooper-push";
+const LINK_STORE = "link";
+const LINK_ID = "current";
+
+function openLinkDB() {
+  return new Promise((resolve) => {
+    let request;
+    try {
+      request = indexedDB.open(LINK_DB, 1);
+    } catch {
+      resolve(null);
+      return;
+    }
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(LINK_STORE)) {
+        db.createObjectStore(LINK_STORE, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+    request.onblocked = () => resolve(null);
+  });
+}
+
+function readLink(db) {
+  return new Promise((resolve) => {
+    let read;
+    try {
+      read = db.transaction(LINK_STORE, "readonly").objectStore(LINK_STORE).get(LINK_ID);
+    } catch {
+      resolve(null);
+      return;
+    }
+    read.onsuccess = () => resolve(read.result ?? null);
+    read.onerror = () => resolve(null);
+  });
+}
+
+// Keep the stored address current, so a SECOND rotation with no app open in
+// between still names the right predecessor instead of one already deleted.
+function writeLink(db, link) {
+  return new Promise((resolve) => {
+    let transaction;
+    try {
+      transaction = db.transaction(LINK_STORE, "readwrite");
+    } catch {
+      resolve();
+      return;
+    }
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => resolve();
+    transaction.onabort = () => resolve();
+    try {
+      transaction.objectStore(LINK_STORE).put(link);
+    } catch {
+      resolve();
+    }
+  });
+}
+
+// the page's urlBase64ToUint8Array, duplicated because a worker cannot import it
+function applicationServerKey(base64) {
+  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    (async () => {
+      try {
+        const db = await openLinkDB();
+        if (!db) return;
+        const link = await readLink(db);
+        if (!link || !link.key || !link.token) return;
+        // The event's own old address is the truth when the browser supplies
+        // it; the stored one is the fallback for browsers that do not.
+        const replaces = (event.oldSubscription && event.oldSubscription.endpoint) || link.endpoint;
+        const fresh =
+          event.newSubscription ||
+          (await self.registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: applicationServerKey(link.key),
+          }));
+        const body = JSON.parse(JSON.stringify(fresh));
+        if (replaces && replaces !== body.endpoint) body.replaces = replaces;
+        const response = await fetch("/api/push/subscribe", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${link.token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+        if (!response || !response.ok) return; // leave the record for the page to fix
+        await writeLink(db, { ...link, id: LINK_ID, endpoint: body.endpoint });
+      } catch {
+        /* the next app open re-registers exactly as it always has */
+      }
+    })()
+  );
+});

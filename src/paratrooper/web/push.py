@@ -8,6 +8,7 @@ operator-provided (Phase 0.5, [YOU]).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -19,6 +20,18 @@ logger = logging.getLogger(__name__)
 
 NOTIFICATION_EXCERPT_CHARS = 200
 PUSH_TIMEOUT_SECONDS = 10
+FINGERPRINT_CHARS = 8
+
+
+def endpoint_fingerprint(endpoint: str) -> str:
+    """A short, stable, log-safe name for one push address.
+
+    An endpoint URL is a bearer capability — anyone holding it can push to the
+    phone — so it must never be written to a log. The last 8 characters of its
+    SHA-256 are enough to tell one device's address from another's across lines
+    and across runs, and carry nothing back to the address itself.
+    """
+    return hashlib.sha256((endpoint or "").encode()).hexdigest()[-FINGERPRINT_CHARS:]
 
 
 @dataclass
@@ -43,9 +56,16 @@ def public_key() -> str | None:
 
 def send_push(subscription: dict, payload: str, cfg: VapidConfig) -> bool:
     """Send one push. Returns False if the subscription is gone (404/410) so the
-    caller can drop it; True otherwise (delivered or transient failure)."""
+    caller can drop it; True otherwise (delivered or transient failure).
+
+    Every outcome names its address by fingerprint. That is the only way to read
+    a run of these lines and see WHICH device each send went to — the failure
+    this was written for was two accepted sends per result, one of them into a
+    rotated-away address Apple still answers 201 for.
+    """
     from pywebpush import WebPushException, webpush
 
+    fingerprint = endpoint_fingerprint(subscription.get("endpoint", ""))
     try:
         response = webpush(
             subscription_info=subscription,
@@ -55,21 +75,27 @@ def send_push(subscription: dict, payload: str, cfg: VapidConfig) -> bool:
             timeout=PUSH_TIMEOUT_SECONDS,
         )
         logger.info(
-            "web push accepted by provider (status %s)",
+            "web push to %s accepted by provider (status %s)",
+            fingerprint,
             getattr(response, "status_code", "unknown"),
         )
         return True
     except WebPushException as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
         if status in (404, 410):
+            logger.info("web push to %s gone (status %s)", fingerprint, status)
             return False  # expired/unsubscribed — drop it
-        logger.warning("web push failed (status %s): %s", status, exc)
+        logger.warning("web push to %s failed (status %s): %s", fingerprint, status, exc)
         return True
     except Exception as exc:
         # Network timeouts and local encryption/key errors are not guaranteed
         # to be WebPushException instances. Push is best-effort: retain the
         # subscription for a later retry and never let it kill the relay.
-        logger.warning("web push failed without provider response (%s)", type(exc).__name__)
+        logger.warning(
+            "web push to %s failed without provider response (%s)",
+            fingerprint,
+            type(exc).__name__,
+        )
         return True
 
 

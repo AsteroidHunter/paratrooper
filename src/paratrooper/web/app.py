@@ -355,10 +355,21 @@ async def _maybe_push(state: AppState, kind: str, payload: object = None) -> Non
         return_exceptions=True,
     )
     for sub, result in zip(subscriptions, results, strict=True):
+        endpoint = sub.get("endpoint", "")
         if isinstance(result, BaseException):
-            logger.warning("web push task failed without result (%s)", type(result).__name__)
+            logger.warning(
+                "web push to %s failed without result (%s)",
+                push.endpoint_fingerprint(endpoint),
+                type(result).__name__,
+            )
         elif not result:
-            state.store.remove_subscription(sub.get("endpoint", ""))
+            # The provider says this address no longer exists. Say so out loud:
+            # a silent drop was indistinguishable from a delivery that worked.
+            logger.info(
+                "dropping push subscription %s: the provider says it is gone",
+                push.endpoint_fingerprint(endpoint),
+            )
+            state.store.remove_subscription(endpoint)
 
 
 def _schedule_push(state: AppState, kind: str, payload: object = None) -> None:
@@ -677,10 +688,33 @@ def create_app(injected: AppState | None = None) -> FastAPI:
 
     @app.post("/api/push/subscribe", dependencies=[Depends(require_token)])
     async def push_subscribe(subscription: dict) -> dict:
+        """Register this device's push address, REPLACING the one it rotated off.
+
+        A phone's endpoint can change while the app is closed, and nothing in
+        the subscription tells the server that the new address and an old row
+        are the same device — so a plain add left both, and every result went
+        out twice, once into an address Apple accepts and never shows. The
+        client (page on open, worker on the rotation event) names the address it
+        supersedes in "replaces"; that row leaves in this same request.
+
+        "replaces" is transport, not part of the subscription, so it is taken
+        off before the record is stored. Adding comes first: a failure between
+        the two steps must leave the phone reachable, never unreachable.
+        """
+        replaces = subscription.pop("replaces", None)
         endpoint = subscription.get("endpoint")
         if not endpoint:
             raise HTTPException(status_code=400, detail="subscription missing endpoint")
-        await asyncio.to_thread(st().store.add_subscription, endpoint, json.dumps(subscription))
+        store = st().store
+        # keyed by endpoint, so re-registering an unchanged address is an upsert
+        await asyncio.to_thread(store.add_subscription, endpoint, json.dumps(subscription))
+        if isinstance(replaces, str) and replaces and replaces != endpoint:
+            await asyncio.to_thread(store.remove_subscription, replaces)
+            logger.info(
+                "push subscription %s replaces %s (old row dropped)",
+                push.endpoint_fingerprint(endpoint),
+                push.endpoint_fingerprint(replaces),
+            )
         return {"ok": True}
 
     @app.websocket("/ws")
