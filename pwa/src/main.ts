@@ -165,7 +165,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.82"; // the keyboard lifts the thread and the bar with a transform; the shell never resizes at an edge
+const APP_VERSION = "0.3.83"; // the PR link and its Publish button wear the sent bubble's own accent, not the legacy blue
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

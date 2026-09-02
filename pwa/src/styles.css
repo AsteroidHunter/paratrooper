@@ -519,7 +519,12 @@ html, body {
 @media (prefers-reduced-motion: reduce) {
   .msg.anim { animation: none; }
 }
-.msg.agent a { color: var(--sent); }
+/* The only link the thread ever draws is the PR row's, and it takes the sent
+   bubble's own fill — one accent in the thread, in either appearance, rather
+   than the link and the bubble sitting a hue apart. --accent is the token
+   .msg.user is painted with above; --sent is the legacy iOS blue the chrome
+   outside the thread still wears, and is deliberately not it. */
+.msg.agent a { color: var(--accent); }
 .msg.user a { color: #fff; text-decoration: underline; }
 
 .msg.error { background: var(--error-bg); color: var(--error-text); }
@@ -618,13 +623,17 @@ html, body {
   padding: 2px 0;
 }
 
+/* Publish sits in the PR row, under the link. It is painted out of the sent
+   bubble's own pair — the fill the user's messages carry and the ink they put
+   on it — so the row's link, its button and the bubbles above all read as one
+   colour. Not a copied hex: the tokens are the same ones .msg.user declares. */
 .publish {
   display: block;
   margin-top: 8px;
   border: none;
   border-radius: 14px;
-  background: var(--sent);
-  color: #fff;
+  background: var(--accent);
+  color: var(--sent-text);
   padding: 8px 16px;
   font: inherit;
   font-weight: 600;
