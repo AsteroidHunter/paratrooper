@@ -165,7 +165,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.80"; // a rotated push address replaces the old one instead of doubling it
+const APP_VERSION = "0.3.81"; // the keyboard close grows the shell in one step instead of gliding it
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -255,9 +255,10 @@ const downBtn = createDownButton((show) =>
 // settles the scroll (settleTail below). The edge is delivered from inside the
 // visual-viewport resize that carries it, which is the event this has to run
 // in; the next frame runs it again because iOS can still be reporting the old
-// numbers at event time, and that is one frame of looking, not a delay. Every
-// frame between the two belongs to the shell's own box glide, and those reach
-// the same place through the thread's resize observer.
+// numbers at event time, and that is one frame of looking, not a delay. On a
+// close both of those run while the shell is still holding its keyboard-era box
+// (shell.ts holdsShellBox), so the growth itself is not theirs: it lands a few
+// ms later, in one step, and the thread's resize observer settles that frame.
 watchKeyboard((up) => {
   downBtn.keyboard(up, followTail);
   const via = up ? "kb-open" : "kb-close";
@@ -1558,9 +1559,12 @@ function userScrollIntent(): boolean {
 // whichever way following happens to be pointing.
 //
 // This is also the only signal that sees every FRAME of a box that changes over
-// a beat rather than in one hop: the shell's glide home after a keyboard close
-// and the drawer's own height easing both move the edge frame by frame, and the
-// observer is delivered on each of those frames, before it paints.
+// a beat rather than in one hop: the shell's glide on a keyboard OPEN and the
+// drawer's own height easing both move the edge frame by frame, and the observer
+// is delivered on each of those frames, before it paints. The keyboard CLOSE is
+// the one-hop case now (shell.ts boxMotion), and this is what pins its single
+// frame: the box grows, layout runs, this settle writes, and only then does
+// anything paint, so the last message never leaves the bar.
 const threadObserver =
   "ResizeObserver" in window
     ? new ResizeObserver(() => settleTail("box", true))
@@ -1864,11 +1868,16 @@ function settleContent(what: string): void {
 //
 // WHEN IT LOOKS. Every frame for CLOSE_TAIL_MS after a close edge, because the
 // restore lands in the one stretch nothing else covers: the thread's resize
-// observer settles on every frame of the shell's glide home and then goes quiet
-// when the box stops moving, at ms 208 on the trail, and the restore arrived at
-// ms 224. The window runs on past the glide's own settle window and the shell's
-// drop back to the four-edge pin (~470ms), so a restore riding either of those
-// is caught as well. After it, the close's two later checkpoints ask the same
+// observer settles on the frame the shell's box changes and then goes quiet,
+// which on the trail that built this was ms 208 at the end of a glide, with the
+// restore arriving at ms 224. The shell no longer glides home — the close grows
+// the box in ONE step (shell.ts boxMotion), so there is one such settle rather
+// than a dozen and it lands the moment the viewport admits the screen is whole
+// — and the window is unchanged for it: it still runs on past the settle window
+// and the shell's drop back to the four-edge pin (~470ms), so a restore riding
+// either of those is caught as well. With the step there should be nothing left
+// for it to catch; it stays because it costs three reads a frame and is the only
+// thing standing between the reader and an offset no gesture will re-clamp. After it, the close's two later checkpoints ask the same
 // question again (recordTailGapNow, at 600ms and 2100ms), which is where a
 // restore delivered late, or one whose frames were throttled, is still taken
 // back — the trail says the state survives for seconds, so a late correction is

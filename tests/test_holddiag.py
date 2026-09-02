@@ -239,14 +239,19 @@ def test_holddiag_viewport_digest_carries_keyboard_dynamics_marks(client, caplog
     kb-focusing for the tap-time choreography signal's lifecycle (focus,
     keyboard handover, hardware-keyboard lapse, blur) and kb-glide for the
     open/close edges that scope the shell's transition window — so deploy
-    logs alone reconstruct how an open and a close played out."""
+    logs alone reconstruct how an open and a close played out.
+
+    kb-glide's `step` is what tells the two edges apart now that they move
+    differently: the open glides its box over 0.2s, the close writes the full
+    height in ONE frame (pwa/src/shell.ts boxMotion), and a trail recorded
+    before that build carries a close with no `step` on the line at all."""
     trail = {
         "build": "b",
         "events": [
             {"t": 1, "ev": "kb-focusing", "d": {"phase": "focus"}},
-            {"t": 2, "ev": "kb-glide", "d": {"edge": "open"}},
+            {"t": 2, "ev": "kb-glide", "d": {"edge": "open", "step": False}},
             {"t": 3, "ev": "kb-focusing", "d": {"phase": "kb"}},
-            {"t": 4, "ev": "kb-glide", "d": {"edge": "close"}},
+            {"t": 4, "ev": "kb-glide", "d": {"edge": "close", "step": True, "held": True}},
         ],
     }
     with caplog.at_level(logging.INFO, logger="paratrooper.holddiag"):
@@ -255,6 +260,10 @@ def test_holddiag_viewport_digest_carries_keyboard_dynamics_marks(client, caplog
     assert len(vp) == 1
     assert '"kb-focusing"' in vp[0] and '"phase": "focus"' in vp[0]
     assert '"kb-glide"' in vp[0] and '"edge": "open"' in vp[0] and '"edge": "close"' in vp[0]
+    # the close's own line says the growth was one step, and that it waited for
+    # the viewport before taking it
+    assert '"step": true' in vp[0] and '"held": true' in vp[0]
+    assert '"step": false' in vp[0]  # and the raise says it still glided
 
 
 def test_holddiag_digest_carries_the_resume_landing(client, caplog):

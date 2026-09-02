@@ -266,13 +266,15 @@ export const MAX_CLOSE_RESTORES = 4;
  * This is the whole difference between the fault and the ordinary frame, and
  * without it the correction would fire on every close. A box that GROWS lowers
  * the end of the range under a position that was legitimately on the old end,
- * so for the instant between the growth and the settle that answers it, every
- * frame of the shell's glide home reads past the end — by about a twelfth of
- * the trip, twelve times over. Those frames are already owned: the thread's
- * resize observer is delivered on each of them and settles before anything
- * paints. What nothing owns is an overhang that appears while the box is
- * holding still, which is exactly the shape of the restore (ms 208 the box
- * stops, ms 224 the offset comes back).
+ * so for the instant between the growth and the settle that answers it the
+ * scroller reads past the end. That instant is already owned: the thread's
+ * resize observer is delivered on the growing frame and settles before anything
+ * paints. It used to be a dozen such frames, one per frame of the shell's glide
+ * home; the close now grows the box in ONE step (shell.ts boxMotion), so it is
+ * a single frame, and this predicate stands the correction down on exactly that
+ * one. What nothing owns is an overhang that appears while the box is holding
+ * still, which is exactly the shape of the restore (ms 208 the box stops, ms
+ * 224 the offset comes back).
  *
  * A first look has nothing to compare against and is therefore never settled,
  * which costs one frame at the start of a window that runs for six hundred ms.

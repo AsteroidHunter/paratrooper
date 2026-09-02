@@ -33,7 +33,9 @@ import {
   SETTLE_BURST_GAP_MS,
   boxSettled,
   createSettleBurst,
+  followFlipDecision,
   maxScrollTop,
+  nearBottomOf,
   restoreMark,
   restoreVerdict,
   settleBottom,
@@ -100,6 +102,57 @@ describe("keyboard close with a flight still in the air", () => {
     const plan = settleBottom({ sh: CONTENT, st: TRUE_END, ch: REST_BOX }, true);
     expect(plan.top).toBe(TRUE_END);
     expect(plan.over).toBe(0);
+    expect(plan.moved).toBe(false);
+  });
+});
+
+// The close as it runs now: the shell grows the box in ONE step (shell.ts
+// boxMotion) on the frame the viewport admits the screen is whole, so this is
+// no longer a dozen frames of glide with a settle on each. It is one box
+// change, one resize callback, one settle — delivered after layout and before
+// paint, so the pin and the growth are the same frame and the last message
+// never leaves the compose bar.
+describe("the close's one step: pinned on the frame the box grows", () => {
+  const seated = maxScrollTop(CONTENT, OPEN_BOX); // following, so on the keyboard-era end
+
+  it("one settle takes the whole growth, and there is no second one to make", () => {
+    const step = settleBottom({ sh: CONTENT, st: seated, ch: REST_BOX }, true);
+    expect(step.top).toBe(TRUE_END);
+    expect(step.moved).toBe(true);
+    // asked again on the very next frame, with the box now still: nothing left
+    const after = settleBottom({ sh: CONTENT, st: step.top, ch: REST_BOX }, true);
+    expect(after.moved).toBe(false);
+    expect(after.over).toBe(0);
+  });
+
+  it("the correction stands down on the step frame and finds nothing after it", () => {
+    // the box changed, so this frame is "moving" and the settle above owns it
+    const growing = { sh: CONTENT, st: seated, ch: REST_BOX };
+    expect(restoreVerdict(growing, boxSettled(growing, { sh: CONTENT, st: seated, ch: OPEN_BOX }), 0, false))
+      .toBe("moving");
+    // and from the next frame on the box is settled with nothing past the end,
+    // which is the close he should now see: no kb-restore, no over 386
+    const landed = { sh: CONTENT, st: TRUE_END, ch: REST_BOX };
+    expect(restoreVerdict(landed, boxSettled(landed, growing), 0, false)).toBe("none");
+  });
+
+  it("growing the box can only read as MORE at the bottom, so following stays on", () => {
+    // the follow flag is derived from this reading on the scroll event the
+    // growth fires, and a step that turned it off would leave every later
+    // re-pin disarmed. A bigger box lowers the end of the range under the same
+    // position, so the reading can only move toward the bottom, never away —
+    // whether or not the engine has clamped scrollTop yet on this frame
+    expect(nearBottomOf(CONTENT, seated, OPEN_BOX)).toBe(true); // before the step
+    expect(nearBottomOf(CONTENT, seated, REST_BOX)).toBe(true); // unclamped, mid-step
+    expect(nearBottomOf(CONTENT, TRUE_END, REST_BOX)).toBe(true); // clamped, after it
+    for (const st of [seated, TRUE_END]) {
+      expect(followFlipDecision(nearBottomOf(CONTENT, st, REST_BOX), true, false)).toBe("follow");
+    }
+  });
+
+  it("a reader up in the history is not pulled down by the step either", () => {
+    const plan = settleBottom({ sh: CONTENT, st: 1200, ch: REST_BOX }, false);
+    expect(plan.top).toBe(1200);
     expect(plan.moved).toBe(false);
   });
 });
@@ -688,9 +741,11 @@ describe("the correction: only ever a position that cannot exist", () => {
     expect(restoreVerdict({ sh: 400, st: 0, ch: 624 }, true, 0, false)).toBe("none");
   });
 
-  it("every frame of the shell's glide home stands aside for the settle it owns", () => {
+  it("the frame the shell steps home stands aside for the settle it owns", () => {
     // the box grew this frame, so the position that was on the old end is past
-    // the new one for the instant before the thread's resize observer answers
+    // the new one for the instant before the thread's resize observer answers.
+    // That used to be a dozen such frames, one per frame of the shell's glide;
+    // the close steps now (shell.ts boxMotion), so it is one
     expect(restoreVerdict(PAST_END, false, 0, false)).toBe("moving");
   });
 

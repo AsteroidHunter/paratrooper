@@ -36,7 +36,12 @@
 //   phone by 6 to 44ms and left the thread scrolled a keyboard past its own
 //   end (nine closes, 2026-09-01). The box therefore waits out that gap
 //   (holdsShellBox below): one shell resize per close, taken when the viewport
-//   says the screen is whole.
+//   says the screen is whole. And that one resize is a STEP rather than a
+//   glide (boxMotion below): an animated close handed iOS thirteen to fifteen
+//   frames in which to go on compositing the thread at its pre-close offset
+//   while the box grew under it, which is the white band that opens under the
+//   last message and the snap that takes it back (2026-09-01, fourteen
+//   production closes and eight recorded frame by frame, all one shape).
 // - Corrections run at CLOSE, never mid-typing (Telegram never fights the
 //   keyboard): a window.scrollTo(0,0) conditional on displacement being
 //   actually stuck — iOS 26 can leave vv.offsetTop nonzero after dismissal
@@ -175,6 +180,55 @@ export function shellBox(t: ShellTarget): { top: number; height: number } | null
 // immediate; it is only the SHELL's box that waits for the phone to agree.
 export function holdsShellBox(kb: boolean, hasBox: boolean, inset: number): boolean {
   return !kb && hasBox && inset > 0;
+}
+
+// How the shell's box MOVES when it is written, and why the close is the one
+// edge that must not travel (production trail and a frame-by-frame screen
+// recording, 2026-09-01: fourteen closes and eight, every one the same shape).
+//
+// The close used to ride the same 0.2s glide the open does. The box was written
+// once — keyboard height to full height — and .gliding animated it there over
+// about 220ms. Through that whole window the app's own bookkeeping was perfect
+// and the screen was still wrong: the thread's resize observer was delivered on
+// every frame and every one of them settled and read "already at the bottom,
+// moved 0", because the engine clamps scrollTop as the box grows, so there was
+// never anything for a settle to correct — while iOS went on compositing the
+// message list at the offset it held before the close and republished only at
+// the end. On screen that is the compose bar sliding down with the keyboard,
+// the message area's bottom edge following it, and the messages not moving at
+// all: a white band opening under the last message and growing to about 386px
+// over thirteen to fifteen frames, taken back in a single frame by the overhang
+// correction (main.ts's kb-restore, act fix, over 386) once the phone caught up.
+//
+// The WINDOW is the whole of it. An engine that lags by one frame is invisible;
+// an engine given thirteen frames to lag paints a band the height of a
+// keyboard. So the close is given no window to lag in: the box goes to its
+// final full height in ONE step, on the frame the viewport admits the screen is
+// whole (holdsShellBox above still owns when that is, and the 0.3.73 hold is
+// untouched by this), and there is no stretch in which the app's geometry and
+// the phone's compositing can disagree at all. The thread's own settle pins the
+// bottom on that same frame — one box change, one resize callback, one pin — so
+// the last message stays glued above the compose bar and the overhang
+// correction has nothing left to take back.
+//
+// The OPEN edge keeps its glide exactly as it was. It SHRINKS the box, which
+// can never strand a scroll position past the end of the range, and WebKit can
+// publish the keyboard's whole rise as one event, which a one-step write would
+// render as a jump cut.
+//
+// Everything outside a settle window stays instant, as before: a mid-typing box
+// write must never smear an active-growth frame.
+//
+// Two readers, one rule. styles.css carries the same decision on the classes —
+// #app.gliding.kb carries the box transition, and a close is .gliding WITHOUT
+// .kb, so it carries none — and the trail reads it here, so the shell-size
+// record's `glide` flag says whether the write really animated instead of only
+// whether a window happened to be open.
+export type BoxMotion = "glide" | "step" | "instant";
+
+export function boxMotion(kb: boolean, gliding: boolean): BoxMotion {
+  if (!gliding) return "instant";
+  return kb ? "glide" : "step";
 }
 
 // The box top at a keyboard edge, and the one case where the freshest number
@@ -364,11 +418,20 @@ export function focusingActive(
   return editorFocused && !kb && sinceFocusMs < FOCUSING_MAX_MS;
 }
 
-// Keyboard open/close glide: WebKit can publish a keyboard's whole geometry
-// change as ONE vv event, and a shell box applied in one write is a jump cut.
-// Box writes landing inside this window after a .kb edge animate (styles.css
-// #app.gliding, 0.2s ease-out); outside it — every mid-typing write — they
-// stay instant, so an active-growth frame never smears.
+// The settle window a .kb edge opens, and it is now two different things on the
+// two edges (boxMotion above owns why).
+//
+// On the OPEN it is the glide: WebKit can publish a keyboard's whole geometry
+// change as ONE vv event, and a shell box applied in one write is a jump cut, so
+// box writes landing inside the window animate (styles.css #app.gliding.kb,
+// 0.2s ease-out). Outside it — every mid-typing write — they stay instant, so
+// an active-growth frame never smears.
+//
+// On the CLOSE the box does not travel at all, and the window is still needed
+// for two things that are not the box's motion: the numeric box has to stay
+// APPLIED (the four-edge pin has no height to write a full screen into, so the
+// vars must outlive the .kb class), and the bar's own bottom gap still eases
+// home on this same clock, which is the one animation the close keeps.
 export const GLIDE_SETTLE_MS = 450;
 
 // The teardown window cannot be shortened, survived, or recovered from (three
@@ -571,20 +634,27 @@ function readWorld(): World {
   };
 }
 
-// a .kb edge opens the glide window: box writes inside it animate (styles.css
-// #app.gliding), so the keyboard's rise and close read as motion even when
-// WebKit publishes the whole geometry change as one event. The timer
-// re-converges once the window ends — reconcile drops .gliding (and a close
-// glide's numeric rest box) through the one writer; a stale or duplicate fire
+// a .kb edge opens the settle window: on the OPEN, box writes inside it animate
+// (styles.css #app.gliding.kb), so a rise WebKit publishes as one event still
+// reads as motion; on the CLOSE the window only keeps the numeric box applied
+// and carries the bar's bottom gap home, while the box itself steps. The timer
+// re-converges once the window ends — reconcile drops .gliding (and the close's
+// numeric rest box) through the one writer; a stale or duplicate fire
 // reconciles an already-converged state, harmlessly.
 function armGlide(edge: "open" | "close", held: boolean): void {
   glideUntil = performance.now() + GLIDE_SETTLE_MS;
+  // Which of the two windows this is, said outright rather than inferred from
+  // the edge name by a reader who would have to know the rule: `step` is the
+  // close's one-frame growth, and a trail carrying it can be told apart at a
+  // glance from one recorded before this build, where the same edge glided.
+  const step = edge === "close";
   // `held` marks the close that is standing on its keyboard-era box until the
   // viewport catches up (holdsShellBox). It rides this record rather than one
   // of its own because this line is already written once per edge and already
   // digested, and because the release needs no second record: the shell-size
-  // write a few ms later carries the wait in its own ems.
-  holdDiagRecord("kb-glide", held ? { edge, held } : { edge });
+  // write a few ms later carries the wait in its own ems, and its `glide` flag
+  // says the growth was one frame.
+  holdDiagRecord("kb-glide", held ? { edge, step, held } : { edge, step });
   if (glideTimer) clearTimeout(glideTimer);
   glideTimer = setTimeout(() => {
     glideTimer = null;
@@ -595,10 +665,12 @@ function armGlide(edge: "open" | "close", held: boolean): void {
 // THE one writer of shell presentation: four mode classes plus the measured
 // box. styles.css owns what they mean (.kb collapses --pad-b and vanishes the
 // ＋; .focusing runs that same bar choreography from the focus tap itself;
-// .kb/.gliding size the shell from --shell-top/--shell-h and .gliding alone
-// carries their transition AND the matching one on everything --pad-b moves,
-// so the shell's bottom edge and the bar's bottom gap are armed by the single
-// class recalculation below and cannot travel on separate clocks; .settling
+// .kb/.gliding size the shell from --shell-top/--shell-h, .gliding.kb carries
+// the box's own transition — the OPEN edge alone, since a close that travelled
+// is the white band (boxMotion) — and .gliding carries the matching one on
+// everything --pad-b moves, so every reader of the gap is armed by the single
+// class recalculation below and none of them can be given a clock of its own;
+// .settling
 // greys the bar for the whole picker session). Every vv event lands here, so
 // the box is always the freshest numbers iOS has published — no latch,
 // nothing to retract.
@@ -642,12 +714,20 @@ function applyShell(t: ShellTarget, settling: boolean): void {
   appEl.classList.toggle("gliding", gliding);
   appEl.classList.toggle("focusing", focusing);
 
-  // The box: the visual viewport while the keyboard is up, the ride home to the
-  // pin's geometry once it is gone — and, on a close the viewport has not
+  // Whether a box write on THIS frame really animates, which since the close
+  // stopped travelling is no longer the same question as whether a window is
+  // open: the open edge's window glides the box, the close's steps it, and
+  // outside a window every write is instant (boxMotion owns the whole reason,
+  // and styles.css keys the identical rule off .gliding.kb). The trail's glide
+  // flag is this, never the window alone.
+  const glides = boxMotion(t.kb, gliding) === "glide";
+
+  // The box: the visual viewport while the keyboard is up, the pin's own
+  // geometry in one step once it is gone — and, on a close the viewport has not
   // admitted yet, neither. A held close is the one way a numeric box outlives
   // the .kb class without being written on; it stands exactly where it is until
-  // the viewport reports the full screen, and the ride home then runs once, on
-  // the same reading a viewport-learned close would have run it on.
+  // the viewport reports the full screen, and the step then runs once, on the
+  // same reading a viewport-learned close would have run it on.
   const box = shellBox(t);
   if (box) {
     const top = Math.round(box.top);
@@ -668,20 +748,26 @@ function applyShell(t: ShellTarget, settling: boolean): void {
       appEl.style.setProperty("--shell-top", `${box.top}px`);
       appEl.style.setProperty("--shell-h", `${box.height}px`);
       // the device's read-back for every shell resize the keyboard causes
-      recordShellSize(top, height, gliding, atEdge);
+      recordShellSize(top, height, glides, atEdge);
     }
   } else if (!held && (appliedTop !== null || appliedHeight !== null)) {
     if (gliding) {
-      // the close glide: ride a numeric box home to the pin's geometry (the
-      // pin itself cannot animate); armGlide's timer drops it below once the
-      // window ends, landing on the measurement-free pin as before
+      // The close's ONE step: the pin's own geometry, written into the numeric
+      // box in a single frame. It is written rather than dropped because the
+      // window still holds the box vars applied and the pin has no height of
+      // its own to fall back to; armGlide's timer drops them below once the
+      // window ends, landing on the measurement-free pin as before, and since
+      // this write already put the box exactly on the pin's geometry that drop
+      // moves nothing. No transition is armed here (styles.css scopes the box
+      // transition to .gliding.kb), so the growth is the frame it lands on and
+      // no other — boxMotion owns the whole reason.
       const restH = Math.round(baseline);
       if (appliedTop !== 0 || appliedHeight !== restH) {
         appliedTop = 0;
         appliedHeight = restH;
         appEl.style.setProperty("--shell-top", "0px");
         appEl.style.setProperty("--shell-h", `${restH}px`);
-        recordShellSize(0, restH, gliding, atEdge);
+        recordShellSize(0, restH, glides, atEdge);
       }
     } else {
       const wasTop = appliedTop;

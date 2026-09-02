@@ -610,11 +610,23 @@ describe("shell-size / shell-pin: what the box was set to, when, and whether it 
     expect(r.ems).toBe(3200.4);
   });
 
+  it("the close's growth reads as a step: full height, inside the window, not animated", () => {
+    // the line a healthy close now leaves — one write, at the full screen, a
+    // few ms after the edge (the wait for the viewport, holdsShellBox), and
+    // `glide` false because the box travelled no distance at all. A trail from
+    // before this build carries the same top/h with glide TRUE, which is how
+    // the two are told apart at a glance
+    const step = sizeRecord(0, 844, false, false, 22.4);
+    expect(step.glide).toBe(false);
+    expect(step.ems).toBe(22.4); // inside the window, so the window is not what it says
+    expect(step.top).toBe(0);
+    expect(step.h).toBe(844);
+  });
+
   it("shell-pin marks the frame the numeric box is dropped for the four-edge pin", () => {
     expect(pinRecord(0, 844, 471.6)).toEqual({ top: 0, h: 844, ems: 471.6 });
-    // if the ride home had not landed on the pin's own geometry, this is the
-    // height it snapped FROM, and the probe's own last frames say what it
-    // snapped TO
+    // if the step had not landed on the pin's own geometry, this is the height
+    // it snapped FROM, and the probe's own last frames say what it snapped TO
     expect(pinRecord(0, 820, 470)).toEqual({ top: 0, h: 820, ems: 470 });
   });
 
@@ -641,12 +653,22 @@ describe("wiring: the box records sit at the writes, and change none of them", (
 
   it("both box writes record through the one builder, after the write, never before", () => {
     expect(shell).toMatch(
-      /appEl\.style\.setProperty\("--shell-h", `\$\{box\.height\}px`\);\n[^\n]*\n\s*recordShellSize\(top, height, gliding, atEdge\);/,
+      /appEl\.style\.setProperty\("--shell-h", `\$\{box\.height\}px`\);\n[^\n]*\n\s*recordShellSize\(top, height, glides, atEdge\);/,
     );
     expect(shell).toMatch(
-      /appEl\.style\.setProperty\("--shell-h", `\$\{restH\}px`\);\n\s*recordShellSize\(0, restH, gliding, atEdge\);/,
+      /appEl\.style\.setProperty\("--shell-h", `\$\{restH\}px`\);\n\s*recordShellSize\(0, restH, glides, atEdge\);/,
     );
     expect(shell.match(/recordShellSize\(/g)?.length).toBe(3); // the definition and its two sites
+  });
+
+  // The flag has to be the MOTION, not the window. Since the close stopped
+  // travelling, "a settle window is open" and "this write animates" are
+  // different facts, and a trail that carried the window would say a one-frame
+  // growth glided — which is the exact claim the next device session has to be
+  // able to check.
+  it("the glide flag is read from boxMotion, so a stepped close cannot log as animated", () => {
+    expect(shell).toMatch(/const glides = boxMotion\(t\.kb, gliding\) === "glide";/);
+    expect(shell.match(/recordShellSize\([^)]*gliding[^)]*\)/g)).toBeNull();
   });
 
   it("the seeding reflow names itself on the edge record instead of being inferred", () => {

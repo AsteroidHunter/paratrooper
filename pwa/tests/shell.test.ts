@@ -12,6 +12,7 @@ import {
   MIN_KEYBOARD_PX,
   SETTLE_GUARD_MS,
   TEARDOWN_MAX_MS,
+  boxMotion,
   closeCorrectionNeeded,
   composerTapVerdict,
   computeShell,
@@ -27,6 +28,7 @@ import {
   preservesFocus,
   shellBox,
   shoveVerdict,
+  type BoxMotion,
   type World,
 } from "../src/shell";
 
@@ -149,6 +151,54 @@ describe("holdsShellBox — the close the phone has not admitted yet", () => {
   });
 });
 
+// The band the hold above did NOT fix, and the second half of the same close
+// (production trail and a frame-by-frame recording, 2026-09-01: fourteen closes
+// and eight, every one the same shape). The hold ran correctly on all of them —
+// the shell waited for the viewport and grew once — and the band still came,
+// because the growth ANIMATED. Over the 220ms it took, the app's own settle ran
+// on every frame and read "already at the bottom, moved 0" every time, since the
+// engine clamps scrollTop as the box grows; iOS meanwhile kept compositing the
+// message list at its pre-close offset and republished only at the end. So the
+// compose bar slid down, the message area's bottom edge followed it, the
+// messages did not move, and white opened under the last message to about 386px
+// over thirteen to fifteen frames before one frame of snap took it back.
+//
+// The window is the fault. An engine one frame behind is invisible; an engine
+// thirteen frames behind paints a keyboard of white. The close therefore gets no
+// window: one write, at the full height, on the frame the viewport admits the
+// screen is whole.
+describe("boxMotion — the close steps, the open still glides", () => {
+  it("the close's write lands in one frame: no window for the engine to lag in", () => {
+    expect(boxMotion(false, true)).toBe("step");
+  });
+
+  it("the open still glides: WebKit can publish a whole rise as one event", () => {
+    expect(boxMotion(true, true)).toBe("glide");
+  });
+
+  it("outside a settle window nothing animates, whichever edge it belongs to", () => {
+    // a mid-typing write must never smear an active-growth frame
+    expect(boxMotion(true, false)).toBe("instant");
+    expect(boxMotion(false, false)).toBe("instant");
+  });
+
+  it("only the raise ever animates the box — the one thing the band turns on", () => {
+    const animated = [true, false].flatMap((kb) =>
+      [true, false]
+        .filter((gliding) => boxMotion(kb, gliding) === "glide")
+        .map((gliding) => [kb, gliding]),
+    );
+    expect(animated).toEqual([[true, true]]);
+  });
+
+  it("a close that arrives inside the raise's own window still steps", () => {
+    // dismissing within GLIDE_SETTLE_MS of the tap re-arms the window as a
+    // close, and .kb is off from that edge on, so nothing can inherit a glide
+    // the raise opened
+    expect(boxMotion(false, true)).toBe("step");
+  });
+});
+
 // The same rule played through a whole close, because the property that matters
 // is not one verdict but the sequence: ONE shell resize per close, never two,
 // and never one before the phone agrees. The stand-in below is applyShell's box
@@ -161,8 +211,13 @@ describe("the close's writes: one resize, taken when the viewport says so", () =
     let top: number | null = null;
     let height: number | null = null;
     const writes: (readonly [number | null, number | null])[] = [];
+    // how each of those writes MOVED, taken from the same decision the real
+    // writer records it with, so the sequence pins say not only that the close
+    // writes once but that the one write does not travel
+    const motions: BoxMotion[] = [];
     return {
       writes,
+      motions,
       box: () => [top, height] as const,
       /** one viewport reading, exactly as reconcile hands it to applyShell */
       read(w: World, gliding = true): void {
@@ -172,12 +227,14 @@ describe("the close's writes: one resize, taken when the viewport says so", () =
           top !== null || height !== null,
           keyboardInset(w.baseline, w.vvHeight),
         );
+        const motion = boxMotion(t.kb, gliding);
         const box = shellBox(t);
         if (box) {
           if (Math.round(box.top) !== top || Math.round(box.height) !== height) {
             top = Math.round(box.top);
             height = Math.round(box.height);
             writes.push([top, height]);
+            motions.push(motion);
           }
         } else if (!held && (top !== null || height !== null)) {
           if (gliding) {
@@ -186,11 +243,13 @@ describe("the close's writes: one resize, taken when the viewport says so", () =
               top = 0;
               height = restH;
               writes.push([top, height]);
+              motions.push(motion);
             }
           } else {
             top = null;
             height = null;
             writes.push([null, null]); // the vars go, the four-edge pin takes over
+            motions.push(motion);
           }
         }
       },
@@ -259,16 +318,60 @@ describe("the close's writes: one resize, taken when the viewport says so", () =
     }
   });
 
-  it("the ride home still lands on the pin's own geometry when the window ends", () => {
+  it("the step still lands on the pin's own geometry when the window ends", () => {
     const s = raised();
     s.read(world({ editorFocused: false, vvHeight: UP }));
     s.read(world({ editorFocused: false, vvHeight: 844 }));
-    s.read(world({ editorFocused: false, vvHeight: 844 }), false); // the glide expired
+    s.read(world({ editorFocused: false, vvHeight: 844 }), false); // the window expired
     expect(s.writes).toEqual([
       [0, UP],
       [0, 844],
       [null, null],
     ]);
+  });
+
+  // The same sequence read for the other property: not how many writes, but how
+  // far each one travelled. This is the whole of the change, played through a
+  // close.
+  it("the close's one write is a STEP — the full height, arrived at in a frame", () => {
+    const s = raised();
+    s.read(world({ editorFocused: false, vvHeight: UP })); // the focus edge: held
+    s.read(world({ editorFocused: false, vvHeight: 844 })); // the viewport agrees
+    expect(s.writes.at(-1)).toEqual([0, 844]); // the final full height, not a stage of it
+    expect(s.motions).toEqual(["glide", "step"]);
+  });
+
+  it("the raise is untouched: its own write still glides", () => {
+    expect(raised().motions).toEqual(["glide"]);
+  });
+
+  it("a viewport-learned close steps too — one rule, whichever input taught it", () => {
+    const s = raised();
+    s.read(world({ editorFocused: true, vvHeight: 844 }));
+    expect(s.motions).toEqual(["glide", "step"]);
+  });
+
+  it("no close animates the box, and none writes it twice", () => {
+    for (const close of [
+      [world({ editorFocused: false, vvHeight: UP }), world({ editorFocused: false, vvHeight: 844 })],
+      [world({ editorFocused: true, vvHeight: 844 }), world({ editorFocused: false, vvHeight: 844 })],
+      [world({ editorFocused: false, vvHeight: 844 })],
+    ]) {
+      const s = raised();
+      for (const w of close) s.read(w);
+      expect(s.motions.slice(1)).toEqual(["step"]); // past the raise's own glide
+    }
+  });
+
+  it("the drop to the pin moves nothing, because the step already sat on it", () => {
+    // the window ends about 470ms later and the vars go; if the step had landed
+    // anywhere but the pin's own geometry, THAT frame would be the snap
+    const s = raised();
+    s.read(world({ editorFocused: false, vvHeight: UP }));
+    s.read(world({ editorFocused: false, vvHeight: 844 }));
+    expect(s.box()).toEqual([0, 844]); // the pin's geometry, written in full
+    s.read(world({ editorFocused: false, vvHeight: 844 }), false);
+    expect(s.box()).toEqual([null, null]);
   });
 });
 
@@ -313,12 +416,18 @@ describe("wiring: the shell box waits for the viewport, and only the box does", 
     expect(shell).not.toMatch(/heldUntil|holdTimer|HOLD_MAX_MS|releaseHold/);
   });
 
-  it("a held close says so on the trail, beside the glide it armed", () => {
+  it("a held close says so on the trail, beside the window it armed", () => {
     expect(shell).toMatch(/function armGlide\(edge: "open" \| "close", held: boolean\): void \{/);
     expect(shell).toMatch(
-      /holdDiagRecord\("kb-glide", held \? \{ edge, held \} : \{ edge \}\);/,
+      /holdDiagRecord\("kb-glide", held \? \{ edge, step, held \} : \{ edge, step \}\);/,
     );
     expect(shell).toMatch(/armGlide\(t\.kb \? "open" : "close", held\);/);
+  });
+
+  it("and the same line says the close's growth was one step, not a glide", () => {
+    // the trail's own answer to "did this build's close travel", without which
+    // a device session would have to infer it from the edge name and a version
+    expect(shell).toMatch(/const step = edge === "close";/);
   });
 });
 
@@ -775,18 +884,19 @@ describe("focusingActive — the tap-time choreography signal (the pop-then-expa
   });
 });
 
-// Presentation pins for the glide's scoping: the transition lives on .gliding
-// ALONE — shell.ts arms it on the .kb edges for a settle window — so keyboard
-// open/close glide while every mid-typing box write stays instant. The box
-// vars must survive into .gliding without .kb (the close ride home), and the
+// Presentation pins for the glide's scoping: the box transition lives on
+// .gliding.kb ALONE — the OPEN edge, since a close that travelled is the white
+// band — so a raise glides, a close steps, and every mid-typing box write stays
+// instant. The box vars must still survive into .gliding without .kb (the close
+// holds its keyboard-era box, then writes the full screen into it), and the
 // focusing class must key the same bar choreography as .kb.
-describe("presentation — glide scoped to kb edges, focusing keys the choreography", () => {
+describe("presentation — glide scoped to the open edge, focusing keys the choreography", () => {
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
   const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
 
-  it("only .gliding carries the top/height transition, 0.2s ease-out", () => {
+  it("only .gliding.kb carries the top/height transition, 0.2s ease-out", () => {
     expect(css).toMatch(
-      /\n#app\.gliding \{\n  transition: top var\(--glide\), height var\(--glide\);\n\}/,
+      /\n#app\.gliding\.kb \{\n  transition: top var\(--glide\), height var\(--glide\);\n\}/,
     );
     expect(css).toMatch(/\n#app \{[^}]*--glide: 0\.2s ease-out;/); // and that token IS the clock
     const kbRule = css.match(/\n#app\.kb \{([^}]*)\}/)?.[1] ?? "";
@@ -797,7 +907,27 @@ describe("presentation — glide scoped to kb edges, focusing keys the choreogra
     expect(appRule).not.toContain("transition"); // the rest pin stays inert
   });
 
-  it("the box vars apply under .kb and stay through .gliding for the close ride home", () => {
+  it("the close carries no box transition at all — .gliding without .kb animates nothing", () => {
+    // the whole change, as one pin: every rule that transitions top or height
+    // has to demand .kb, so the state a close is actually in cannot match one.
+    // Without this the box could travel again from any rule added later, and
+    // the 386px band would come back with it.
+    const bare = css.replace(/\/\*[\s\S]*?\*\//g, "");
+    // the animated property is the FIRST token of each transition entry, so a
+    // max-height elsewhere in the sheet is not a shell box travelling
+    const boxAnimators = [...bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter((m) =>
+        (m[2].match(/transition:([^;]*);/)?.[1] ?? "")
+          .split(",")
+          .some((entry) => ["top", "height"].includes(entry.trim().split(/\s+/)[0])),
+      )
+      .map((m) => m[1].trim());
+    expect(boxAnimators).toEqual(["#app.gliding.kb"]);
+  });
+
+  it("the box vars apply under .kb and stay through .gliding, so the close has one to step", () => {
+    // the four-edge pin has no height of its own to write the full screen into,
+    // so the step is written INTO the numeric box and the vars must outlive .kb
     expect(css).toMatch(
       /#app\.kb,\n#app\.gliding \{\n  top: var\(--shell-top, 0px\);\n  height: var\(--shell-h, 100vh\);\n\}/,
     );

@@ -170,27 +170,46 @@ html, body {
 #app.kb {
   --pad-b: 0.5rem;
 }
-/* the box vars apply while the keyboard is provably up AND through the close
-   glide (.gliding without .kb): the ride home needs a numeric box to animate
-   — the pin's own `auto` height interpolates with nothing. shell.ts drops
-   both class and vars when the settle window ends, landing back on the pin. */
+/* the box vars apply while the keyboard is provably up AND through the close's
+   own window (.gliding without .kb): the close writes the full screen INTO the
+   box rather than dropping to the pin, because the pin has no height of its own
+   to write it into. shell.ts drops both class and vars when the settle window
+   ends, landing back on the pin — and since the step already put the box on the
+   pin's own geometry, that drop moves nothing. */
 #app.kb,
 #app.gliding {
   top: var(--shell-top, 0px);
   height: var(--shell-h, 100vh);
 }
-/* keyboard open/close glide (shell.ts arms .gliding on the .kb edge alone,
-   for GLIDE_SETTLE_MS): box writes inside the window animate, so one reported
-   geometry jump reads as motion; outside it — every mid-typing write — the
-   box stays instant, so an active-growth frame never smears. */
-#app.gliding {
+/* The keyboard OPEN glide, and the one edge that has it (shell.ts arms
+   .gliding on either .kb edge, for GLIDE_SETTLE_MS; boxMotion there holds the
+   whole reason). A rise WebKit publishes as one geometry jump reads as motion,
+   and a mid-typing write outside the window stays instant so an active-growth
+   frame never smears.
+   The CLOSE is .gliding WITHOUT .kb, and it is deliberately left out of this
+   selector: an animated close gave iOS thirteen to fifteen frames in which to
+   keep compositing the thread at its pre-close offset while the box grew under
+   it — a white band opening under the last message to about 386px, then one
+   frame of snap when the overhang correction took it back. So the close's box
+   is written once, at full height, and travels no distance at all. */
+#app.gliding.kb {
   transition: top var(--glide), height var(--glide);
 }
-/* The bottom gap travels with the shell's bottom edge: same clock, same gate.
+/* The bottom gap eases home on the shell's own clock and the shell's own gate.
    applyShell (shell.ts) toggles .kb and .gliding inside ONE style
    recalculation, so a transition written here is armed by the very write that
-   moves the value, and the two can only be started apart by someone splitting
-   that toggle. Left untransitioned, --pad-b delivered the whole home-indicator
+   moves the value, and the readers below can only be started apart from each
+   other by someone splitting that toggle.
+   What they are no longer guaranteed to arrive WITH is the shell's box, and
+   only on the close: the box steps to full height in a single frame there
+   (shell.ts boxMotion) while this gap keeps easing, so the pill settles the
+   last 26px of home-indicator inset after the shell has landed. That is the
+   deliberate half of the trade — the box travelling is what let iOS paint a
+   keyboard-sized band, and 26px of gap cannot — and it stays an EASE because
+   the thread re-pins on every frame of it, so the last message rides the settle
+   down with the bar rather than standing while it moves. The open edge is
+   untouched: there the box and the gap still glide together.
+   Left untransitioned, --pad-b delivered the whole home-indicator
    inset in a single frame while the shell had not begun to move: a close
    recorded frame by frame on device read padding 8.5px then 34px with the
    shell height still 400px, so the pill hopped about 26px up and only then
