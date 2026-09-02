@@ -4,6 +4,8 @@ import "./styles.css";
 import "./push.css";
 import { BLUR_EDGE, decodeBlurhash } from "./blurhash";
 import { createBootGate } from "./bootgate";
+import { bubbleLineWidths, fitBubbles, fitScale } from "./bubblefit";
+import type { FitBubble } from "./bubblefit";
 import { caretCountsAsComposing } from "./caret";
 import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
@@ -154,7 +156,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.77"; // returning to the app reconnects and lands on the new reply
+const APP_VERSION = "0.3.78"; // wrapped bubbles end at their longest line, not at the 75% cap
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -778,6 +780,9 @@ function renderChat(): void {
   restoredOutbox = false; // a fresh shell re-reads the durable outbox
   threadObserver?.disconnect(); // the old shell's thread element is gone
   threadObserver?.observe(thread);
+  threadWidthObserver?.disconnect(); // and so are the bubbles it was refitting
+  threadWidthObserver?.observe(thread);
+  lastThreadWidth = 0; // a fresh shell has measured nothing yet
   watchPhotos(thread); // history photos load off THIS thread box's proximity
   // rebuild any failed sends persisted from a prior session; async and marked
   // .restored so the server replay (kicked off right after) stays above them
@@ -1398,6 +1403,85 @@ function takeShot(file: File): HTMLImageElement {
 
 const threadEl = () => document.getElementById("thread")!;
 
+// --- bubble width fit (bubblefit.ts holds the rule and the arithmetic) --------
+// A wrapped bubble is laid out at the 75% cap and its text is wrapped inside
+// that box, so whatever the last word of each line could not use is left as
+// bare bubble on the right. bubblefit.ts caps each one at its widest RENDERED
+// line instead; this half is the DOM it reads and the frame it runs in.
+//
+// The batch is the point. Every render site queues its bubbles and one frame
+// later the whole queue is fitted in a single pass — a history page's
+// twenty-five events pay two forced layouts between them rather than fifty.
+// The queue drains in the same rendering frame that first PAINTS a newborn
+// bubble (a rAF callback runs before that frame's paint), so nothing is ever
+// seen at the cap and then narrowed.
+//
+// The one caller that cannot wait a frame is the send: the flying morph shell
+// measures the seat synchronously at launch and pins its text to that width,
+// so the seat has to be final before it looks. fitBubblesNow is that caller's
+// door, and it is the same pass.
+
+/** the bubble's horizontal inset, [left, right], in layout pixels */
+function padOf(el: HTMLElement): [number, number] {
+  const cs = getComputedStyle(el);
+  return [parseFloat(cs.paddingLeft) || 0, parseFloat(cs.paddingRight) || 0];
+}
+
+/** the DOM behind one bubble, as bubblefit.ts asks to see it */
+function fitTarget(el: HTMLElement): FitBubble {
+  return {
+    classes: () => Array.from(el.classList),
+    children: () => el.childElementCount,
+    lines: () => {
+      // the rects of a range over the text are the only place the wrap's real
+      // widths are written down. They come one per text FRAGMENT rather than
+      // one per line and in PAINTED pixels, so bubblefit.ts folds them onto
+      // their line boxes and the entrance pop's live scale (.msg.anim) is
+      // divided back out on the way — both from the content box's own left
+      // edge, which is where every line of this text starts
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const box = el.getBoundingClientRect();
+      const k = fitScale(box.width, el.offsetWidth);
+      return bubbleLineWidths(range.getClientRects(), box.left + padOf(el)[0] * k, k);
+    },
+    padding: () => padOf(el),
+    width: () => el.offsetWidth,
+    height: () => el.offsetHeight,
+    cap: (px) => {
+      if (px === null) el.style.removeProperty("max-width");
+      else el.style.setProperty("max-width", `${px}px`);
+    },
+  };
+}
+
+const fitQueue = new Set<HTMLElement>();
+let fitFrame = 0;
+
+function runBubbleFits(): void {
+  const live = Array.from(fitQueue).filter((el) => el.isConnected);
+  fitQueue.clear();
+  if (live.length) fitBubbles(live.map(fitTarget));
+}
+
+/** queue every bubble under `root` for the next frame's one pass */
+function scheduleBubbleFit(root: ParentNode | null): void {
+  if (!root) return;
+  for (const el of root.querySelectorAll<HTMLElement>(".msg")) fitQueue.add(el);
+  if (fitFrame || !fitQueue.size) return;
+  fitFrame = requestAnimationFrame(() => {
+    fitFrame = 0;
+    runBubbleFits();
+  });
+}
+
+/** the send path's door: the seat must be final before the morph measures it */
+function fitBubblesNow(root: ParentNode | null): void {
+  if (!root) return;
+  const els = Array.from(root.querySelectorAll<HTMLElement>(".msg"));
+  if (els.length) fitBubbles(els.map(fitTarget));
+}
+
 // --- scrolling: glide when following the tail, chevron when reading history ----
 
 // stick-to-bottom (the WICG chat pattern): while following the tail, EVERY
@@ -1470,6 +1554,25 @@ function userScrollIntent(): boolean {
 const threadObserver =
   "ResizeObserver" in window
     ? new ResizeObserver(() => settleTail("box", true))
+    : null;
+
+// The same box, watched for the other reason, and kept a separate observer
+// because it answers a different question and must not add a line to the
+// settle's per-frame path above. A rotation (or a desktop resize) is the only
+// thing that invalidates every fitted bubble cap at once, since each one was
+// measured against the width it had. WIDTH-gated: the keyboard's edges and the
+// drawer's ease move this box's HEIGHT on every frame of a beat, and none of
+// those change a wrap. The pass clears each cap before re-measuring, so a
+// refit re-derives from the new width rather than from its own last answer.
+let lastThreadWidth = 0;
+const threadWidthObserver =
+  "ResizeObserver" in window
+    ? new ResizeObserver((entries) => {
+        const w = entries[0]?.target.clientWidth ?? 0;
+        if (w === lastThreadWidth) return;
+        lastThreadWidth = w;
+        scheduleBubbleFit(document.getElementById("thread"));
+      })
     : null;
 
 // Rows the send flight has in the air, each one translated down toward the
@@ -2111,6 +2214,10 @@ function applyEvent(m: ServerMsg): void {
     moveTypingAfter(threadEl(), wrapper);
   }
   decorate();
+  // the newborn bubble ends at its longest line rather than at the 75% cap —
+  // queued, so a history page's whole batch is one pass, and drained in the
+  // frame that first paints it, so it is never seen wide (bubblefit.ts)
+  scheduleBubbleFit(wrapper);
   // pinned-viewport handling for older pages lives in loadOlder; only tail
   // applies drive the scroll rule (the chevron is scroll-pause-only, downbtn.ts)
   if (isTail && wrapper.childElementCount > 0) {
@@ -2154,6 +2261,7 @@ function rerender(seq: number): void {
   renderInto(w, m);
   suppressAnim = prevSuppress;
   decorate();
+  scheduleBubbleFit(w); // fresh elements, so the old caps went with the old DOM
 }
 
 function prUrl(payload: unknown): string | null {
@@ -4636,6 +4744,7 @@ function localBubble(role: string, cls: string, text: string): void {
   const w = localWrapper(role);
   rowEl(w, role, cls, Date.now()).textContent = text;
   decorate();
+  scheduleBubbleFit(w);
   if (role === "user") setFollowTail(true, "local-user");
   if (followTail) scrollToBottom();
 }
@@ -4875,6 +4984,11 @@ async function send(): Promise<void> {
   if (text) rowEl(w, "user", "text", Date.now()).textContent = text;
   suppressAnim = prevSuppress;
   decorate();
+  // the sent bubble ends at its longest line, and it does so BEFORE anything
+  // measures it: the morph below reads the seat synchronously at launch and
+  // pins its flying copy of the text to that width, so a seat that narrowed a
+  // frame later would cut the copy's left edge for the whole flight
+  fitBubblesNow(w);
   setFollowTail(true, "send"); // sending snaps you to the tail
   scrollToBottom(true); // instant pin first; the transforms below play over it
   shift.play(); // preceding rows glide, newborn stamps fade up: no white strip, no pop
@@ -5138,6 +5252,7 @@ async function restoreOutbox(): Promise<void> {
     }
     if (rec.text) rowEl(w, "user", "text", rec.ts).textContent = rec.text;
     markFailed(w, rec.text, files); // red badge + Not Delivered + in-memory entry
+    scheduleBubbleFit(w);
   }
   suppressAnim = prevSuppress;
   decorate();
