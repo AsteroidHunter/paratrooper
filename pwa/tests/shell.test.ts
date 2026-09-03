@@ -6,6 +6,8 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { holdDiagEvents, holdDiagReset } from "../src/hold";
 import {
+  DISMISS_DOWNNESS,
+  DISMISS_TRAVEL_REM,
   EARLY_LIFT_MAX_MS,
   FOCUSING_MAX_MS,
   HEAL_THRESHOLD_PX,
@@ -20,6 +22,7 @@ import {
   closeCorrectionNeeded,
   composerTapVerdict,
   computeShell,
+  createDismissSwipe,
   createPickerLifecycle,
   earlyLiftActive,
   edgeBoxTop,
@@ -36,6 +39,7 @@ import {
   shellBox,
   shoveVerdict,
   storeInset,
+  type SwipeTouch,
   type World,
 } from "../src/shell";
 
@@ -1843,5 +1847,182 @@ describe("wiring: the focusing tap is intercepted on mousedown and nowhere else"
 
   it("the shove clear stays exactly where it was: the take-over is a prevention, not a swap", () => {
     expect(shell).toMatch(/shoveClears \+= 1;\n\s*window\.scrollTo\(0, 0\);/);
+  });
+});
+
+describe("createDismissSwipe — the swipe down the compose bar that puts the keyboard away", () => {
+  // px per rem for these cases. Every threshold the reducer holds is stated in
+  // rem and multiplied by whatever the phone's root font size turns out to be,
+  // so nothing below is a number fitted to one screen.
+  const REM = 16;
+  const PAST = DISMISS_TRAVEL_REM * REM + 1;
+  const SHORT = DISMISS_TRAVEL_REM * REM - 1;
+  const Y = 700; // a finger on the bar, near the bottom of the screen
+  const X = 100;
+
+  function touch(over: Partial<SwipeTouch> = {}): SwipeTouch {
+    return { x: X, y: Y, kbUp: true, inEditor: false, editorScrollTop: 0, rem: REM, ...over };
+  }
+
+  it("a tap is still a tap: no travel, no dismissal, and the box keeps its focus", () => {
+    const s = createDismissSwipe();
+    expect(s.start(touch({ inEditor: true }))).toBe("watch");
+    expect(s.move(X, Y)).toBe("watch"); // a finger that never moved
+    expect(s.move(X + 2, Y + 3)).toBe("watch"); // and one that only wobbled
+    expect(s.move(X, Y + SHORT)).toBe("watch");
+    s.end();
+  });
+
+  it("past the travel and mostly downward: the keyboard goes", () => {
+    const s = createDismissSwipe();
+    s.start(touch());
+    expect(s.move(X, Y + PAST)).toBe("dismiss");
+  });
+
+  it("mostly sideways is not a dismissal, however far down it also went", () => {
+    const s = createDismissSwipe();
+    s.start(touch());
+    // the drop clears the travel on its own; the sideways drift is what refuses it
+    expect(s.move(X + PAST * 2, Y + PAST)).toBe("watch");
+  });
+
+  it("the ratio is the test, not the axis: a diagonal that is mostly down still dismisses", () => {
+    const s = createDismissSwipe();
+    s.start(touch());
+    expect(s.move(X + PAST / DISMISS_DOWNNESS - 1, Y + PAST)).toBe("dismiss");
+  });
+
+  it("upward is never a dismissal", () => {
+    const s = createDismissSwipe();
+    s.start(touch());
+    expect(s.move(X, Y - PAST)).toBe("watch");
+  });
+
+  it("a scrolled draft owns the drag: the swipe never steals the textarea's own scroll", () => {
+    // a long message past the pill's five-line cap scrolls INSIDE the box, and
+    // a downward drag there is that scroll — not an exit
+    const s = createDismissSwipe();
+    expect(s.start(touch({ inEditor: true, editorScrollTop: 40 }))).toBe("ignore");
+    expect(s.move(X, Y + PAST)).toBe("ignore");
+  });
+
+  it("a draft already at its top is a pull PAST the top, and that dismisses", () => {
+    const s = createDismissSwipe();
+    expect(s.start(touch({ inEditor: true, editorScrollTop: 0 }))).toBe("watch");
+    expect(s.move(X, Y + PAST)).toBe("dismiss");
+  });
+
+  it("a finger outside the box never asks the draft's permission", () => {
+    // the bar's padding, the ＋ and the ↑: whatever the textarea's own scroll
+    // reads, it is not this gesture's business
+    const s = createDismissSwipe();
+    expect(s.start(touch({ inEditor: false, editorScrollTop: 400 }))).toBe("watch");
+    expect(s.move(X, Y + PAST)).toBe("dismiss");
+  });
+
+  it("no keyboard of ours is up: there is nothing to put down", () => {
+    const s = createDismissSwipe();
+    expect(s.start(touch({ kbUp: false }))).toBe("ignore");
+    expect(s.move(X, Y + PAST)).toBe("ignore");
+  });
+
+  it("an unreadable rem is not a threshold, and a gesture with no threshold does not arm", () => {
+    const s = createDismissSwipe();
+    expect(s.start(touch({ rem: NaN }))).toBe("ignore");
+    expect(s.move(X, Y + PAST)).toBe("ignore");
+  });
+
+  it("the boundary: exactly the travel counts, one pixel short does not", () => {
+    const s = createDismissSwipe();
+    s.start(touch());
+    expect(s.move(X, Y + DISMISS_TRAVEL_REM * REM - 1)).toBe("watch");
+    expect(s.move(X, Y + DISMISS_TRAVEL_REM * REM)).toBe("dismiss");
+  });
+
+  it("one dismissal per gesture; the rest of the drag, and any move without a start, is nothing", () => {
+    const s = createDismissSwipe();
+    s.start(touch());
+    expect(s.move(X, Y + PAST)).toBe("dismiss");
+    expect(s.move(X, Y + PAST * 2)).toBe("ignore");
+    s.end();
+    expect(s.move(X, Y + PAST * 2)).toBe("ignore");
+  });
+});
+
+describe("wiring: the bar's swipe is a blur and nothing else", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const binder = shell.match(/export function bindComposeDismiss[\s\S]*?\n\}/)?.[0] ?? "";
+  const core = shell.match(/export function createDismissSwipe[\s\S]*?\n\}/)?.[0] ?? "";
+
+  it("every listener is on the compose FORM, and the form is what main.ts hands it", () => {
+    expect(binder, "bindComposeDismiss").not.toBe("");
+    const bound = [...binder.matchAll(/(\w+)\.addEventListener\(\s*"(\w+)"/g)];
+    expect(bound.map((m) => `${m[1]}.${m[2]}`)).toEqual([
+      "form.touchstart",
+      "form.touchmove",
+      "form.touchend",
+      "form.touchcancel",
+    ]);
+    expect(main).toContain('bindComposeDismiss(document.getElementById("compose")!, textEl);');
+    expect(shell.match(/createDismissSwipe\(/g)).toHaveLength(2); // the factory and its one use
+  });
+
+  it("the dismissal IS the blur: the ordinary close is what follows, and nothing new moves", () => {
+    expect(binder).toContain('if (swipe.move(t.clientX, t.clientY) === "dismiss") editor.blur();');
+    expect(binder.match(/\.blur\(\)/g)).toHaveLength(1);
+    // no class, no transition, no scroll write, no clock of its own: the lift
+    // leaves on the keyboard's curve because focusout reconciles, as always
+    expect(binder).not.toMatch(
+      /classList|\.style\.|transition|scrollTo\(|requestAnimationFrame|setTimeout/,
+    );
+  });
+
+  it("nothing is prevented, and all four listeners say so by being passive", () => {
+    // a blur needs no default stopped; preventing would cancel the very inner
+    // scroll the long-draft rule hands back, and would sit in front of iOS's
+    // own caret, loupe and selection handling
+    expect(binder).not.toMatch(/preventDefault|stopPropagation|stopImmediatePropagation/);
+    expect(binder.match(/\{ passive: true \}/g)).toHaveLength(4);
+    expect(binder).not.toContain("passive: false");
+  });
+
+  it("the focusing take-over is untouched: mousedown is still its event, touchmove is ours", () => {
+    expect(shell).toMatch(/document\.addEventListener\("mousedown", composerTapListener, true\);/);
+    expect(shell.match(/composerTapListener/g)).toHaveLength(2); // the function and its one listener
+    expect(binder).not.toContain("mousedown");
+    expect(binder).not.toContain("pointerdown");
+    // and the composer is still focused in exactly one place in the whole shell
+    expect(shell.match(/\.focus\(\{ preventScroll: true \}\)/g)).toHaveLength(1);
+  });
+
+  it("the thresholds are a length and a ratio; the reducer measures nothing itself", () => {
+    expect(shell).toMatch(/^export const DISMISS_TRAVEL_REM = 2\.5;$/m);
+    expect(shell).toMatch(/^export const DISMISS_DOWNNESS = 1\.5;$/m);
+    // the rem comes off the document root, so the phone's own text size sets it
+    expect(shell).toContain(
+      "return parseFloat(getComputedStyle(document.documentElement).fontSize);",
+    );
+    expect(core, "createDismissSwipe").not.toBe("");
+    expect(core).not.toMatch(/\d+px|\b\d{2,}\b/); // no pixel constant anywhere in it
+    expect(core).not.toMatch(/window\.|document\.|performance\./); // and no reading either
+  });
+
+  it("the touch-time reads are taken only where the verdict turns on them", () => {
+    // the same discipline as the take-over's caret measurement: a focusing tap
+    // reads nothing here, so no layout is forced ahead of the keyboard's rise
+    expect(binder).toContain("const focused = document.activeElement === editor;");
+    expect(binder).toContain("editorScrollTop: focused && inEditor ? editor.scrollTop : 0,");
+    expect(binder).toContain("rem: focused ? rootRem() : 0,");
+    expect(binder).not.toContain("getBoundingClientRect");
+  });
+
+  it("the textarea itself gains no listener, and the thread's own drag is left alone", () => {
+    expect(main).not.toMatch(/textEl\.addEventListener\("(?:pointer|touch|mouse)/);
+    expect(main).toMatch(/import \{\n  bindComposeDismiss,\n/);
+    // the peek gesture still owns its own preventDefault on its own element
+    expect(main).toContain('thread.addEventListener(\n    "touchmove",');
+    expect(main).toContain("e.preventDefault(); // we own this gesture");
+    expect(main).toContain("{ passive: false },");
   });
 });

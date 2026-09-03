@@ -616,6 +616,93 @@ export function createPickerLifecycle(
   };
 }
 
+// The compose bar's own way down (Messages' gesture): a swipe down the bar puts
+// the keyboard away, so the ✓ on iOS's own accessory bar stops being the only
+// exit. What a web app may do about a keyboard is exactly one thing — drop the
+// focus that raised it — so this decides WHEN to blur and nothing else. The
+// keyboard then plays its own dismissal, and the ORDINARY close follows: the
+// lift's transition leaves at the focus loss on the keyboard's clock and curve
+// (liftAim above), and the bar rides down with it. Nothing here animates
+// anything, and the finger does not carry the keyboard: a page is given no
+// frames of it.
+//
+// The gesture is REFUSED, never fought, on the one case where the finger
+// already means something else. A draft past the pill's five-line cap scrolls
+// INSIDE the textarea, and a downward drag there is that scroll. So the swipe
+// arms only when the box has nothing left to give a downward drag — its
+// scrollTop is 0 when the finger lands, which makes the drag a pull PAST the
+// top — or when the finger landed outside the box entirely (the bar's padding,
+// the ＋, the ↑). The reading is taken once, at the touch: mid-gesture the
+// scroll and the swipe would be reading each other.
+//
+// Nothing is prevented, on any of the four events, and every listener says so
+// by being passive. A blur needs no default stopped, so preventing would buy
+// nothing; what it would cost is the very inner scroll the rule above hands
+// back, and it would put this in front of iOS's own text handling — the caret,
+// the loupe, the selection drag — for a gesture it has no business owning. A
+// gesture iOS claims for itself arrives here as a touchcancel and ends the
+// watch, which is the right answer.
+//
+// The focusing take-over (focusComposerTap) is independent by construction: it
+// runs on mousedown, which iOS synthesises only for a gesture it has ALREADY
+// ruled a tap, and this one only ever acts on a touchmove. A tap reaches no
+// travel, so a tap is still a tap and still focuses.
+
+// The travel that counts as a swipe, in the sheet's own unit rather than a
+// count fitted to one phone: about two lines of the bar's own text — past any
+// tap's wobble, short enough that the keyboard leaves while the finger is still
+// moving.
+export const DISMISS_TRAVEL_REM = 2.5;
+// And how much of that travel has to be DOWN: the drop must beat the sideways
+// drift by this much. A ratio, so it holds at every screen size, and it is what
+// keeps a drag across the bar from reading as a dismissal.
+export const DISMISS_DOWNNESS = 1.5;
+
+export interface SwipeTouch {
+  x: number;
+  y: number;
+  /**
+   * Whether there is a keyboard of OURS to put down. The app knows its own
+   * keyboard by the focus that raised it and can end it only the same way, so
+   * this is the composer holding focus — true through the rise as well, before
+   * the viewport has proved anything.
+   */
+  kbUp: boolean;
+  /** Whether the finger landed inside the textarea rather than on the bar. */
+  inEditor: boolean;
+  /** Its scroll offset at that moment: a scrolled draft owns the drag. */
+  editorScrollTop: number;
+  /**
+   * px per rem, so the travel above stays a length. A rem that could not be
+   * read is not a threshold, and a gesture with no threshold does not arm.
+   */
+  rem: number;
+}
+
+export type SwipeVerdict = "dismiss" | "watch" | "ignore";
+
+export function createDismissSwipe() {
+  let from: SwipeTouch | null = null;
+  return {
+    start(t: SwipeTouch): SwipeVerdict {
+      from = t.kbUp && t.rem > 0 && !(t.inEditor && t.editorScrollTop > 0) ? t : null;
+      return from ? "watch" : "ignore";
+    },
+    move(x: number, y: number): SwipeVerdict {
+      if (!from) return "ignore";
+      const down = y - from.y;
+      const across = Math.abs(x - from.x);
+      if (down < DISMISS_TRAVEL_REM * from.rem) return "watch";
+      if (down < across * DISMISS_DOWNNESS) return "watch";
+      from = null; // one dismissal per gesture; the rest of the drag is nothing
+      return "dismiss";
+    },
+    end(): void {
+      from = null;
+    },
+  };
+}
+
 // --- DOM layer: one reader, one writer, everything converges ------------------
 // No DOM access at import time — window/document are only touched inside
 // functions, so the pure core above imports cleanly in any environment
@@ -1513,6 +1600,63 @@ export function bindSendShield(button: HTMLElement): void {
   button.addEventListener("pointerdown", (e) => {
     if (preservesFocus(readWorld())) e.preventDefault();
   });
+}
+
+// The gesture's unit, read from the document root: 1rem is the app's own font
+// size, so DISMISS_TRAVEL_REM is a length in the same currency as every length
+// in the sheet and follows the phone's text size instead of a number fitted to
+// one screen. An unreadable value comes back NaN and the gesture declines to
+// arm on it (createDismissSwipe's rem > 0), rather than falling back to a guess.
+function rootRem(): number {
+  return parseFloat(getComputedStyle(document.documentElement).fontSize);
+}
+
+// The swipe that puts the keyboard away, wired to the compose FORM: the pill,
+// the padding either side of it, the ＋ and the ↑ are all one bar and carry one
+// gesture, exactly as Messages does. Bound per renderChat like the picker and
+// the send shield, because the chat's render rebuilds the bar with everything
+// on it. The send tap is untouched — nothing here prevents anything, and a tap
+// never reaches the travel — and so is the focusing take-over, which lives on
+// mousedown (createDismissSwipe's header owns both arguments).
+export function bindComposeDismiss(form: HTMLElement, editor: HTMLTextAreaElement): void {
+  const swipe = createDismissSwipe();
+  const done = (): void => swipe.end();
+  form.addEventListener(
+    "touchstart",
+    (e) => {
+      const t = e.touches[0];
+      if (!t) return;
+      // The two READS are taken only where the gesture can arm at all — a
+      // composer that already holds focus, touched inside its own box — for the
+      // same reason the take-over measures its caret only for the tap whose
+      // verdict turns on it. That path has no keyboard rising and no caret being
+      // placed to be in front of; the focusing tap itself reads nothing here.
+      const focused = document.activeElement === editor;
+      const inEditor = e.target === editor;
+      swipe.start({
+        x: t.clientX,
+        y: t.clientY,
+        kbUp: focused,
+        inEditor,
+        editorScrollTop: focused && inEditor ? editor.scrollTop : 0,
+        rem: focused ? rootRem() : 0,
+      });
+    },
+    { passive: true },
+  );
+  form.addEventListener(
+    "touchmove",
+    (e) => {
+      const t = e.touches[0];
+      if (!t) return;
+      // the blur IS the dismissal: focusout reconciles, the lift leaves for home
+      // on the keyboard's own curve, and iOS animates its keyboard down beside it
+      if (swipe.move(t.clientX, t.clientY) === "dismiss") editor.blur();
+    },
+    { passive: true },
+  );
+  form.addEventListener("touchend", done, { passive: true });
+  form.addEventListener("touchcancel", done, { passive: true });
 }
 
 // the current file input — it is replaced on fresh presents, so callers must

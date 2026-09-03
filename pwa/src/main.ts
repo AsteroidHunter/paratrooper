@@ -91,6 +91,7 @@ import {
 import type { MorphBox } from "./shift";
 import { zoomClipCuts, zoomClipInset, zoomClipRest, zoomFit, zoomReturn } from "./zoom";
 import {
+  bindComposeDismiss,
   bindLift,
   bindPicker,
   bindSendShield,
@@ -167,7 +168,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.97"; // the sign-in box is focused by the app, so iOS never reveals it and nothing has to be taken back
+const APP_VERSION = "0.3.98"; // a swipe down the compose bar puts the keyboard away, so the accessory bar's ✓ is no longer the only way out
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -663,10 +664,15 @@ function renderChat(): void {
   // the ↑ must not steal focus from the textarea (that collapsed the keyboard
   // on every send); the shield mirrors the ＋'s, and shell.ts owns the rule
   bindSendShield(document.getElementById("sendbtn")!);
+  const textEl = document.getElementById("text") as HTMLTextAreaElement;
+  // the swipe down the bar that puts the keyboard away (Messages' gesture;
+  // shell.ts owns the rule, the thresholds and the long-draft refusal). On the
+  // FORM, so the whole bar carries it, and here rather than at module level
+  // because this render rebuilt both elements.
+  bindComposeDismiss(document.getElementById("compose")!, textEl);
   // compose auto-grow lives in autosize() (module level, by the scroll
   // helpers): it resizes the box AND compensates the thread's scroll in the
   // same frame, so send() can route its bar collapse through the same path
-  const textEl = document.getElementById("text") as HTMLTextAreaElement;
   textEl.addEventListener("input", () => {
     autosize(true); // typed: the blink protects this keystroke whether or not it grew a line
     refreshSend();
