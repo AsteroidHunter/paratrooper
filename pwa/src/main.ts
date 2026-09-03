@@ -166,7 +166,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.89"; // the ＋ leaves and the pill widens as one motion on the keyboard's clock, the closing button clipping its own glyph
+const APP_VERSION = "0.3.90"; // a message dissolves into the canvas at the list's two cut edges instead of being sliced flat under the bars
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -534,6 +534,7 @@ function renderChat(): void {
         <main id="thread" class="thread">
           <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
         </main>
+        <div class="edgefade" aria-hidden="true"></div>
         <div id="pending" class="pending"></div>
         <form id="compose" class="compose">
           <button type="button" id="attach" class="attach" title="Attach">＋</button>
