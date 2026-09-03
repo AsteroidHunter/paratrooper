@@ -181,7 +181,12 @@ describe("photo send morph (armShotMorph): the squares leave the strip", () => {
     expect(shot).not.toContain("background");
     expect(shot).not.toContain("accent");
     expect(shot).not.toContain("morph-face");
-    const sheet = css.slice(css.indexOf(".shotflight"), css.indexOf(".buildstamp"));
+    // the flight's own DECLARATIONS, read off the sheet between its first
+    // selector and whatever is written next (the sign-in build stamp used to
+    // sit there; the chevron follows it now — the boundary is a landmark, not
+    // a subject, and the prose either side of it is not a declaration)
+    const bare = css.replace(/\/\*[\s\S]*?\*\//g, "");
+    const sheet = bare.slice(bare.indexOf(".shotflight"), bare.indexOf(".jump"));
     expect(sheet).not.toContain("background");
     expect(sheet).not.toContain("box-shadow");
     expect(css).toContain(".msg.shot { padding: 0; background: none; }");

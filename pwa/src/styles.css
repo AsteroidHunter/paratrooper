@@ -269,6 +269,16 @@ html, body {
   max-width: 22rem;
   padding: 2rem 1.5rem;
   text-align: center;
+  /* The badge's one dial. The same block is a strip on a bar and the TITLE of
+     this page, so the card does not restate the bar's sizes at a bigger value
+     — it declares a factor and the badge's three rules (.avatar height,
+     .title and .ver font-size, and the gap between logo and name) each read
+     the bar's own figure times this. Custom properties inherit, so declaring
+     it here reaches every part of the badge inside the card without a single
+     .gate-scoped copy of a bar rule; every one of those rules falls back to 1,
+     which is the only value the bar ever sees. Change this number and the
+     whole badge grows in proportion — there is no second place to change. */
+  --gate-badge-scale: 1.75;
   /* the clock lives on the card, not under the keyboard classes: a transition
      is started from the AFTER-change style, so one declared only while the
      class is on would already be gone at the close and the card would snap
@@ -279,9 +289,36 @@ html, body {
 #app.kbearly .gate {
   transform: translateY(calc(-1 * clamp(0px, var(--kb-inset) / 2, var(--shell-h, 100vh) / 2 - 50%)));
 }
+/* The one sentence, spaced as a caption for the box rather than a paragraph of
+   its own: a clear break under the badge, then almost nothing before the field,
+   so the ask and the thing you type into read as one pair. Written here, on the
+   card, so no other <p> in the app is touched — and the field carries no top
+   margin of its own, or it would put the pair back apart.
+   It is SET as an ask, too, rather than left at whatever a <p> inherits: the
+   app's body type is the thread's type, and the one line this screen says was
+   reading as leftover prose in it. One step up in size and one in weight is the
+   whole treatment — enough to sit above the field and the button it introduces,
+   and deliberately not enough to reach the badge's name, which is still the
+   card's title. Nothing exotic: the same face the app is set in, at the weight
+   the notification card already gives its own single sentence (.push-copy,
+   push.css). rem, like every other measure on this card, so the step is taken
+   from the app's own text size instead of being a second opinion about it. And
+   no colour of its own — the ask keeps --text at full strength in both schemes,
+   where the version line under the badge is the thing that greys out. */
+.gate p {
+  margin: 2.5rem 0 0.35rem;
+  font-size: 1.1rem;
+  font-weight: 500;
+}
 .gate input {
-  width: 100%;
-  margin: 0.75rem 0;
+  /* a share of the card, not the whole of it: at full width the box ran wall
+     to wall and read as a form field, so it is trimmed at both ends and the
+     card's own text-align: center seats it (it is inline-block) */
+  width: 72%;
+  /* nothing above (the sentence's own gap is the pair's whole spacing), and
+     below it the 0.75rem the box always carried, so Connect sits exactly where
+     it sat */
+  margin: 0 0 0.75rem;
   padding: 0.7rem 0.9rem;
   border: 1px solid var(--hairline);
   border-radius: 10px;
@@ -332,7 +369,10 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  /* rides the badge's dial with everything else it separates, so the block
+     grows as one thing (var(--gate-badge-scale), declared on .gate; the bar
+     never declares it and takes the fallback) */
+  gap: calc(5px * var(--gate-badge-scale, 1));
 }
 .ident {
   display: flex;
@@ -340,9 +380,11 @@ html, body {
   align-items: flex-start;
 }
 /* the top-bar trooper (public/topbar-logo.png, NOT the PWA icon): a cut-out
-   figure, so natural aspect — no circle crop, no frame */
+   figure, so natural aspect — no circle crop, no frame. 48px is the bar's
+   height; the sign-in card multiplies it (see --gate-badge-scale on .gate),
+   and width: auto carries the figure's own proportions along with it. */
 .avatar {
-  height: 48px;
+  height: calc(48px * var(--gate-badge-scale, 1));
   width: auto;
   display: block;
 }
@@ -350,11 +392,14 @@ html, body {
    two homes for ONE declaration, so the card cannot drift off the bar it is
    meant to match. They are scoped at all only because .title and .ver are
    generic names; the rest of the block — .contact, .avatar, .ident above — was
-   never scoped to the bar and reaches both screens on its own. */
+   never scoped to the bar and reaches both screens on its own.
+   Both sizes are the bar's figure times the card's one factor, which is 1
+   everywhere but the card, and both line-heights are unitless so they follow
+   the type instead of holding a bar-sized line under title-sized letters. */
 .bar .title,
 .gate .title {
   font-weight: 600;
-  font-size: 13px;
+  font-size: calc(13px * var(--gate-badge-scale, 1));
   line-height: 1.3;
 }
 /* faint version line under the name */
@@ -362,7 +407,7 @@ html, body {
 .gate .ver {
   color: var(--muted);
   font-weight: 400;
-  font-size: 9px;
+  font-size: calc(9px * var(--gate-badge-scale, 1));
   line-height: 1.2;
 }
 
@@ -1089,8 +1134,6 @@ html, body {
   max-width: none;
   max-height: none;
 }
-
-.buildstamp { color: var(--muted); font-size: 11px; margin-top: 1.5rem; }
 
 /* jump-to-latest chevron: seated at the bar's RIGHT end, floating just above
    it — same liquid-glass material as the rest, lifted clear of the bar. It
