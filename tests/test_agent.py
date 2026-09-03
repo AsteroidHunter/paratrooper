@@ -24,6 +24,7 @@ from paratrooper.agent.config import (
     ConfigError,
     load_config,
     require_env,
+    validate_branch_prefix,
 )
 from paratrooper.agent.hooks import git_violation, make_main_guard_hook
 from paratrooper.agent.siterepo import SiteRepo
@@ -212,6 +213,99 @@ def test_branch_cap_skipped_without_repo_root():
     assert _call_hook(hook, "git checkout -B paratrooper/anything") == {}
 
 
+# --- the configured branch word ([site] branch_prefix) ------------------------
+
+def test_git_violation_fences_the_configured_prefix():
+    """The namespace the guard fences is the site's configured word. Configure
+    'blimp' and blimp/* becomes the allowlist — the old paratrooper/* names are
+    then as forbidden as any other stranger."""
+    for command in (
+        "git checkout -B blimp/twen-new-photo",
+        "git switch -c blimp/x",
+        "git push -u origin blimp/x",
+        "git push origin HEAD:refs/heads/blimp/x",
+        "git branch -D blimp/stale",
+        "git push origin --delete blimp/stale",
+        "git branch -m blimp/old blimp/new",
+    ):
+        assert git_violation(command, "main", "blimp") is None, command
+    for command in (
+        "git checkout -B paratrooper/x",
+        "git switch -c paratrooper/x",
+        "git push -u origin paratrooper/x",
+        "git branch -D paratrooper/x",
+        "git checkout paratrooper/x",
+    ):
+        assert git_violation(command, "main", "blimp") is not None, command
+    # the default-branch and merge rules don't move with the prefix
+    assert git_violation("git push origin main", "main", "blimp") is not None
+    assert git_violation("git merge blimp/x", "main", "blimp") is not None
+    assert git_violation("git checkout -B main origin/main", "main", "blimp") is None
+
+
+def test_violation_messages_name_the_configured_prefix():
+    """The deny reason is the only place the agent learns the namespace from, so
+    it must quote the configured word and never the built-in default."""
+    for command in (
+        "git checkout -B feature/x",
+        "git checkout feature/x",
+        "git push origin feature/x",
+        "git push origin",
+        "git branch -D feature/x",
+        "git branch feature/x",
+    ):
+        reason = git_violation(command, "main", "blimp")
+        assert reason is not None, command
+        assert "blimp/" in reason, reason
+        assert "paratrooper" not in reason, reason
+
+
+def test_configured_prefix_takes_either_spelling():
+    """The config holds the bare word, the hook's own constant carries the
+    slash; both must name the same namespace."""
+    for spelling in ("blimp", "blimp/"):
+        assert git_violation("git checkout -B blimp/x", "main", spelling) is None
+        assert git_violation("git checkout -B blimpx", "main", spelling) is not None
+
+
+def test_omitted_prefix_is_exactly_the_default():
+    """Existing callers pass no prefix: that path must stay bit-for-bit what it
+    was, verdict and wording alike."""
+    for command in (
+        "git checkout -B paratrooper/x", "git checkout -B feature/x",
+        "git push -u origin paratrooper/x", "git push origin main",
+        "git branch -D paratrooper/x", "git branch -D feature/x",
+        "git checkout -B main origin/main", "git status",
+    ):
+        assert git_violation(command, "main") == git_violation(command, "main", "paratrooper")
+
+
+def test_hook_with_configured_prefix_denies_the_default_namespace():
+    hook = make_main_guard_hook("main", branch_prefix="blimp")
+    assert _call_hook(hook, "git checkout -B blimp/x") == {}
+    deny = _call_hook(hook, "git checkout -B paratrooper/x")
+    assert deny["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "blimp/" in deny["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_branch_cap_counts_the_configured_prefix(tmp_path):
+    """The cap counts the namespace actually in use: with 'blimp' configured,
+    paratrooper/* branches sitting in the same checkout don't fill it, and seven
+    blimp/* ones do."""
+    root = _seed_site_checkout(tmp_path, 7)  # seven paratrooper/* branches
+    hook = make_main_guard_hook("main", repo_root=root, branch_prefix="blimp")
+    assert _call_hook(hook, "git checkout -B blimp/new") == {}  # none of ITS branches exist
+    for i in range(7):
+        subprocess.run(
+            ["git", "branch", f"blimp/b{i}"], cwd=root, check=True, capture_output=True
+        )
+    deny = _call_hook(hook, "git checkout -B blimp/new")
+    reason = deny["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "7 local blimp/* branches" in reason
+    assert "reuse" in reason and "clean up" in reason
+    assert _call_hook(hook, "git checkout -B blimp/b0") == {}  # existing: never caps
+
+
 def test_prompt_first_look_sweeps_interrupted_leftovers():
     """WORKFLOW step 1c: an interrupted earlier run (a mid-run cancel kills the
     session wherever it stood) can strand a dirty tree or a pushed-but-PR-less
@@ -225,6 +319,38 @@ def test_prompt_first_look_sweeps_interrupted_leftovers():
     assert "`git branch -D <branch>`" in SYSTEM_PROMPT  # stray local branch
     assert "`git push origin --delete <branch>`" in SYSTEM_PROMPT  # pushed, no PR
     assert "never clean up" in SYSTEM_PROMPT  # the open PR's branch is spared
+
+
+def test_system_prompt_branch_instructions_follow_the_configured_prefix():
+    """The prompt is the only thing telling the agent what to name its branch,
+    so it has to agree with the guard: configure 'blimp' and every branch
+    instruction says blimp/, with no paratrooper/ name left to trip the hook."""
+    from paratrooper.agent.prompt import SYSTEM_PROMPT, build_system_prompt
+
+    rendered = build_system_prompt(branch_prefix="blimp")
+    assert "blimp/<short-slug>" in rendered
+    assert "blimp/twen-new-photo" in rendered  # the worked example
+    assert "`blimp/*` branch" in rendered  # step 1c's stray-branch sweep
+    assert "paratrooper/" not in rendered
+    assert build_system_prompt(branch_prefix="blimp/") == rendered  # either spelling
+    # and nothing BUT the branch instructions moved
+    assert rendered == SYSTEM_PROMPT.replace("paratrooper/", "blimp/")
+
+
+def test_default_system_prompt_is_unchanged():
+    """Default config = the prompt exactly as it read before the prefix became
+    configurable: the same three branch instructions, byte for byte."""
+    from paratrooper.agent.prompt import SYSTEM_PROMPT, build_system_prompt
+
+    assert build_system_prompt() == SYSTEM_PROMPT
+    assert build_system_prompt(branch_prefix="paratrooper") == SYSTEM_PROMPT
+    assert build_system_prompt("digest") == (
+        SYSTEM_PROMPT + "\n\n--- SESSION CONTEXT ---\ndigest"
+    )
+    assert "paratrooper/<short-slug>` (e.g. paratrooper/twen-new-photo)" in SYSTEM_PROMPT
+    assert "`paratrooper/*` branch that is NOT the open PR's branch" in SYSTEM_PROMPT
+    assert SYSTEM_PROMPT.count("paratrooper/") == 3
+    assert "{prefix}" not in SYSTEM_PROMPT  # the slot is always filled
 
 
 # --- auth (3.2): manual mode, no fallback ------------------------------------
@@ -289,6 +415,36 @@ def test_load_config_resolves_paths(tmp_path):
     assert cfg.inbox == (tmp_path / "inbox").resolve()
     assert cfg.default_branch == "main"
     assert cfg.branch_prefix == "paratrooper"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "paratrooper/", "para/trooper", "/", "para trooper", "para\ttrooper", " para", 7],
+)
+def test_load_config_rejects_an_unusable_branch_prefix(tmp_path, bad):
+    """That one word feeds the guard, the prompt and the Publish PR lookup, so a
+    word that can't name a branch is a loud config error at load — never a quiet
+    fall back to the default that would leave the three disagreeing."""
+    cfg_file = tmp_path / "paths.toml"
+    cfg_file.write_text(
+        '[paths]\nsite_root = "site"\ninbox = "inbox"\n'
+        f"[site]\nbranch_prefix = {json.dumps(bad)}\n"
+    )
+    with pytest.raises(ConfigError, match="branch_prefix"):
+        load_config(cfg_file)
+
+
+def test_validate_branch_prefix_passes_ordinary_words():
+    for good in ("paratrooper", "blimp", "bot-2", "a"):
+        assert validate_branch_prefix(good) == good
+
+
+def test_load_config_keeps_a_configured_branch_prefix(tmp_path):
+    cfg_file = tmp_path / "paths.toml"
+    cfg_file.write_text(
+        '[paths]\nsite_root = "site"\ninbox = "inbox"\n[site]\nbranch_prefix = "blimp"\n'
+    )
+    assert load_config(cfg_file).branch_prefix == "blimp"  # stored bare, as publish reads it
 
 
 def test_load_config_missing_file():
@@ -810,6 +966,64 @@ def test_run_job_without_github_token_skips_auth_env(tmp_path, monkeypatch):
     env = captured["options"].env
     for key in ("GH_TOKEN", "GIT_ASKPASS", "PARATROOPER_GIT_ASKPASS_TOKEN", "GIT_TERMINAL_PROMPT"):
         assert key not in env
+
+
+def test_run_job_hands_the_branch_word_to_both_the_prompt_and_the_guard(tmp_path, monkeypatch):
+    """The configured word must reach BOTH ends of a session: the prompt that
+    tells the agent what to name its branch, and the hook that decides whether
+    that branch is allowed. Wired to only one of them, they disagree and every
+    branch the agent makes gets denied."""
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {}
+
+    def fake_build_tool_server(ctx):
+        return {"name": "paratrooper"}, []
+
+    async def fake_query(*, prompt, options):
+        captured["options"] = options
+        if False:
+            yield
+
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
+    monkeypatch.setattr(worker_mod, "query", fake_query)
+
+    cfg = _tool_cfg(tmp_path)
+    cfg.branch_prefix = "blimp"
+    job = worker_mod.Job(job_id="j5", thread_id="t1", text="add the pin")
+    assert asyncio.run(worker_mod.run_job(job, config=cfg)).status == "done"
+
+    options = captured["options"]
+    assert "blimp/<short-slug>" in options.system_prompt
+    assert "paratrooper/" not in options.system_prompt
+    guard = options.hooks["PreToolUse"][0].hooks[0]
+    assert _call_hook(guard, "git checkout -B blimp/x") == {}
+    denied = _call_hook(guard, "git checkout -B paratrooper/x")
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_run_job_rejects_an_unusable_branch_word_before_starting(tmp_path, monkeypatch):
+    """A word that can't name a branch stops the job at the door, not halfway
+    through a session with a half-branched checkout."""
+    import paratrooper.agent.worker as worker_mod
+
+    ran: list[bool] = []
+
+    async def fake_query(*, prompt, options):
+        ran.append(True)
+        if False:
+            yield
+
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "query", fake_query)
+
+    cfg = _tool_cfg(tmp_path)
+    cfg.branch_prefix = "para/trooper"
+    job = worker_mod.Job(job_id="j6", thread_id="t1", text="add the pin")
+    with pytest.raises(ConfigError, match="branch_prefix"):
+        asyncio.run(worker_mod.run_job(job, config=cfg))
+    assert not ran
 
 
 def test_is_text_delta_classifier():

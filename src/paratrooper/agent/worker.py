@@ -28,7 +28,14 @@ from claude_agent_sdk import (
 )
 
 from .auth import configure_auth
-from .config import Config, ConfigError, github_token, load_config, spotify_credentials
+from .config import (
+    Config,
+    ConfigError,
+    github_token,
+    load_config,
+    spotify_credentials,
+    validate_branch_prefix,
+)
 from .hooks import make_main_guard_hook
 from .memory import Changelog, format_digest
 from .prompt import build_system_prompt
@@ -104,6 +111,10 @@ async def run_job(
     design it should crash the job visibly."""
     configure_auth(auth_mode)  # subscription|api, hard-error if misconfigured
     config = config or load_config()
+    # one word fences the guard, names the branches the prompt asks for, and
+    # filters the Publish PR lookup: check it here, before any git or agent work,
+    # so a bad one is a loud failure and never a quiet fall back to the default
+    validate_branch_prefix(config.branch_prefix)
 
     async def emit(kind: str, payload: object) -> None:
         await _emit(on_event, {"job_id": job.job_id, "kind": kind, "payload": payload})
@@ -147,13 +158,19 @@ async def run_job(
         emit_update=emit_update,
     )
     server, tool_names = build_tool_server(ctx)
-    # the guard fences the agent onto paratrooper/* branches; the site checkout
-    # root lets it also enforce the local paratrooper-branch cap by counting there
-    guard = make_main_guard_hook(config.default_branch, repo_root=config.site_root)
+    # the guard fences the agent onto the configured <prefix>/* branches; the site
+    # checkout root lets it also enforce the local agent-branch cap by counting there
+    guard = make_main_guard_hook(
+        config.default_branch,
+        repo_root=config.site_root,
+        branch_prefix=config.branch_prefix,
+    )
 
     options = ClaudeAgentOptions(
         model=model,
-        system_prompt=build_system_prompt(format_digest(changelog.hot_digest())),
+        system_prompt=build_system_prompt(
+            format_digest(changelog.hot_digest()), branch_prefix=config.branch_prefix
+        ),
         cwd=str(config.site_root),
         # extra vars for the CLI subprocess (and so the agent's Bash shells);
         # merged over the inherited worker env by the SDK transport

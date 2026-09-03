@@ -39,6 +39,34 @@ class ConfigError(RuntimeError):
     """Raised on a missing/invalid config or a missing required secret. Loud by design."""
 
 
+def validate_branch_prefix(prefix: str) -> str:
+    """Return ``prefix`` unchanged once it can actually name a branch namespace.
+
+    That one word is the single source of truth for the agent's branches: it
+    fences the PreToolUse guard, names the branches the system prompt tells the
+    agent to create, and filters the Publish fallback's PR lookup. A word that
+    cannot do all three (empty/not a string, carrying its own slash, or split by
+    whitespace) is a misconfiguration, so it raises rather than quietly falling
+    back to the default and leaving the three in disagreement.
+    """
+    if not isinstance(prefix, str) or not prefix:
+        raise ConfigError(
+            f"[site].branch_prefix must be a non-empty string (got {prefix!r}): "
+            'name the branch namespace, e.g. "paratrooper"'
+        )
+    if "/" in prefix:
+        raise ConfigError(
+            f"[site].branch_prefix {prefix!r} must not contain '/': write the bare "
+            'word (e.g. "paratrooper"), the separator before the branch name is added'
+        )
+    if any(ch.isspace() for ch in prefix):
+        raise ConfigError(
+            f"[site].branch_prefix {prefix!r} must not contain whitespace: "
+            "a branch namespace is one word"
+        )
+    return prefix
+
+
 @dataclass
 class Config:
     """Resolved worker configuration. Folders are absolute paths.
@@ -128,7 +156,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         changelog=changelog,
         remote=site.get("remote") or os.environ.get("PARATROOPER_REMOTE"),
         default_branch=site.get("default_branch", DEFAULT_BRANCH),
-        branch_prefix=site.get("branch_prefix", DEFAULT_BRANCH_PREFIX),
+        branch_prefix=validate_branch_prefix(site.get("branch_prefix", DEFAULT_BRANCH_PREFIX)),
         git_name=os.environ.get("PARATROOPER_GIT_NAME") or site.get("git_name", DEFAULT_GIT_NAME),
         git_email=os.environ.get("PARATROOPER_GIT_EMAIL") or site.get("git_email", DEFAULT_GIT_EMAIL),
     )

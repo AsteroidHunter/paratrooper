@@ -1,4 +1,10 @@
-"""PreToolUse hook: fence the agent's git/gh onto paratrooper/* branches.
+"""PreToolUse hook: fence the agent's git/gh onto the agent's branch namespace.
+
+The namespace is one configured word — ``[site] branch_prefix``, ``paratrooper``
+by default — threaded in from the worker. Every check, message and branch count
+below reads that one value (:data:`BRANCH_PREFIX` is only the fallback for
+callers that pass none), so the ``paratrooper/*`` in the prose below is simply
+what the default renders.
 
 Two layers of enforcement on every ``Bash`` command, and a deny wins even under
 ``bypassPermissions`` (hooks evaluate before permission mode):
@@ -43,7 +49,9 @@ from typing import Any
 # split a shell line into sequential sub-commands
 _SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n|&)\s*")
 
-# the one namespace the agent owns; everything branch-shaped must live under it
+# the default namespace the agent owns; everything branch-shaped must live under
+# it. The worker passes the site's configured word instead (see the module
+# docstring); this constant is what callers that configure nothing still get.
 BRANCH_PREFIX = "paratrooper/"
 # hygiene cap: at most this many local paratrooper/* branches in the checkout
 MAX_AGENT_BRANCHES = 7
@@ -65,9 +73,16 @@ _BRANCH_LIST_FLAGS = {
 }
 
 
-def _is_agent_branch(name: str) -> bool:
-    """True for a non-empty branch name under the paratrooper/* namespace."""
-    return name.startswith(BRANCH_PREFIX) and len(name) > len(BRANCH_PREFIX)
+def normalize_prefix(branch_prefix: str) -> str:
+    """The prefix in matching form: exactly one trailing ``/``. The site config
+    holds the bare word (``paratrooper``) while every check here wants
+    ``paratrooper/``, so the entry points accept either spelling."""
+    return branch_prefix if branch_prefix.endswith("/") else f"{branch_prefix}/"
+
+
+def _is_agent_branch(name: str, branch_prefix: str = BRANCH_PREFIX) -> bool:
+    """True for a non-empty branch name under the agent's <prefix>/* namespace."""
+    return name.startswith(branch_prefix) and len(name) > len(branch_prefix)
 
 
 def _regex_backstop(command: str, default_branch: str) -> str | None:
@@ -111,7 +126,9 @@ def _split_flags(rest: list[str]) -> tuple[set[str], list[str]]:
     return flags, positionals
 
 
-def _check_checkout_switch(sub: str, rest: list[str], default_branch: str) -> str | None:
+def _check_checkout_switch(
+    sub: str, rest: list[str], default_branch: str, branch_prefix: str = BRANCH_PREFIX
+) -> str | None:
     """Allowlist for ``git checkout`` / ``git switch``."""
     if "--" in rest:
         return None  # pathspec/file checkout (e.g. `git checkout -- .`), not a branch op
@@ -119,7 +136,7 @@ def _check_checkout_switch(sub: str, rest: list[str], default_branch: str) -> st
     for i, tok in enumerate(rest):
         if tok in _CREATION_FLAGS[sub]:
             name = rest[i + 1] if i + 1 < len(rest) else ""
-            if _is_agent_branch(name):
+            if _is_agent_branch(name, branch_prefix):
                 return None  # (the cap, if configured, is checked separately)
             if sub == "checkout" and rest == ["-B", default_branch, f"origin/{default_branch}"]:
                 return None  # THE carve-out: reset local default from origin, exact shape only
@@ -130,7 +147,7 @@ def _check_checkout_switch(sub: str, rest: list[str], default_branch: str) -> st
                 )
             return (
                 f"creating branch '{name}' is forbidden: the agent may only create "
-                f"{BRANCH_PREFIX}* branches"
+                f"{branch_prefix}* branches"
             )
     # plain switch: the first positional is the target branch
     for tok in rest:
@@ -141,18 +158,18 @@ def _check_checkout_switch(sub: str, rest: list[str], default_branch: str) -> st
         return None  # no target at all (e.g. bare `git checkout`)
     if target == "." or target.startswith(("./", "../", "/")):
         return None  # a path, not a branch: file/pathspec checkout stays allowed
-    if _is_agent_branch(target):
+    if _is_agent_branch(target, branch_prefix):
         return None
     return (
         f"checking out '{target}' is forbidden: the agent works only on "
-        f"{BRANCH_PREFIX}* branches (to refresh the local default branch use "
+        f"{branch_prefix}* branches (to refresh the local default branch use "
         f"'git checkout -B {default_branch} origin/{default_branch}')"
     )
 
 
-def _check_push(rest: list[str]) -> str | None:
+def _check_push(rest: list[str], branch_prefix: str = BRANCH_PREFIX) -> str | None:
     """Allowlist for ``git push``: force/--all rules as before, then every
-    refspec destination (deletions included) must be a paratrooper/* branch."""
+    refspec destination (deletions included) must be a <prefix>/* branch."""
     if "--force" in rest or "-f" in rest or any(t.startswith("+") for t in rest):
         return "force-push is forbidden"
     if "--all" in rest or "--mirror" in rest or "--branches" in rest:
@@ -162,42 +179,44 @@ def _check_push(rest: list[str]) -> str | None:
     if not refspecs:
         return (
             "git push without an explicit refspec is forbidden: name the branch, "
-            f"e.g. git push -u origin {BRANCH_PREFIX}<slug>"
+            f"e.g. git push -u origin {branch_prefix}<slug>"
         )
     for tok in refspecs:
         dest = _push_destination(tok)
-        if not _is_agent_branch(dest):
+        if not _is_agent_branch(dest, branch_prefix):
             return (
-                f"pushing to '{dest}' is forbidden: only {BRANCH_PREFIX}* branches "
+                f"pushing to '{dest}' is forbidden: only {branch_prefix}* branches "
                 "may be pushed or deleted on the remote"
             )
     return None
 
 
-def _check_branch(rest: list[str]) -> str | None:
+def _check_branch(rest: list[str], branch_prefix: str = BRANCH_PREFIX) -> str | None:
     """Allowlist for ``git branch``: delete/rename/copy may name only
-    paratrooper/* branches (both sides of a rename/copy), and bare creation
+    <prefix>/* branches (both sides of a rename/copy), and bare creation
     (`git branch <name>`) must target the prefix. Listing/query forms pass."""
     flags, positionals = _split_flags(rest)
     if flags & _BRANCH_MODIFY_FLAGS:
         for name in positionals:
-            if not _is_agent_branch(name):
+            if not _is_agent_branch(name, branch_prefix):
                 return (
-                    f"git branch on '{name}' is forbidden: only {BRANCH_PREFIX}* "
+                    f"git branch on '{name}' is forbidden: only {branch_prefix}* "
                     "branches may be created, renamed, copied, or deleted"
                 )
         return None
     if positionals and not (flags & _BRANCH_LIST_FLAGS):
         name = positionals[0]  # `git branch <name> [<start>]`
-        if not _is_agent_branch(name):
+        if not _is_agent_branch(name, branch_prefix):
             return (
                 f"creating branch '{name}' is forbidden: the agent may only create "
-                f"{BRANCH_PREFIX}* branches"
+                f"{branch_prefix}* branches"
             )
     return None
 
 
-def _check_subcommand(tokens: list[str], default_branch: str) -> str | None:
+def _check_subcommand(
+    tokens: list[str], default_branch: str, branch_prefix: str = BRANCH_PREFIX
+) -> str | None:
     if not tokens:
         return None
     head = tokens[0]
@@ -214,11 +233,11 @@ def _check_subcommand(tokens: list[str], default_branch: str) -> str | None:
     if sub == "merge":
         return "git merge is forbidden — the agent never merges"
     if sub == "push":
-        return _check_push(rest)
+        return _check_push(rest, branch_prefix)
     if sub in ("checkout", "switch"):
-        return _check_checkout_switch(sub, rest, default_branch)
+        return _check_checkout_switch(sub, rest, default_branch, branch_prefix)
     if sub == "branch":
-        return _check_branch(rest)
+        return _check_branch(rest, branch_prefix)
     return None
 
 
@@ -234,14 +253,18 @@ def _subcommands(command: str) -> Iterator[list[str]]:
             yield piece.split()  # unbalanced quotes: fall back to naive split
 
 
-def git_violation(command: str, default_branch: str = "main") -> str | None:
+def git_violation(
+    command: str, default_branch: str = "main", branch_prefix: str = BRANCH_PREFIX
+) -> str | None:
     """Return a denial reason if ``command`` (a Bash command string) steps
-    outside the paratrooper/* branch allowlist, touches the default branch, or
-    merges, else ``None``. Pure function — the unit of the hook, tested
+    outside the <prefix>/* branch allowlist, touches the default branch, or
+    merges, else ``None``. ``branch_prefix`` takes the bare configured word or
+    the slash-terminated form. Pure function — the unit of the hook, tested
     directly. The branch-count cap is deliberately NOT here (see
     :func:`cap_violation`)."""
+    branch_prefix = normalize_prefix(branch_prefix)
     for tokens in _subcommands(command):
-        reason = _check_subcommand(tokens, default_branch)
+        reason = _check_subcommand(tokens, default_branch, branch_prefix)
         if reason:
             return reason
     return _regex_backstop(command, default_branch)
@@ -275,15 +298,17 @@ def branch_creation_targets(command: str) -> list[str]:
     return targets
 
 
-def _local_agent_branches(repo_root: str | Path) -> set[str] | None:
-    """The checkout's local paratrooper/* branch names, via one quick
+def _local_agent_branches(
+    repo_root: str | Path, branch_prefix: str = BRANCH_PREFIX
+) -> set[str] | None:
+    """The checkout's local <prefix>/* branch names, via one quick
     ``git for-each-ref``. Returns ``None`` when git can't answer (no repo,
     git missing): the cap is a hygiene limit, not a security boundary, so it
     fails open rather than blocking recovery in a broken checkout."""
     try:
         proc = subprocess.run(
             ["git", "for-each-ref", "--format=%(refname:short)",
-             f"refs/heads/{BRANCH_PREFIX.rstrip('/')}"],
+             f"refs/heads/{branch_prefix.rstrip('/')}"],
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -294,19 +319,22 @@ def _local_agent_branches(repo_root: str | Path) -> set[str] | None:
         return None
     return {
         line.strip() for line in proc.stdout.splitlines()
-        if line.strip().startswith(BRANCH_PREFIX)
+        if line.strip().startswith(branch_prefix)
     }
 
 
-def cap_violation(command: str, repo_root: str | Path) -> str | None:
+def cap_violation(
+    command: str, repo_root: str | Path, branch_prefix: str = BRANCH_PREFIX
+) -> str | None:
     """The one effectful check: deny a command that would create a NEW
-    paratrooper/* branch while the checkout already holds
+    <prefix>/* branch while the checkout already holds
     :data:`MAX_AGENT_BRANCHES` of them. Re-creating or switching to an
-    existing paratrooper branch never triggers the cap."""
-    targets = [t for t in branch_creation_targets(command) if _is_agent_branch(t)]
+    existing agent branch never triggers the cap."""
+    branch_prefix = normalize_prefix(branch_prefix)
+    targets = [t for t in branch_creation_targets(command) if _is_agent_branch(t, branch_prefix)]
     if not targets:
         return None
-    existing = _local_agent_branches(repo_root)
+    existing = _local_agent_branches(repo_root, branch_prefix)
     if existing is None:
         return None
     if len(existing) < MAX_AGENT_BRANCHES:
@@ -314,30 +342,35 @@ def cap_violation(command: str, repo_root: str | Path) -> str | None:
     if all(t in existing for t in targets):
         return None  # only touching branches that already exist
     return (
-        f"the checkout already has {len(existing)} local {BRANCH_PREFIX}* branches "
-        f"(the limit is {MAX_AGENT_BRANCHES}): reuse an existing paratrooper branch for "
-        "this work, or clean up stale ones first (git branch -D <branch>, then "
-        "git push origin --delete <branch> if it was pushed) before creating a new one"
+        f"the checkout already has {len(existing)} local {branch_prefix}* branches "
+        f"(the limit is {MAX_AGENT_BRANCHES}): reuse an existing "
+        f"{branch_prefix.rstrip('/')} branch for this work, or clean up stale ones "
+        "first (git branch -D <branch>, then git push origin --delete <branch> if "
+        "it was pushed) before creating a new one"
     )
 
 
 def make_main_guard_hook(
     default_branch: str = "main",
     repo_root: str | Path | None = None,
+    branch_prefix: str = BRANCH_PREFIX,
 ) -> Callable[[dict[str, Any], str | None, Any], Awaitable[dict[str, Any]]]:
-    """Build the PreToolUse hook (closes over the default branch name and,
-    optionally, the site checkout root). With a ``repo_root`` the hook also
-    enforces the paratrooper/* branch cap by counting local branches there;
-    without one the cap is skipped and the hook stays fully pure. Register
-    via ``HookMatcher(matcher="Bash", hooks=[hook])``."""
+    """Build the PreToolUse hook (closes over the default branch name, the
+    agent's branch prefix and, optionally, the site checkout root). With a
+    ``repo_root`` the hook also enforces the <prefix>/* branch cap by counting
+    local branches there; without one the cap is skipped and the hook stays
+    fully pure. ``branch_prefix`` takes the site config's bare word
+    (``paratrooper``) or the slash-terminated form. Register via
+    ``HookMatcher(matcher="Bash", hooks=[hook])``."""
+    branch_prefix = normalize_prefix(branch_prefix)
 
     async def hook(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict:
         if input_data.get("tool_name") != "Bash":
             return {}
         command = (input_data.get("tool_input") or {}).get("command", "")
-        reason = git_violation(command, default_branch)
+        reason = git_violation(command, default_branch, branch_prefix)
         if reason is None and repo_root is not None:
-            reason = cap_violation(command, repo_root)
+            reason = cap_violation(command, repo_root, branch_prefix)
         if reason is None:
             return {}
         return {

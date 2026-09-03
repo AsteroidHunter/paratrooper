@@ -2,12 +2,21 @@
 
 A fully custom persona (string form, not Claude Code's preset). The worker
 prepends the hot memory digest (recent changelog entries) so the agent starts
-each request aware of recent history.
+each request aware of recent history, and fills in the site's configured branch
+prefix so the branch instructions match what the PreToolUse guard allows.
 """
 
 from __future__ import annotations
 
-SYSTEM_PROMPT = """\
+from .config import DEFAULT_BRANCH_PREFIX
+
+# The agent's branch namespace is one configured word ([site] branch_prefix), so
+# the branch instructions below carry this slot instead of a literal. It is
+# filled by plain replacement, never str.format: the prompt's own braces
+# ({x,y}, {w,h}) are literal schema text.
+_PREFIX_SLOT = "{prefix}"
+
+_SYSTEM_PROMPT_TEMPLATE = """\
 You are Paratrooper, the agent that maintains Akash's polaroid pinboard at \
 theonetrueakash.com. Each "pin" is a folder holding its `index.json` plus its \
 asset(s) (`preview.webp`, optional `opened.webp`; text pins have no asset). You \
@@ -55,11 +64,11 @@ waiting — continue on ITS branch (`git fetch origin` then \
 `git checkout -B <branch> origin/<branch>`) and build on what's there. No open \
 PR -> fork fresh from the latest default branch: `git fetch origin main`, \
 `git checkout -B main origin/main`, then `git checkout -B \
-paratrooper/<short-slug>` (e.g. paratrooper/twen-new-photo).
+{prefix}/<short-slug>` (e.g. {prefix}/twen-new-photo).
 1c. Part of that same first look: leftovers from an interrupted earlier \
 attempt. A dirty tree at the start of a job is debris, not work in progress \
 -> discard it (`git checkout -- .`, then `git clean -fd`). A stray local \
-`paratrooper/*` branch that is NOT the open PR's branch -> delete it \
+`{prefix}/*` branch that is NOT the open PR's branch -> delete it \
 (`git branch -D <branch>`); if it was pushed but has no open PR, delete it on \
 the remote too (`git push origin --delete <branch>`). The open PR's branch \
 you're continuing is the one thing you never clean up.
@@ -146,9 +155,24 @@ screenshot to Akash automatically.\
 """
 
 
-def build_system_prompt(digest_text: str | None = None) -> str:
+def render_system_prompt(branch_prefix: str = DEFAULT_BRANCH_PREFIX) -> str:
+    """The persona with the agent's branch namespace filled in. ``branch_prefix``
+    is the bare configured word; a trailing slash is tolerated so the hook's
+    spelling (``paratrooper/``) renders identically."""
+    return _SYSTEM_PROMPT_TEMPLATE.replace(_PREFIX_SLOT, branch_prefix.rstrip("/"))
+
+
+# the default rendering, kept importable for callers and tests that don't care
+# about the prefix (byte-identical to the prompt before it was made configurable)
+SYSTEM_PROMPT = render_system_prompt()
+
+
+def build_system_prompt(
+    digest_text: str | None = None, branch_prefix: str = DEFAULT_BRANCH_PREFIX
+) -> str:
     """Full system prompt, optionally with the recent-updates digest appended as
     session context."""
+    prompt = render_system_prompt(branch_prefix)
     if not digest_text:
-        return SYSTEM_PROMPT
-    return f"{SYSTEM_PROMPT}\n\n--- SESSION CONTEXT ---\n{digest_text}"
+        return prompt
+    return f"{prompt}\n\n--- SESSION CONTEXT ---\n{digest_text}"
