@@ -1089,9 +1089,17 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
     expect(bare).not.toMatch(/\.gliding|--glide\b/);
   });
 
-  it("one keyboard clock, written once: the only transition on the keyboard's path spells the token", () => {
+  it("one keyboard clock, written once: every transition on the keyboard's path spells the token", () => {
     const onToken = rules.filter((r) => transitionOf(r.body).includes("--kb-anim")).map((r) => r.sel);
-    expect(onToken).toEqual([".lift"]);
+    // three riders, one clock, and none of them writes 0.22s down: the lift
+    // carrying the thread and the bar, and the compose bar's keyboard-UP
+    // motion — the pill widening leftward and the ＋ leaving — which now runs
+    // WITH the keyboard rather than on a shorter clock of its own
+    expect(onToken).toEqual([
+      ".lift",
+      "#app.kb .compose textarea,\n#app.focusing .compose textarea",
+      "#app.kb .compose .attach,\n#app.focusing .compose .attach",
+    ]);
     expect(rule("#app")).toMatch(/--kb-anim: 0\.22s cubic-bezier\(0\.45, 0, 0\.55, 1\);/);
   });
 
@@ -1264,7 +1272,10 @@ describe("wiring: the session ends at the hand-back or the expiry, never at the 
 // never registered and a tap grazing one was credited to the full-width bar
 // behind it, the element iOS then centres the picker menu on. The square is
 // a transparent unrounded pseudo, at least the platform's 44pt minimum, and
-// the button must stay unclipped or the clip takes the square with it.
+// the RESTING button must stay unclipped or the clip takes the square with it.
+// The keyboard-up rule may clip and does (the collapsing box has to close over
+// its own glyph): by then the same rule has made the button untappable, and a
+// pseudo rides its button's pointer-events, so there is no target left to lose.
 describe("presentation: the plus's 44pt hit square", () => {
   const bare = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "");
@@ -1283,7 +1294,7 @@ describe("presentation: the plus's 44pt hit square", () => {
     expect(square).not.toContain("background"); // invisible: no paint, no visual change
   });
 
-  it("the button stays unclipped (a clip would take the square with it), the circle look untouched", () => {
+  it("the resting button stays unclipped (a clip would take the square with it), the circle look untouched", () => {
     expect(attach).not.toContain("overflow");
     expect(attach).toContain("width: 34px");
     expect(attach).toContain("border-radius: 50%");
@@ -1294,15 +1305,187 @@ describe("presentation: the plus's 44pt hit square", () => {
     expect(attachKb).toContain("pointer-events: none");
   });
 
-  it("the clip could go because the fade and the width move never overlap, either direction", () => {
-    // keyboard-DOWN (base rule): width moves first, opacity waits out the whole move
-    const down = attach.match(/width ([\d.]+)s ease, margin-right [\d.]+s ease, opacity ([\d.]+)s ease ([\d.]+)s/);
-    expect(down).not.toBeNull();
-    expect(Number(down![3])).toBeGreaterThanOrEqual(Number(down![1]));
-    // keyboard-UP (.kb rule): opacity fades first, width waits for it to land
-    const up = attachKb.match(/opacity ([\d.]+)s ease, width [\d.]+s ease ([\d.]+)s/);
-    expect(up).not.toBeNull();
-    expect(Number(up![2])).toBeGreaterThanOrEqual(Number(up![1]));
+  it("the only clip is the collapse's own, and it is inert by the time it lands", () => {
+    // the clip and the pointer-events refusal are the SAME rule: there is no
+    // state in the sheet where the square is clipped away while still tappable
+    expect(attachKb).toContain("overflow: clip");
+    expect(attachKb).toContain("pointer-events: none");
+    // and no other rule in the sheet reaches for the button to clip it
+    const clippers = [...bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter((m) => /\battach\b/.test(m[1]) && /overflow:/.test(m[2]))
+      .map((m) => m[1].trim().replace(/\s*\n\s*/g, "\n"));
+    expect(clippers).toEqual(["#app.kb .compose .attach,\n#app.focusing .compose .attach"]);
+  });
+});
+
+// The compose bar's keyboard-UP choreography, which is ONE motion and used to
+// be two steps. From the focus tap the ＋ fades, gives up its width and lets
+// its negative margin eat the flex gap, while the pill's right inset grows into
+// the space — all four on the keyboard's own clock and curve, no delay on any
+// of them, so the ＋ leaves exactly as fast as the pill arrives: nothing
+// overlaps and no gap opens. Two consequences, both pinned below.
+//   1. THE WRAP WIDTH. The ＋ releases 42px (its 34px box plus the 8px flex gap
+//      the margin swallows) and the inset absorbs 42px. One shared easing
+//      function means both sides read the SAME eased progress every frame, so
+//      the difference is identically zero and the text never re-wraps. Give
+//      either side its own duration or a delay and that difference becomes real
+//      pixels — the last test here measures how many.
+//   2. THE GLYPH. The old rule sequenced the fade strictly before the width
+//      move, so the ＋ was already invisible by the time the box narrowed.
+//      Running them together means a VISIBLE glyph inside a shrinking box, so
+//      the glyph gets a fixed track pinned to the start (nothing ever resizes
+//      or moves it) and the box clips, closing its own rounded edge over it.
+// The keyboard-DOWN direction is deliberately NOT this: it stays a sequence on
+// its own 0.13s clock, the editor handing the space back first and the ＋
+// fading in after, and the last-but-one test holds it there.
+describe("presentation: the ＋ leaves and the pill widens as one motion", () => {
+  const bare = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const compose = bare.match(/\n\.compose \{([^}]*)\}/)?.[1] ?? "";
+  const attachRest = bare.match(/\n\.attach \{([^}]*)\}/)?.[1] ?? "";
+  const attachUp =
+    bare.match(/\n#app\.kb \.compose \.attach,\n#app\.focusing \.compose \.attach \{([^}]*)\}/)?.[1] ?? "";
+  const pillRest = bare.match(/\n\.compose textarea \{([^}]*)\}/)?.[1] ?? "";
+  const pillUp =
+    bare.match(/\n#app\.kb \.compose textarea,\n#app\.focusing \.compose textarea \{([^}]*)\}/)?.[1] ?? "";
+  const token = bare.match(/--kb-anim: ([^;]*);/)?.[1]?.trim() ?? "";
+  // a transition list split at the TOP level only, so cubic-bezier()'s own
+  // commas stay inside the entry they belong to
+  const entries = (body: string): string[] => {
+    const decl = body.match(/transition:([^;]*);/)?.[1] ?? "";
+    const out: string[] = [];
+    let depth = 0;
+    let cur = "";
+    for (const ch of decl) {
+      if (ch === "(") depth += 1;
+      if (ch === ")") depth -= 1;
+      if (ch === "," && depth === 0) {
+        out.push(cur.trim());
+        cur = "";
+        continue;
+      }
+      cur += ch;
+    }
+    if (cur.trim()) out.push(cur.trim());
+    return out;
+  };
+  // property name + however many timing words follow it, with any parenthesised
+  // run flattened to one word — so "opacity var(--kb-anim)" is two words and a
+  // delay would be a third
+  const words = (entry: string): string[] => entry.replace(/\([^)]*\)/g, "()").split(/\s+/);
+
+  const px = (rem: number): number => rem * 16; // 1rem at the root font size
+  const restW = Number(attachRest.match(/\n\s*width: ([\d.]+)px/)?.[1]);
+  const gapRem = Number(compose.match(/gap: ([\d.]+)rem/)?.[1]);
+  const eatenRem = Math.abs(Number(attachUp.match(/margin-right: (-?[\d.]+)rem/)?.[1]));
+  const restPadR = Number(pillRest.match(/padding: [\d.]+px ([\d.]+)px/)?.[1]);
+  const upPad = pillUp.match(/padding-right: calc\(([\d.]+)px \+ ([\d.]+)rem\)/);
+  const upPadR = Number(upPad?.[1]) + px(Number(upPad?.[2]));
+  const released = restW + px(eatenRem); // the box, plus the flex gap the margin eats
+  const absorbed = upPadR - restPadR; // what the pill takes back on its right
+
+  it("the ＋'s three properties and the pill's inset are one transition timing", () => {
+    expect(entries(attachUp)).toEqual([
+      "opacity var(--kb-anim)",
+      "width var(--kb-anim)",
+      "margin-right var(--kb-anim)",
+    ]);
+    expect(entries(pillUp)).toEqual(["padding-right var(--kb-anim)"]);
+    // the property name is the only thing that differs across all four
+    const timings = new Set([...entries(attachUp), ...entries(pillUp)].map((e) => words(e)[1]));
+    expect([...timings]).toEqual(["var()"]);
+  });
+
+  it("that timing is the keyboard's own token, and it leaves no room for a delay", () => {
+    expect(token).toBe("0.22s cubic-bezier(0.45, 0, 0.55, 1)");
+    expect(words(token)).toHaveLength(2); // a duration and a curve, and nothing else
+    // so an entry that is one property plus the bare token cannot carry one
+    for (const e of [...entries(attachUp), ...entries(pillUp)]) {
+      expect(words(e)).toHaveLength(2);
+      expect(e).toContain("var(--kb-anim)"); // the token, never the numbers retyped
+    }
+    expect(attachUp).not.toMatch(/\d+m?s/); // no literal clock anywhere in the up rules
+    expect(pillUp.match(/transition:[^;]*/)?.[0]).not.toMatch(/\d+m?s/);
+  });
+
+  it("the space the ＋ releases and the space the pill absorbs are the same 42px", () => {
+    expect(restW).toBe(34); // the resting ＋
+    expect(attachUp).toContain("width: 0"); // collapsed to nothing
+    expect(px(eatenRem)).toBe(px(gapRem)); // the negative margin eats exactly the bar's gap
+    expect(restPadR).toBe(40); // the ↑'s reserved column, both states
+    expect(released).toBe(42);
+    expect(absorbed).toBe(42);
+    expect(released).toBe(absorbed);
+  });
+
+  it("frame by frame the two sides cancel — and a delay on either would not", () => {
+    const dur = Number(token.match(/^([\d.]+)s/)![1]) * 1000;
+    const [x1, y1, x2, y2] = token
+      .match(/cubic-bezier\(([^)]*)\)/)![1]
+      .split(",")
+      .map(Number);
+    // one axis of a cubic bezier anchored at (0,0) and (1,1)
+    const axis = (a: number, b: number, t: number): number =>
+      3 * a * t * (1 - t) ** 2 + 3 * b * t * t * (1 - t) + t ** 3;
+    const eased = (ms: number): number => {
+      const frac = Math.min(1, Math.max(0, ms / dur));
+      let lo = 0;
+      let hi = 1;
+      for (let i = 0; i < 40; i += 1) {
+        const mid = (lo + hi) / 2;
+        if (axis(x1, x2, mid) < frac) lo = mid;
+        else hi = mid;
+      }
+      return axis(y1, y2, (lo + hi) / 2);
+    };
+    const frames = [...Array(Math.ceil(dur / (1000 / 60)) + 1)].map((_, i) => (i * 1000) / 60);
+    // the invariant: at every frame the released and absorbed pixels are equal,
+    // so the textarea's content width — and with it the wrap — never moves
+    for (const ms of frames) {
+      expect(absorbed * eased(ms) - released * eased(ms)).toBeCloseTo(0, 10);
+    }
+    // and it is the SHARED clock doing that work, not luck: hand one side the
+    // 0.1s head start the old two-step rule gave the fade and the same loop
+    // opens tens of pixels of re-wrap
+    const skew = Math.max(
+      ...frames.map((ms) => Math.abs(absorbed * eased(ms) - released * eased(ms - 100))),
+    );
+    expect(skew).toBeGreaterThan(20);
+  });
+
+  it("the glyph keeps its shape: a fixed track the closing box slides over", () => {
+    // an auto track is sized by its container, so a narrowing button would drag
+    // the ＋ in with it; a fixed track pinned at the start cannot be resized or
+    // moved by anything the collapse does
+    expect(attachRest).toContain("grid-template-columns: 34px");
+    expect(attachRest).toContain("justify-content: start");
+    expect(attachRest).toContain("place-items: center"); // still centred in that track at rest
+    expect(restW).toBe(34); // and at rest the track IS the button: no visual change standing still
+    // the shape-keeping half only works if the box that narrows past it clips
+    expect(attachUp).toContain("overflow: clip");
+    expect(attachRest).not.toContain("overflow"); // never at rest: the 44pt square must survive
+    // the file input is a SIBLING of the button, not a child, so the clip can
+    // never reach it and its positioning is untouched
+    const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+    expect(main).toMatch(/<button type="button" id="attach" class="attach"[^>]*>＋<\/button>\n\s*<input/);
+    expect(bare.match(/\n\.filepick \{([^}]*)\}/)?.[1]).toContain("position: absolute");
+  });
+
+  it("the keyboard-DOWN direction is untouched: still a sequence, still on its own clock", () => {
+    expect(entries(attachRest)).toEqual([
+      "width 0.13s ease",
+      "margin-right 0.13s ease",
+      "opacity 0.1s ease 0.13s",
+      "filter 0.3s ease",
+    ]);
+    expect(entries(pillRest)).toEqual(["padding-right 0.13s ease"]);
+    // the ＋ waits out the whole width move before it starts fading back in
+    const move = Number(words(entries(attachRest)[0])[1].replace("s", ""));
+    const fadeStarts = Number(words(entries(attachRest)[2])[3].replace("s", ""));
+    expect(fadeStarts).toBeGreaterThanOrEqual(move);
+    // and nothing on the way down reaches for the keyboard's clock
+    expect(entries(attachRest).join()).not.toContain("--kb-anim");
+    expect(entries(pillRest).join()).not.toContain("--kb-anim");
   });
 });
 

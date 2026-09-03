@@ -811,15 +811,22 @@ html, body {
    text rides WITH its left edge — one uniform slide, never a re-wrap. The
    vacated space (34px ＋ + 0.5rem flex gap) is absorbed by the RIGHT inset,
    where ragged line-ends live, so the wrap width is identical in both states
-   and nothing visibly changes but the glide. Same duration and delay as the
-   ＋'s width collapse, so the wrap width holds frame-by-frame. Keyed off
-   .focusing too (shell.ts, set synchronously on the focus tap): the widen
-   runs WHILE the keyboard rises instead of popping after .kb finally latches
-   on the proven shrink. */
+   and nothing visibly changes but the glide.
+     THE INVARIANT, and it is arithmetic, not care: this inset and the ＋'s
+   width+margin collapse below share one duration, one curve and no delay, so
+   they run off the SAME eased progress p. The ＋ has released 42px * p (34 of
+   width plus the 8 of flex gap its negative margin swallows) and this inset
+   has absorbed 42px * p, on every frame, for every p — the two cancel exactly
+   and the text's wrap width is a constant. Give either side a different clock
+   or a delay and the difference becomes real pixels, which is a re-wrap.
+     The shared clock is --kb-anim, the keyboard's own (see #app): the bar's
+   one motion is over when the keyboard's is. Keyed off .focusing too
+   (shell.ts, set synchronously on the focus tap), so it starts on the tap
+   rather than popping when .kb finally latches on the proven shrink. */
 #app.kb .compose textarea,
 #app.focusing .compose textarea {
   padding-right: calc(74px + 0.5rem); /* 40px ↑ column + 34px ＋ + the gap */
-  transition: padding-right 0.13s ease 0.1s;
+  transition: padding-right var(--kb-anim);
 }
 /* iOS skips its caret-reveal scroll when the freshly focused control sits at
    opacity 0 (the verified ios-chat/kiding mechanism): one 0.02s opacity blink
@@ -840,6 +847,17 @@ html, body {
 .attach {
   display: grid;
   place-items: center;
+  /* THE GLYPH'S BOX, and the point is that it never changes size. An auto
+     track is sized by its container, so a collapsing button would squeeze the
+     ＋ along with it; a fixed 34px track pinned to the start keeps the glyph
+     at its resting width and its resting position while the button's right
+     edge travels left past it. That is what lets the keyboard-up collapse
+     below run the fade and the width move together — the old choreography
+     kept them strictly apart precisely because a visible glyph in a narrowing
+     auto track deforms. At rest the track IS the button's content box, so
+     nothing about the ＋ standing still changes. */
+  grid-template-columns: 34px;
+  justify-content: start;
   position: relative; /* seats the ::after hit square */
   width: 34px;
   height: 34px;
@@ -863,11 +881,11 @@ html, body {
      but the single-line pill (39px borderless) is 5px taller than the ＋ —
      half of that lifts the ＋ onto the pill's optical centerline */
   margin-bottom: 2.5px;
-  /* no overflow clip here: it would take the ::after hit square below with it
-     (clipped away, and rounded to this circle). The glyph still cannot paint
-     outside a mid-collapse box: this transition and the .kb one below both
-     sequence the opacity fade strictly apart from the width move, so the
-     glyph sits at opacity 0 whenever the box is between its resting widths. */
+  /* no overflow clip in the RESTING rule: it would take the ::after hit square
+     below with it (clipped away, and rounded to this circle), and that square
+     is the whole 44pt tap target. The clip lives in the keyboard-up rule
+     instead, on for exactly as long as the collapse lasts, where the square is
+     already inert — that rule sets pointer-events: none, and pseudos ride it. */
   /* keyboard-DOWN direction: the editor hands the space back first, then the
      ＋ fades in — the mirror of the keyboard-up choreography below. The filter
      entry is the settling window's RE-ENABLE fade (going off stays instant). */
@@ -891,23 +909,40 @@ html, body {
 
 /* The ＋ and the keyboard never coexist. From the focus tap itself (.focusing,
    shell.ts's tap-synchronous signal) or while the keyboard is provably up
-   (.kb — the shell's baseline-tested signal) the ＋ fades out, THEN yields its
-   flex slot so the editor widens leftward into it, both inside the keyboard's
-   own rise — .focusing starts the choreography with the tap and .kb takes
-   over when the shrink proves out, so the bar expands while the keyboard
-   rises instead of popping after it lands; a keyboard-less focus lapses the
-   signal and the bar returns. When the keyboard leaves, the editor shrinks
-   back first and the ＋ fades in after. With no ＋ to tap while typing, a
-   picker can never present over a live keyboard — the teardown snatch has
-   nothing left to snatch. */
+   (.kb — the shell's baseline-tested signal) the ＋ fades out AND gives up its
+   flex slot in the same breath, while the editor widens leftward into that
+   slot on the same clock: ONE motion, not two steps. .focusing starts it with
+   the tap and .kb takes over when the shrink proves out, so the motion runs
+   inside the keyboard's own rise and finishes with it; a keyboard-less focus
+   lapses the signal and the bar returns. When the keyboard leaves, the editor
+   shrinks back first and the ＋ fades in after — the CLOSE is still a
+   sequence, and its timings are the base rule's above, untouched. With no ＋
+   to tap while typing, a picker can never present over a live keyboard — the
+   teardown snatch has nothing left to snatch. */
 #app.kb .compose .attach,
 #app.focusing .compose .attach {
   opacity: 0;
   width: 0;
   margin-right: -0.5rem; /* swallow the flex gap so the slot truly closes */
   pointer-events: none; /* mid-fade taps belong to the widening editor */
-  /* keyboard-UP direction: fade first, then give up the width */
-  transition: opacity 0.1s ease, width 0.13s ease 0.1s, margin-right 0.13s ease 0.1s;
+  /* The clip, on only while the ＋ is collapsed or collapsing. With the fade
+     and the width move now running together the glyph is visible for the whole
+     narrowing, so the button's own rounded edge has to close over it — the
+     glyph holds its shape and its place (the fixed track above) and the box
+     slides across it. It takes the ::after hit square with it, which costs
+     nothing: pointer-events above already made the square inert, and the clip
+     is gone the instant .kb/.focusing leave, so the resting 44pt target never
+     sees it. `clip`, not `hidden`: a hidden box is a scroll container, and
+     this one would be created on the focus tap — the exact frame iOS goes
+     looking for something to scroll (.liftclip carries the same note). */
+  overflow: clip;
+  /* keyboard-UP direction: ONE motion, on the keyboard's own clock and curve
+     (--kb-anim), with no delay on any of the three. The fade, the width and
+     the margin land together with the pill's padding-right above, which is
+     declared with the same token for the same reason: one easing function
+     across all four means the space the ＋ has released is the space the pill
+     has absorbed on every frame, so nothing overlaps and no gap opens. */
+  transition: opacity var(--kb-anim), width var(--kb-anim), margin-right var(--kb-anim);
 }
 
 /* The picker session window (.settling, shell.ts): the ＋ greys and the whole
