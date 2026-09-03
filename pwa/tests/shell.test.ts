@@ -6,8 +6,10 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { holdDiagEvents, holdDiagReset } from "../src/hold";
 import {
+  EARLY_LIFT_MAX_MS,
   FOCUSING_MAX_MS,
   HEAL_THRESHOLD_PX,
+  INSET_KEY,
   KB_ANIM_MS,
   LIFT_SETTLE_MS,
   MAX_SHOVE_CLEARS,
@@ -18,17 +20,21 @@ import {
   composerTapVerdict,
   computeShell,
   createPickerLifecycle,
+  earlyLiftActive,
   edgeBoxTop,
   focusComposerTap,
   focusingActive,
   healNeeded,
   holdsBarTap,
   keyboardInset,
+  liftAim,
   liftInset,
   plusClickVerdict,
   preservesFocus,
+  recallInset,
   shellBox,
   shoveVerdict,
+  storeInset,
   type World,
 } from "../src/shell";
 
@@ -162,19 +168,186 @@ describe("liftInset — the one number the shell writes for the keyboard", () =>
 });
 
 describe("the keyboard's clock", () => {
-  it("is the platform's 0.25s, and the settle window outlasts it", () => {
-    expect(KB_ANIM_MS).toBe(250);
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const anim = css.match(/--kb-anim: ([\d.]+)s cubic-bezier\(([^)]*)\);/);
+  const points = (): number[] => anim![2].split(",").map((n) => Number(n.trim()));
+
+  it("is the keyboard's measured 220ms, and the settle window outlasts it", () => {
+    expect(KB_ANIM_MS).toBe(220);
     expect(LIFT_SETTLE_MS).toBeGreaterThan(KB_ANIM_MS);
     expect(LIFT_SETTLE_MS).toBe(KB_ANIM_MS + 200);
   });
 
-  it("styles.css plays the same duration: the two copies are held together here", () => {
-    const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
-    const anim = css.match(/--kb-anim: ([\d.]+)s cubic-bezier\(([^)]*)\);/);
+  it("styles.css plays the same duration on the measured curve: the two copies are held together here", () => {
     expect(anim).not.toBeNull();
     expect(Number(anim![1]) * 1000).toBe(KB_ANIM_MS);
-    // the published approximation of the keyboard's spring (Apple forums 48088)
-    expect(anim![2].split(",").map((n) => Number(n.trim()))).toEqual([0.38, 0.7, 0.125, 1]);
+    // the fit to the keyboard's own frames (the token's comment carries the derivation)
+    expect(points()).toEqual([0.45, 0, 0.55, 1]);
+  });
+
+  it("the curve leaves rest and lands at rest, and never overshoots", () => {
+    const [x1, y1, x2, y2] = points();
+    // a cubic bezier's initial slope is y1/x1 and its final slope (1-y2)/(1-x2):
+    // zero velocity at both ends means y1 = 0 and y2 = 1, the S the keyboard
+    // was measured to be. The retired curve had y1 = 0.7: a start at full
+    // speed, which is the lurch the recording showed.
+    expect(y1).toBe(0);
+    expect(y2).toBe(1);
+    // control x's inside the unit box: progress is monotonic and bounded
+    for (const x of [x1, x2]) {
+      expect(x).toBeGreaterThan(0);
+      expect(x).toBeLessThan(1);
+    }
+  });
+
+  it("the early start's bound is two of the keyboard's own animations, inside the focusing window", () => {
+    expect(EARLY_LIFT_MAX_MS).toBe(2 * KB_ANIM_MS);
+    expect(EARLY_LIFT_MAX_MS).toBeLessThan(FOCUSING_MAX_MS);
+  });
+});
+
+// The early start (shell.ts liftAim). The property that matters is the
+// sequence: the lift leaves with the focus, the report either agrees (nothing
+// written) or retargets (one write), a focus the keyboard never answers goes
+// home at the bound, and the close is the close it always was. The stand-in
+// is the aim plus the two edges applyShell keeps (the up edge that arms the
+// window, the inset write that moves the transition); the wiring pins further
+// down hold it to the source it mirrors.
+describe("the early start: the lift leaves with the focus tap, aimed at the height the keyboard last reported", () => {
+  const UP = 458; // the keyboard the phone reports: 844 - 458 = 386 of inset
+  const REMEMBERED = 386;
+
+  function aimer(remembered: number) {
+    let appliedUp = false;
+    let appliedInset = 0;
+    const arms: string[] = []; // every up/down edge, as armLift would be told it
+    const insets: number[] = []; // every --kb-inset write, in order
+    return {
+      arms,
+      insets,
+      read(w: World, sinceFocusMs: number) {
+        const t = computeShell(w);
+        const aim = liftAim(t, w.baseline, w.editorFocused, sinceFocusMs, remembered);
+        if (aim.up !== appliedUp) {
+          appliedUp = aim.up;
+          arms.push(aim.up ? (aim.early ? "open-early" : "open") : "close");
+        }
+        if (aim.inset !== appliedInset) {
+          appliedInset = aim.inset;
+          insets.push(aim.inset);
+        }
+        return aim;
+      },
+    };
+  }
+
+  it("the rule: a remembered inset, an editor focused, no keyboard proven yet, inside the bound", () => {
+    expect(earlyLiftActive(true, false, 0, REMEMBERED)).toBe(true);
+    expect(earlyLiftActive(true, false, EARLY_LIFT_MAX_MS - 1, REMEMBERED)).toBe(true);
+    expect(earlyLiftActive(true, false, EARLY_LIFT_MAX_MS, REMEMBERED)).toBe(false); // lapsed
+    expect(earlyLiftActive(true, true, 0, REMEMBERED)).toBe(false); // the keyboard is proven: the report aims
+    expect(earlyLiftActive(false, false, 0, REMEMBERED)).toBe(false); // nothing focused
+    expect(earlyLiftActive(true, false, 0, 0)).toBe(false); // nothing remembered: wait for the report
+  });
+
+  it("focus with a remembered inset arms the lift at once, at the remembered height", () => {
+    const s = aimer(REMEMBERED);
+    const aim = s.read(world({ editorFocused: true }), 0); // the tap: the viewport is still whole
+    expect(aim).toEqual({ up: true, early: true, inset: REMEMBERED });
+    expect(s.arms).toEqual(["open-early"]);
+    expect(s.insets).toEqual([REMEMBERED]);
+  });
+
+  it("a report that agrees writes nothing: the running transition simply lands", () => {
+    const s = aimer(REMEMBERED);
+    s.read(world({ editorFocused: true }), 0);
+    const aim = s.read(world({ editorFocused: true, vvHeight: UP }), 80); // the phone's report
+    expect(aim).toEqual({ up: true, early: false, inset: REMEMBERED });
+    expect(s.arms).toEqual(["open-early"]); // one run: the report is not a second edge
+    expect(s.insets).toEqual([REMEMBERED]); // no second write, so no retarget
+  });
+
+  it("a report that differs retargets: one more inset write, still the same run", () => {
+    const s = aimer(REMEMBERED);
+    s.read(world({ editorFocused: true }), 0);
+    s.read(world({ editorFocused: true, vvHeight: 400 }), 80); // a taller keyboard than last time
+    expect(s.arms).toEqual(["open-early"]);
+    expect(s.insets).toEqual([REMEMBERED, 444]);
+  });
+
+  it("with nothing remembered the open waits for the report, exactly as before", () => {
+    const s = aimer(0);
+    expect(s.read(world({ editorFocused: true }), 0)).toEqual({ up: false, early: false, inset: 0 });
+    expect(s.arms).toEqual([]);
+    expect(s.insets).toEqual([]);
+    s.read(world({ editorFocused: true, vvHeight: UP }), 80);
+    expect(s.arms).toEqual(["open"]);
+    expect(s.insets).toEqual([386]);
+  });
+
+  it("a focus the keyboard never answers goes home at the bound", () => {
+    const s = aimer(REMEMBERED);
+    s.read(world({ editorFocused: true }), 0);
+    s.read(world({ editorFocused: true }), EARLY_LIFT_MAX_MS - 1); // still waiting, still up
+    expect(s.arms).toEqual(["open-early"]);
+    const aim = s.read(world({ editorFocused: true }), EARLY_LIFT_MAX_MS); // the lapse clock
+    expect(aim).toEqual({ up: false, early: false, inset: 0 });
+    expect(s.arms).toEqual(["open-early", "close"]);
+    expect(s.insets).toEqual([REMEMBERED, 0]);
+  });
+
+  it("focus while the keyboard is already up takes the viewport's number, never the memory", () => {
+    const s = aimer(REMEMBERED);
+    const aim = s.read(world({ editorFocused: true, vvHeight: 400 }), 0);
+    expect(aim).toEqual({ up: true, early: false, inset: 444 });
+    expect(s.arms).toEqual(["open"]);
+  });
+
+  it("the close path is unchanged: the focus loss sends the lift home under a stale viewport", () => {
+    const s = aimer(REMEMBERED);
+    s.read(world({ editorFocused: true }), 0);
+    s.read(world({ editorFocused: true, vvHeight: UP }), 80);
+    const aim = s.read(world({ editorFocused: false, vvHeight: UP }), 5000); // the focus edge, 6-13ms ahead of the viewport
+    expect(aim).toEqual({ up: false, early: false, inset: 0 });
+    expect(s.arms).toEqual(["open-early", "close"]);
+    expect(s.insets).toEqual([REMEMBERED, 0]);
+    s.read(world({ editorFocused: false }), 5100); // the viewport catches up: nothing more
+    expect(s.insets).toEqual([REMEMBERED, 0]);
+  });
+
+  it("a viewport-learned close is the same: the keyboard gone under a held focus is a close, not an early open", () => {
+    const s = aimer(REMEMBERED);
+    s.read(world({ editorFocused: true }), 0);
+    s.read(world({ editorFocused: true, vvHeight: UP }), 80);
+    // the picker's sheet takes the keyboard while the editor keeps focus, long
+    // after the tap: outside the bound, so nothing is aimed early
+    const aim = s.read(world({ editorFocused: true }), 5000);
+    expect(aim).toEqual({ up: false, early: false, inset: 0 });
+    expect(s.arms).toEqual(["open-early", "close"]);
+  });
+
+  describe("the remembered inset survives a relaunch, for the width it was measured on", () => {
+    it("round-trips through its storage form", () => {
+      expect(recallInset(storeInset(390, 386), 390)).toBe(386);
+    });
+
+    it("another width recalls nothing: a rotation has its own keyboard height", () => {
+      expect(recallInset(storeInset(390, 386), 844)).toBe(0);
+    });
+
+    it("nothing stored, garbage, or a non-keyboard's worth all recall nothing", () => {
+      expect(recallInset(null, 390)).toBe(0);
+      expect(recallInset("", 390)).toBe(0);
+      expect(recallInset("{not json", 390)).toBe(0);
+      expect(recallInset(JSON.stringify({ w: 390, inset: "386" }), 390)).toBe(0);
+      expect(recallInset(JSON.stringify({ w: 390 }), 390)).toBe(0);
+      expect(recallInset(storeInset(390, MIN_KEYBOARD_PX - 1), 390)).toBe(0);
+      expect(recallInset(storeInset(390, MIN_KEYBOARD_PX), 390)).toBe(MIN_KEYBOARD_PX);
+    });
+
+    it("the key is one string, namespaced like the app's other storage", () => {
+      expect(INSET_KEY).toBe("paratrooper:kb-inset");
+    });
   });
 });
 
@@ -314,7 +487,9 @@ describe("wiring: the lift is the keyboard's one write, and the landing is its o
   });
 
   it("the inset is written in the same pass as the classes, and only when it changed", () => {
-    expect(apply).toContain("const inset = liftInset(t, baseline);");
+    expect(apply).toContain(
+      "const { up, early, inset } = liftAim(t, baseline, editorFocused, sinceFocus, rememberedInset);",
+    );
     expect(apply).toMatch(
       /if \(inset !== appliedInset\) \{\n\s*appliedInset = inset;\n\s*appEl\.style\.setProperty\("--kb-inset", `\$\{inset\}px`\);/,
     );
@@ -327,12 +502,31 @@ describe("wiring: the lift is the keyboard's one write, and the landing is its o
     expect(shell).toMatch(/if \(wasUp && !t\.kb\) keyboardClosed\(\);/);
   });
 
-  it("the edge arms the window with the inset, and the clock is only a backstop", () => {
+  it("the up edge arms the window with the inset, and the clock is only a backstop", () => {
+    // `up` is the aim, not the proof: an early start and its report are one
+    // run, and the report is read against the aim BEFORE the edge can move it
     expect(apply).toMatch(
-      /if \(t\.kb !== appliedKb\) \{\n\s*appliedKb = t\.kb;\n\s*armLift\(t\.kb \? "open" : "close", inset\);/,
+      /if \(t\.kb !== appliedKb\) \{\n\s*appliedKb = t\.kb;\n[\s\S]{0,300}if \(t\.kb\) reportedInset\(appliedUp, inset\);\n\s*\}\n\s*if \(up !== appliedUp\) \{\n\s*appliedUp = up;\n\s*armLift\(up \? "open" : "close", inset, early\);/,
     );
     expect(shell).toMatch(/liftUntil = performance\.now\(\) \+ LIFT_SETTLE_MS;/);
     expect(shell).toMatch(/LIFT_SETTLE_MS \+ 20/);
+  });
+
+  it("the early start is wired: its class, its lapse clock, its memory recalled at boot and on rotation", () => {
+    expect(apply).toContain('appEl.classList.toggle("kbearly", early);');
+    expect(shell).toMatch(/setTimeout\(reconcile, EARLY_LIFT_MAX_MS \+ 20\);/);
+    // recalled once at initShell and again whenever the width changes, from one key
+    expect(shell.match(/recallRemembered\(\)/g)).toHaveLength(3); // the definition and its two callers
+    expect(shell).toMatch(/appEl = el;\n\s*recallRemembered\(\);/);
+    expect(shell).toMatch(/baseline = 0;\n\s*recallRemembered\(\);/);
+    expect(shell).toMatch(/localStorage\.getItem\(INSET_KEY\)/);
+    expect(shell).toMatch(/localStorage\.setItem\(INSET_KEY, storeInset\(window\.innerWidth, inset\)\);/);
+    // remembered at the report, and again when the keyboard changes height while up
+    expect(shell).toMatch(/function reportedInset\([\s\S]*?rememberInset\(reported\);\n\}/);
+    expect(apply).toMatch(/if \(t\.kb && !atEdge\) rememberInset\(inset\);/);
+    // and no reduce-motion rule was hung on the lift: the user said no
+    const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+    expect(css).not.toMatch(/prefers-reduced-motion[\s\S]{0,400}\.lift\b/);
   });
 
   it("the landing is the transform's own transitionend, on the wrapper alone", () => {
@@ -346,7 +540,7 @@ describe("wiring: the lift is the keyboard's one write, and the landing is its o
     expect(landed).toContain(
       "if (liftLandedRun !== liftRun || (Number.isFinite(y) && y !== landedLift)) {",
     );
-    expect(landed).toContain("onLiftLanding?.(appliedKb, Number.isFinite(y) ? Math.abs(y) : 0);");
+    expect(landed).toContain("onLiftLanding?.(appliedUp, Number.isFinite(y) ? Math.abs(y) : 0);");
     // a close the phone has not finished reporting keeps the clock, so the top
     // stands until the un-pan; the clock's own fire closes it regardless
     expect(landed).toContain("const whole = keyboardInset(w.baseline, w.vvHeight) === 0 && w.vvTop <= 1;");
@@ -853,7 +1047,11 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
   });
 
   it("the lift is derived in CSS from the inset and two CSS lengths; the shell writes only the inset", () => {
-    expect(rule("#app.kb")).toContain("--kb-lift: calc(var(--pad-b) - var(--kb-gap) - var(--kb-inset))");
+    // under the proven keyboard and under the early start alike: one formula
+    expect(rule("#app.kb,\n#app.kbearly")).toContain(
+      "--kb-lift: calc(var(--pad-b) - var(--kb-gap) - var(--kb-inset))",
+    );
+    expect(bare.match(/kbearly/g)).toHaveLength(1); // the lift is the only thing the early class moves
     expect(rule("#app")).toContain("--kb-inset: 0px");
     expect(rule("#app")).toContain("--kb-lift: 0px");
     expect(rule("#app")).toContain("--kb-gap: 0.5rem");
@@ -894,7 +1092,7 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
   it("one keyboard clock, written once: the only transition on the keyboard's path spells the token", () => {
     const onToken = rules.filter((r) => transitionOf(r.body).includes("--kb-anim")).map((r) => r.sel);
     expect(onToken).toEqual([".lift"]);
-    expect(rule("#app")).toMatch(/--kb-anim: 0\.25s cubic-bezier\(0\.38, 0\.7, 0\.125, 1\);/);
+    expect(rule("#app")).toMatch(/--kb-anim: 0\.22s cubic-bezier\(0\.45, 0, 0\.55, 1\);/);
   });
 
   it("the thread's top padding is the reachability pad, and only that pad moves it", () => {

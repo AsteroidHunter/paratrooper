@@ -683,9 +683,17 @@ describe("wiring: the box records sit at the writes, and change none of them", (
   });
 
   it("the lift's records sit at the arm and the landing, and read the engine's own translate", () => {
-    expect(shell).toMatch(/holdDiagRecord\("kb-lift", \{ edge, via: "arm", inset \}\);/);
+    // the arm names the aim's source on an open and the engine's own curve on a close
     expect(shell).toMatch(
-      /holdDiagRecord\("kb-lift", \{\n\s*edge: appliedKb \? "open" : "close",\n\s*via,\n\s*ms: px\(edgeAge\(\)\),\n\s*lift: px\(y\),\n\s*writes: readScrollWrites \? readScrollWrites\(\) - liftWritesAtEdge : -1,\n\s*\}\);/,
+      /holdDiagRecord\(\n\s*"kb-lift",\n\s*edge === "open" \? \{ edge, via: "arm", inset, early \} : \{ edge, via: "arm", inset, curve: liftCurve\(\) \},\n\s*\);/,
+    );
+    expect(shell).toMatch(/return `\$\{s\.transitionDuration\} \$\{s\.transitionTimingFunction\}`;/);
+    // the report: what the early start aimed at against what the phone said
+    expect(shell).toMatch(
+      /holdDiagRecord\("kb-lift", \{\n\s*edge: "open",\n\s*via: "report",\n\s*early,\n\s*remembered,\n\s*reported,\n\s*retarget: early && reported !== remembered,\n\s*lead: early \? px\(performance\.now\(\) - liftArmAt\) : -1,\n\s*\}\);/,
+    );
+    expect(shell).toMatch(
+      /holdDiagRecord\("kb-lift", \{\n\s*edge: appliedUp \? "open" : "close",\n\s*via,\n\s*ms: px\(edgeAge\(\)\),\n\s*lift: px\(y\),\n\s*writes: readScrollWrites \? readScrollWrites\(\) - liftWritesAtEdge : -1,\n\s*\}\);/,
     );
     // the landing's number is the computed transform, parsed by the engine's
     // own matrix, never the inset re-derived by hand

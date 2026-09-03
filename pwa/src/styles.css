@@ -159,26 +159,35 @@ html, body {
      nothing in this sheet is a pixel measured off a phone. */
   --kb-inset: 0px;
   --kb-lift: 0px;
-  /* The keyboard's own animation, as the lift plays it: iOS animates the
-     keyboard over 0.25s (Apple, UIResponder.keyboardAnimationDurationUserInfoKey)
-     on a private spring curve (UIView.AnimationCurve raw value 7). A page gets
-     no frames of that animation — WebKit reports the viewport once, at the
-     end — so the transition plays the platform's curve on its own clock. The
-     control points are the approximation published on Apple's developer
-     forums, thread 48088 (jpdery, 2016; the same thread later identified the
-     underlying CASpringAnimation), and against a close recorded frame by
-     frame on device they sit within a few percent of the keyboard's travel
-     on every frame. shell.ts KB_ANIM_MS carries the same 250ms for the settle
-     window's clock; a test holds the two together. */
-  --kb-anim: 0.25s cubic-bezier(0.38, 0.7, 0.125, 1);
+  /* The keyboard's own animation, as the lift plays it. A page gets no frames
+     of the keyboard's motion (WebKit reports the viewport once per edge), so
+     the transition plays a copy of the system curve on its own clock, and the
+     copy is MEASURED, not quoted: the keyboard's top edge was read frame by
+     frame off a 60fps recording of this phone (2026-09-01 19:21, nine frames
+     of visible travel per close) and every named curve was fitted to it. The
+     motion is an S: it leaves rest at zero velocity, peaks mid-flight and
+     eases to rest, complete in about 200ms; Apple's documented 0.25s
+     (UIResponder.keyboardAnimationDurationUserInfoKey) is the envelope, not
+     the visible travel. cubic-bezier(0.45, 0, 0.55, 1) at 0.22s fits within
+     about 2px RMS; the forum approximation this replaced (Apple forums 48088,
+     cubic-bezier(0.38, 0.7, 0.125, 1)) left rest at full speed and fitted six
+     times worse, and that instantaneous start was the lurch seen on device.
+     shell.ts KB_ANIM_MS carries the same 220ms for the settle window's clock;
+     a test holds the two together and pins both ends of the curve to rest. */
+  --kb-anim: 0.22s cubic-bezier(0.45, 0, 0.55, 1);
 }
 /* Keyboard provably up (shell.ts's baseline-tested signal): the lift. The
    message list and the compose bar (.lift below) translate up by the keyboard's
    inset, less the home-indicator clearance the bar no longer sheds, so the
    pill sits --kb-gap above the keyboard exactly as it did when the clearance
    collapsed, and the clearance itself is behind the keyboard. Every term is a
-   CSS length the engine resolves; the shell writes only --kb-inset. */
-#app.kb {
+   CSS length the engine resolves; the shell writes only --kb-inset.
+   .kbearly is the same lift started early: from the focus tap, aimed at the
+   inset the keyboard last reported (shell.ts liftAim), until the viewport's own
+   report proves the keyboard and .kb takes over, retargeting the transition
+   mid-flight if the height differs and touching nothing if it agrees. */
+#app.kb,
+#app.kbearly {
   --kb-lift: calc(var(--pad-b) - var(--kb-gap) - var(--kb-inset));
 }
 /* The shell box while the keyboard is up, and through the close's own settle
