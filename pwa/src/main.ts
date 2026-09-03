@@ -166,7 +166,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.92"; // the worker ships the gh CLI, and the shell guard now refuses every other road to GitHub
+const APP_VERSION = "0.3.93"; // the notification card arrives and leaves on the system alert's own timing
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -5507,7 +5507,9 @@ function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
 
 let pushRegistration: ServiceWorkerRegistration | null = null;
 let pushNotifications: PushSetup | null = null;
-const PUSH_DIALOG_TRANSITION_MS = 360;
+// The dismissal's own length, in step with --alert-anim in push.css: the card
+// may not be pulled out of the layout until the fade it is running has ended.
+const PUSH_DIALOG_TRANSITION_MS = 200;
 const PUSH_DIALOG_DELAY_MS = 2500;
 let pushDialogHideTimer: number | null = null;
 let pushDialogShowFrame: number | null = null;
@@ -5543,6 +5545,7 @@ function cancelPushDialogExit(): void {
 
 function hidePushDialog(dialog: HTMLElement, state: PushState): void {
   dialog.setAttribute("aria-hidden", "true");
+  dialog.classList.remove("push-dialog-entering"); // a start state may not outlive its start
   if (dialog.hidden) {
     dialog.classList.remove("push-dialog-leaving");
     return;
@@ -5554,13 +5557,20 @@ function hidePushDialog(dialog: HTMLElement, state: PushState): void {
 }
 
 function showPushDialog(dialog: HTMLElement): void {
-  const shouldEnter = dialog.hidden || dialog.classList.contains("push-dialog-leaving");
+  // Entering counts as needing an entrance too: renderPushState can cancel the
+  // frame below, and the class it would have removed is then still on the
+  // element. Reading it here is what lets the next show finish the job.
+  const shouldEnter =
+    dialog.hidden ||
+    dialog.classList.contains("push-dialog-leaving") ||
+    dialog.classList.contains("push-dialog-entering");
   dialog.hidden = false;
   dialog.setAttribute("aria-hidden", "false");
   if (!shouldEnter) return;
-  dialog.classList.add("push-dialog-leaving");
+  dialog.classList.remove("push-dialog-leaving");
+  dialog.classList.add("push-dialog-entering");
   pushDialogShowFrame = requestAnimationFrame(() => {
-    dialog.classList.remove("push-dialog-leaving");
+    dialog.classList.remove("push-dialog-entering");
   });
 }
 

@@ -585,12 +585,14 @@ describe("centered notification popup wiring", () => {
     );
     expect(render.indexOf("armPushDialogEntrance()"))
       .toBeLessThan(render.indexOf("startPushNotifications()"));
-    // the dismissal's own fade, which the hide timer above is cut to; the
-    // entrance has its own shorter ease and is pinned in pushcard.test.ts
+    // the fade the hide timer above is cut to. It is the layer's own, borrowed
+    // by the dismissal, which states no timing; the whole shape of the arrival
+    // and the departure is pinned in pushcard.test.ts
+    expect(PUSH_CSS_RULES).toMatch(/--alert-anim:\s*200ms ease-in-out;/);
     expect(PUSH_CSS_RULES).toMatch(
-      /\.push-dialog\.push-dialog-leaving \{[^}]*transition:\s*opacity 360ms/,
+      /\.push-dialog \{[^}]*transition:\s*opacity var\(--alert-anim\);/,
     );
-    expect(PUSH_CSS_RULES).toMatch(/translateY\(8px\) scale\(0\.95\)/);
+    expect(PUSH_CSS_RULES).toMatch(/\.push-dialog\.push-dialog-leaving \{\s*opacity: 0;\s*\}/);
   });
 
   it("checks on load/resume without automatically requesting permission", () => {

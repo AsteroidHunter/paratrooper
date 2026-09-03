@@ -1,6 +1,11 @@
 /* Fixed overlay: it consumes no flex space, so showing or hiding notification
    UI cannot resize the thread or move the composer. */
 .push-dialog {
+  /* The whole alert's motion budget, named once: 200ms on the standard
+     ease-in-out, which is what the system spends presenting and dismissing its
+     own centred alert. The dim and the card are never given separate numbers,
+     so neither direction can drift off the other's clock. */
+  --alert-anim: 200ms ease-in-out;
   position: fixed;
   inset: 0;
   z-index: 18;
@@ -9,24 +14,35 @@
   padding: 24px;
   background: rgba(0, 0, 0, 0.14);
   opacity: 1;
-  transition: opacity 260ms ease-in-out;
+  transition: opacity var(--alert-anim);
 }
 .push-dialog[hidden],
 .push-actions [hidden] {
   display: none;
 }
-/* Two timings, one class: removing push-dialog-leaving is the way in, adding
-   it is the way out, and a transition takes its duration and easing from the
-   style it lands ON. So the leaving rules below are not duplicates of the base
-   ones — they are the dismissal, kept exactly as it was, while the base rules
-   above now time only the entrance. The entrance used to borrow this same
-   curve and so arrived at speed: cubic-bezier(0.22, 0.61, 0.36, 1) leaves the
-   gate at nearly 3x and coasts, which is a card that is already moving the
-   instant it exists. It now starts from rest and settles into place instead —
-   ease-in-out, zero velocity at both ends, over the same short travel. */
+/* Two classes, one clock. A transition takes its duration and easing from the
+   style it lands ON, and both directions land on the base rules above, so
+   neither state below restates a timing. The way in lands there by dropping
+   push-dialog-entering; the way out is adding push-dialog-leaving.
+   They are two classes because the directions are no longer mirror images.
+   The card used to fly in from below and shrink away to the same spot, one
+   "away" state serving both ends. The system alert does neither: it arrives
+   already at full size and settles inward, 1.1 to 1, with no vertical travel,
+   and it leaves on the fade alone, holding scale(1) the whole way out. A
+   single class cannot be both a transform the entrance starts FROM and a state
+   the exit ends ON.
+   The entering rules take transition: none so that landing on the start state
+   is a jump, never a journey — otherwise re-showing a card mid-dismissal would
+   animate it out to 1.1 first and be seen to swell. */
+.push-dialog.push-dialog-entering {
+  opacity: 0;
+  transition: none;
+}
+/* The dismissal is this and nothing else. The card has no fade of its own: it
+   is inside the layer, so it goes with it, on the layer's timing, which is how
+   a plain fade out stays plain. */
 .push-dialog.push-dialog-leaving {
   opacity: 0;
-  transition: opacity 360ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 .push-card {
   width: min(304px, calc(100vw - 48px));
@@ -43,11 +59,11 @@
   color: var(--text);
   text-align: center;
   transform: scale(1);
-  transition: transform 260ms ease-in-out;
+  transition: transform var(--alert-anim);
 }
-.push-dialog.push-dialog-leaving .push-card {
-  transform: translateY(8px) scale(0.95);
-  transition: transform 360ms cubic-bezier(0.22, 0.61, 0.36, 1);
+.push-dialog.push-dialog-entering .push-card {
+  transform: scale(1.1);
+  transition: none;
 }
 .push-copy {
   margin: 0;
@@ -110,11 +126,11 @@
   .push-not-now { background: rgba(118, 118, 128, 0.32); }
 }
 
-/* The leaving rules carry their own timing and outrank the base ones, so they
-   have to be named here too or the dismissal would keep its 360ms. */
+/* Every rule that times anything is named here, and that is now just the base
+   pair: the leaving rule states no timing of its own, so flattening the base
+   dialog flattens the dismissal with it, and the entering rules are a start
+   state with transition: none, which has no duration to cut. */
 @media (prefers-reduced-motion: reduce) {
   .push-dialog,
-  .push-card,
-  .push-dialog.push-dialog-leaving,
-  .push-dialog.push-dialog-leaving .push-card { transition-duration: 1ms; }
+  .push-card { transition-duration: 1ms; }
 }

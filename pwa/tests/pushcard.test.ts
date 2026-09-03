@@ -5,9 +5,10 @@
 // Neither half names a value it wants. The colours are read out of the sent
 // bubble at run time and the card is required to repeat them, in the mould of
 // prtone.test.ts, so a copied hex cannot drift away from the bubble again. The
-// entrance is checked for a property of its curve rather than for one curve:
-// it has to start and end at rest and never pass its destination, which is
-// what "gentle" means here, and it has to stay short.
+// motion is the system's centred alert, so here the numbers ARE the point and
+// are pinned outright: 1.1 down to 1 with no travel, 200ms, standard
+// ease-in-out, one clock shared by the dim and the card and by both
+// directions, and a dismissal that is a fade and nothing else.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -152,9 +153,16 @@ function curve(easing: string): Curve {
   return KEYWORDS[easing];
 }
 
+/** The one value --alert-anim is given, so rules that use it can be read. */
+const ALERT_ANIM = (() => {
+  const named = [...push.matchAll(/--alert-anim\s*:([^;]*)/g)];
+  expect(named, "the alert's timing is named once, or not at all").toHaveLength(1);
+  return named[0][1].replace(/\s+/g, " ").trim();
+})();
+
 /** The transition on a rule, split into what it animates and how. */
 function transition(body: string): { property: string; ms: number; easing: string } {
-  const value = decl(body, "transition");
+  const value = decl(body, "transition").replace("var(--alert-anim)", ALERT_ANIM);
   const m = /^([\w-]+) (\d+)ms (.+)$/.exec(value);
   expect(m, `unreadable transition: ${value}`).not.toBeNull();
   return { property: m![1], ms: Number(m![2]), easing: m![3] };
@@ -171,83 +179,108 @@ function fn(name: string, until: string): string {
 
 const dialogIn = only(pushRules, ".push-dialog");
 const cardIn = only(pushRules, ".push-card");
+const dialogStart = only(pushRules, ".push-dialog.push-dialog-entering");
+const cardStart = only(pushRules, ".push-dialog.push-dialog-entering .push-card");
 const dialogOut = only(pushRules, ".push-dialog.push-dialog-leaving");
-const cardOut = only(pushRules, ".push-dialog.push-dialog-leaving .push-card");
 
-describe("the notification card eases in from rest and leaves as it always did", () => {
-  it("one class runs both directions, so the base rules time the way in", () => {
-    // a transition takes its duration and easing from the style it lands ON:
-    // dropping the class lands on the base rules, adding it lands on the
-    // leaving ones. That is the whole reason the two can be timed apart.
+/** Whether a rule times anything of its own, rather than borrowing. */
+function times(rule: Rule): boolean {
+  const m = /(?:^|;)\s*transition\s*:([^;]*)/.exec(rule.body);
+  return m !== null && m[1].trim() !== "none";
+}
+
+describe("the notification card arrives and leaves as the system alert does", () => {
+  it("the start of the way in is its own class, not the end of the way out", () => {
+    // a transition takes its duration and easing from the style it lands ON,
+    // and both directions land on the base rules, so one clock serves both.
+    // The two states are still separate classes because the entrance starts
+    // FROM a transform the exit must never end ON.
     const show = fn("showPushDialog", "function renderPushState(");
-    expect(show.indexOf('classList.add("push-dialog-leaving")')).toBeGreaterThan(0);
+    expect(show).toContain('classList.remove("push-dialog-leaving")');
     expect(show).toMatch(
-      /requestAnimationFrame\(\(\) => \{\s*dialog\.classList\.remove\("push-dialog-leaving"\)/,
+      /classList\.add\("push-dialog-entering"\);\s*pushDialogShowFrame = requestAnimationFrame/,
     );
-    expect(show.indexOf('classList.add("push-dialog-leaving")')).toBeLessThan(
-      show.indexOf('classList.remove("push-dialog-leaving")'),
+    expect(show).toMatch(
+      /requestAnimationFrame\(\(\) => \{\s*dialog\.classList\.remove\("push-dialog-entering"\)/,
     );
+    expect(show.indexOf('classList.add("push-dialog-entering")')).toBeLessThan(
+      show.indexOf('classList.remove("push-dialog-entering")'),
+    );
+    // a cancelled frame leaves the start state on the element, so the next show
+    // has to count it as needing an entrance or the card stays invisible
+    expect(show).toContain('classList.contains("push-dialog-entering")');
     const hide = fn("hidePushDialog", "function showPushDialog(");
+    expect(hide).toContain('classList.remove("push-dialog-entering")');
     expect(hide).toMatch(
       /classList\.add\("push-dialog-leaving"\);\s*pushDialogHideTimer = window\.setTimeout\(/,
     );
   });
 
-  it("the way in starts at rest, ends at rest and never overshoots", () => {
+  it("the way in is the standard ease, at rest at both ends", () => {
     for (const rule of [dialogIn, cardIn]) {
       const [x1, y1, x2, y2] = curve(transition(rule.body).easing);
+      // the keyword or its own control points, either spelling
+      expect([x1, y1, x2, y2]).toEqual(KEYWORDS["ease-in-out"]);
       expect(y1, "leaves at speed instead of from a standstill").toBe(0);
       expect(x1, "no run-up: a horizontal first handle is not zero velocity")
         .toBeGreaterThan(0);
       expect(y2, "does not settle").toBe(1);
       expect(x2, "arrives at speed").toBeLessThan(1);
-      // control points inside the box: no bounce, no pass-and-return
-      for (const y of [y1, y2]) expect(y).toBeGreaterThanOrEqual(0);
-      for (const y of [y1, y2]) expect(y).toBeLessThanOrEqual(1);
     }
   });
 
-  it("the way in is short: the card fades and the card itself scales", () => {
-    expect(transition(dialogIn.body).property).toBe("opacity");
-    expect(transition(cardIn.body).property).toBe("transform");
+  it("one clock, named once, spent by the dim and the card together", () => {
+    expect(ALERT_ANIM).toBe("200ms ease-in-out");
     for (const rule of [dialogIn, cardIn]) {
-      const { ms } = transition(rule.body);
-      expect(ms).toBeGreaterThanOrEqual(220);
-      expect(ms).toBeLessThanOrEqual(300);
+      expect(decl(rule.body, "transition")).toContain("var(--alert-anim)");
+      expect(transition(rule.body).ms).toBe(200);
     }
-    expect(transition(dialogIn.body).ms).toBe(transition(cardIn.body).ms); // one arrival
+    expect(transition(dialogIn.body).property).toBe("opacity"); // the dim
+    expect(transition(cardIn.body).property).toBe("transform"); // the card
   });
 
-  it("the way out is untouched, and the hide timer still matches it", () => {
-    for (const rule of [dialogOut, cardOut]) {
-      const { ms, easing } = transition(rule.body);
-      expect(ms).toBe(360);
-      expect(easing).toBe("cubic-bezier(0.22, 0.61, 0.36, 1)");
+  it("the way in settles inward from 1.1, and never travels", () => {
+    expect(decl(dialogStart.body, "opacity")).toBe("0");
+    expect(decl(dialogIn.body, "opacity")).toBe("1");
+    expect(decl(cardStart.body, "transform")).toBe("scale(1.1)");
+    expect(decl(cardIn.body, "transform")).toBe("scale(1)");
+    for (const rule of pushRules) {
+      expect(rule.body, "the alert does not rise, drop or shrink into place")
+        .not.toMatch(/translate|scale\(0/);
     }
+    // the start state is a jump, not a journey: reached with no transition, so
+    // re-showing a card mid-dismissal cannot be seen swelling out to 1.1 first
+    for (const rule of [dialogStart, cardStart]) {
+      expect(decl(rule.body, "transition")).toBe("none");
+    }
+  });
+
+  it("the way out is a fade and nothing else, on that same clock", () => {
     expect(decl(dialogOut.body, "opacity")).toBe("0");
-    expect(decl(cardOut.body, "transform")).toBe("translateY(8px) scale(0.95)");
+    expect(dialogOut.body.match(/[\w-]+\s*:/g)).toEqual(["opacity:"]); // and only that
+    expect(dialogOut.body, "restating a timing is how the two ends drift apart")
+      .not.toMatch(/(?:^|;)\s*transition\s*:/);
+    // no away-transform for the card either: it is inside the layer and goes
+    // with it, which is what makes the dismissal a plain fade
+    expect(rules(pushRules, ".push-dialog.push-dialog-leaving .push-card")).toHaveLength(0);
     const held = /const PUSH_DIALOG_TRANSITION_MS = (\d+);/.exec(main);
     expect(held, "missing PUSH_DIALOG_TRANSITION_MS").not.toBeNull();
-    expect(Number(held![1])).toBe(transition(dialogOut.body).ms);
+    // the layer it borrows from is what the hide timer has to outlast
+    expect(Number(held![1])).toBe(transition(dialogIn.body).ms);
   });
 
-  it("reduced motion still flattens both directions", () => {
+  it("reduced motion names every rule that times anything", () => {
     const reduced = pushRules.filter((r) =>
       r.at.some((a) => a.includes("prefers-reduced-motion")),
     );
     expect(reduced).toHaveLength(1);
-    // the leaving rules now carry timing of their own and outrank the base
-    // ones, so naming only the base two would hand the dismissal back its 360ms
+    const timed = pushRules.filter((r) => r.at.length === 0 && times(r));
+    expect(timed.map((r) => r.selectors.join(", "))).toEqual([".push-dialog", ".push-card"]);
     expect(reduced[0].selectors).toEqual(
-      expect.arrayContaining([
-        ...dialogIn.selectors,
-        ...cardIn.selectors,
-        ...dialogOut.selectors,
-        ...cardOut.selectors,
-      ]),
+      expect.arrayContaining(timed.flatMap((r) => r.selectors)),
     );
     expect(decl(reduced[0].body, "transition-duration")).toBe("1ms");
     // equal specificity: it only wins by coming last
-    expect(reduced[0].index).toBeGreaterThan(Math.max(dialogOut.index, cardOut.index));
+    expect(reduced[0].index).toBeGreaterThan(Math.max(...timed.map((r) => r.index)));
   });
 });
