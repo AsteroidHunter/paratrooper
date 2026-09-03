@@ -657,6 +657,18 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         # "which code is actually serving" — no more guessing.
         return {"ok": True, "version": os.environ.get("RENDER_GIT_COMMIT", "dev")[:7]}
 
+    # The sign-in screen's one question, and the only honest answer to it: is
+    # this token the token? No body, no state, no DB — require_token settles it
+    # by letting the request through (204) or refusing it (401), so the gate is
+    # exactly the gate every other route sits behind and nothing here can weaken
+    # it. The PWA asks once before it enters the chat, and again after a socket
+    # closes without opening: a browser hides the status of a failed WebSocket
+    # handshake, so this is the only way it can tell a rejected token from a
+    # dropped connection.
+    @app.get("/api/auth/check", status_code=204, dependencies=[Depends(require_token)])
+    async def auth_check() -> Response:
+        return Response(status_code=204)
+
     @app.post("/api/upload", response_model=UploadResponse, dependencies=[Depends(require_token)])
     async def upload(file: UploadFile) -> UploadResponse:
         content = await file.read()

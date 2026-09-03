@@ -359,14 +359,17 @@ describe("write wiring — debounced after applies, flushed on hidden, gone on l
   });
 
   it("logout cancels the pending write and deletes the record", () => {
+    // logout and a token the server has stopped accepting leave the chat the
+    // same way, through one teardown, so the pin follows it there
     const logout = src.indexOf('getElementById("confirm-yes")');
     const gate = src.indexOf("renderTokenGate()", logout);
-    const between = src.slice(logout, gate);
-    expect(between.indexOf("cacheWrites.cancel()")).toBeGreaterThan(-1);
+    expect(src.slice(logout, gate)).toContain("leaveChat()");
+    const body = fnBody("leaveChat");
+    expect(body.indexOf("cacheWrites.cancel()")).toBeGreaterThan(-1);
     // cancel BEFORE delete: a pending write must not resurrect the record
-    expect(between.indexOf("cacheWrites.cancel()")).toBeLessThan(
-      between.indexOf("cacheDel(THREAD_ID)"),
-    );
+    expect(body.indexOf("cacheWrites.cancel()")).toBeLessThan(body.indexOf("cacheDel(THREAD_ID)"));
+    // and the other way out reaches the same teardown
+    expect(fnBody("probeAfterClose")).toContain("leaveChat()");
   });
 
   it("the snapshot is the newest CACHE_FRAMES stored frames plus the cursor", () => {

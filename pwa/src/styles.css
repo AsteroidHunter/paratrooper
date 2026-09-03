@@ -13,6 +13,13 @@
   --muted: #8e8e93;
   --error-bg: #ffe5e5;
   --error-text: #d70015;
+  /* The sign-in box's two answers, worn on its boundary and nowhere else.
+     Pastel by instruction: soft enough that the card is not shouting, saturated
+     enough that a one-pixel line reads as green or red on this canvas. Not the
+     --error pair above — that one is a failed message's filled bubble, a much
+     louder red, and this is a border on a login field. */
+  --gate-ok: #7ac79b;
+  --gate-bad: #eb9391;
   /* White-ish face, per the verified iMessage recipe: their fill is white
      (the grey impression comes from the hairline + placeholder). ~2% below
      pure white keeps a sliver of glow headroom, like their rendered glass. */
@@ -72,6 +79,10 @@
     --muted: #98989f;
     --error-bg: #3a1214;
     --error-text: #ff453a;
+    /* the same two answers over black: lifted, because a pastel line that
+       reads on white sinks into the canvas the card sits on here */
+    --gate-ok: #6ed69d;
+    --gate-bad: #ff9d99;
     --glass-bg: rgba(255, 255, 255, 0.14); /* lighter lean in dark mode too */
     /* Here the rim earns its keep: a black shadow cast on a black canvas is
        nothing at all, so on dark the edge of the pill IS this line. Gentler
@@ -325,6 +336,39 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font: inherit;
+}
+/* The server's answer to Connect, worn on the box's own boundary and nothing
+   else. Only border-color changes: the width stays at the one pixel the rule
+   above sets (so the text inside does not move), and so do the box's share of
+   the card, its padding, its radius, its fill and the mark that makes the app
+   own its focus. Green holds for the beat before the chat replaces the card;
+   red stays until the next keystroke, so what was typed is still there to be
+   corrected. Neither colour is written here — the tokens are, so the sign-in
+   screen cannot be given a green the rest of the app has never heard of. */
+.gate input.ok {
+  border-color: var(--gate-ok);
+}
+.gate input.bad {
+  border-color: var(--gate-bad);
+}
+/* And the wrong-passcode shake under the red, the way iOS refuses a passcode:
+   a few oscillations losing height, over inside half a second. translateX
+   only — the box slides on its own layer, so nothing reflows, the card above
+   it does not move, and the keyboard lift (a transform on .gate) is untouched.
+   It re-arms by construction rather than by a layout read: every Connect tap
+   drops all three classes before it asks, so the same wrong token typed twice
+   shakes twice. */
+.gate input.shake {
+  animation: gate-shake 0.45s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+@keyframes gate-shake {
+  0%, 100% { transform: translateX(0); }
+  12% { transform: translateX(-8px); }
+  26% { transform: translateX(7px); }
+  40% { transform: translateX(-5px); }
+  54% { transform: translateX(4px); }
+  68% { transform: translateX(-3px); }
+  82% { transform: translateX(2px); }
 }
 /* Connect is the sent bubble worn as a pill: the fill the user's own messages
    carry and the ink they put on it, named as the tokens .msg.user declares

@@ -1189,6 +1189,19 @@ def test_auth_required(client):
     assert client.get("/api/thread/d").status_code == 401
 
 
+def test_auth_check(client):
+    # the sign-in screen's question: 204 for the token, 401 for anything else.
+    # It carries no body — the status IS the answer
+    ok = client.get("/api/auth/check", headers={"Authorization": "Bearer tok"})
+    assert ok.status_code == 204
+    assert ok.content == b""
+    assert client.get("/api/auth/check").status_code == 401
+    wrong = client.get("/api/auth/check", headers={"Authorization": "Bearer wrong"})
+    assert wrong.status_code == 401
+    # and it is a read: asking twice answers the same, and changes nothing
+    assert client.get("/api/auth/check", headers={"Authorization": "Bearer tok"}).status_code == 204
+
+
 def test_upload_and_send_flow(client):
     auth = {"Authorization": "Bearer tok"}
     up = client.post("/api/upload", headers=auth, files={"file": ("p.png", b"bytes", "image/png")})

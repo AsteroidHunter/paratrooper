@@ -105,6 +105,8 @@ import {
   watchScrollWrites,
 } from "./shell";
 import { bootBlankGap, installLoadingScreen, installStartupImage, watchQuiet } from "./splash";
+import { afterSocketClose, createTokenGate } from "./tokengate";
+import type { Fetcher, TokenGate } from "./tokengate";
 import {
   SETTLE_BURST_GAP_MS,
   USER_SCROLL_INTENT_MS,
@@ -168,7 +170,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.98"; // a swipe down the compose bar puts the keyboard away, so the accessory bar's ✓ is no longer the only way out
+const APP_VERSION = "0.3.99"; // Connect asks the server before it lets you in: the box goes green on a yes, red and shaking on a no
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -207,6 +209,7 @@ let threadTouching = false; // finger on the thread: never insert under it
 let lastScrollAt = 0; // scroll events still arriving = momentum still running
 let ws: WebSocket | null = null;
 let closingOnPurpose = false; // logout: suppress the auto-reconnect
+let retryTimer: ReturnType<typeof setTimeout> | null = null; // the blind two-second reconnect
 let restoredOutbox = false; // once-per-session guard for the durable-outbox restore
 // Replay batching (one-commit catch-up): while the boot ledger says the
 // backlog is still streaming, socket replay frames buffer here instead of
@@ -491,6 +494,14 @@ holdDiagAuth(authHeaders);
 // the app focuses both boxes itself, so iOS never runs its caret reveal on
 // either and the card's only motion on a tap is the lift (shell.ts OWNED_FOCUS
 // owns the whole rule; styles.css blinks both boxes off the same mark).
+//
+// Connect no longer takes the typed value at its word. It asks the server one
+// authenticated question first (tokengate.ts, the same require_token gate every
+// other route sits behind) and the box wears the answer: pastel green for a
+// beat and then the chat, or pastel red and a shake with the value still in
+// place to correct. Nothing is stored until the yes comes back, so a wrong
+// token can no longer leave the app behind an empty thread reconnecting into a
+// refused socket forever.
 function renderTokenGate(): void {
   app.innerHTML = `
     <div class="gate">
@@ -506,14 +517,56 @@ function renderTokenGate(): void {
       <button id="token-save">Connect</button>
     </div>`;
   const input = document.getElementById("token-input") as HTMLInputElement;
-  document.getElementById("token-save")!.addEventListener("click", () => {
-    const value = input.value.trim();
-    if (!value) return;
-    token = value;
-    localStorage.setItem(TOKEN_KEY, value);
-    renderChat();
-    connect();
+  const save = document.getElementById("token-save") as HTMLButtonElement;
+  // the accepted path is this card's whole reason to exist, so it stays here in
+  // the open: the token is stored, the chat is built and the socket opens — the
+  // same three lines as before, now behind the server's yes
+  const gate = createTokenGate(input, save, {
+    fetcher: gateFetch,
+    wait: (ms, run) => setTimeout(run, ms),
+    accepted: (value) => {
+      token = value;
+      localStorage.setItem(TOKEN_KEY, value);
+      renderChat();
+      connect();
+    },
   });
+  tokenGate = gate; // so a socket refused later can paint THIS card red
+  document.getElementById("token-save")!.addEventListener("click", () => {
+    void gate.submit();
+  });
+}
+
+// The controller for the card currently on screen, or null while the chat is
+// up. Only the socket's own refusal reads it: everything else the gate does is
+// a tap on a button it wired itself.
+let tokenGate: TokenGate | null = null;
+
+/** The check's one request. Named so the card and the socket's probe cannot
+ *  drift into asking two different questions. */
+const gateFetch: Fetcher = (url, init) => fetch(url, init);
+
+// Leaving the chat — the one teardown behind both ways out: Log Out, and a
+// saved token the server has stopped accepting. Everything the session owns
+// goes with it — the push registration, the token, the replay cursor, the
+// socket (on purpose, so its close arms nothing), any reconnect already armed,
+// the pending cache write and the cached thread itself, which is credentialed
+// content. The caller renders whatever comes next.
+function leaveChat(): void {
+  pushNotifications?.stop();
+  pushNotifications = null;
+  localStorage.removeItem(TOKEN_KEY);
+  token = "";
+  lastSeq = 0; // full replay on next login
+  closingOnPurpose = true;
+  ws?.close();
+  ws = null;
+  cacheWrites.cancel(); // a pending write must not resurrect the record deleted next
+  void cacheDel(THREAD_ID); // the cached thread is credentialed content
+  if (probeFallback) clearTimeout(probeFallback);
+  probeFallback = null;
+  if (retryTimer) clearTimeout(retryTimer); // nothing is left armed to reconnect
+  retryTimer = null;
 }
 
 // --- chat shell --------------------------------------------------------------
@@ -621,18 +674,7 @@ function renderChat(): void {
     confirmEl.classList.remove("open");
   });
   document.getElementById("confirm-yes")!.addEventListener("click", () => {
-    pushNotifications?.stop();
-    pushNotifications = null;
-    localStorage.removeItem(TOKEN_KEY);
-    token = "";
-    lastSeq = 0; // full replay on next login
-    closingOnPurpose = true;
-    ws?.close();
-    ws = null;
-    cacheWrites.cancel(); // a pending write must not resurrect the record deleted next
-    void cacheDel(THREAD_ID); // the cached thread is credentialed content
-    if (probeFallback) clearTimeout(probeFallback);
-    probeFallback = null;
+    leaveChat(); // the token, the socket, the cached thread and any armed retry
     renderTokenGate();
   });
   const filesEl = document.getElementById("files") as HTMLInputElement;
@@ -845,6 +887,7 @@ function renderChat(): void {
   setFollowTail(true, "fresh-shell");
   downBtn.bottomReached(); // fresh shell opens pinned: no chevron, no pending timer
   bootGate.reset(); // fresh shell: replay ledger re-arms, the first settle owns the pin
+  tokenGate = null; // the card this shell replaced is gone, and so is its controller
   flightsUp = 0; // airborne flights died with the old shell (late settles floor at 0)
   airborneRows.clear(); // and their rows belong to a thread that no longer exists
   receiptPending = false;
@@ -3601,7 +3644,9 @@ function connect(): void {
     replaySettle();
   }, PROBE_FALLBACK_MS);
   ws = new WebSocket(url);
+  let opened = false; // this socket got past the handshake; see ws.onclose
   ws.onopen = () => {
+    opened = true;
     // presence first: a new socket has told the server nothing, and until it
     // does, a reply finishing on this thread is pushed to a phone whose owner
     // is looking straight at it. The interval's own first ping is 25s away.
@@ -3652,8 +3697,45 @@ function connect(): void {
   };
   ws.onclose = () => {
     if (closingOnPurpose || !token) return; // logout: stay closed
-    setTimeout(connect, 2000); // dropped: reconnect; catch-up via ?since=
+    const refused = token; // whatever this socket carried, before anything moves
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      connect(); // dropped: reconnect; catch-up via ?since=
+    }, 2000);
+    // A socket that opened and then died is a drop, and the retry above is the
+    // whole answer. A socket that never opened may instead have been refused —
+    // and there is no way to tell from here, because a browser hides the status
+    // of a failed WebSocket handshake and the server's rejection arrives as the
+    // same anonymous close a dead network does. That ambiguity is what kept a
+    // wrong token reconnecting forever behind an empty thread, so one
+    // authenticated question settles it, running ALONGSIDE the retry rather
+    // than in front of it: a real drop still comes back on the same two seconds
+    // it always did, and only a refusal ends the session.
+    if (opened) return;
+    probeAfterClose(refused);
   };
+}
+
+let closeProbeBusy = false; // one question per outage, not one per refused handshake
+
+// The socket's own refusal, wired: the verdict and its rules live in
+// tokengate.ts (afterSocketClose), and a refusal lands on the same card and the
+// same red border a wrong token gets at sign-in, with the rejected value still
+// in the box.
+function probeAfterClose(refused: string): void {
+  if (closeProbeBusy) return;
+  closeProbeBusy = true;
+  void afterSocketClose(refused, {
+    fetcher: gateFetch,
+    stillSignedIn: (value) => token === value,
+    signOut: (value) => {
+      leaveChat(); // the token, the socket, the cached thread and the armed retry
+      renderTokenGate();
+      tokenGate?.refuse(value);
+    },
+  }).finally(() => {
+    closeProbeBusy = false;
+  });
 }
 
 // --- the app coming back on screen --------------------------------------------
