@@ -151,15 +151,6 @@ html, body {
      further down behind the keyboard instead, which is the same hug with no
      padding change and so no thread-box change at the edge */
   --pad-b: max(0.5rem, env(safe-area-inset-bottom));
-  /* How deep a message dissolves into the canvas at the two lines the message
-     list is cut at — under the top bar, and above the compose bar. ONE value
-     for both edges, and it is a rem rather than a device measurement so it
-     rides the type: the root is 17px here, so the band is about 15px, which is
-     shorter than one line box (17 x 1.35 = 23px). That ceiling is the point —
-     the band can soften the edge of a bubble but can never veil a whole line
-     of text on its way past. The bands themselves are .bar::after and
-     .edgefade::before below. */
-  --edge-fade: 0.875rem;
   /* the gap the pill keeps above the keyboard while it is up (iMessage's) */
   --kb-gap: 0.5rem;
   /* the keyboard's inset, written by shell.ts from the visual viewport (the
@@ -286,32 +277,6 @@ html, body {
   position: sticky;
   top: 0;
   z-index: 5;
-}
-/* THE LIST'S TOP CUT, SOFTENED. A message scrolled up past the bar was sliced
-   flat: .liftclip clips the list at exactly this line, so a bubble's last few
-   pixels simply stopped. This is that line drawn as a dissolve instead — and it
-   is NOT a see-through veil, it is the canvas itself, opaque against the bar
-   and gone by the far side, so the message reads as fading INTO the page.
-   var(--bg) rather than a colour, so dark mode follows with no second rule.
-
-   WHY IT HANGS OFF THE BAR. The bar does not move for the keyboard; the clip
-   box starts where the bar ends, in both states. So a band pinned under the
-   bar is on the visible edge whether the lift is up or down, and it needs to
-   know nothing about the lift to be there. It is absolutely positioned, so it
-   takes no grid track and adds no height — the bar is exactly the size it was.
-   Its stacking comes free from the bar's own z-index 5: above everything the
-   lift carries (the chevron's 4 is inside the lift), below the settings menu
-   (6) and the send morph (7), so neither of those is dimmed by it. Inert to
-   touch, because the message underneath is still a message. */
-.bar::after {
-  content: "";
-  position: absolute;
-  top: 100%; /* the bar's bottom edge — the line the clip box begins at */
-  left: 0;
-  right: 0;
-  height: var(--edge-fade);
-  background: linear-gradient(to bottom, var(--bg), transparent);
-  pointer-events: none;
 }
 /* contact group, centered in the bar: the trooper image with the left-aligned
    name/version block on its right */
@@ -483,46 +448,6 @@ html, body {
   gap: 2px;
   touch-action: pan-y; /* leftward drags belong to the time-peek gesture */
   overscroll-behavior: contain; /* a thread overscroll must never chain to a page pan */
-}
-
-/* THE LIST'S BOTTOM CUT, SOFTENED — the bar's band (.bar::after above), upside
-   down. A message scrolled down past the compose bar was sliced flat by the
-   scroller's own edge; this is that line drawn as a dissolve into the canvas
-   instead, the same depth and the same var(--bg) so the two ends of the app
-   match and dark mode follows both.
-
-   WHY IT IS AN ELEMENT AND NOT A PSEUDO ON THE COMPOSE FORM. Two reasons, and
-   the second is the better one.
-   1. The form is under a standing ban on overlay pseudo-elements
-      (composershine.test.ts): a veil on one is what washed the textarea grey
-      once, and lifting the text back out from under it cost double-tap word
-      select. A band hung outside the form's box could not reach the text, but
-      the ban is blunt on purpose and this is not the change to soften it for.
-   2. The list's bottom edge is NOT always the form's top edge. The photo
-      drawer stands between them when photos are staged, and it opens, grows,
-      shrinks and (on a send) leaves the flow entirely. An empty marker parked
-      immediately after the thread is at the list's real edge through all of
-      that, with nothing to switch and nothing to keep in step.
-
-   It rides the lift, so the keyboard carries it with the edge it belongs to,
-   and it is a flex item with no height at all: the column lays out exactly as
-   it did, and the fade itself hangs off the marker's own line. No z-index
-   either — at auto the band paints after the thread's rows (tree order) and
-   before the jump chevron's face and glyph, which carry 4, so a half-scrolled
-   message fades and the chevron parked over it never dims. */
-.edgefade {
-  position: relative; /* the band's anchor; the marker itself paints nothing */
-  height: 0; /* takes no room in the column, so the list keeps every pixel */
-}
-.edgefade::before {
-  content: "";
-  position: absolute;
-  bottom: 0; /* the marker's line, which is the list's last visible one */
-  left: 0;
-  right: 0;
-  height: var(--edge-fade);
-  background: linear-gradient(to top, var(--bg), transparent);
-  pointer-events: none;
 }
 
 /* each chat event renders inside one .evt wrapper; display:contents keeps its
@@ -886,22 +811,15 @@ html, body {
    text rides WITH its left edge — one uniform slide, never a re-wrap. The
    vacated space (34px ＋ + 0.5rem flex gap) is absorbed by the RIGHT inset,
    where ragged line-ends live, so the wrap width is identical in both states
-   and nothing visibly changes but the glide.
-     THE INVARIANT, and it is arithmetic, not care: this inset and the ＋'s
-   width+margin collapse below share one duration, one curve and no delay, so
-   they run off the SAME eased progress p. The ＋ has released 42px * p (34 of
-   width plus the 8 of flex gap its negative margin swallows) and this inset
-   has absorbed 42px * p, on every frame, for every p — the two cancel exactly
-   and the text's wrap width is a constant. Give either side a different clock
-   or a delay and the difference becomes real pixels, which is a re-wrap.
-     The shared clock is --kb-anim, the keyboard's own (see #app): the bar's
-   one motion is over when the keyboard's is. Keyed off .focusing too
-   (shell.ts, set synchronously on the focus tap), so it starts on the tap
-   rather than popping when .kb finally latches on the proven shrink. */
+   and nothing visibly changes but the glide. Same duration and delay as the
+   ＋'s width collapse, so the wrap width holds frame-by-frame. Keyed off
+   .focusing too (shell.ts, set synchronously on the focus tap): the widen
+   runs WHILE the keyboard rises instead of popping after .kb finally latches
+   on the proven shrink. */
 #app.kb .compose textarea,
 #app.focusing .compose textarea {
   padding-right: calc(74px + 0.5rem); /* 40px ↑ column + 34px ＋ + the gap */
-  transition: padding-right var(--kb-anim);
+  transition: padding-right 0.13s ease 0.1s;
 }
 /* iOS skips its caret-reveal scroll when the freshly focused control sits at
    opacity 0 (the verified ios-chat/kiding mechanism): one 0.02s opacity blink
@@ -922,17 +840,6 @@ html, body {
 .attach {
   display: grid;
   place-items: center;
-  /* THE GLYPH'S BOX, and the point is that it never changes size. An auto
-     track is sized by its container, so a collapsing button would squeeze the
-     ＋ along with it; a fixed 34px track pinned to the start keeps the glyph
-     at its resting width and its resting position while the button's right
-     edge travels left past it. That is what lets the keyboard-up collapse
-     below run the fade and the width move together — the old choreography
-     kept them strictly apart precisely because a visible glyph in a narrowing
-     auto track deforms. At rest the track IS the button's content box, so
-     nothing about the ＋ standing still changes. */
-  grid-template-columns: 34px;
-  justify-content: start;
   position: relative; /* seats the ::after hit square */
   width: 34px;
   height: 34px;
@@ -956,11 +863,11 @@ html, body {
      but the single-line pill (39px borderless) is 5px taller than the ＋ —
      half of that lifts the ＋ onto the pill's optical centerline */
   margin-bottom: 2.5px;
-  /* no overflow clip in the RESTING rule: it would take the ::after hit square
-     below with it (clipped away, and rounded to this circle), and that square
-     is the whole 44pt tap target. The clip lives in the keyboard-up rule
-     instead, on for exactly as long as the collapse lasts, where the square is
-     already inert — that rule sets pointer-events: none, and pseudos ride it. */
+  /* no overflow clip here: it would take the ::after hit square below with it
+     (clipped away, and rounded to this circle). The glyph still cannot paint
+     outside a mid-collapse box: this transition and the .kb one below both
+     sequence the opacity fade strictly apart from the width move, so the
+     glyph sits at opacity 0 whenever the box is between its resting widths. */
   /* keyboard-DOWN direction: the editor hands the space back first, then the
      ＋ fades in — the mirror of the keyboard-up choreography below. The filter
      entry is the settling window's RE-ENABLE fade (going off stays instant). */
@@ -984,40 +891,23 @@ html, body {
 
 /* The ＋ and the keyboard never coexist. From the focus tap itself (.focusing,
    shell.ts's tap-synchronous signal) or while the keyboard is provably up
-   (.kb — the shell's baseline-tested signal) the ＋ fades out AND gives up its
-   flex slot in the same breath, while the editor widens leftward into that
-   slot on the same clock: ONE motion, not two steps. .focusing starts it with
-   the tap and .kb takes over when the shrink proves out, so the motion runs
-   inside the keyboard's own rise and finishes with it; a keyboard-less focus
-   lapses the signal and the bar returns. When the keyboard leaves, the editor
-   shrinks back first and the ＋ fades in after — the CLOSE is still a
-   sequence, and its timings are the base rule's above, untouched. With no ＋
-   to tap while typing, a picker can never present over a live keyboard — the
-   teardown snatch has nothing left to snatch. */
+   (.kb — the shell's baseline-tested signal) the ＋ fades out, THEN yields its
+   flex slot so the editor widens leftward into it, both inside the keyboard's
+   own rise — .focusing starts the choreography with the tap and .kb takes
+   over when the shrink proves out, so the bar expands while the keyboard
+   rises instead of popping after it lands; a keyboard-less focus lapses the
+   signal and the bar returns. When the keyboard leaves, the editor shrinks
+   back first and the ＋ fades in after. With no ＋ to tap while typing, a
+   picker can never present over a live keyboard — the teardown snatch has
+   nothing left to snatch. */
 #app.kb .compose .attach,
 #app.focusing .compose .attach {
   opacity: 0;
   width: 0;
   margin-right: -0.5rem; /* swallow the flex gap so the slot truly closes */
   pointer-events: none; /* mid-fade taps belong to the widening editor */
-  /* The clip, on only while the ＋ is collapsed or collapsing. With the fade
-     and the width move now running together the glyph is visible for the whole
-     narrowing, so the button's own rounded edge has to close over it — the
-     glyph holds its shape and its place (the fixed track above) and the box
-     slides across it. It takes the ::after hit square with it, which costs
-     nothing: pointer-events above already made the square inert, and the clip
-     is gone the instant .kb/.focusing leave, so the resting 44pt target never
-     sees it. `clip`, not `hidden`: a hidden box is a scroll container, and
-     this one would be created on the focus tap — the exact frame iOS goes
-     looking for something to scroll (.liftclip carries the same note). */
-  overflow: clip;
-  /* keyboard-UP direction: ONE motion, on the keyboard's own clock and curve
-     (--kb-anim), with no delay on any of the three. The fade, the width and
-     the margin land together with the pill's padding-right above, which is
-     declared with the same token for the same reason: one easing function
-     across all four means the space the ＋ has released is the space the pill
-     has absorbed on every frame, so nothing overlaps and no gap opens. */
-  transition: opacity var(--kb-anim), width var(--kb-anim), margin-right var(--kb-anim);
+  /* keyboard-UP direction: fade first, then give up the width */
+  transition: opacity 0.1s ease, width 0.13s ease 0.1s, margin-right 0.13s ease 0.1s;
 }
 
 /* The picker session window (.settling, shell.ts): the ＋ greys and the whole
