@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -213,6 +214,166 @@ def test_branch_cap_skipped_without_repo_root():
     assert _call_hook(hook, "git checkout -B paratrooper/anything") == {}
 
 
+# --- the one road to GitHub: git, and the gh pull-request commands ------------
+#
+# The session env hands the shell a live GitHub token, so anything that can
+# speak HTTP is an authorised API client. The branch allowlist never saw those
+# commands (they aren't git), which is how PRs ended up being opened by raw REST.
+
+_GITHUB_DENIED = [
+    # --- reaching a GitHub host with something that isn't git or gh ---
+    "curl -s https://api.github.com/repos/o/r/pulls",
+    'curl -X POST -H "Authorization: bearer $GH_TOKEN" https://api.github.com/repos/o/r/pulls',
+    "wget -qO- https://api.github.com/user",
+    "curl https://raw.githubusercontent.com/o/r/main/index.json",
+    "curl https://objects.githubusercontent.com/blob",
+    "curl https://github.com/o/r/pull/7",
+    """python -c "import requests; requests.post('https://api.github.com/repos/o/r/pulls')" """,
+    """python3 -c "import httpx; httpx.get('https://github.com/o/r')" """,
+    """node -e "fetch('https://api.github.com/user')" """,
+    'bash -c "curl https://api.github.com/repos/o/r/pulls"',  # nested wrapper
+    "sh -c 'wget https://api.github.com/user'",
+    "git log --oneline | curl -X POST -d @- https://api.github.com/gists",  # pipe
+    "git status && curl https://api.github.com/user",  # chained after a legal git
+    'gh pr list && curl https://api.github.com/user',  # chained after a legal gh
+    "HOST=api.github.com; curl https://$HOST/user",  # assembled in a variable
+    'gh pr create --title x --body "$(curl -s https://api.github.com/user)"',  # substitution
+    # --- reading the token back out of the environment ---
+    "echo $GH_TOKEN",
+    "echo ${GITHUB_TOKEN}",
+    "echo $PARATROOPER_GIT_ASKPASS_TOKEN",
+    """python -c "import os; print(os.environ['GH_TOKEN'])" """,
+    """node -e "console.log(process.env.GH_TOKEN)" """,
+    "env",
+    "env | grep TOKEN",
+    "printenv",
+    "printenv GH_TOKEN",
+    "export -p",
+    "export",
+    "set",
+    "cat /proc/self/environ",
+    "tr -d '\\0' < /proc/1/environ",
+    """python -c "print(open('/proc/self/environ').read())" """,
+    'gh pr create --title x --body "$(printenv GH_TOKEN)"',  # substitution
+    # --- gh outside its pull-request allowlist ---
+    "gh api repos/o/r/pulls",
+    "gh api --method POST repos/o/r/pulls -f title=x",
+    "gh pr merge 5",
+    "gh pr close 3",
+    "gh pr edit 3 --base main",
+    "gh repo delete o/r",
+    "gh repo clone o/r",
+    "gh release create v1",
+    "gh secret set FOO",
+    "gh auth login",
+    "gh auth token",
+    "gh auth refresh",
+    "gh run list",
+    "gh workflow run deploy",
+]
+
+
+@pytest.mark.parametrize("command", _GITHUB_DENIED)
+def test_github_roads_other_than_git_and_gh_are_denied(command):
+    assert git_violation(command, "main") is not None
+
+
+@pytest.mark.parametrize("command", _GITHUB_DENIED)
+def test_github_denials_name_the_sanctioned_route(command):
+    """A denial the agent can't act on is one it will try to route around, so
+    every refusal has to point at the way through."""
+    reason = git_violation(command, "main")
+    assert "gh pr create" in reason, reason
+    assert "gh pr list" in reason, reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # the gh commands the prompt's workflow actually runs
+        "gh pr list --json title,headRefName,url",
+        "gh pr view 7 --json url",
+        'gh pr create --title "add twen pin" --body "adds the new twen photo"',
+        "gh pr status",
+        "gh pr checks",
+        "gh auth status",
+        "gh --version",
+        "gh version",
+        "gh help",
+        # git, fenced as before
+        "git fetch origin main",
+        "git push -u origin paratrooper/twen-new-photo",
+        "git checkout -B paratrooper/twen-new-photo",
+        # HTTP to anything that isn't GitHub stays open: the Astro dev server,
+        # an image the user linked, a health check
+        "curl -s http://localhost:4321/",
+        "curl -sI https://images.unsplash.com/photo-1234",
+        "curl -o /tmp/x.jpg https://upload.wikimedia.org/x.jpg",
+        # interpreters with nothing to do with GitHub
+        """python -c "import json; print(json.dumps({'a': 1}))" """,
+        'node -e "console.log(1 + 1)"',
+        "npm run build",
+        # ordinary environment work
+        "export FOO=bar",
+        "export NODE_ENV=production && npm run build",
+        "set -euo pipefail",
+    ],
+)
+def test_the_sanctioned_routes_stay_open(command):
+    assert git_violation(command, "main") is None
+
+
+def test_gh_denial_names_what_gh_may_still_run():
+    """`gh` is now an allowlist, so the refusal has to spell the allowlist out —
+    the agent has no other way to learn which gh commands survived."""
+    reason = git_violation("gh repo delete o/r", "main")
+    for allowed in ("gh pr list", "gh pr view", "gh pr create", "gh auth status"):
+        assert allowed in reason, reason
+
+
+def test_a_leading_assignment_does_not_hide_the_command():
+    """`FOO=bar git push ...` is a git command with a one-shot env var in front.
+    Read literally its head token is `FOO=bar`, the allowlist never runs, and the
+    whole fence is one assignment away from being off."""
+    for command in (
+        "FOO=bar git push origin feature/x",
+        "FOO=bar git checkout -b feature/x",
+        "GIT_ASKPASS=/tmp/x git push origin main",
+        "FOO=bar gh api repos/o/r",
+        "HOST=api.github.com",  # an assignment on its own still names the host
+    ):
+        assert git_violation(command, "main") is not None, command
+    for command in (
+        "FOO=bar git push origin paratrooper/x",
+        "FOO=bar gh pr list",
+        "NODE_ENV=production npm run build",
+    ):
+        assert git_violation(command, "main") is None, command
+    # and the branch cap counts the branch such a command would create
+    from paratrooper.agent.hooks import branch_creation_targets
+
+    assert branch_creation_targets("FOO=bar git checkout -b paratrooper/x") == ["paratrooper/x"]
+
+
+def test_github_fence_leaves_the_branch_prefix_alone():
+    """The GitHub rules and the configured-namespace rules are independent: the
+    new fence must not shift what counts as an agent branch."""
+    assert git_violation("git push -u origin blimp/x", "main", "blimp") is None
+    assert git_violation("gh pr create --title x --body y", "main", "blimp") is None
+    assert git_violation("curl https://api.github.com", "main", "blimp") is not None
+
+
+def test_worker_image_installs_the_github_cli():
+    """The fence sends every PR through `gh`, so the worker image has to carry
+    it — installed from GitHub's own signed apt repository, not a loose binary."""
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.worker").read_text()
+    assert "https://cli.github.com/packages/githubcli-archive-keyring.gpg" in dockerfile
+    assert "/etc/apt/keyrings/githubcli-archive-keyring.gpg" in dockerfile
+    assert "https://cli.github.com/packages stable main" in dockerfile
+    assert re.search(r"apt-get install[^\n]*\bgh\b", dockerfile)
+    assert "rm -rf /var/lib/apt/lists/*" in dockerfile  # the layer still cleans up
+
+
 # --- the configured branch word ([site] branch_prefix) ------------------------
 
 def test_git_violation_fences_the_configured_prefix():
@@ -351,6 +512,53 @@ def test_default_system_prompt_is_unchanged():
     assert "`paratrooper/*` branch that is NOT the open PR's branch" in SYSTEM_PROMPT
     assert SYSTEM_PROMPT.count("paratrooper/") == 3
     assert "{prefix}" not in SYSTEM_PROMPT  # the slot is always filled
+
+
+# --- the prompt's GitHub route -----------------------------------------------
+
+# the one paragraph added when gh went into the worker image and the guard
+# closed every other road; quoted here so the test can subtract it
+_GITHUB_RULE = (
+    "GITHUB IS REACHABLE ONLY THROUGH git AND `gh`. Open a pull request with "
+    "`gh pr create` and look at pull requests with `gh pr list` / `gh pr view` — "
+    "never call the GitHub API yourself: no `gh api`, no curl or wget, no Python "
+    "or Node request to github.com or api.github.com, and never read the token "
+    "out of the environment. The shell refuses all of those, so going around "
+    "`gh` only costs you a turn."
+)
+
+
+def test_system_prompt_forbids_calling_the_github_api_directly():
+    """The guard refuses a raw API call, but a refusal the agent never expected
+    costs it a turn — the instruction has to say so up front, and name the tool
+    that does work."""
+    from paratrooper.agent.prompt import SYSTEM_PROMPT
+
+    assert _GITHUB_RULE in SYSTEM_PROMPT
+    assert "`gh api`" in SYSTEM_PROMPT
+    assert "api.github.com" in SYSTEM_PROMPT
+    # the gh commands it IS told to use are still the ones the guard allows
+    assert "`gh pr list --json title,headRefName,url`" in SYSTEM_PROMPT
+    assert 'gh pr create --title "..." --body "..."' in SYSTEM_PROMPT
+
+
+def test_system_prompt_adds_only_the_github_rule():
+    """One inserted paragraph and nothing else: subtract it and every branch-
+    prefix invariant from the previous change has to still hold, word for word."""
+    from paratrooper.agent.prompt import SYSTEM_PROMPT, render_system_prompt
+
+    assert SYSTEM_PROMPT.count(_GITHUB_RULE) == 1
+    before = SYSTEM_PROMPT.replace(f"\n\n{_GITHUB_RULE}", "")
+    assert _GITHUB_RULE not in before
+    assert "paratrooper/<short-slug>` (e.g. paratrooper/twen-new-photo)" in before
+    assert "`paratrooper/*` branch that is NOT the open PR's branch" in before
+    assert before.count("paratrooper/") == 3  # the added rule names no branch
+    assert "{prefix}" not in before
+    assert "\n\n\n" not in before  # the paragraph came out clean
+    # and the templating itself is untouched: still one slot, both spellings
+    assert render_system_prompt("blimp") == SYSTEM_PROMPT.replace("paratrooper/", "blimp/")
+    assert render_system_prompt("blimp/") == render_system_prompt("blimp")
+    assert _GITHUB_RULE in render_system_prompt("blimp")
 
 
 # --- auth (3.2): manual mode, no fallback ------------------------------------

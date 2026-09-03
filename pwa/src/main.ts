@@ -166,7 +166,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.91"; // the collapsing attach button and the message list's edge fade are both taken back out
+const APP_VERSION = "0.3.92"; // the worker ships the gh CLI, and the shell guard now refuses every other road to GitHub
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

@@ -9,9 +9,21 @@ ENV PYTHONUNBUFFERED=1
 # git: site-repo clone + branch/commit/push. ca-certificates: HTTPS to GitHub.
 # node/npm: screenshot_board runs the site's `npm run build` (Astro) — the
 # Claude SDK itself needs no Node (bundled native CLI), but the SITE build does.
+# gh: the ONLY sanctioned road to the GitHub API. The prompt tells the agent to
+# open and inspect PRs with `gh pr create`/`gh pr list`, and the PreToolUse guard
+# refuses every other route (curl/python/node to github.com, `gh api`), so the
+# binary has to actually be here — without it the agent falls back to raw REST.
+# Installed from GitHub's own apt repository (keyring + signed-by source line).
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+    && install -m 0755 -d /etc/apt/keyrings /etc/apt/sources.list.d \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs gh \
     && rm -rf /var/lib/apt/lists/*
 
 # The license file rides with it: the package metadata names the license by
