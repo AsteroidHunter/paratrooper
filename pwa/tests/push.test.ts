@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
+import { transformWithEsbuild } from "vite";
 import {
   PUSH_LINK_DB,
   PUSH_LINK_ID,
@@ -220,15 +221,64 @@ describe("the direct user-gesture permission action", () => {
     await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "enable" }));
   });
 
-  it("hides after Do Not Allow instead of revealing a second Paratrooper popup", async () => {
+  it("explains Settings after a refused request instead of going quiet", async () => {
+    // The device bug this replaces: a phone whose notifications are off in
+    // Settings answers the query "default", so Enable is offered, and the
+    // request behind it is refused instantly with no sheet ever shown. Hiding
+    // then left the user with no way to learn that Settings is the only route.
+    const h = harness({ answer: "denied" });
+    await h.setup.check();
+    expect(h.setup.state()).toEqual({ kind: "enable" });
+    h.setup.action();
+    await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "denied" }));
+    h.setup.action(); // and that box is not a route back to Apple
+    expect(h.requestPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps that explanation for the session while the phone still says default", async () => {
     const h = harness({ answer: "denied" });
     await h.setup.check();
     h.setup.action();
-    await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "hidden" }));
-    h.setup.action();
+    await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "denied" }));
+    // a return to the app, or the delayed entrance drawing again: neither may
+    // offer Enable a second time, because the request behind it is spent
+    await h.setup.check();
+    expect(h.setup.state()).toEqual({ kind: "denied" });
     expect(h.requestPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it("dismisses the Settings explanation for the session on Ok", async () => {
+    const h = harness({ answer: "denied" });
+    await h.setup.check();
+    h.setup.action();
+    await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "denied" }));
+    h.setup.dismiss();
+    expect(h.setup.state()).toEqual({ kind: "hidden" });
     await h.setup.check();
     expect(h.setup.state()).toEqual({ kind: "hidden" });
+  });
+
+  it("still repairs silently when Settings grants permission after a refusal", async () => {
+    const h = harness({ answer: "denied" });
+    await h.setup.check();
+    h.setup.action();
+    await vi.waitFor(() => expect(h.setup.state()).toEqual({ kind: "denied" }));
+    h.setPermission("granted"); // the user went where the box sent them
+    await h.setup.check();
+    expect(h.setup.state()).toEqual({ kind: "active" });
+    expect(h.requestPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it("forgets the refusal on the next app load", async () => {
+    // the box sends the user to Settings, so the next launch has to be able to
+    // take a plain "default" at its word again
+    const first = harness({ answer: "denied" });
+    await first.setup.check();
+    first.setup.action();
+    await vi.waitFor(() => expect(first.setup.state()).toEqual({ kind: "denied" }));
+    const second = harness({ permission: "default" });
+    await second.setup.check();
+    expect(second.setup.state()).toEqual({ kind: "enable" });
   });
 
   it("keeps Enable retryable when the browser permission call rejects", async () => {
@@ -488,6 +538,24 @@ function sourceBetween(start: string, end: string): string {
   return MAIN_SOURCE.slice(at, until);
 }
 
+/** A millisecond constant read out of main.ts, so no test may restate one. */
+function millis(name: string): number {
+  const found = new RegExp(`const ${name} = (\\d+);`).exec(MAIN_SOURCE);
+  expect(found, `missing ${name}`).not.toBeNull();
+  return Number(found![1]);
+}
+
+const TRANSITION_MS = millis("PUSH_DIALOG_TRANSITION_MS");
+const DELAY_MS = millis("PUSH_DIALOG_DELAY_MS");
+
+// The three boxes, word for word. The arrows are the ASCII pair, not an en
+// dash and not "→": this is a path the user has to follow through Settings by
+// hand, so it is spelled the way the labels there are read out.
+const ENABLE_COPY = "Enable notifications from your Paratrooper?";
+const DENIED_COPY =
+  "Notifications could not be turned on. Re-enable them by going to Settings -> Notifications -> Paratrooper.";
+const RETRY_COPY = "Notifications couldn’t be enabled.";
+
 describe("centered notification popup wiring", () => {
   it("uses one fixed accessible alert dialog without adding a composer layout row", () => {
     const render = sourceBetween("function renderChat()", "async function loadOlder(");
@@ -526,7 +594,7 @@ describe("centered notification popup wiring", () => {
     const actionLabels = [...dialogMarkup.matchAll(/<button[^>]*>([^<]+)<\/button>/g)]
       .map((match) => match[1].trim());
     expect(actionLabels).toEqual(["Not Now", "Enable"]);
-    expect(renderState).toContain("Enable notifications from your Paratrooper?");
+    expect(renderState).toContain(ENABLE_COPY);
     expect(renderState).toContain('action.textContent = "Enable"');
   });
 
@@ -537,12 +605,14 @@ describe("centered notification popup wiring", () => {
       renderState.indexOf("// Permission was granted"),
     );
     const retry = renderState.slice(renderState.indexOf("// Permission was granted"));
-    expect(renderState).toContain("Re-enable them in iPhone Settings.");
-    expect(renderState).toContain("Notifications couldn’t be enabled.");
+    expect(renderState).toContain(DENIED_COPY);
+    expect(renderState).toContain(RETRY_COPY);
     expect(renderState).toContain("notNow.hidden = false");
-    expect(denied).not.toContain("action.hidden = false"); // Not Now only
+    expect(denied).not.toContain("action.hidden = false"); // one pill, and it is Ok
+    expect(denied).toContain('notNow.textContent = "Ok"');
     expect(retry).toContain("action.hidden = false");
     expect(retry).toContain('action.textContent = "Retry"');
+    expect(retry).not.toContain("notNow.textContent"); // Retry keeps Not Now
   });
 
   it("routes Enable directly into the synchronous action boundary", () => {
@@ -642,6 +712,250 @@ describe("centered notification popup wiring", () => {
     expect(loadKey.indexOf("publicKeyForWorker = body.key")).toBeGreaterThan(
       loadKey.indexOf("invalid push key"),
     );
+  });
+});
+
+// --- the alert on screen ------------------------------------------------------
+//
+// Everything above this line reads main.ts. The handover below is a sequence in
+// time — a box leaves, the screen is empty, the next arrives — so reading the
+// source cannot show that the two never share it. It has to be run.
+//
+// There is no DOM in this env, and main.ts is the app's entry point: importing
+// it would boot the whole app. So the block that owns the alert is cut out of
+// the module by the same names the pins above use, stripped of its types and
+// run in a VM, in the mould of the service-worker harness further down. Its
+// top-level function declarations land on the context, which is what makes
+// renderPushState callable, and the stand-in below is the smallest thing that
+// answers what those functions ask of an element.
+//
+// The stand-in records every write to hidden, because that is the only place
+// the claim "the screen was empty in between" can be observed: the handover
+// pulls the card out of the layout and puts the next one up inside one tick.
+
+/** Enough of an element for the alert: classes, dataset, text, hidden. */
+class DialogStandIn {
+  textContent = "";
+  disabled = false;
+  dataset: Record<string, string> = {};
+  attributes: Record<string, string> = {};
+  /** Every value hidden has been set to, in order. */
+  hiddenLog: boolean[] = [];
+  private classes = new Set<string>();
+  private isHidden = false;
+
+  get hidden(): boolean {
+    return this.isHidden;
+  }
+
+  set hidden(next: boolean) {
+    this.isHidden = next;
+    this.hiddenLog.push(next);
+  }
+
+  classList = {
+    add: (name: string) => void this.classes.add(name),
+    remove: (name: string) => void this.classes.delete(name),
+    contains: (name: string) => this.classes.has(name),
+  };
+
+  setAttribute(name: string, value: string): void {
+    this.attributes[name] = value;
+  }
+}
+
+/** main.ts's dialog block, as JavaScript, ready to run in a fresh context. */
+let dialogScript = "";
+
+beforeAll(async () => {
+  const block = sourceBetween("const PUSH_DIALOG_TRANSITION_MS", "function pushApisSupported(");
+  dialogScript = (await transformWithEsbuild(block, "pushdialog.ts", { loader: "ts" })).code;
+});
+
+function alertHarness() {
+  const dialog = new DialogStandIn();
+  dialog.hidden = true; // as renderChat's markup ships it
+  dialog.hiddenLog.length = 0;
+  const copy = new DialogStandIn();
+  const notNow = new DialogStandIn();
+  const action = new DialogStandIn();
+  const elements: Record<string, DialogStandIn> = {
+    "push-dialog": dialog,
+    "push-copy": copy,
+    "push-not-now": notNow,
+    "push-action": action,
+  };
+  const frames = new Map<number, () => void>();
+  let nextFrame = 1;
+  const context: Record<string, unknown> = {
+    document: { getElementById: (id: string) => elements[id] ?? null },
+    // through window, so the fake clock this file installs is the one used
+    window: {
+      setTimeout: (run: () => void, ms: number) => setTimeout(run, ms),
+      clearTimeout: (handle: number) => clearTimeout(handle),
+    },
+    requestAnimationFrame: (run: () => void) => {
+      const handle = nextFrame++;
+      frames.set(handle, run);
+      return handle;
+    },
+    cancelAnimationFrame: (handle: number) => void frames.delete(handle),
+    pushNotifications: null, // only cancelPushDialogExit reads it
+  };
+  runInNewContext(dialogScript, context);
+  const call = (name: string, ...args: unknown[]): void => {
+    (context[name] as (...a: unknown[]) => void)(...args);
+  };
+  return {
+    dialog,
+    copy,
+    notNow,
+    action,
+    render: (state: PushState) => call("renderPushState", state),
+    arm: () => call("armPushDialogEntrance"),
+    beginExit: () => call("beginPushDialogExit"),
+    /** Run the frame the entrance is waiting on, landing it at rest. */
+    paint: () => {
+      const due = [...frames.values()];
+      frames.clear();
+      for (const run of due) run();
+    },
+    entering: () => dialog.classList.contains("push-dialog-entering"),
+    leaving: () => dialog.classList.contains("push-dialog-leaving"),
+  };
+}
+
+describe("the alert's boxes, one at a time", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A harness whose gentle opening delay has already elapsed. */
+  function opened(): ReturnType<typeof alertHarness> {
+    const h = alertHarness();
+    h.arm();
+    vi.advanceTimersByTime(DELAY_MS);
+    return h;
+  }
+
+  it("holds the first box back until the thread has had its moment", () => {
+    const h = alertHarness();
+    h.arm();
+    h.render({ kind: "enable" });
+    expect(h.dialog.hidden).toBe(true);
+    vi.advanceTimersByTime(DELAY_MS - 1);
+    expect(h.dialog.hidden).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(h.dialog.hidden).toBe(false);
+    expect(h.copy.textContent).toBe(ENABLE_COPY);
+  });
+
+  it("asks the question with Not Now beside Enable", () => {
+    const h = opened();
+    h.render({ kind: "enable" });
+    expect(h.copy.textContent).toBe(ENABLE_COPY);
+    expect([h.notNow.hidden, h.notNow.textContent]).toEqual([false, "Not Now"]);
+    expect([h.action.hidden, h.action.textContent]).toEqual([false, "Enable"]);
+  });
+
+  it("names the path through Settings, and answers it with one Ok", () => {
+    const h = opened();
+    h.render({ kind: "denied" });
+    expect(h.copy.textContent).toBe(DENIED_COPY);
+    expect([h.notNow.hidden, h.notNow.textContent]).toEqual([false, "Ok"]);
+    expect(h.action.hidden).toBe(true); // one pill: there is nothing else to do
+  });
+
+  it("leaves the Retry box as it was", () => {
+    const h = opened();
+    h.render({ kind: "retry" });
+    expect(h.copy.textContent).toBe(RETRY_COPY);
+    expect([h.notNow.hidden, h.notNow.textContent]).toEqual([false, "Not Now"]);
+    expect([h.action.hidden, h.action.textContent]).toEqual([false, "Retry"]);
+  });
+
+  it("hands over: the box on screen leaves whole before the next one arrives", () => {
+    const h = opened();
+    h.render({ kind: "enable" });
+    h.paint();
+    expect([h.entering(), h.leaving()]).toEqual([false, false]); // at rest
+
+    h.render({ kind: "denied" });
+    // what is on screen is still the Enable box, entire, and now on its way out
+    expect(h.copy.textContent).toBe(ENABLE_COPY);
+    expect(h.action.textContent).toBe("Enable");
+    expect([h.entering(), h.leaving()]).toEqual([false, true]);
+
+    vi.advanceTimersByTime(TRANSITION_MS - 1);
+    expect(h.copy.textContent).toBe(ENABLE_COPY); // nothing is built over it
+
+    h.dialog.hiddenLog.length = 0;
+    vi.advanceTimersByTime(1);
+    // gone, and only then back: the two boxes never share the screen
+    expect(h.dialog.hiddenLog).toEqual([true, false]);
+    expect(h.copy.textContent).toBe(DENIED_COPY);
+    expect(h.notNow.textContent).toBe("Ok");
+    // and it arrives on the ordinary entrance, from its start state
+    expect([h.entering(), h.leaving()]).toEqual([true, false]);
+    h.paint();
+    expect(h.entering()).toBe(false);
+  });
+
+  it("plays the whole refusal, from the Enable tap to the Settings box", () => {
+    const h = opened();
+    h.render({ kind: "enable" });
+    h.paint();
+    h.beginExit(); // the tap itself starts the exit
+    h.render({ kind: "requesting" }); // the request goes to the phone
+    h.render({ kind: "denied" }); // and comes back refused, with no sheet shown
+    expect(h.copy.textContent).toBe(ENABLE_COPY); // still the box that was tapped
+
+    h.dialog.hiddenLog.length = 0;
+    vi.advanceTimersByTime(TRANSITION_MS);
+    expect(h.dialog.hiddenLog).toEqual([true, false]);
+    expect(h.copy.textContent).toBe(DENIED_COPY);
+    expect(h.notNow.textContent).toBe("Ok");
+    expect([h.entering(), h.leaving()]).toEqual([true, false]);
+  });
+
+  it("waits for nothing when the screen is already empty", () => {
+    // the other refusal: Apple's sheet was up, so our box finished leaving long
+    // before the answer came back and there is nothing to hand over from
+    const h = opened();
+    h.render({ kind: "enable" });
+    h.paint();
+    h.render({ kind: "requesting" });
+    vi.advanceTimersByTime(TRANSITION_MS);
+    expect(h.dialog.hidden).toBe(true);
+
+    h.render({ kind: "denied" });
+    expect(h.dialog.hidden).toBe(false);
+    expect(h.copy.textContent).toBe(DENIED_COPY);
+    expect(h.entering()).toBe(true);
+  });
+
+  it("cancels a waiting box when the state changes mid-handover", () => {
+    const h = opened();
+    h.render({ kind: "enable" });
+    h.paint();
+    h.render({ kind: "denied" }); // the handover begins
+    h.render({ kind: "hidden" }); // and is overtaken before it can land
+    vi.advanceTimersByTime(TRANSITION_MS * 4);
+    expect(h.dialog.hidden).toBe(true);
+    expect(h.copy.textContent).not.toBe(DENIED_COPY); // never built
+  });
+
+  it("is not a handover when the box already up is rendered again", () => {
+    const h = opened();
+    h.render({ kind: "enable" });
+    h.paint();
+    h.render({ kind: "enable" });
+    expect([h.entering(), h.leaving()]).toEqual([false, false]); // no exit, no entrance
+    expect(h.copy.textContent).toBe(ENABLE_COPY);
   });
 });
 

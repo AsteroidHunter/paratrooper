@@ -52,6 +52,14 @@ export function createPushSetup<Subscription>(
   let generation = 0;
   let stopped = false;
   let dismissed = false;
+  // A phone whose notifications were switched off in Settings still answers the
+  // permission query with "default", so Enable is offered, the request behind it
+  // returns "denied" with no sheet shown, and offering Enable a second time
+  // would walk into the same wall. One refused request is therefore remembered
+  // for the session: every prompt after it is the Settings explanation, however
+  // the phone answers. A relaunch asks from scratch, because Settings is exactly
+  // where the user was sent and turning it back on has to be able to land.
+  let refused = false;
 
   const live = (mine: number): boolean => !stopped && mine === generation;
 
@@ -100,17 +108,20 @@ export function createPushSetup<Subscription>(
   ): Promise<void> => {
     if (!live(mine)) return;
     if (permission === "denied") {
-      // Apple's Do Not Allow sheet is already a complete answer. Do not reveal
-      // a second Paratrooper dialog underneath it as soon as it closes. A later
-      // app open/check can show the single Settings explanation directly.
-      if (fromNativeRequest) dismissed = true;
-      show(fromNativeRequest ? { kind: "hidden" } : { kind: "denied" }, mine);
+      // Nothing here can tell a refusal the user typed into Apple's sheet from
+      // one the phone returned instantly because the switch is already off in
+      // Settings: both arrive as "denied" from the same call. Settings is the
+      // right next step for either, so both get the same one box.
+      if (fromNativeRequest) refused = true;
+      show({ kind: "denied" }, mine);
       return;
     }
     if (permission === "default") {
       // Dismissing the native sheet is not permanent: leave Enable available
-      // for another deliberate tap, without prompting again on our own.
-      show({ kind: "enable" }, mine);
+      // for another deliberate tap, without prompting again on our own. After a
+      // refusal in this session, though, "default" is the off-in-Settings
+      // reading of the same phone, and Enable would be a dead end.
+      show(refused ? { kind: "denied" } : { kind: "enable" }, mine);
       return;
     }
     await ensureSubscription(mine, key);

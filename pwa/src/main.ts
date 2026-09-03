@@ -166,7 +166,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.93"; // the notification card arrives and leaves on the system alert's own timing
+const APP_VERSION = "0.3.94"; // a refused request hands the card over to the Settings one, never both at once
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -5514,6 +5514,7 @@ const PUSH_DIALOG_DELAY_MS = 2500;
 let pushDialogHideTimer: number | null = null;
 let pushDialogShowFrame: number | null = null;
 let pushDialogDelayTimer: number | null = null;
+let pushDialogChainTimer: number | null = null;
 let pushDialogCanShow = false;
 let pendingPushDialogState: PushState | null = null;
 
@@ -5574,6 +5575,32 @@ function showPushDialog(dialog: HTMLElement): void {
   });
 }
 
+/**
+ * Hand the alert over from the box on screen to the next one.
+ *
+ * Two boxes may never share the screen, and rewriting the copy under a card
+ * that is still on it would read as a change of mind rather than a handover.
+ * So the one showing leaves whole, on the ordinary exit, and the render that
+ * wanted the screen is replayed once it is empty — where it finds nothing to
+ * hand over to and builds its box on the ordinary entrance. Neither box can
+ * tell it shared a sequence with the other: both arrive and leave exactly as a
+ * box that came up alone.
+ */
+function chainPushDialog(dialog: HTMLElement, state: PushState): void {
+  hidePushDialog(dialog, state);
+  // One timer, not two on the same deadline. hidePushDialog's own would be
+  // racing this one to pull the card out of the layout, so it is dropped and
+  // the handover does that itself, in the only order that is safe: gone first,
+  // and only then the replay that puts the next box up.
+  if (pushDialogHideTimer !== null) window.clearTimeout(pushDialogHideTimer);
+  pushDialogHideTimer = null;
+  pushDialogChainTimer = window.setTimeout(() => {
+    pushDialogChainTimer = null;
+    dialog.hidden = true;
+    renderPushState(state);
+  }, PUSH_DIALOG_TRANSITION_MS);
+}
+
 function renderPushState(state: PushState): void {
   const dialog = document.getElementById("push-dialog") as HTMLElement | null;
   const copy = document.getElementById("push-copy") as HTMLElement | null;
@@ -5583,16 +5610,22 @@ function renderPushState(state: PushState): void {
 
   if (pushDialogHideTimer !== null) window.clearTimeout(pushDialogHideTimer);
   if (pushDialogShowFrame !== null) cancelAnimationFrame(pushDialogShowFrame);
+  if (pushDialogChainTimer !== null) window.clearTimeout(pushDialogChainTimer);
   pushDialogHideTimer = null;
   pushDialogShowFrame = null;
+  pushDialogChainTimer = null; // a state that arrives mid-handover cancels it
+
+  // Read before the dataset below is rewritten: while a card is on screen, or
+  // still fading off it, that attribute names the box the screen is holding. A
+  // different one may not be built over it — it waits for the exit.
+  const prompt = ["enable", "denied", "retry"].includes(state.kind);
+  if (prompt && pushDialogCanShow && !dialog.hidden && dialog.dataset.pushState !== state.kind) {
+    chainPushDialog(dialog, state);
+    return;
+  }
+
   dialog.dataset.pushState = state.kind;
   dialog.setAttribute("aria-busy", String(state.kind === "requesting"));
-  notNow.hidden = false;
-  notNow.disabled = false;
-  action.hidden = true;
-  action.disabled = false;
-  action.textContent = "";
-  copy.textContent = "";
   const hidden = state.kind === "hidden" || state.kind === "checking" || state.kind === "active";
   if (hidden || state.kind === "requesting") {
     pendingPushDialogState = null;
@@ -5607,6 +5640,16 @@ function renderPushState(state: PushState): void {
   }
   pendingPushDialogState = null;
 
+  // The card is built only on the way in. Blanking it on the way out would
+  // empty and reflow it in the first frame of its own fade, so what left would
+  // not be the box the user was looking at.
+  notNow.hidden = false;
+  notNow.disabled = false;
+  notNow.textContent = "Not Now";
+  action.hidden = true;
+  action.disabled = false;
+  action.textContent = "";
+
   if (state.kind === "enable") {
     copy.textContent = "Enable notifications from your Paratrooper?";
     action.hidden = false;
@@ -5615,7 +5658,12 @@ function renderPushState(state: PushState): void {
     return;
   }
   if (state.kind === "denied") {
-    copy.textContent = "Notifications are off. Re-enable them in iPhone Settings.";
+    // Every route to this box ends in the same place — the switch is in
+    // Settings and only the user can reach it — so it names the path there and
+    // offers the one thing left to say back.
+    copy.textContent =
+      "Notifications could not be turned on. Re-enable them by going to Settings -> Notifications -> Paratrooper.";
+    notNow.textContent = "Ok";
     showPushDialog(dialog);
     return;
   }
