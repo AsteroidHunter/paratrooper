@@ -97,6 +97,7 @@ import {
   closeCorrectionNeeded,
   currentFileInput,
   initShell,
+  ownsFocus,
   watchFollowTail,
   watchKeyboard,
   watchLiftLanding,
@@ -166,7 +167,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.96"; // the sign-in badge reads as a title, its sentence pairs with a narrower box
+const APP_VERSION = "0.3.97"; // the sign-in box is focused by the app, so iOS never reveals it and nothing has to be taken back
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -397,20 +398,23 @@ document.addEventListener(
 // shell itself never scrolls (styles.css — html/body are overflow:hidden at
 // 100vh with touch-action:none, #app is inset-pinned, only .thread scrolls),
 // yet iOS can still programmatically scroll the WINDOW to "reveal" a focused
-// composer — e.g. a focus tap's reveal landing before the keyboard is provably
-// up, the gap the focus blink (styles.css) exists to close. The composer is
-// always fully visible in our layout, so a window scroll while it holds focus
-// with NO keyboard is iOS fighting the shell: snap it straight back, same
-// frame (snapping to 0 refires "scroll" once with scrollY already 0, so it
-// cannot loop). WITH the keyboard up (.kb) the shell owns the whole affair
-// (shell.ts): it rides the visual viewport, refuses to track a scroll-sourced
-// growth shove (clearing it in its own frame, with a yield guard so the
-// retired counter's window war cannot restart), and corrects residue once at
-// close.
+// box — e.g. a focus tap's reveal landing before the keyboard is provably up,
+// the gap the focus blink (styles.css) exists to close. Both of the app's own
+// boxes are always fully visible in our layout, so a window scroll while one
+// of them holds focus with NO keyboard is iOS fighting the shell: snap it
+// straight back, same frame (snapping to 0 refires "scroll" once with scrollY
+// already 0, so it cannot loop). The gate is guarded by the same line as the
+// composer — one mark, read here as it is read by the take-over that should
+// have made this unnecessary (shell.ts ownsFocus), so neither screen can be
+// left out of a defence written for both. WITH the keyboard up (.kb) the shell
+// owns the whole affair (shell.ts): it rides the visual viewport, refuses to
+// track a scroll-sourced growth shove (clearing it in its own frame, with a
+// yield guard so the retired counter's window war cannot restart), and
+// corrects residue once at close.
 window.addEventListener(
   "scroll",
   () => {
-    if (document.activeElement?.id !== "text") return;
+    if (!ownsFocus(document.activeElement)) return;
     if (app.classList.contains("kb")) return; // close-time correction owns keyboard residue
     if (window.scrollX !== 0 || window.scrollY !== 0) {
       holdDiagRecord("snapback", {
@@ -482,6 +486,10 @@ holdDiagAuth(authHeaders);
 // multiply the bar's own figure by — the size changes, the proportions do not.
 // The build stamp that used to close the card is gone: the version is already
 // on the badge, and a login screen is not where a build timestamp belongs.
+// The box carries data-owned-focus, the same mark the compose textarea carries:
+// the app focuses both boxes itself, so iOS never runs its caret reveal on
+// either and the card's only motion on a tap is the lift (shell.ts OWNED_FOCUS
+// owns the whole rule; styles.css blinks both boxes off the same mark).
 function renderTokenGate(): void {
   app.innerHTML = `
     <div class="gate">
@@ -493,7 +501,7 @@ function renderTokenGate(): void {
         </div>
       </div>
       <p>Your access token please?</p>
-      <input id="token-input" type="password" autocomplete="off" />
+      <input id="token-input" type="password" autocomplete="off" data-owned-focus />
       <button id="token-save">Connect</button>
     </div>`;
   const input = document.getElementById("token-input") as HTMLInputElement;
@@ -556,7 +564,7 @@ function renderChat(): void {
           <input id="files" type="file" accept="image/*" multiple
             class="filepick" tabindex="-1" aria-hidden="true" />
           <div class="field">
-            <textarea id="text" rows="1"
+            <textarea id="text" rows="1" data-owned-focus
               placeholder="${PROMPTS[Math.floor(Math.random() * PROMPTS.length)]}"></textarea>
             <button type="submit" id="sendbtn" class="send">↑</button>
           </div>

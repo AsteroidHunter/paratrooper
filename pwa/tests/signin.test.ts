@@ -230,6 +230,17 @@ describe("the sign-in card's copy and its token box", () => {
     expect(main.match(/placeholder=/g)).toHaveLength(1);
   });
 
+  it("the box is marked as one the app focuses itself, the same as the chat's", () => {
+    // markup, so it belongs here; what the mark DOES is shell.test.ts's, and
+    // this pin exists so the attribute is never read as decoration and dropped
+    const input = /<input id="token-input"[^>]*\/>/.exec(gate)?.[0] ?? "";
+    expect(input).toContain("data-owned-focus");
+    expect(main).toContain('<textarea id="text" rows="1" data-owned-focus'); // the other one
+    // and no third: read off the tags, so the list is every marked element
+    const marked = [...main.matchAll(/<(\w+)[^>]*\sdata-owned-focus[\s/>]/g)];
+    expect(marked.map((m) => m[1])).toEqual(["input", "textarea"]);
+  });
+
   it("no build stamp in the gate", () => {
     // the version is already on the badge; a build timestamp is not something a
     // login screen says. The paragraph is gone and so is the rule it wore —

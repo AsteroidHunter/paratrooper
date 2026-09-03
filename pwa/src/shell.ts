@@ -302,8 +302,12 @@ export function preservesFocus(w: World): boolean {
   return w.editorFocused || w.fileFocused;
 }
 
-// The composer's FOCUSING tap, and the one thing iOS does with it that the app
-// cannot undo afterwards.
+// The FOCUSING tap on a box the app owns, and the one thing iOS does with it
+// that the app cannot undo afterwards. Two boxes carry that ownership and they
+// are marked as such rather than named here (OWNED_FOCUS below): the chat's
+// compose textarea and the sign-in screen's token field. Everything from here
+// to the listener is written for both, and the only part that is a textarea's
+// alone is the caret measurement.
 //
 // When WebKit hands a text box focus from a tap it also runs its caret reveal:
 // the UI process centres the focused box in the band above the keyboard, and
@@ -327,36 +331,57 @@ export function preservesFocus(w: World): boolean {
 // What that costs is everything else the engine's focus tap does, and the part
 // that matters is the CARET: a refused tap places none, so the box would open
 // with the caret wherever a scripted focus leaves it rather than where the
-// finger landed. So the take-over is offered to exactly two kinds of tap, and
-// the second one has to buy its way in:
+// finger landed. So the take-over is offered to the taps that can afford it,
+// and the one that cannot has to buy its way in:
 //   - the box must not already hold focus. The reveal rides the focusing tap
 //     alone, so a tap inside a focused box is left completely alone, and with
 //     it every caret move, long press and selection drag.
 //   - an EMPTY box is taken over outright. It has exactly one caret position,
 //     so focusing it by hand lands the caret exactly where the tap would have.
-//   - a box HOLDING TEXT is taken over only when the offset under the finger
-//     was actually measured (tapcaret.ts, a laid out ruler and one rect per
-//     character), and the caret is put there straight after the focus. When
-//     that measurement cannot be made the tap goes back to the engine
-//     untouched, shove and all, because a caret that jumps to the end of a
-//     half written message would be a worse bug than the one this fixes. No
-//     offset is ever assumed, defaulted, or rounded in from nothing: the
+//   - a MULTI-LINE box HOLDING TEXT is taken over only when the offset under
+//     the finger was actually measured (tapcaret.ts, a laid out ruler and one
+//     rect per character), and the caret is put there straight after the
+//     focus. When that measurement cannot be made the tap goes back to the
+//     engine untouched, shove and all, because a caret that jumps to the end
+//     of a half written message would be a worse bug than the one this fixes.
+//     No offset is ever assumed, defaulted, or rounded in from nothing: the
 //     measurement answers with a character or it answers with nothing.
+//   - a SINGLE-LINE box holding text is taken over whatever it holds, and no
+//     offset is placed: the caret lands where a scripted focus leaves it, at
+//     the end of what is already there. tapcaret.ts measures into a laid out
+//     textarea and has nothing to say about a one-line control, so there is no
+//     measurement to wait for and nothing to lose by not waiting — the token
+//     field renders its contents as dots, so a tap into the middle of it was
+//     never aiming a caret anyone could see, and the tap the bug is about
+//     lands in an empty box anyway. The trade is the opposite way round from
+//     the multi-line rule above, and it is the right way round here.
 //   - the tap must be the primary button, so a right or middle click keeps
 //     whatever the platform does with it.
-// Nothing that focuses the composer without a tap reaches this decision, so a
+// Nothing that focuses either box without a tap reaches this decision, so a
 // hardware keyboard and assistive technology are untouched by it.
-export type ComposerTapVerdict = "intercept" | "caret" | "focused" | "text" | "aux";
+export type ComposerTapVerdict =
+  | "intercept"
+  | "caret"
+  | "single"
+  | "focused"
+  | "text"
+  | "aux";
 
 export function composerTapVerdict(
   alreadyFocused: boolean,
   empty: boolean,
   primary: boolean,
   caretKnown: boolean,
+  // whether the box is a one-line control, which the app never measures into.
+  // Written as a default rather than a required fact so the composer — the
+  // control every case above was worked out on — reads exactly as it did, and
+  // so a new caller has to SAY it is single-line before it is treated as one.
+  singleLine = false,
 ): ComposerTapVerdict {
   if (!primary) return "aux";
   if (alreadyFocused) return "focused";
   if (empty) return "intercept";
+  if (singleLine) return "single";
   return caretKnown ? "caret" : "text";
 }
 
@@ -1200,9 +1225,17 @@ export interface TapTarget {
   focused: boolean;
   value: string;
   /**
+   * Whether this is a one-line control, which the app never measures into and
+   * never places a caret in. Omitted means the composer, for the same reason
+   * composerTapVerdict defaults it: the many-line box is the control the whole
+   * rule was worked out on, and a one-line box has to say so.
+   */
+  singleLine?: boolean;
+  /**
    * The offset under the finger, measured now, or null when it could not be
    * measured at all. A thunk rather than a number because the measurement is
-   * the one costly read on this path and most taps never need it.
+   * the one costly read on this path and most taps never need it. A one-line
+   * control has no ruler to read and always answers null.
    */
   caretAt(): number | null;
   focus(options: { preventScroll: boolean }): void;
@@ -1227,14 +1260,17 @@ export function focusComposerTap(
   prevent: () => void,
 ): ComposerTapVerdict {
   const empty = target.value.length === 0;
+  const singleLine = target.singleLine === true;
   // The measurement is taken BEFORE the refusal, and only for the one tap
-  // whose verdict turns on it: a primary tap into a box that holds text and
-  // does not hold focus. Before, because the answer decides whether this tap
-  // may be taken over at all; only there, because every other tap already has
-  // its verdict and would be paying a layout read for nothing.
-  const at = primary && !target.focused && !empty ? target.caretAt() : null;
-  const verdict = composerTapVerdict(target.focused, empty, primary, at !== null);
-  if (verdict === "intercept" || verdict === "caret") {
+  // whose verdict turns on it: a primary tap into a many-line box that holds
+  // text and does not hold focus. Before, because the answer decides whether
+  // this tap may be taken over at all; only there, because every other tap
+  // already has its verdict and would be paying a layout read for nothing —
+  // and a one-line box has no verdict that turns on it at all.
+  const at =
+    primary && !target.focused && !empty && !singleLine ? target.caretAt() : null;
+  const verdict = composerTapVerdict(target.focused, empty, primary, at !== null, singleLine);
+  if (verdict === "intercept" || verdict === "caret" || verdict === "single") {
     prevent(); // the engine's own focus, and the caret reveal that rides it
     target.focus({ preventScroll: true });
     // after the focus, never between it and the refusal: nothing may come
@@ -1242,18 +1278,44 @@ export function focusComposerTap(
     if (at !== null) target.setCaret(at);
   }
   // Every focusing tap is on the trail, named by what was decided: `intercept`
-  // is the empty box, `caret` is the box holding text, carrying the offset the
-  // caret was put at and the length it was put in, and `text` is a tap left to
-  // the engine because no offset could be measured. A kb-focusing focus edge
-  // with no tap record before it was focused by something that is not a tap; a
-  // shove after a `text` record is a shove on a tap this rule deliberately
-  // stood aside from; and a caret that lands somewhere wrong is a number in
-  // the trail rather than only a thing that was felt.
+  // is the empty box, `caret` is the many-line box holding text, carrying the
+  // offset the caret was put at and the length it was put in, `single` is the
+  // one-line box holding text, taken over with no offset to carry, and `text`
+  // is a tap left to the engine because no offset could be measured. A
+  // kb-focusing focus edge with no tap record before it was focused by
+  // something that is not a tap; a shove after a `text` record is a shove on a
+  // tap this rule deliberately stood aside from; and a caret that lands
+  // somewhere wrong is a number in the trail rather than only a thing that was
+  // felt.
   if (verdict === "intercept") holdDiagRecord("kb-focusing", { tap: verdict });
-  else if (verdict === "caret" || verdict === "text") {
+  else if (verdict === "single") {
+    holdDiagRecord("kb-focusing", { tap: verdict, of: target.value.length });
+  } else if (verdict === "caret" || verdict === "text") {
     holdDiagRecord("kb-focusing", { tap: verdict, at, of: target.value.length });
   }
   return verdict;
+}
+
+/**
+ * The mark on every control the app focuses ITSELF, written on the element in
+ * main.ts and read by the listener below, by the window snap-back (main.ts) and
+ * by the focus blink (styles.css). An id list would have been three copies of
+ * the same judgement in three languages, drifting one screen at a time — which
+ * is exactly what happened: every one of those rules named the composer, so the
+ * sign-in box got iOS's caret reveal and the shell's correction and nothing
+ * that prevents either. The mark is one fact the markup states once per control
+ * and every rule reads.
+ *
+ * Two elements carry it: the chat's compose textarea and the sign-in screen's
+ * token field. Both are boxes the app lays out itself, fully visible without
+ * any scrolling, so the engine's caret reveal has nothing to reveal and every
+ * pixel it moves is a pixel the app then has to take back.
+ */
+export const OWNED_FOCUS = "data-owned-focus";
+
+/** Whether this is one of the app's own boxes — the take-over's whole gate. */
+export function ownsFocus(t: EventTarget | null): boolean {
+  return t instanceof HTMLElement && t.hasAttribute(OWNED_FOCUS);
 }
 
 // The DOM half: which event carries the interception, and why that one.
@@ -1275,12 +1337,18 @@ export function focusComposerTap(
 // all, so a tap held through a picker teardown still never focuses anything.
 function composerTapListener(e: MouseEvent): void {
   const t = e.target;
-  if (!(t instanceof HTMLTextAreaElement) || t.id !== "text") return;
+  if (!(t instanceof HTMLTextAreaElement || t instanceof HTMLInputElement)) return;
+  if (!ownsFocus(t)) return;
   focusComposerTap(
     {
       focused: document.activeElement === t,
       value: t.value,
-      caretAt: () => caretOffsetAt(t, e.clientX, e.clientY),
+      // the one difference between the two boxes, and it is a fact about the
+      // element rather than a name: a textarea has lines to measure into,
+      // anything else has one
+      singleLine: !(t instanceof HTMLTextAreaElement),
+      caretAt: () =>
+        t instanceof HTMLTextAreaElement ? caretOffsetAt(t, e.clientX, e.clientY) : null,
       focus: (options) => t.focus(options),
       setCaret: (at) => t.setSelectionRange(at, at),
     },
@@ -1307,9 +1375,10 @@ export function initShell(el: HTMLElement): void {
   });
   // one frame's grace on focusout: focus may be hopping between editables
   document.addEventListener("focusout", () => requestAnimationFrame(reconcile));
-  // the composer's focusing tap, focused here with preventScroll instead of by
-  // the engine, so iOS never runs the caret reveal that shoves the page
-  // (composerTapVerdict owns which taps this may touch)
+  // the focusing tap on either of the app's own boxes, focused here with
+  // preventScroll instead of by the engine, so iOS never runs the caret reveal
+  // that shoves the page (OWNED_FOCUS says which boxes, composerTapVerdict
+  // which of their taps this may touch)
   document.addEventListener("mousedown", composerTapListener, true);
   // every keystroke in an editable re-opens the shove correction budget
   for (const type of ["beforeinput", "keydown"]) {

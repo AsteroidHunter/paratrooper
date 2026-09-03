@@ -14,6 +14,7 @@ import {
   LIFT_SETTLE_MS,
   MAX_SHOVE_CLEARS,
   MIN_KEYBOARD_PX,
+  OWNED_FOCUS,
   SETTLE_GUARD_MS,
   TEARDOWN_MAX_MS,
   closeCorrectionNeeded,
@@ -1122,12 +1123,19 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
 // centred by auto margins in a shell that holds its full-screen baseline height
 // for the whole keyboard session, so the keyboard simply covered the token box
 // and nothing could bring it back: the shell is fixed, html/body refuse
-// panning, and iOS's caret reveal is cancelled by the shell's top rewrite and
+// panning, and iOS's caret reveal was cancelled by the shell's top rewrite and
 // the shove clear. The card now rides the same inset, the same two classes and
 // the same measured curve as the chat's wrapper, at HALF the inset — a box
 // centred in a height H is centred in the strip H - inset once it rises by
 // inset/2. Source-parsed like the other presentation pins: the arithmetic is
 // the engine's, and jsdom resolves none of it.
+//
+// Cancelling the reveal is what the user then SAW (0.3.96): the page yanked
+// down as iOS panned to show the box, and back up as the shell took the pan
+// away. The chat box never did that, because the app focuses it itself and the
+// reveal never starts. So the token box now carries the same mark the compose
+// textarea carries and gets the same treatment by construction, rather than a
+// second copy of it — that half is pinned in the take-over's own block below.
 describe("presentation — the sign-in card rides the keyboard by half its inset", () => {
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
   const bare = css.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -1217,10 +1225,28 @@ describe("presentation — the sign-in card rides the keyboard by half its inset
     const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
     // the gate's box is <input type="password">, which this selector matches
     expect(shell).toContain(`t.matches("textarea, input:not([type='file'])")`);
-    // and the composer take-over never reaches it: that one is the textarea alone
-    expect(shell).toContain(
-      'if (!(t instanceof HTMLTextAreaElement) || t.id !== "text") return;',
+  });
+
+  it("the token box carries the mark, so the take-over reaches it and the reveal never starts", () => {
+    const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+    const gateRender = main.match(/function renderTokenGate\(\)[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(gateRender).toContain(
+      `<input id="token-input" type="password" autocomplete="off" ${OWNED_FOCUS} />`,
     );
+  });
+
+  it("the lift is the only thing left that moves the card on a tap", () => {
+    // the shell has exactly two writers that could move the page under the card
+    // — the close-time correction pass and the mid-session shove clear — and
+    // neither has anything to act on once the reveal never runs
+    const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+    expect(shell.match(/window\.scrollTo\(0, 0\)/g)).toHaveLength(2);
+    // no scroll source means "track": nothing is corrected, so nothing snaps
+    expect(shoveVerdict(true, true, 0, 0, false, 0)).toBe("track");
+    // and a pan with no scroll under it is followed, not fought
+    expect(edgeBoxTop(412, 0, 0)).toBe(412);
+    // the close pass writes only on real displacement, and there is none
+    expect(closeCorrectionNeeded(0, 0, 0)).toBe(false);
   });
 });
 
@@ -1457,10 +1483,52 @@ describe("composerTapVerdict: which taps the app may focus itself", () => {
     expect(composerTapVerdict(true, false, false, false)).toBe("aux");
     expect(composerTapVerdict(false, false, false, true)).toBe("aux");
   });
+
+  // The sign-in screen's token box is the same rule's second control, and the
+  // one thing it cannot do is carry a measured offset: tapcaret.ts reads a laid
+  // out textarea and has nothing to say about a one-line field. Every case
+  // above is stated again with the box declared single-line, so the two
+  // controls' verdicts sit side by side and neither can be moved alone.
+  it("a one-line box holding text is taken over anyway, with no offset to place", () => {
+    // the opposite trade from the multi-line rule, and the right one here: the
+    // field renders dots, so no tap into it was ever aiming a caret
+    expect(composerTapVerdict(false, false, true, false, true)).toBe("single");
+    // and a measurement it could never have had changes nothing about that
+    expect(composerTapVerdict(false, false, true, true, true)).toBe("single");
+  });
+
+  it("an EMPTY one-line box is the plain interception, exactly as an empty composer is", () => {
+    // the tap the sign-in bug was actually about: nothing typed yet
+    expect(composerTapVerdict(false, true, true, false, true)).toBe("intercept");
+  });
+
+  it("focus and the primary button still come first for a one-line box", () => {
+    // the reveal rides the focusing tap alone on both controls, and a right
+    // click keeps the platform's behaviour on both
+    expect(composerTapVerdict(true, false, true, false, true)).toBe("focused");
+    expect(composerTapVerdict(false, false, false, false, true)).toBe("aux");
+  });
+
+  it("saying nothing about lines IS the composer, so none of its cases moved", () => {
+    // the default is the control every case above was worked out on: a new
+    // caller has to say it is single-line before it is treated as one, and
+    // saying so explicitly is the same answer as saying nothing
+    expect(composerTapVerdict(false, false, true, false)).toBe("text");
+    expect(composerTapVerdict(false, false, true, false, false)).toBe("text");
+    expect(composerTapVerdict(false, false, true, true, false)).toBe("caret");
+    expect(composerTapVerdict(false, true, true, false, false)).toBe("intercept");
+  });
 });
 
 describe("focusComposerTap: the take-over, and everything it must not touch", () => {
-  function tapped(over: { focused?: boolean; value?: string; at?: number | null } = {}) {
+  function tapped(
+    over: {
+      focused?: boolean;
+      value?: string;
+      at?: number | null;
+      singleLine?: boolean;
+    } = {},
+  ) {
     const calls: string[] = [];
     const options: { preventScroll: boolean }[] = [];
     const carets: number[] = [];
@@ -1468,6 +1536,7 @@ describe("focusComposerTap: the take-over, and everything it must not touch", ()
     const target = {
       focused: over.focused ?? false,
       value: over.value ?? "",
+      singleLine: over.singleLine,
       caretAt: (): number | null => {
         measured += 1;
         calls.push("measure");
@@ -1558,6 +1627,47 @@ describe("focusComposerTap: the take-over, and everything it must not touch", ()
     expect(taps()).toEqual([]);
   });
 
+  it("a one-line box holding text is refused and refocused, and no caret is set", () => {
+    // the whole point of the sign-in fix: the same refusal and the same
+    // preventScroll focus the composer gets, with the caret left wherever a
+    // scripted focus puts it rather than at an offset nobody measured
+    const t = tapped({ value: "a-token", at: 3, singleLine: true });
+    expect(focusComposerTap(t.target, true, t.prevent)).toBe("single");
+    expect(t.calls).toEqual(["prevent", "focus"]);
+    expect(t.options).toEqual([{ preventScroll: true }]);
+    expect(t.carets).toEqual([]); // no offset was placed, and none was invented
+  });
+
+  it("a one-line box is never measured, even when it offers an answer", () => {
+    // the ruler is a textarea's; asking it here would be a layout read whose
+    // answer could not be used, and an offset this rule must not have
+    const t = tapped({ value: "a-token", at: 3, singleLine: true });
+    focusComposerTap(t.target, true, t.prevent);
+    expect(t.measures()).toBe(0);
+  });
+
+  it("an empty one-line box is the plain interception, and reads as one on the trail", () => {
+    const t = tapped({ singleLine: true });
+    expect(focusComposerTap(t.target, true, t.prevent)).toBe("intercept");
+    expect(t.calls).toEqual(["prevent", "focus"]);
+    expect(taps()).toEqual([{ tap: "intercept" }]);
+  });
+
+  it("the one-line take-over lands on the trail carrying what it held, and no offset", () => {
+    // `at` is absent rather than null: null is tapcaret.ts answering "could not
+    // measure", and nothing asked it anything here
+    const t = tapped({ value: "a-token", singleLine: true });
+    focusComposerTap(t.target, true, t.prevent);
+    expect(taps()).toEqual([{ tap: "single", of: 7 }]);
+  });
+
+  it("a tap inside a focused one-line box is left alone too", () => {
+    const t = tapped({ focused: true, value: "a-token", singleLine: true });
+    expect(focusComposerTap(t.target, true, t.prevent)).toBe("focused");
+    expect(t.calls).toEqual([]);
+    expect(taps()).toEqual([]);
+  });
+
   it("every focusing tap lands on the keyboard channel, named by what was decided", () => {
     // the empty-box take-over, so a device session shows the interception...
     const own = tapped();
@@ -1636,10 +1746,51 @@ describe("wiring: the focusing tap is intercepted on mousedown and nowhere else"
     expect(handler).not.toContain("pointerdown");
   });
 
-  it("only the composer's own textarea can reach the decision", () => {
+  it("only the app's own boxes reach the decision, and the mark says which", () => {
+    // the gate is a mark on the element, not a list of ids in the handler: the
+    // sign-in screen was left out of every one of these rules exactly because
+    // each of them named the composer separately (the 0.3.96 yank)
+    expect(handler).toContain("if (!ownsFocus(t)) return;");
+    expect(handler).not.toContain('id !== "text"');
     expect(handler).toMatch(
-      /if \(!\(t instanceof HTMLTextAreaElement\) \|\| t\.id !== "text"\) return;/,
+      /if \(!\(t instanceof HTMLTextAreaElement \|\| t instanceof HTMLInputElement\)\) return;/,
     );
+    // and the mark is read, never spelled out again, wherever it is consulted
+    expect(shell).toContain(`export const OWNED_FOCUS = "${OWNED_FOCUS}";`);
+    expect(shell).toContain("return t instanceof HTMLElement && t.hasAttribute(OWNED_FOCUS);");
+  });
+
+  it("both boxes carry the mark, and no third element in the app does", () => {
+    // read off the tags themselves, so the list IS every marked element in the
+    // app: two, and the pair the take-over was written for
+    const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+    const marked = [...main.matchAll(new RegExp(`<(\\w+)[^>]*\\s${OWNED_FOCUS}[\\s/>]`, "g"))];
+    expect(marked.map((m) => m[1])).toEqual(["input", "textarea"]); // the gate's, then the chat's
+  });
+
+  it("the blink is given off the same mark, so neither box can be left without it", () => {
+    // one opacity-0 frame at focus is what makes iOS skip the reveal in the
+    // first place; the take-over is the second lock on that same door, and a
+    // rule that named the composer would have opened one of them on the gate
+    const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+    expect(css).toMatch(
+      new RegExp(`\\[${OWNED_FOCUS}\\]:focus \\{\\n  animation: focus-blink 0\\.02s;\\n\\}`),
+    );
+    expect(css).not.toContain(".compose textarea:focus {"); // not a second copy for the chat
+    expect(css.match(/animation: focus-blink/g)).toHaveLength(1);
+  });
+
+  it("the window snap-back is gated on the same mark, by the same function", () => {
+    // main.ts's one defensive scroll fighter used to read the composer's id, so
+    // it could never have covered the gate either
+    const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+    const snapback = main.match(/window\.addEventListener\(\n  "scroll",[\s\S]*?\n\);/)?.[0] ?? "";
+    expect(snapback, "the window scroll listener").not.toBe("");
+    expect(snapback).toContain("if (!ownsFocus(document.activeElement)) return;");
+    expect(snapback).toContain("window.scrollTo(0, 0);");
+    // one gate, and it is the shell's — not a lookalike predicate in main.ts
+    expect(snapback).not.toContain('activeElement?.id');
+    expect(main).toMatch(/import \{[\s\S]*?\n  ownsFocus,\n[\s\S]*?\} from "\.\/shell";/);
   });
 
   it("the tap's own facts decide, read at the tap: focus state, contents, button", () => {
@@ -1651,8 +1802,13 @@ describe("wiring: the focusing tap is intercepted on mousedown and nowhere else"
 
   it("the caret is measured from the tap's own point and set on the box it was measured for", () => {
     // the event's coordinates, not a rect read later and not a stored one: the
-    // finger is only in one place for the length of this handler
-    expect(handler).toContain("caretAt: () => caretOffsetAt(t, e.clientX, e.clientY)");
+    // finger is only in one place for the length of this handler — and only
+    // for the box that has lines to measure, which is the ONE thing that
+    // differs between the two controls
+    expect(handler).toContain(
+      "t instanceof HTMLTextAreaElement ? caretOffsetAt(t, e.clientX, e.clientY) : null",
+    );
+    expect(handler).toContain("singleLine: !(t instanceof HTMLTextAreaElement)");
     expect(handler).toContain("setCaret: (at) => t.setSelectionRange(at, at)");
   });
 

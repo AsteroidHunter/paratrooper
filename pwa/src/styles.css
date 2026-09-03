@@ -929,8 +929,14 @@ html, body {
    keyboard begins to rise. The reveal fires again on every later keystroke,
    not only on the ones that grow a line, so autosize (main.ts) re-arms this
    same suppression per keystroke while the keyboard is up, via WAAPI so the
-   re-trigger never touches this :focus animation. */
-.compose textarea:focus {
+   re-trigger never touches this :focus animation.
+   Selected by the mark rather than by the box: data-owned-focus is on every
+   control the app focuses itself (shell.ts OWNED_FOCUS — the compose textarea
+   and the sign-in screen's token field), so the blink and the take-over that
+   backs it can never be given to one box and withheld from the other. The
+   sign-in screen was exactly that bug: iOS panned the page to reveal the token
+   field and the shell then took the pan back, one tap, two moves. */
+[data-owned-focus]:focus {
   animation: focus-blink 0.02s;
 }
 @keyframes focus-blink {
