@@ -239,7 +239,46 @@ html, body {
 }
 
 /* --- token gate --- */
-.gate { margin: auto; max-width: 22rem; padding: 2rem 1.5rem; text-align: center; }
+/* The card is centred in the shell by auto margins, and the shell holds its
+   full-screen BASELINE height for the whole keyboard session (#app.kb above:
+   the box must never change size at a keyboard edge). So with the keyboard up
+   the card is still centred on the whole screen while the keyboard covers the
+   lower part of it, and the token box — which sits just below the card's
+   midpoint — ends up underneath. Nothing can bring it back either: the shell is
+   fixed, html/body refuse panning outright, and iOS's own caret reveal is
+   cancelled by the shell's top rewrite and the shove clear (shell.ts).
+   So the card rides the keyboard exactly the way the thread does, and the
+   distance is a CONSTRUCTION, not a measurement: a box centred in a height H is
+   centred in the strip H - inset once it rises by inset/2, so the lift is half
+   the inset the shell already writes and this sheet stays free of device
+   pixels. It is keyed off the same two classes as --kb-lift, so it leaves with
+   the focus tap aimed at the remembered height (.kbearly), is retargeted by the
+   viewport's report (.kb), and comes home at the focus loss — one measured
+   curve for the whole app.
+   The cap is the card's own centring, written in the card's own height: a
+   percentage in a translate is a share of the border box, so
+   var(--shell-h)/2 - 50% is exactly the auto top margin, the whole distance
+   there is to rise before the card's top would pass the shell's top. clamp()
+   takes the lesser of that and the half inset, and floors both at rest, so a
+   card taller than the visible strip stays where it is instead of climbing off
+   the top of the screen. The chat is untouched: .gate exists on the sign-in
+   screen alone (main.ts renderTokenGate) and is gone the moment the token is
+   accepted. */
+.gate {
+  margin: auto;
+  max-width: 22rem;
+  padding: 2rem 1.5rem;
+  text-align: center;
+  /* the clock lives on the card, not under the keyboard classes: a transition
+     is started from the AFTER-change style, so one declared only while the
+     class is on would already be gone at the close and the card would snap
+     home instead of riding the keyboard down */
+  transition: transform var(--kb-anim);
+}
+#app.kb .gate,
+#app.kbearly .gate {
+  transform: translateY(calc(-1 * clamp(0px, var(--kb-inset) / 2, var(--shell-h, 100vh) / 2 - 50%)));
+}
 .gate input {
   width: 100%;
   margin: 0.75rem 0;
@@ -250,11 +289,19 @@ html, body {
   color: var(--text);
   font: inherit;
 }
+/* Connect is the sent bubble worn as a pill: the fill the user's own messages
+   carry and the ink they put on it, named as the tokens .msg.user declares
+   rather than copied out as colours, the same way .publish and the
+   notification buttons are painted. --sent and #fff, which this button wore
+   before, are the legacy iOS blue and a literal white, and are deliberately
+   not it. The radius is the notification pills' own 999px — a figure past any
+   height this button can take, so its ends are true semicircles at every text
+   size instead of a corner that would need refitting when the type grows. */
 .gate button {
   border: none;
-  border-radius: 10px;
-  background: var(--sent);
-  color: #fff;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--sent-text);
   padding: 0.6rem 1.4rem;
   font: inherit;
   font-weight: 600;
@@ -299,13 +346,20 @@ html, body {
   width: auto;
   display: block;
 }
-.bar .title {
+/* The name and the version line under it, in the bar and on the sign-in card:
+   two homes for ONE declaration, so the card cannot drift off the bar it is
+   meant to match. They are scoped at all only because .title and .ver are
+   generic names; the rest of the block — .contact, .avatar, .ident above — was
+   never scoped to the bar and reaches both screens on its own. */
+.bar .title,
+.gate .title {
   font-weight: 600;
   font-size: 13px;
   line-height: 1.3;
 }
 /* faint version line under the name */
-.bar .ver {
+.bar .ver,
+.gate .ver {
   color: var(--muted);
   font-weight: 400;
   font-size: 9px;

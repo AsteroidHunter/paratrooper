@@ -1051,7 +1051,9 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
     expect(rule("#app.kb,\n#app.kbearly")).toContain(
       "--kb-lift: calc(var(--pad-b) - var(--kb-gap) - var(--kb-inset))",
     );
-    expect(bare.match(/kbearly/g)).toHaveLength(1); // the lift is the only thing the early class moves
+    // the early class moves two things and only two: the chat's wrapper (this
+    // formula) and the sign-in card (its own block below), each once
+    expect(bare.match(/kbearly/g)).toHaveLength(2);
     expect(rule("#app")).toContain("--kb-inset: 0px");
     expect(rule("#app")).toContain("--kb-lift: 0px");
     expect(rule("#app")).toContain("--kb-gap: 0.5rem");
@@ -1091,7 +1093,9 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
 
   it("one keyboard clock, written once: the only transition on the keyboard's path spells the token", () => {
     const onToken = rules.filter((r) => transitionOf(r.body).includes("--kb-anim")).map((r) => r.sel);
-    expect(onToken).toEqual([".lift"]);
+    // the chat's wrapper and the sign-in card, in source order; both spell the
+    // token rather than a duration of their own, so there is one clock to change
+    expect(onToken).toEqual([".lift", ".gate"]);
     expect(rule("#app")).toMatch(/--kb-anim: 0\.22s cubic-bezier\(0\.45, 0, 0\.55, 1\);/);
   });
 
@@ -1111,6 +1115,112 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
       /<div class="liftclip">\n\s*<div class="lift">\n\s*<main id="thread" class="thread">[\s\S]*?<div id="pending" class="pending"><\/div>\n\s*<form id="compose" class="compose">[\s\S]*?<\/form>\n\s*<\/div>\n\s*<\/div>`;/,
     );
     expect(main).toContain('bindLift(app.querySelector<HTMLElement>(".lift")!);');
+  });
+});
+
+// The sign-in screen, which has no wrapper to lift. The gate is one card
+// centred by auto margins in a shell that holds its full-screen baseline height
+// for the whole keyboard session, so the keyboard simply covered the token box
+// and nothing could bring it back: the shell is fixed, html/body refuse
+// panning, and iOS's caret reveal is cancelled by the shell's top rewrite and
+// the shove clear. The card now rides the same inset, the same two classes and
+// the same measured curve as the chat's wrapper, at HALF the inset — a box
+// centred in a height H is centred in the strip H - inset once it rises by
+// inset/2. Source-parsed like the other presentation pins: the arithmetic is
+// the engine's, and jsdom resolves none of it.
+describe("presentation — the sign-in card rides the keyboard by half its inset", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const bare = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = [...bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+    sel: m[1].trim().replace(/\s*\n\s*/g, "\n"),
+    body: m[2],
+  }));
+  const rule = (sel: string): string => rules.find((r) => r.sel === sel)?.body ?? "";
+  const transitionOf = (body: string): string => body.match(/transition:([^;]*);/)?.[1] ?? "";
+  const gateLift = rule("#app.kb .gate,\n#app.kbearly .gate");
+
+  it("the card rises by half the one inset the shell writes, under the proven keyboard and the early start alike", () => {
+    expect(gateLift).toContain("transform: translateY(");
+    expect(gateLift).toContain("var(--kb-inset) / 2"); // half, and half is the whole construction
+    expect(gateLift).toContain("-1 *"); // upward
+    expect(bare.match(/var\(--kb-inset\) \/ 2/g)).toHaveLength(1); // one copy of it, nowhere else
+  });
+
+  it("the card plays the keyboard's clock, declared where the CLOSE can still read it", () => {
+    // on .gate itself, not under the classes: a transition is started from the
+    // after-change style, so one that left with the class would never play the
+    // close and the card would snap home
+    expect(transitionOf(rule(".gate")).trim()).toBe("transform var(--kb-anim)");
+    expect(transitionOf(gateLift)).toBe("");
+  });
+
+  it("the lift is capped by the card's own centring, so it can never climb off the top", () => {
+    // a percentage in a translate is a share of the border box, so 50% is half
+    // the card and this term is exactly its auto top margin — the whole
+    // distance there is to rise before the card's top passes the shell's top
+    expect(gateLift).toContain("var(--shell-h, 100vh) / 2 - 50%");
+    // clamp(floor, want, cap): a card taller than the visible strip makes the
+    // cap negative, clamp hands back the floor, and the card stays put
+    expect(gateLift).toContain(
+      "clamp(0px, var(--kb-inset) / 2, var(--shell-h, 100vh) / 2 - 50%)",
+    );
+  });
+
+  it("nothing in the card's lift is a number measured off a phone", () => {
+    expect(gateLift).not.toMatch(/[1-9][\d.]*px/); // 0px is the clamp's floor: rest
+    expect(gateLift).not.toMatch(/[\d.]+m?s\b/); // the clock is the token, on .gate
+    expect(gateLift).not.toMatch(/\d+(\.\d+)?(rem|em|pt|ex|ch)/);
+  });
+
+  it("the chat screen is untouched: the wrapper's formula, its clock and the box vars are as they were", () => {
+    expect(rule("#app.kb,\n#app.kbearly").trim()).toBe(
+      "--kb-lift: calc(var(--pad-b) - var(--kb-gap) - var(--kb-inset));",
+    );
+    expect(rule(".lift")).toContain("transform: translateY(var(--kb-lift))");
+    expect(transitionOf(rule(".lift")).trim()).toBe("transform var(--kb-anim)");
+    expect(css).toMatch(
+      /#app\.kb,\n#app\.lifting \{\n  top: var\(--shell-top, 0px\);\n  height: var\(--shell-h, 100vh\);\n\}/,
+    );
+  });
+
+  it("the rule reaches the sign-in screen alone: the card is rendered there and nowhere else", () => {
+    const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+    expect(main.match(/class="gate"/g)).toHaveLength(1);
+    const gateRender = main.match(/function renderTokenGate\(\)[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(gateRender).toContain('<div class="gate">');
+    expect(gateRender).toContain('id="token-input" type="password"');
+  });
+
+  it("the inset the card reads is written whatever screen is up: no wrapper in the write's path", () => {
+    const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+    const apply = shell.match(/function applyShell\([\s\S]*?\n\}/)?.[0] ?? "";
+    // the one writer puts the classes and the inset on #app and never consults
+    // the chat's wrapper, so a screen without one is driven by the same numbers
+    expect(apply).toContain('appEl.style.setProperty("--kb-inset", `${inset}px`);');
+    expect(apply).toContain('appEl.classList.toggle("kb", t.kb);');
+    expect(apply).toContain('appEl.classList.toggle("kbearly", early);');
+    expect(apply).not.toContain("liftEl");
+    // and the aim behind it is pure: the world, the baseline and the focus
+    const up = world({ editorFocused: true, vvHeight: 458 }); // 844 - 458 = 386
+    expect(liftAim(computeShell(up), up.baseline, true, 0, 0).inset).toBe(386);
+    const early = world({ editorFocused: true }); // focused, no shrink reported yet
+    expect(liftAim(computeShell(early), early.baseline, true, 0, 386)).toEqual({
+      up: true,
+      early: true,
+      inset: 386,
+    });
+    const rest = world();
+    expect(liftAim(computeShell(rest), rest.baseline, false, 0, 386).inset).toBe(0);
+  });
+
+  it("the token box is an editable to the shell, so the keyboard session runs on this screen", () => {
+    const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+    // the gate's box is <input type="password">, which this selector matches
+    expect(shell).toContain(`t.matches("textarea, input:not([type='file'])")`);
+    // and the composer take-over never reaches it: that one is the textarea alone
+    expect(shell).toContain(
+      'if (!(t instanceof HTMLTextAreaElement) || t.id !== "text") return;',
+    );
   });
 });
 

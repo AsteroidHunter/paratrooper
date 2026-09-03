@@ -166,7 +166,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.94"; // a refused request hands the card over to the Settings one, never both at once
+const APP_VERSION = "0.3.95"; // the sign-in card wears the top bar's own badge and rides the keyboard up
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -471,12 +471,24 @@ holdDiagAuth(authHeaders);
 
 // --- token gate --------------------------------------------------------------
 
+// The card leads with the chat's own contact block — the same image, the same
+// classes, the same version read out of APP_VERSION — rather than a heading of
+// its own, so the badge you sign in under is the badge you then message under.
+// Nothing here is a lookalike: styles.css widens the two bar-scoped rules
+// (.title, .ver) to this card instead of restating their values, and the rest
+// of the block (.contact, .avatar, .ident) was never scoped to the bar at all.
 function renderTokenGate(): void {
   app.innerHTML = `
     <div class="gate">
-      <h1>Paratrooper</h1>
-      <p>Enter your access token to connect.</p>
-      <input id="token-input" type="password" placeholder="access token" autocomplete="off" />
+      <div class="contact">
+        <img class="avatar" src="/topbar-logo.png" alt="" />
+        <div class="ident">
+          <span class="title">Paratrooper</span>
+          <span class="ver">v${APP_VERSION}</span>
+        </div>
+      </div>
+      <p>Your access token please?</p>
+      <input id="token-input" type="password" autocomplete="off" />
       <button id="token-save">Connect</button>
       <p class="buildstamp">ui build ${__BUILT_AT__}</p>
     </div>`;
