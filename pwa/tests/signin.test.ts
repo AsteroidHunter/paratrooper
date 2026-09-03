@@ -33,7 +33,7 @@ import { describe, expect, it } from "vitest";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
-const push = readFileSync(new URL("../src/push.css", import.meta.url), "utf8");
+const alertCss = readFileSync(new URL("../src/alert.css", import.meta.url), "utf8");
 
 interface Rule {
   selectors: string[]; // the rule's selector list, one entry per comma
@@ -73,7 +73,7 @@ function parse(sheet: string): Rule[] {
 }
 
 const styleRules = parse(css);
-const pushRules = parse(push);
+const alertRules = parse(alertCss);
 
 /** Every rule whose selector list contains exactly this selector. */
 const matching = (rules: Rule[], sel: string): Rule[] =>
@@ -329,7 +329,7 @@ describe("Connect is the sent bubble worn as a pill", () => {
   });
 
   it("is a full pill, at the radius the notification pills already wear", () => {
-    const pill = decl(one(pushRules, ".push-actions button").body, "border-radius");
+    const pill = decl(one(alertRules, ".alert-actions button").body, "border-radius");
     expect(pill).toBe("999px"); // past any height this button can take
     expect(decl(one(styleRules, ".gate button").body, "border-radius")).toBe(pill);
   });
@@ -337,7 +337,7 @@ describe("Connect is the sent bubble worn as a pill", () => {
   it("no appearance re-colours the button or the badge", () => {
     // one value each, wherever the scheme lands: nothing here is restated
     // inside a prefers-color-scheme block, in either sheet
-    const nested = [...styleRules, ...pushRules]
+    const nested = [...styleRules, ...alertRules]
       .filter((r) => r.at.some((at) => at.includes("prefers-color-scheme")))
       .flatMap((r) => r.selectors);
     expect(nested.length).toBeGreaterThan(0); // the blocks exist, so this bites
@@ -369,7 +369,7 @@ describe("the trooper on the sign-in card carries no box", () => {
   });
 
   it("and nothing else paints one behind it, on either screen", () => {
-    const painted = [...styleRules, ...pushRules].filter(
+    const painted = [...styleRules, ...alertRules].filter(
       (r) =>
         r.selectors.some((s) => s.includes(".avatar") || s.includes(".contact")) &&
         /background|border|box-shadow|backdrop-filter/.test(r.body),

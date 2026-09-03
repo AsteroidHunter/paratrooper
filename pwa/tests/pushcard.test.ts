@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
-const push = readFileSync(new URL("../src/push.css", import.meta.url), "utf8");
+const alertCss = readFileSync(new URL("../src/alert.css", import.meta.url), "utf8");
 
 interface Rule {
   selectors: string[]; // the rule's selector list, one entry per comma
@@ -55,7 +55,7 @@ function parse(sheet: string): Rule[] {
   return out;
 }
 
-const pushRules = parse(push);
+const alertRules = parse(alertCss);
 
 /** Every rule whose selector list contains exactly this selector. */
 function rules(sheet: Rule[], selector: string): Rule[] {
@@ -89,13 +89,13 @@ describe("the notification card's pills are painted out of the sent bubble", () 
   });
 
   it("Enable is the bubble: its fill, with the bubble's own ink on it", () => {
-    const action = only(pushRules, ".push-action");
+    const action = only(alertRules, ".alert-action");
     expect(decl(action.body, "background")).toBe(fill);
     expect(decl(action.body, "color")).toBe(ink);
   });
 
   it("Not Now stays the secondary one but takes its label from that fill", () => {
-    const notNow = only(pushRules, ".push-not-now");
+    const notNow = only(alertRules, ".alert-quiet");
     expect(decl(notNow.body, "color")).toBe(fill);
     // still a plain neutral wash, so the pair reads as primary and secondary
     // rather than as two solid accents side by side
@@ -105,26 +105,27 @@ describe("the notification card's pills are painted out of the sent bubble", () 
   });
 
   it("nothing in the card names the legacy blue any more", () => {
-    expect(push).not.toMatch(/var\(--sent\)/); // --sent-text, the ink, is fine
+    expect(alertCss).not.toMatch(/var\(--sent\)/); // --sent-text, the ink, is fine
   });
 
   it("no appearance gets to re-colour either pill", () => {
-    const schemes = pushRules.filter((r) =>
+    const schemes = alertRules.filter((r) =>
       r.at.some((a) => a.includes("prefers-color-scheme")),
     );
     expect(schemes.length).toBeGreaterThan(0); // the guard has something to guard
-    expect(rules(pushRules, ".push-action").filter((r) => r.at.length)).toHaveLength(0);
+    expect(rules(alertRules, ".alert-action").filter((r) => r.at.length)).toHaveLength(0);
     // dark may still deepen the neutral wash behind Not Now; it may not touch
     // the label, which resolves to the bubble's fill in both appearances
-    for (const scheme of rules(pushRules, ".push-not-now").filter((r) => r.at.length)) {
+    for (const scheme of rules(alertRules, ".alert-quiet").filter((r) => r.at.length)) {
       expect(scheme.body).not.toMatch(/(?:^|;)\s*color\s*:/);
     }
   });
 
   it("those two rules are the buttons the dialog actually renders", () => {
-    expect(main).toContain('<div class="push-actions">');
-    expect(main).toContain('id="push-not-now" class="push-not-now"');
-    expect(main).toContain('id="push-action" class="push-action"');
+    expect(main).toContain('id="push-not-now" class="alert-quiet"');
+    expect(main).toContain('id="push-action" class="alert-action"');
+    // and it is the shared row they sit in, not one of the card's own
+    expect(main.match(/<div class="alert-actions">/g)).toHaveLength(2);
   });
 });
 
@@ -155,7 +156,7 @@ function curve(easing: string): Curve {
 
 /** The one value --alert-anim is given, so rules that use it can be read. */
 const ALERT_ANIM = (() => {
-  const named = [...push.matchAll(/--alert-anim\s*:([^;]*)/g)];
+  const named = [...alertCss.matchAll(/--alert-anim\s*:([^;]*)/g)];
   expect(named, "the alert's timing is named once, or not at all").toHaveLength(1);
   return named[0][1].replace(/\s+/g, " ").trim();
 })();
@@ -177,11 +178,11 @@ function fn(name: string, until: string): string {
   return main.slice(at, end);
 }
 
-const dialogIn = only(pushRules, ".push-dialog");
-const cardIn = only(pushRules, ".push-card");
-const dialogStart = only(pushRules, ".push-dialog.push-dialog-entering");
-const cardStart = only(pushRules, ".push-dialog.push-dialog-entering .push-card");
-const dialogOut = only(pushRules, ".push-dialog.push-dialog-leaving");
+const dialogIn = only(alertRules, ".alert-dialog");
+const cardIn = only(alertRules, ".alert-card");
+const dialogStart = only(alertRules, ".alert-dialog.alert-entering");
+const cardStart = only(alertRules, ".alert-dialog.alert-entering .alert-card");
+const dialogOut = only(alertRules, ".alert-dialog.alert-leaving");
 
 /** Whether a rule times anything of its own, rather than borrowing. */
 function times(rule: Rule): boolean {
@@ -195,24 +196,24 @@ describe("the notification card arrives and leaves as the system alert does", ()
     // and both directions land on the base rules, so one clock serves both.
     // The two states are still separate classes because the entrance starts
     // FROM a transform the exit must never end ON.
-    const show = fn("showPushDialog", "function renderPushState(");
-    expect(show).toContain('classList.remove("push-dialog-leaving")');
+    const show = fn("showAlert", "function hideAlert(");
+    expect(show).toContain('classList.remove("alert-leaving")');
     expect(show).toMatch(
-      /classList\.add\("push-dialog-entering"\);\s*pushDialogShowFrame = requestAnimationFrame/,
+      /classList\.add\("alert-entering"\);\s*alertShowFrames\.set\(\s*dialog,\s*requestAnimationFrame/,
     );
     expect(show).toMatch(
-      /requestAnimationFrame\(\(\) => \{\s*dialog\.classList\.remove\("push-dialog-entering"\)/,
+      /requestAnimationFrame\(\(\) => \{\s*dialog\.classList\.remove\("alert-entering"\)/,
     );
-    expect(show.indexOf('classList.add("push-dialog-entering")')).toBeLessThan(
-      show.indexOf('classList.remove("push-dialog-entering")'),
+    expect(show.indexOf('classList.add("alert-entering")')).toBeLessThan(
+      show.indexOf('classList.remove("alert-entering")'),
     );
     // a cancelled frame leaves the start state on the element, so the next show
     // has to count it as needing an entrance or the card stays invisible
-    expect(show).toContain('classList.contains("push-dialog-entering")');
-    const hide = fn("hidePushDialog", "function showPushDialog(");
-    expect(hide).toContain('classList.remove("push-dialog-entering")');
+    expect(show).toContain('classList.contains("alert-entering")');
+    const hide = fn("hideAlert", "function armPushDialogEntrance(");
+    expect(hide).toContain('classList.remove("alert-entering")');
     expect(hide).toMatch(
-      /classList\.add\("push-dialog-leaving"\);\s*pushDialogHideTimer = window\.setTimeout\(/,
+      /classList\.add\("alert-leaving"\);\s*alertHideTimers\.set\(\s*dialog,\s*window\.setTimeout\(/,
     );
   });
 
@@ -244,7 +245,7 @@ describe("the notification card arrives and leaves as the system alert does", ()
     expect(decl(dialogIn.body, "opacity")).toBe("1");
     expect(decl(cardStart.body, "transform")).toBe("scale(1.1)");
     expect(decl(cardIn.body, "transform")).toBe("scale(1)");
-    for (const rule of pushRules) {
+    for (const rule of alertRules) {
       expect(rule.body, "the alert does not rise, drop or shrink into place")
         .not.toMatch(/translate|scale\(0/);
     }
@@ -262,20 +263,20 @@ describe("the notification card arrives and leaves as the system alert does", ()
       .not.toMatch(/(?:^|;)\s*transition\s*:/);
     // no away-transform for the card either: it is inside the layer and goes
     // with it, which is what makes the dismissal a plain fade
-    expect(rules(pushRules, ".push-dialog.push-dialog-leaving .push-card")).toHaveLength(0);
-    const held = /const PUSH_DIALOG_TRANSITION_MS = (\d+);/.exec(main);
-    expect(held, "missing PUSH_DIALOG_TRANSITION_MS").not.toBeNull();
+    expect(rules(alertRules, ".alert-dialog.alert-leaving .alert-card")).toHaveLength(0);
+    const held = /const ALERT_TRANSITION_MS = (\d+);/.exec(main);
+    expect(held, "missing ALERT_TRANSITION_MS").not.toBeNull();
     // the layer it borrows from is what the hide timer has to outlast
     expect(Number(held![1])).toBe(transition(dialogIn.body).ms);
   });
 
   it("reduced motion names every rule that times anything", () => {
-    const reduced = pushRules.filter((r) =>
+    const reduced = alertRules.filter((r) =>
       r.at.some((a) => a.includes("prefers-reduced-motion")),
     );
     expect(reduced).toHaveLength(1);
-    const timed = pushRules.filter((r) => r.at.length === 0 && times(r));
-    expect(timed.map((r) => r.selectors.join(", "))).toEqual([".push-dialog", ".push-card"]);
+    const timed = alertRules.filter((r) => r.at.length === 0 && times(r));
+    expect(timed.map((r) => r.selectors.join(", "))).toEqual([".alert-dialog", ".alert-card"]);
     expect(reduced[0].selectors).toEqual(
       expect.arrayContaining(timed.flatMap((r) => r.selectors)),
     );

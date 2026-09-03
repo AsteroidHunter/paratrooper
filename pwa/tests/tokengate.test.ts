@@ -504,8 +504,8 @@ describe("the gate's rules paint a border and move nothing", () => {
   });
 });
 
-describe("the card ships as 0.3.99", () => {
+describe("the card ships as 0.3.100", () => {
   it("the version on the badge is the version of this change", () => {
-    expect(main).toMatch(/^const APP_VERSION = "0\.3\.99"; \/\/ \S/m);
+    expect(main).toMatch(/^const APP_VERSION = "0\.3\.100"; \/\/ \S/m);
   });
 });

@@ -1,7 +1,7 @@
 // Paratrooper PWA — message the pinboard agent. Vanilla TS + DOM (lightest build).
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
-import "./push.css";
+import "./alert.css";
 import { BLUR_EDGE, decodeBlurhash } from "./blurhash";
 import { createBootGate } from "./bootgate";
 import { bubbleLineWidths, fitBubbles, fitScale } from "./bubblefit";
@@ -170,7 +170,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.99"; // Connect asks the server before it lets you in: the box goes green on a yes, red and shaking on a no
+const APP_VERSION = "0.3.100"; // The log-out question is the notification card's twin: same box, same pills, same 200ms in and out
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -588,22 +588,26 @@ function renderChat(): void {
         </div>
       </div>
     </header>
-    <div id="confirm" class="confirm">
-      <div class="confirm-card">
-        <p class="confirm-msg">Are you sure you want to log out?</p>
-        <div class="confirm-row">
-          <button type="button" id="confirm-no" class="confirm-no">No</button>
-          <button type="button" id="confirm-yes" class="confirm-yes">Yes</button>
+    <div id="push-dialog" class="alert-dialog" role="alertdialog" aria-modal="true"
+      aria-labelledby="push-copy" hidden>
+      <div class="alert-card">
+        <p id="push-copy" class="alert-copy"></p>
+        <div class="alert-actions">
+          <button type="button" id="push-not-now" class="alert-quiet">Not Now</button>
+          <button type="button" id="push-action" class="alert-action">Enable</button>
         </div>
       </div>
     </div>
-    <div id="push-dialog" class="push-dialog" role="alertdialog" aria-modal="true"
-      aria-labelledby="push-copy" hidden>
-      <div class="push-card">
-        <p id="push-copy" class="push-copy"></p>
-        <div class="push-actions">
-          <button type="button" id="push-not-now" class="push-not-now">Not Now</button>
-          <button type="button" id="push-action" class="push-action">Enable</button>
+    <!-- The same alert, asking the other question. Written after the card
+         above because the two share a layer: if both are ever up, the one the
+         user is waiting to answer is the one on top. -->
+    <div id="confirm" class="alert-dialog" role="alertdialog" aria-modal="true"
+      aria-labelledby="confirm-copy" hidden>
+      <div class="alert-card">
+        <p id="confirm-copy" class="alert-copy">Are you sure you want to log out?</p>
+        <div class="alert-actions">
+          <button type="button" id="confirm-no" class="alert-quiet">Cancel</button>
+          <button type="button" id="confirm-yes" class="alert-action">Log Out</button>
         </div>
       </div>
     </div>
@@ -660,22 +664,26 @@ function renderChat(): void {
   });
   armPushDialogEntrance();
   startPushNotifications();
-  // Log Out is gated behind an iOS-style confirm so a stray tap can't log out:
-  // No (safe, bold blue) dismisses; Yes (destructive red) actually logs out.
+  // Log Out is gated behind the same centred alert the notification card comes
+  // up in, so a stray tap can't log out: Cancel is the quiet pill, Log Out the
+  // one the box is asking for. Both answers play the box out before anything
+  // else happens, so leaving the chat is never a screen that simply vanishes.
   const confirmEl = document.getElementById("confirm")!;
   document.getElementById("logout")!.addEventListener("click", () => {
     document.getElementById("menu")!.classList.remove("open");
-    confirmEl.classList.add("open");
+    showAlert(confirmEl);
   });
   confirmEl.addEventListener("click", (e) => {
-    if (e.target === confirmEl) confirmEl.classList.remove("open"); // backdrop tap = No
+    if (e.target === confirmEl) hideAlert(confirmEl); // backdrop tap = Cancel
   });
   document.getElementById("confirm-no")!.addEventListener("click", () => {
-    confirmEl.classList.remove("open");
+    hideAlert(confirmEl);
   });
   document.getElementById("confirm-yes")!.addEventListener("click", () => {
-    leaveChat(); // the token, the socket, the cached thread and any armed retry
-    renderTokenGate();
+    hideAlert(confirmEl, () => {
+      leaveChat(); // the token, the socket, the cached thread and any armed retry
+      renderTokenGate();
+    });
   });
   const filesEl = document.getElementById("files") as HTMLInputElement;
   // ＋/picker focus choreography (preventDefault rules, parked-focus cleanup,
@@ -5619,16 +5627,101 @@ function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
 
 let pushRegistration: ServiceWorkerRegistration | null = null;
 let pushNotifications: PushSetup | null = null;
-// The dismissal's own length, in step with --alert-anim in push.css: the card
-// may not be pulled out of the layout until the fade it is running has ended.
-const PUSH_DIALOG_TRANSITION_MS = 200;
+
+// --- the centred alert -------------------------------------------------------
+//
+// One box, asking two questions: the notification card the app volunteers, and
+// the log-out question the user asks for. They are the same markup out of
+// renderChat, the same family of rules out of alert.css, and the same two
+// functions below, so there is one answer in this app to "how does a box come
+// up" and one to "how does it go away". The log-out box's own wiring is 5000
+// lines above this, in renderChat beside its markup, because everything the
+// alert does has to stay in one contiguous block: the tests cut this block out
+// of the module and run it, there being no DOM and no app to boot in that env.
+//
+// The length here is the dismissal's own, in step with --alert-anim in
+// alert.css: a box may not be pulled out of the layout until the fade it is
+// running has ended.
+const ALERT_TRANSITION_MS = 200;
 const PUSH_DIALOG_DELAY_MS = 2500;
-let pushDialogHideTimer: number | null = null;
-let pushDialogShowFrame: number | null = null;
+// Per box, not per app: two of these can be on screen at once, and a hide the
+// log-out box armed may not be cancelled by the card's next render.
+const alertHideTimers = new WeakMap<HTMLElement, number>();
+const alertShowFrames = new WeakMap<HTMLElement, number>();
 let pushDialogDelayTimer: number | null = null;
 let pushDialogChainTimer: number | null = null;
 let pushDialogCanShow = false;
 let pendingPushDialogState: PushState | null = null;
+
+/** Cut short whatever motion a box is part-way through, showing what it shows. */
+function stopAlertMotion(dialog: HTMLElement): void {
+  const hide = alertHideTimers.get(dialog);
+  if (hide !== undefined) window.clearTimeout(hide);
+  const frame = alertShowFrames.get(dialog);
+  if (frame !== undefined) cancelAnimationFrame(frame);
+  alertHideTimers.delete(dialog);
+  alertShowFrames.delete(dialog);
+}
+
+/** Put a box on screen, on the entrance every box shares. */
+function showAlert(dialog: HTMLElement): void {
+  // Entering counts as needing an entrance too: a render can cancel the frame
+  // below, and the class it would have removed is then still on the element.
+  // Reading it here is what lets the next show finish the job.
+  const shouldEnter =
+    dialog.hidden ||
+    dialog.classList.contains("alert-leaving") ||
+    dialog.classList.contains("alert-entering");
+  // A box put back up mid-dismissal has a hide still counting down on it, and
+  // that hide would pull the box the user is looking at out of the layout.
+  stopAlertMotion(dialog);
+  dialog.hidden = false;
+  dialog.setAttribute("aria-hidden", "false");
+  if (!shouldEnter) return;
+  dialog.classList.remove("alert-leaving");
+  dialog.classList.add("alert-entering");
+  alertShowFrames.set(
+    dialog,
+    requestAnimationFrame(() => {
+      dialog.classList.remove("alert-entering");
+      alertShowFrames.delete(dialog);
+    }),
+  );
+}
+
+/**
+ * Take a box off screen, on the fade every box shares.
+ *
+ * @param settled  run once the fade has ended and the box has left the layout.
+ *                 It is what the box was asking about — logging out — and it
+ *                 rides the one hide timer, so nothing races it to the same
+ *                 deadline.
+ * @param stillThis  asked at that deadline: false means the box on screen is no
+ *                 longer the one that started leaving, so it is left alone.
+ */
+function hideAlert(
+  dialog: HTMLElement,
+  settled?: () => void,
+  stillThis?: () => boolean,
+): void {
+  dialog.setAttribute("aria-hidden", "true");
+  dialog.classList.remove("alert-entering"); // a start state may not outlive its start
+  if (dialog.hidden) {
+    dialog.classList.remove("alert-leaving");
+    settled?.(); // nothing to wait for: there is no fade to sit through
+    return;
+  }
+  dialog.classList.add("alert-leaving");
+  alertHideTimers.set(
+    dialog,
+    window.setTimeout(() => {
+      alertHideTimers.delete(dialog);
+      if (stillThis && !stillThis()) return;
+      dialog.hidden = true;
+      settled?.();
+    }, ALERT_TRANSITION_MS),
+  );
+}
 
 function armPushDialogEntrance(): void {
   if (pushDialogDelayTimer !== null) window.clearTimeout(pushDialogDelayTimer);
@@ -5645,46 +5738,24 @@ function armPushDialogEntrance(): void {
 
 function beginPushDialogExit(): void {
   const dialog = document.getElementById("push-dialog") as HTMLElement | null;
-  if (dialog && !dialog.hidden) dialog.classList.add("push-dialog-leaving");
+  if (dialog && !dialog.hidden) dialog.classList.add("alert-leaving");
 }
 
 function cancelPushDialogExit(): void {
   const dialog = document.getElementById("push-dialog") as HTMLElement | null;
   const kind = pushNotifications?.state().kind;
   if (dialog && kind && ["enable", "denied", "retry"].includes(kind)) {
-    dialog.classList.remove("push-dialog-leaving");
+    dialog.classList.remove("alert-leaving");
   }
 }
 
+/**
+ * The card's own way out: the one every box takes, plus the guard that a card
+ * is pulled out of the layout only while it is still the card that left. The
+ * mechanism is not repeated here — there is nowhere else it lives.
+ */
 function hidePushDialog(dialog: HTMLElement, state: PushState): void {
-  dialog.setAttribute("aria-hidden", "true");
-  dialog.classList.remove("push-dialog-entering"); // a start state may not outlive its start
-  if (dialog.hidden) {
-    dialog.classList.remove("push-dialog-leaving");
-    return;
-  }
-  dialog.classList.add("push-dialog-leaving");
-  pushDialogHideTimer = window.setTimeout(() => {
-    if (dialog.dataset.pushState === state.kind) dialog.hidden = true;
-  }, PUSH_DIALOG_TRANSITION_MS);
-}
-
-function showPushDialog(dialog: HTMLElement): void {
-  // Entering counts as needing an entrance too: renderPushState can cancel the
-  // frame below, and the class it would have removed is then still on the
-  // element. Reading it here is what lets the next show finish the job.
-  const shouldEnter =
-    dialog.hidden ||
-    dialog.classList.contains("push-dialog-leaving") ||
-    dialog.classList.contains("push-dialog-entering");
-  dialog.hidden = false;
-  dialog.setAttribute("aria-hidden", "false");
-  if (!shouldEnter) return;
-  dialog.classList.remove("push-dialog-leaving");
-  dialog.classList.add("push-dialog-entering");
-  pushDialogShowFrame = requestAnimationFrame(() => {
-    dialog.classList.remove("push-dialog-entering");
-  });
+  hideAlert(dialog, undefined, () => dialog.dataset.pushState === state.kind);
 }
 
 /**
@@ -5700,17 +5771,16 @@ function showPushDialog(dialog: HTMLElement): void {
  */
 function chainPushDialog(dialog: HTMLElement, state: PushState): void {
   hidePushDialog(dialog, state);
-  // One timer, not two on the same deadline. hidePushDialog's own would be
-  // racing this one to pull the card out of the layout, so it is dropped and
-  // the handover does that itself, in the only order that is safe: gone first,
-  // and only then the replay that puts the next box up.
-  if (pushDialogHideTimer !== null) window.clearTimeout(pushDialogHideTimer);
-  pushDialogHideTimer = null;
+  // One timer, not two on the same deadline. hideAlert's own would be racing
+  // this one to pull the card out of the layout, so it is dropped and the
+  // handover does that itself, in the only order that is safe: gone first, and
+  // only then the replay that puts the next box up.
+  stopAlertMotion(dialog);
   pushDialogChainTimer = window.setTimeout(() => {
     pushDialogChainTimer = null;
     dialog.hidden = true;
     renderPushState(state);
-  }, PUSH_DIALOG_TRANSITION_MS);
+  }, ALERT_TRANSITION_MS);
 }
 
 function renderPushState(state: PushState): void {
@@ -5720,11 +5790,8 @@ function renderPushState(state: PushState): void {
   const action = document.getElementById("push-action") as HTMLButtonElement | null;
   if (!dialog || !copy || !notNow || !action) return;
 
-  if (pushDialogHideTimer !== null) window.clearTimeout(pushDialogHideTimer);
-  if (pushDialogShowFrame !== null) cancelAnimationFrame(pushDialogShowFrame);
+  stopAlertMotion(dialog); // whatever the card was part-way through is this render's now
   if (pushDialogChainTimer !== null) window.clearTimeout(pushDialogChainTimer);
-  pushDialogHideTimer = null;
-  pushDialogShowFrame = null;
   pushDialogChainTimer = null; // a state that arrives mid-handover cancels it
 
   // Read before the dataset below is rewritten: while a card is on screen, or
@@ -5766,7 +5833,7 @@ function renderPushState(state: PushState): void {
     copy.textContent = "Enable notifications from your Paratrooper?";
     action.hidden = false;
     action.textContent = "Enable";
-    showPushDialog(dialog);
+    showAlert(dialog);
     return;
   }
   if (state.kind === "denied") {
@@ -5776,7 +5843,7 @@ function renderPushState(state: PushState): void {
     copy.textContent =
       "Notifications could not be turned on. Re-enable them by going to Settings -> Notifications -> Paratrooper.";
     notNow.textContent = "Ok";
-    showPushDialog(dialog);
+    showAlert(dialog);
     return;
   }
   // Permission was granted, but browser subscription or server registration
@@ -5784,7 +5851,7 @@ function renderPushState(state: PushState): void {
   copy.textContent = "Notifications couldn’t be enabled.";
   action.hidden = false;
   action.textContent = "Retry";
-  showPushDialog(dialog);
+  showAlert(dialog);
 }
 
 function pushApisSupported(reg: ServiceWorkerRegistration): boolean {

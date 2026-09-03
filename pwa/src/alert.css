@@ -1,10 +1,18 @@
-/* Fixed overlay: it consumes no flex space, so showing or hiding notification
-   UI cannot resize the thread or move the composer. */
-.push-dialog {
+/* The centred alert, worn by both boxes: the notification card the app
+   volunteers, and the log-out question the user asks for. One family of rules,
+   so neither can drift away from the other — the log-out box used to be a
+   flat-white card of its own with hairline-divided text buttons and the legacy
+   blue, and the way it stopped matching was that it was never the same rules.
+   Only the words inside differ now.
+
+   Fixed overlay: it consumes no flex space, so showing or hiding a box cannot
+   resize the thread or move the composer. */
+.alert-dialog {
   /* The whole alert's motion budget, named once: 200ms on the standard
      ease-in-out, which is what the system spends presenting and dismissing its
      own centred alert. The dim and the card are never given separate numbers,
-     so neither direction can drift off the other's clock. */
+     so neither direction can drift off the other's clock, and neither box can
+     be quicker than the other. */
   --alert-anim: 200ms ease-in-out;
   position: fixed;
   inset: 0;
@@ -16,14 +24,18 @@
   opacity: 1;
   transition: opacity var(--alert-anim);
 }
-.push-dialog[hidden],
-.push-actions [hidden] {
+.alert-dialog[hidden],
+.alert-actions [hidden] {
   display: none;
 }
+/* One layer for both, so if they are ever up together the markup decides which
+   is on top: the log-out question is the one the user is waiting to answer, so
+   renderChat writes it last, after the card the app volunteers. Nothing here
+   singles either box out — that is the whole point of the family. */
 /* Two classes, one clock. A transition takes its duration and easing from the
    style it lands ON, and both directions land on the base rules above, so
    neither state below restates a timing. The way in lands there by dropping
-   push-dialog-entering; the way out is adding push-dialog-leaving.
+   alert-entering; the way out is adding alert-leaving.
    They are two classes because the directions are no longer mirror images.
    The card used to fly in from below and shrink away to the same spot, one
    "away" state serving both ends. The system alert does neither: it arrives
@@ -32,19 +44,19 @@
    single class cannot be both a transform the entrance starts FROM and a state
    the exit ends ON.
    The entering rules take transition: none so that landing on the start state
-   is a jump, never a journey — otherwise re-showing a card mid-dismissal would
+   is a jump, never a journey — otherwise re-showing a box mid-dismissal would
    animate it out to 1.1 first and be seen to swell. */
-.push-dialog.push-dialog-entering {
+.alert-dialog.alert-entering {
   opacity: 0;
   transition: none;
 }
 /* The dismissal is this and nothing else. The card has no fade of its own: it
    is inside the layer, so it goes with it, on the layer's timing, which is how
    a plain fade out stays plain. */
-.push-dialog.push-dialog-leaving {
+.alert-dialog.alert-leaving {
   opacity: 0;
 }
-.push-card {
+.alert-card {
   width: min(304px, calc(100vw - 48px));
   overflow: hidden;
   padding: 20px 14px 14px;
@@ -61,11 +73,11 @@
   transform: scale(1);
   transition: transform var(--alert-anim);
 }
-.push-dialog.push-dialog-entering .push-card {
+.alert-dialog.alert-entering .alert-card {
   transform: scale(1.1);
   transition: none;
 }
-.push-copy {
+.alert-copy {
   margin: 0;
   padding: 0 8px 18px;
   font-size: 18px;
@@ -73,13 +85,13 @@
   line-height: 1.28;
   letter-spacing: -0.01em;
 }
-.push-actions {
+.alert-actions {
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: 1fr;
   gap: 10px;
 }
-.push-actions button {
+.alert-actions button {
   min-width: 0;
   min-height: 44px;
   padding: 8px 12px;
@@ -91,29 +103,32 @@
   cursor: pointer;
 }
 /* Both pills are painted out of the sent bubble, from the pair .msg.user
-   declares: --accent for the fill and --sent-text for the ink on it. Enable is
-   that bubble outright; Not Now stays secondary — a quiet neutral tint — and
+   declares: --accent for the fill and --sent-text for the ink on it. The one
+   the box is asking for — Enable, Log Out — is that bubble outright; the quiet
+   one beside it — Not Now, Cancel — stays secondary, a quiet neutral tint, and
    takes the bubble's fill as its label, so the two read as one system instead
-   of a second blue floating over the thread. --sent, which both wore before,
+   of a second blue floating over the thread. --sent, which these wore before,
    is the legacy iOS blue the chrome outside the thread still uses, and is
-   deliberately not it. Neither is a copied hex, so neither can drift again. */
-.push-not-now {
+   deliberately not it. Neither is a copied hex, so neither can drift again.
+   Nothing here knows which box it is in: a destructive answer is not painted
+   red, because the system's own alert does not paint it red either. */
+.alert-quiet {
   background: rgba(118, 118, 128, 0.12);
   color: var(--accent);
 }
-.push-action {
+.alert-action {
   background: var(--accent);
   color: var(--sent-text);
   font-weight: 600;
 }
-.push-actions button:disabled {
+.alert-actions button:disabled {
   opacity: 0.55;
   cursor: default;
 }
 
 @media (prefers-color-scheme: dark) {
-  .push-dialog { background: rgba(0, 0, 0, 0.34); }
-  .push-card {
+  .alert-dialog { background: rgba(0, 0, 0, 0.34); }
+  .alert-card {
     border-color: rgba(255, 255, 255, 0.12);
     background: rgba(44, 44, 46, 0.94);
     box-shadow:
@@ -123,7 +138,7 @@
   /* only the scrim behind the label, never the label: --accent and
      --sent-text are one value each in both appearances, exactly as the bubble
      resolves them, so nothing here may re-state a pill's colour. */
-  .push-not-now { background: rgba(118, 118, 128, 0.32); }
+  .alert-quiet { background: rgba(118, 118, 128, 0.32); }
 }
 
 /* Every rule that times anything is named here, and that is now just the base
@@ -131,6 +146,6 @@
    dialog flattens the dismissal with it, and the entering rules are a start
    state with transition: none, which has no duration to cut. */
 @media (prefers-reduced-motion: reduce) {
-  .push-dialog,
-  .push-card { transition-duration: 1ms; }
+  .alert-dialog,
+  .alert-card { transition-duration: 1ms; }
 }

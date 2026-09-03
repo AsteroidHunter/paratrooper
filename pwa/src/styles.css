@@ -311,8 +311,8 @@ html, body {
    whole treatment — enough to sit above the field and the button it introduces,
    and deliberately not enough to reach the badge's name, which is still the
    card's title. Nothing exotic: the same face the app is set in, at the weight
-   the notification card already gives its own single sentence (.push-copy,
-   push.css). rem, like every other measure on this card, so the step is taken
+   the centred alert already gives its own single sentence (.alert-copy,
+   alert.css). rem, like every other measure on this card, so the step is taken
    from the app's own text size instead of being a second opinion about it. And
    no colour of its own — the ask keeps --text at full strength in both schemes,
    where the version line under the badge is the thing that greys out. */
@@ -523,57 +523,12 @@ html, body {
   cursor: pointer;
 }
 
-/* log-out confirm: iOS-alert-shaped — dimmed backdrop, centered card, No
-   (safe, bold blue) beside Yes (destructive red) */
-.confirm {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  background: rgba(0, 0, 0, 0.35);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s ease;
-  z-index: 20;
-}
-.confirm.open {
-  opacity: 1;
-  pointer-events: auto;
-}
-.confirm-card {
-  width: min(270px, 80vw);
-  border-radius: 14px;
-  background: var(--menu-bg);
-  overflow: hidden; /* button row corners stay inside the card's radius */
-  text-align: center;
-}
-.confirm-msg {
-  margin: 0;
-  padding: 20px 16px 18px;
-  font-size: 15px;
-  font-weight: 600;
-}
-.confirm-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  border-top: 0.5px solid var(--hairline);
-}
-.confirm-row button {
-  padding: 11px 0;
-  border: none;
-  background: none;
-  font: inherit;
-  font-size: 17px;
-  cursor: pointer;
-}
-.confirm-no {
-  border-right: 0.5px solid var(--hairline);
-  color: var(--sent);
-  font-weight: 600; /* the safe default gets the bold, per Apple's alerts */
-}
-.confirm-yes {
-  color: var(--error-text);
-}
+/* The log-out question has no rules here. It is the same centred alert as the
+   notification card, out of alert.css, down to the pills and the 200ms it
+   arrives and leaves on. What used to sit here was a second, flat card of its
+   own — hairline-divided text buttons, the legacy blue on the safe one and red
+   on the destructive one — and being its own rules is exactly how it fell
+   behind the card it now matches. */
 
 /* --- thread --- */
 .thread {
@@ -1504,9 +1459,10 @@ html, body {
   cursor: pointer;
 }
 
-/* failed-send action sheet: bottom-anchored iOS sheet in the log-out confirm's
-   visual language — blue actions, red destructive Delete, and Cancel bold blue
-   on its own card (the safe default, like the confirm's "No") */
+/* failed-send action sheet: bottom-anchored iOS sheet — blue actions, red
+   destructive Delete, and Cancel bold blue on its own card (the safe default).
+   Still the old visual language; the centred boxes have since moved on to
+   alert.css and this one has not followed them yet. */
 .sheet {
   position: fixed;
   inset: 0;

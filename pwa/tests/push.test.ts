@@ -523,8 +523,8 @@ describe("the record the service worker reads", () => {
 });
 
 const MAIN_SOURCE = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-const PUSH_CSS_SOURCE = readFileSync(new URL("../src/push.css", import.meta.url), "utf8");
-const PUSH_CSS_RULES = PUSH_CSS_SOURCE.replace(/\/\*[\s\S]*?\*\//g, "");
+const ALERT_CSS_SOURCE = readFileSync(new URL("../src/alert.css", import.meta.url), "utf8");
+const ALERT_CSS_RULES = ALERT_CSS_SOURCE.replace(/\/\*[\s\S]*?\*\//g, "");
 const SW_SOURCE = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
 const MANIFEST = JSON.parse(
   readFileSync(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
@@ -545,7 +545,7 @@ function millis(name: string): number {
   return Number(found![1]);
 }
 
-const TRANSITION_MS = millis("PUSH_DIALOG_TRANSITION_MS");
+const TRANSITION_MS = millis("ALERT_TRANSITION_MS");
 const DELAY_MS = millis("PUSH_DIALOG_DELAY_MS");
 
 // The three boxes, word for word. The arrows are the ASCII pair, not an en
@@ -570,26 +570,28 @@ describe("centered notification popup wiring", () => {
     expect(render.slice(pendingAt, composeAt)).not.toContain("push-dialog");
     expect(render).not.toContain("push-banner");
     expect(render).not.toContain("push-setting");
-    expect(PUSH_CSS_RULES).toMatch(/\.push-dialog \{[\s\S]*?position:\s*fixed;/);
-    expect(PUSH_CSS_RULES).toMatch(/\.push-dialog \{[\s\S]*?inset:\s*0;/);
-    expect(PUSH_CSS_RULES).toMatch(/\.push-dialog \{[\s\S]*?place-items:\s*center;/);
-    expect(PUSH_CSS_RULES).toContain(".push-dialog[hidden]");
-    expect(PUSH_CSS_RULES).toMatch(/\.push-card \{[\s\S]*?width:\s*min\(304px,/);
-    expect(PUSH_CSS_RULES).toMatch(/\.push-card \{[\s\S]*?border-radius:\s*26px;/);
-    expect(PUSH_CSS_RULES).toMatch(/\.push-copy \{[\s\S]*?font-size:\s*18px;/);
-    expect(PUSH_CSS_RULES).toMatch(/\.push-copy \{[\s\S]*?font-weight:\s*500;/);
-    expect(PUSH_CSS_RULES).toMatch(/\.push-actions button \{[\s\S]*?border-radius:\s*999px;/);
-    expect(PUSH_CSS_RULES).toContain(".push-dialog.push-dialog-leaving");
-    expect(PUSH_CSS_RULES).not.toMatch(/\.push-dialog\.push-dialog-leaving\s*\{[^}]*pointer-events/);
-    expect(PUSH_CSS_RULES).not.toMatch(/\.compose\b/);
+    expect(ALERT_CSS_RULES).toMatch(/\.alert-dialog \{[\s\S]*?position:\s*fixed;/);
+    expect(ALERT_CSS_RULES).toMatch(/\.alert-dialog \{[\s\S]*?inset:\s*0;/);
+    expect(ALERT_CSS_RULES).toMatch(/\.alert-dialog \{[\s\S]*?place-items:\s*center;/);
+    expect(ALERT_CSS_RULES).toContain(".alert-dialog[hidden]");
+    expect(ALERT_CSS_RULES).toMatch(/\.alert-card \{[\s\S]*?width:\s*min\(304px,/);
+    expect(ALERT_CSS_RULES).toMatch(/\.alert-card \{[\s\S]*?border-radius:\s*26px;/);
+    expect(ALERT_CSS_RULES).toMatch(/\.alert-copy \{[\s\S]*?font-size:\s*18px;/);
+    expect(ALERT_CSS_RULES).toMatch(/\.alert-copy \{[\s\S]*?font-weight:\s*500;/);
+    expect(ALERT_CSS_RULES).toMatch(/\.alert-actions button \{[\s\S]*?border-radius:\s*999px;/);
+    expect(ALERT_CSS_RULES).toContain(".alert-dialog.alert-leaving");
+    expect(ALERT_CSS_RULES).not.toMatch(/\.alert-dialog\.alert-leaving\s*\{[^}]*pointer-events/);
+    expect(ALERT_CSS_RULES).not.toMatch(/\.compose\b/);
   });
 
   it("shows exactly Not Now and Enable with the approved question", () => {
     const render = sourceBetween("function renderChat()", "async function loadOlder(");
     const renderState = sourceBetween("function renderPushState(", "function pushApisSupported(");
+    // to the log-out box, not to the thread: the two alerts are neighbours in
+    // the markup now, and only this one's pills are being counted
     const dialogMarkup = render.slice(
       render.indexOf('id="push-dialog"'),
-      render.indexOf('<main id="thread"'),
+      render.indexOf('id="confirm"'),
     );
     const actionLabels = [...dialogMarkup.matchAll(/<button[^>]*>([^<]+)<\/button>/g)]
       .map((match) => match[1].trim());
@@ -636,11 +638,11 @@ describe("centered notification popup wiring", () => {
 
   it("fades and conceals Paratrooper's popup while Apple's request is in flight", () => {
     const renderState = sourceBetween("function renderPushState(", "function pushApisSupported(");
-    const hide = sourceBetween("function hidePushDialog(", "function showPushDialog(");
+    const hide = sourceBetween("function hideAlert(", "function armPushDialogEntrance(");
     const render = sourceBetween("function renderChat()", "async function loadOlder(");
     expect(renderState).toContain('state.kind === "requesting"');
     expect(renderState).toContain("hidePushDialog(dialog, state)");
-    expect(hide).toContain('classList.add("push-dialog-leaving")');
+    expect(hide).toContain('classList.add("alert-leaving")');
     expect(render).toContain('control.addEventListener("pointerdown", beginPushDialogExit)');
     expect(renderState).toContain('action.textContent = "Enable"');
     expect(renderState).not.toContain(".focus(");
@@ -648,7 +650,7 @@ describe("centered notification popup wiring", () => {
 
   it("gently delays the initial popup without delaying the permission tap", () => {
     const render = sourceBetween("function renderChat()", "async function loadOlder(");
-    const popup = sourceBetween("const PUSH_DIALOG_TRANSITION_MS", "function pushApisSupported(");
+    const popup = sourceBetween("const ALERT_TRANSITION_MS", "function pushApisSupported(");
     expect(popup).toContain("const PUSH_DIALOG_DELAY_MS = 2500");
     expect(popup).toMatch(
       /setTimeout\(\(\) => \{[\s\S]*?pushDialogCanShow = true;[\s\S]*?renderPushState\(pending\);[\s\S]*?PUSH_DIALOG_DELAY_MS/,
@@ -658,11 +660,11 @@ describe("centered notification popup wiring", () => {
     // the fade the hide timer above is cut to. It is the layer's own, borrowed
     // by the dismissal, which states no timing; the whole shape of the arrival
     // and the departure is pinned in pushcard.test.ts
-    expect(PUSH_CSS_RULES).toMatch(/--alert-anim:\s*200ms ease-in-out;/);
-    expect(PUSH_CSS_RULES).toMatch(
-      /\.push-dialog \{[^}]*transition:\s*opacity var\(--alert-anim\);/,
+    expect(ALERT_CSS_RULES).toMatch(/--alert-anim:\s*200ms ease-in-out;/);
+    expect(ALERT_CSS_RULES).toMatch(
+      /\.alert-dialog \{[^}]*transition:\s*opacity var\(--alert-anim\);/,
     );
-    expect(PUSH_CSS_RULES).toMatch(/\.push-dialog\.push-dialog-leaving \{\s*opacity: 0;\s*\}/);
+    expect(ALERT_CSS_RULES).toMatch(/\.alert-dialog\.alert-leaving \{\s*opacity: 0;\s*\}/);
   });
 
   it("checks on load/resume without automatically requesting permission", () => {
@@ -768,7 +770,7 @@ class DialogStandIn {
 let dialogScript = "";
 
 beforeAll(async () => {
-  const block = sourceBetween("const PUSH_DIALOG_TRANSITION_MS", "function pushApisSupported(");
+  const block = sourceBetween("const ALERT_TRANSITION_MS", "function pushApisSupported(");
   dialogScript = (await transformWithEsbuild(block, "pushdialog.ts", { loader: "ts" })).code;
 });
 
@@ -820,8 +822,8 @@ function alertHarness() {
       frames.clear();
       for (const run of due) run();
     },
-    entering: () => dialog.classList.contains("push-dialog-entering"),
-    leaving: () => dialog.classList.contains("push-dialog-leaving"),
+    entering: () => dialog.classList.contains("alert-entering"),
+    leaving: () => dialog.classList.contains("alert-leaving"),
   };
 }
 
