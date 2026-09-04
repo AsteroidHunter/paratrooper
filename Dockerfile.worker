@@ -47,12 +47,15 @@ RUN python -m playwright install --with-deps chromium \
 # inbox it materializes photos into.
 # The empty ~/.ssh is Render's price of admission: its SSH closes the session
 # the instant it logs in unless the running user already owns one at 0700, and
-# the sandbox probe rides in over exactly that shell.
+# the sandbox probe rides in over exactly that shell. useradd leaves the
+# account locked, which Render's SSH also refuses, so unlock it; no password is
+# set either way, and nothing can log in without a key Render itself holds.
 ENV HOME=/home/app
 RUN useradd --create-home --home-dir /home/app --uid 1000 --shell /bin/bash app \
     && mkdir -p /home/app/.claude /home/app/.ssh /app/site_checkout /tmp/paratrooper-inbox \
     && chown -R app:app /home/app /app/site_checkout /tmp/paratrooper-inbox \
-    && chmod 0700 /home/app/.ssh
+    && chmod 0700 /home/app/.ssh \
+    && passwd -u app
 USER app
 
 # clones the site repo on first boot, then consumes jobs from the queue
