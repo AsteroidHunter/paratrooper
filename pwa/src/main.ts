@@ -170,7 +170,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.100"; // The log-out question is the notification card's twin: same box, same pills, same 200ms in and out
+const APP_VERSION = "0.3.101"; // Connect answers the finger: it dims while it asks, says so when nothing answers, and takes Return
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -515,13 +515,17 @@ function renderTokenGate(): void {
       <p>Your access token please?</p>
       <input id="token-input" type="password" autocomplete="off" data-owned-focus />
       <button id="token-save">Connect</button>
+      <div id="token-note" class="gate-note" role="status" aria-live="polite"></div>
     </div>`;
   const input = document.getElementById("token-input") as HTMLInputElement;
   const save = document.getElementById("token-save") as HTMLButtonElement;
+  // the third answer's line: empty until there is something to say, and out of
+  // the flow (styles.css .gate-note), so nothing above it ever moves for it
+  const note = document.getElementById("token-note") as HTMLDivElement;
   // the accepted path is this card's whole reason to exist, so it stays here in
   // the open: the token is stored, the chat is built and the socket opens — the
   // same three lines as before, now behind the server's yes
-  const gate = createTokenGate(input, save, {
+  const gate = createTokenGate(input, save, note, {
     fetcher: gateFetch,
     wait: (ms, run) => setTimeout(run, ms),
     accepted: (value) => {
@@ -533,6 +537,15 @@ function renderTokenGate(): void {
   });
   tokenGate = gate; // so a socket refused later can paint THIS card red
   document.getElementById("token-save")!.addEventListener("click", () => {
+    void gate.submit();
+  });
+  // Return is Connect. The box is the only field on the card, so the key that
+  // ends the typing is the key that sends it — the same handler, not a second
+  // path to the same place. No <form> around any of it: a form would submit
+  // and reload the page, and everything this card does it does in place.
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
     void gate.submit();
   });
 }

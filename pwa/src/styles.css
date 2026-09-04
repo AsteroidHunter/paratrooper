@@ -290,6 +290,11 @@ html, body {
      which is the only value the bar ever sees. Change this number and the
      whole badge grows in proportion — there is no second place to change. */
   --gate-badge-scale: 1.75;
+  /* the frame the third answer's line hangs in. The line is out of the flow,
+     pinned to the bottom of this box, so it can appear and disappear without
+     the badge, the ask, the box or the pill moving a pixel — and without the
+     card's own height, which the keyboard lift's 50% is taken from, changing */
+  position: relative;
   /* the clock lives on the card, not under the keyboard classes: a transition
      is started from the AFTER-change style, so one declared only while the
      class is on would already be gone at the close and the card would snap
@@ -387,6 +392,43 @@ html, body {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
+}
+/* Pressed, working, and spent — one dim, three doors. The app turns the
+   system's tap flash off for everything (html, body above), so a pill that
+   declares nothing for a finger is a pill that does not answer one: :active is
+   the press itself. .busy is that same dim held for exactly as long as the
+   check is out (tokengate.ts sets it with `asking`), because the finger
+   usually lifts long before the server answers and the pill must not flash
+   back to full while the app is still asking. :disabled is the beat after a
+   yes, while the card is leaving, and it is here so a dead button can never
+   again look identical to a live one. Opacity, not a second fill: the accent
+   stays the accent in both appearances and no new colour is named. No
+   transition either — a press that fades in is a press that feels late. */
+.gate button:active,
+.gate button.busy,
+.gate button:disabled {
+  opacity: 0.6;
+}
+/* The third answer: no answer at all. It says what happened rather than what
+   the token is, so it is not the box's business — no border, no shake — and it
+   is set as the card's quietest voice, the same grey the version line under
+   the badge wears. Absolutely placed in the 2rem of bottom padding the card
+   already carries, so it costs no height: it appears and vanishes under a
+   Connect pill that never moves. Faded on the sheet's usual short fade, and
+   emptied by the next keystroke — the text is written in, not unhidden, so a
+   silent card is silent to a screen reader too (main.ts renders it empty). */
+.gate-note {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.gate-note.shown {
+  opacity: 1;
 }
 
 /* --- nav bar (frosted, centered title, hairline) --- */

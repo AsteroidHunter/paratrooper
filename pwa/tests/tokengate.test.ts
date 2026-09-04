@@ -7,9 +7,18 @@
 //
 // Three answers, and the third is the one worth pinning hardest: only the gate
 // itself refusing (401/403) may paint the box red. No answer at all, or a
-// server that broke, says nothing about the token — the border stays neutral,
-// Connect comes back, and the app invents no copy for a case the spec does not
-// cover.
+// server that broke, says nothing about the token — the border stays neutral
+// and Connect comes back. What it does now say is one muted line under the
+// pill, which claims nothing about the token either; and a check that never
+// comes back is cut off after CHECK_TIMEOUT_MS and lands on that same line,
+// so a hung request can no longer leave Connect dead forever.
+//
+// The pill answers the finger too: one dim carried by :active, by the busy
+// class for as long as the check is out, and by :disabled for the beat a card
+// that has been let through takes to leave. And the two things that were not
+// possible at all — Connect on an empty box, and Return instead of Connect —
+// are here as well: the first shakes without sending anything, the second is a
+// keydown on the box calling the very same handler, with no <form> in sight.
 //
 // The controller runs on element STAND-INS, the tapcaret.test.ts way: the three
 // things it touches are a value, a class list and an input listener, so the
@@ -17,13 +26,18 @@
 // then LOOK like is a source pin over the sheet, like the other presentation
 // pins — jsdom resolves none of these rules and there is no browser here.
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   BAD_CLASS,
+  BUSY_CLASS,
+  CHECK_TIMEOUT_MS,
   CHECK_URL,
   type Fetcher,
   type GateBox,
   type GateButton,
+  type GateNote,
+  NOTE_CLASS,
+  NOTE_COPY,
   OK_CLASS,
   PASS_MS,
   SHAKE_CLASS,
@@ -38,68 +52,105 @@ const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
 // --- the stand-ins ------------------------------------------------------------
 
-interface Box extends GateBox {
-  classes: Set<string>;
-  type(text: string): void; // a keystroke: the value changes and the app hears it
-}
-
-function makeBox(value = ""): Box {
-  const classes = new Set<string>();
-  let onInput: (() => void) | null = null;
+/** A class list, the only part of an element three of these stand-ins share. */
+function classes() {
+  const set = new Set<string>();
   return {
-    value,
-    classes,
-    classList: {
-      add: (c: string) => void classes.add(c),
-      remove: (c: string) => void classes.delete(c),
-    },
-    addEventListener: (_type: "input", listener: () => void) => {
-      onInput = listener;
-    },
-    type(text: string) {
-      this.value = text;
-      onInput?.();
+    set,
+    list: {
+      add: (c: string) => void set.add(c),
+      remove: (c: string) => void set.delete(c),
     },
   };
 }
 
-const makeButton = (): GateButton => ({ disabled: false });
+interface Box extends GateBox {
+  classes: Set<string>;
+  type(text: string): void; // a keystroke: the value changes and the app hears it
+  shakeOver(): void; // the 0.45s finishing, which is what takes the class off
+}
+
+function makeBox(value = ""): Box {
+  const own = classes();
+  const heard = new Map<string, () => void>();
+  return {
+    value,
+    classes: own.set,
+    classList: own.list,
+    addEventListener: (type: "input" | "animationend", listener: () => void) => {
+      heard.set(type, listener);
+    },
+    type(text: string) {
+      this.value = text;
+      heard.get("input")?.();
+    },
+    shakeOver() {
+      heard.get("animationend")?.();
+    },
+  };
+}
+
+interface Button extends GateButton {
+  classes: Set<string>;
+}
+
+function makeButton(): Button {
+  const own = classes();
+  return { disabled: false, classes: own.set, classList: own.list };
+}
+
+interface Note extends GateNote {
+  classes: Set<string>;
+}
+
+function makeNote(): Note {
+  const own = classes();
+  return { textContent: "", classes: own.set, classList: own.list };
+}
 
 /** A fetch that answers with one status, and remembers how it was called. */
 function answering(status: number) {
   const calls: { url: string; auth: string; cache: string }[] = [];
+  const signals: AbortSignal[] = [];
   const fetcher: Fetcher = async (url, init) => {
     calls.push({ url, auth: init.headers.Authorization, cache: init.cache });
+    signals.push(init.signal);
     return { status };
   };
-  return { fetcher, calls };
+  return { fetcher, calls, signals };
 }
 
-/** A fetch that never answers, held open by the test. */
+/** A fetch that never answers, held open by the test — and, like the real
+ *  thing, thrown out the moment its signal is pulled. Without that the cut-off
+ *  would have nothing to cut and this stand-in would be lying about fetch. */
 function hanging() {
   let release: (status: number) => void = () => {};
   const calls: string[] = [];
-  const fetcher: Fetcher = (url) => {
+  const signals: AbortSignal[] = [];
+  const fetcher: Fetcher = (url, init) => {
     calls.push(url);
-    return new Promise((resolve) => {
+    signals.push(init.signal);
+    return new Promise((resolve, reject) => {
       release = (status) => resolve({ status });
+      init.signal.addEventListener("abort", () => reject(new Error("aborted")));
     });
   };
-  return { fetcher, calls, answer: (status: number) => release(status) };
+  return { fetcher, calls, signals, answer: (status: number) => release(status) };
 }
 
 /** The card, wired the way main.ts wires it, with the beat's clock in hand. */
 function card(fetcher: Fetcher, value: string) {
   const box = makeBox(value);
   const button = makeButton();
+  const note = makeNote();
   const beats: { ms: number; run: () => void }[] = [];
   const accepted: string[] = [];
-  const gate = createTokenGate(box, button, {
+  const gate = createTokenGate(box, button, note, {
     fetcher,
     wait: (ms, run) => void beats.push({ ms, run }),
     accepted: (v) => void accepted.push(v),
   });
-  return { box, button, beats, accepted, gate };
+  return { box, button, note, beats, accepted, gate };
 }
 
 // --- what one answer means ----------------------------------------------------
@@ -132,6 +183,52 @@ describe("the verdict — only the gate itself may say no", () => {
     expect(await askToken("  ", fetcher)).toBe("accepted"); // the caller trims, not this
     expect(calls).toEqual([{ url: CHECK_URL, auth: "Bearer   ", cache: "no-store" }]);
     expect(CHECK_URL).toBe("/api/auth/check");
+  });
+});
+
+// --- the cut-off --------------------------------------------------------------
+//
+// A refusal is an answer and a dead socket is an answer; a captive portal is
+// neither. The request just hangs, and the whole point of asking before
+// entering the chat was that somebody is standing there waiting for it.
+
+describe("a check that never comes back", () => {
+  it("is given eight seconds, and is a bounded wait either way", () => {
+    expect(CHECK_TIMEOUT_MS).toBe(8000);
+  });
+
+  it("hands the fetch a signal, unpulled, on every ask", async () => {
+    const { fetcher, signals } = answering(204);
+    await askToken("t", fetcher);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(signals[0].aborted).toBe(false);
+  });
+
+  it("pulls it at the cut-off, and the hang becomes no answer at all", async () => {
+    vi.useFakeTimers();
+    try {
+      const hung = hanging();
+      const verdict = askToken("t", hung.fetcher);
+      expect(hung.signals[0].aborted).toBe(false); // still waiting on the server
+      vi.advanceTimersByTime(CHECK_TIMEOUT_MS);
+      expect(hung.signals[0].aborted).toBe(true);
+      expect(await verdict).toBe("unknown"); // not a refusal: nothing was said
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("and disarms it the moment an answer arrives — no timer outlives its tap", async () => {
+    vi.useFakeTimers();
+    try {
+      const { fetcher, signals } = answering(401);
+      expect(await askToken("t", fetcher)).toBe("refused");
+      vi.advanceTimersByTime(CHECK_TIMEOUT_MS * 2);
+      expect(signals[0].aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -238,6 +335,66 @@ describe("Connect with nothing to answer it", () => {
     expect(c.button.disabled).toBe(false);
     expect(c.accepted).toEqual([]);
   });
+
+  it("says the one thing there is to say, under the pill", async () => {
+    const dead: Fetcher = () => Promise.reject(new Error("offline"));
+    const c = card(dead, "right");
+    await c.gate.submit();
+    expect(c.note.textContent).toBe(NOTE_COPY);
+    expect([...c.note.classes]).toEqual([NOTE_CLASS]); // and it is faded in
+  });
+
+  it("the line is about the server, and says nothing about the token", () => {
+    expect(NOTE_COPY).toBe("Couldn't reach the server. Try again.");
+    expect(NOTE_COPY.toLowerCase()).not.toContain("token");
+    expect(NOTE_COPY.toLowerCase()).not.toContain("wrong");
+  });
+
+  it("a 500 gets it too — a server that broke is still a server not reached", async () => {
+    const { fetcher } = answering(500);
+    const c = card(fetcher, "right");
+    await c.gate.submit();
+    expect(c.note.textContent).toBe(NOTE_COPY);
+  });
+
+  it("but a refusal never does: the border is the answer there", async () => {
+    const { fetcher } = answering(401);
+    const c = card(fetcher, "wrong");
+    await c.gate.submit();
+    expect(c.note.textContent).toBe("");
+    expect([...c.note.classes]).toEqual([]);
+  });
+
+  it("and neither does a yes", async () => {
+    const { fetcher } = answering(204);
+    const c = card(fetcher, "right");
+    await c.gate.submit();
+    expect(c.note.textContent).toBe("");
+  });
+
+  it("the next keystroke takes it away, emptied and not just faded", async () => {
+    const dead: Fetcher = () => Promise.reject(new Error("offline"));
+    const c = card(dead, "righ");
+    await c.gate.submit();
+    c.box.type("right");
+    expect(c.note.textContent).toBe("");
+    expect([...c.note.classes]).toEqual([]);
+  });
+
+  it("and so does the next tap, before it has anything new to report", async () => {
+    const dead: Fetcher = () => Promise.reject(new Error("offline"));
+    const c = card(dead, "right");
+    await c.gate.submit();
+    const hung = hanging();
+    const second = card(hung.fetcher, "right");
+    second.note.textContent = NOTE_COPY;
+    second.note.classes.add(NOTE_CLASS);
+    const pending = second.gate.submit();
+    expect(second.note.textContent).toBe(""); // silent while it asks again
+    expect([...second.note.classes]).toEqual([]);
+    hung.answer(204);
+    await pending;
+  });
 });
 
 describe("while the question is out", () => {
@@ -253,12 +410,97 @@ describe("while the question is out", () => {
     expect(hung.calls).toHaveLength(1);
   });
 
-  it("an empty box asks nothing at all", async () => {
+  it("the pill stays dimmed for exactly as long as the check is out", async () => {
+    const hung = hanging();
+    const c = card(hung.fetcher, "right");
+    expect([...c.button.classes]).toEqual([]); // nothing before the tap
+    const pending = c.gate.submit();
+    expect([...c.button.classes]).toEqual([BUSY_CLASS]); // the finger may lift now
+    hung.answer(401);
+    await pending;
+    expect([...c.button.classes]).toEqual([]);
+  });
+
+  it("and the dim comes off on a refusal, on no answer, and on the yes", async () => {
+    const dead: Fetcher = () => Promise.reject(new Error("offline"));
+    for (const [what, fetcher] of [
+      ["refused", answering(401).fetcher],
+      ["unknown", dead],
+      ["accepted", answering(204).fetcher],
+    ] as const) {
+      const c = card(fetcher, "right");
+      await c.gate.submit();
+      expect(c.button.classes.has(BUSY_CLASS), `${what} left the pill busy`).toBe(false);
+    }
+  });
+
+  it("nothing can leave Connect dead: the cut-off gives it back too", async () => {
+    vi.useFakeTimers();
+    try {
+      const hung = hanging();
+      const c = card(hung.fetcher, "right");
+      const pending = c.gate.submit();
+      expect(c.button.disabled).toBe(true);
+      vi.advanceTimersByTime(CHECK_TIMEOUT_MS);
+      await pending;
+      expect(c.button.disabled).toBe(false);
+      expect(c.button.classes.has(BUSY_CLASS)).toBe(false);
+      expect([...c.box.classes]).toEqual([]); // no red: nothing refused anything
+      expect(c.note.textContent).toBe(NOTE_COPY); // the third answer, as always
+      // and the card is askable again, which is the whole point of the cut-off
+      const again = c.gate.submit();
+      expect(hung.calls).toHaveLength(2);
+      hung.answer(204);
+      await again;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("Connect on an empty box", () => {
+  it("shakes, sends nothing, and leaves the pill live", async () => {
     const { fetcher, calls } = answering(204);
-    const c = card(fetcher, "   ");
+    const c = card(fetcher, "   "); // whitespace is empty: the value is trimmed
     await c.gate.submit();
-    expect(calls).toEqual([]);
+    expect(calls).toEqual([]); // no request at all — there is nothing to ask
+    expect([...c.box.classes]).toEqual([SHAKE_CLASS]); // the shake, and no red
+    expect(c.box.classes.has(BAD_CLASS)).toBe(false);
     expect(c.button.disabled).toBe(false);
+    expect([...c.button.classes]).toEqual([]); // never went busy
+    expect(c.note.textContent).toBe(""); // and nothing was reached to fail
+  });
+
+  it("shakes again on the next tap: the animation drops its own class", async () => {
+    // adding a class an element already wears restarts nothing, and there is no
+    // round trip here to carry the removal across a frame — so the end of the
+    // shake is what takes it off, and the next tap re-arms by construction
+    const { fetcher } = answering(204);
+    const c = card(fetcher, "");
+    await c.gate.submit();
+    expect([...c.box.classes]).toEqual([SHAKE_CLASS]);
+    c.box.shakeOver();
+    expect([...c.box.classes]).toEqual([]);
+    await c.gate.submit();
+    expect([...c.box.classes]).toEqual([SHAKE_CLASS]);
+  });
+
+  it("clears whatever the last answer left before it shakes", async () => {
+    const { fetcher } = answering(401);
+    const c = card(fetcher, "wrong");
+    await c.gate.submit();
+    expect(c.box.classes.has(BAD_CLASS)).toBe(true);
+    c.box.value = "  "; // typed away to nothing, then Connect again
+    await c.gate.submit();
+    expect([...c.box.classes]).toEqual([SHAKE_CLASS]); // the red went with it
+  });
+
+  it("and the shake the refusal wears comes off on the same event", async () => {
+    const { fetcher } = answering(401);
+    const c = card(fetcher, "wrong");
+    await c.gate.submit();
+    c.box.shakeOver();
+    expect([...c.box.classes]).toEqual([BAD_CLASS]); // the red stays; the motion is over
   });
 });
 
@@ -321,7 +563,7 @@ describe("main.ts — nothing is stored until the server has said yes", () => {
 
   it("the card is a controller now, and the accepted path is its callback", () => {
     expect(gate, "renderTokenGate not found").not.toBe("");
-    expect(gate).toContain("createTokenGate(input, save, {");
+    expect(gate).toContain("createTokenGate(input, save, note, {");
     // the three lines that used to run on a tap now run on an answer
     const accepted = gate.slice(gate.indexOf("accepted: (value) =>"));
     expect(accepted).toContain("localStorage.setItem(TOKEN_KEY, value)");
@@ -341,6 +583,35 @@ describe("main.ts — nothing is stored until the server has said yes", () => {
     expect(main).toContain("const gateFetch: Fetcher = (url, init) => fetch(url, init);");
     expect(main.match(/fetcher: gateFetch,/g)).toHaveLength(2); // the card, the probe
     expect(main).not.toContain(CHECK_URL); // the route is named once, in tokengate.ts
+  });
+
+  it("the third answer's line is rendered empty, and announced when it is not", () => {
+    expect(gate).toContain(
+      '<div id="token-note" class="gate-note" role="status" aria-live="polite"></div>',
+    );
+    // it is the LAST thing in the card: nothing in the flow sits under it, and
+    // the sheet lifts it out of the flow entirely
+    expect(gate).toMatch(/<div id="token-note"[^>]*><\/div>\s*<\/div>`;/);
+    // the copy is never written here — the module owns the one sentence
+    expect(main).not.toContain(NOTE_COPY);
+    expect(gate).toContain('document.getElementById("token-note") as HTMLDivElement');
+  });
+
+  it("Return in the box is a Connect tap, and there is still no form", () => {
+    const at = gate.indexOf('input.addEventListener("keydown"');
+    expect(at, "no keydown on the token box").toBeGreaterThan(-1);
+    const key = gate.slice(at);
+    expect(key).toContain('if (event.key !== "Enter") return;');
+    expect(key).toContain("event.preventDefault();"); // or the box would keep it
+    expect(key).toContain("void gate.submit();"); // the same handler, not a copy
+    // one path in, two ways to take it: nothing here re-implements the check
+    expect(key).not.toContain("askToken");
+    expect(key).not.toContain("localStorage");
+    // and no <form> was wrapped around the card to get Return for free: the
+    // chat's composer is the app's only one, and a form here would reload
+    const markup = /app\.innerHTML = `([\s\S]*?)`;/.exec(gate)?.[1] ?? "";
+    expect(markup, "the card's markup not found").not.toBe("");
+    expect(markup).not.toContain("<form");
   });
 });
 
@@ -430,15 +701,16 @@ describe("the two answers are tokens, declared for both appearances", () => {
   });
 });
 
-describe("the gate's rules paint a border and move nothing", () => {
-  const rule = (selector: string): string => {
-    const m = new RegExp(`(?:^|\\n)${selector.replace(/\./g, "\\.")} \\{([^}]*)\\}`).exec(
-      css.replace(/\/\*[\s\S]*?\*\//g, ""),
-    );
-    expect(m, `no rule for ${selector}`).not.toBeNull();
-    return m![1];
-  };
+/** One rule's body, by the exact selector it is written under. */
+const rule = (selector: string): string => {
+  const m = new RegExp(`(?:^|\\n)${selector.replace(/\./g, "\\.")} \\{([^}]*)\\}`).exec(
+    css.replace(/\/\*[\s\S]*?\*\//g, ""),
+  );
+  expect(m, `no rule for ${selector}`).not.toBeNull();
+  return m![1];
+};
 
+describe("the gate's rules paint a border and move nothing", () => {
   it("green and red are the tokens and nothing else — no colour is written here", () => {
     expect(rule(".gate input.ok").trim()).toBe("border-color: var(--gate-ok);");
     expect(rule(".gate input.bad").trim()).toBe("border-color: var(--gate-bad);");
@@ -504,8 +776,70 @@ describe("the gate's rules paint a border and move nothing", () => {
   });
 });
 
-describe("the card ships as 0.3.100", () => {
+describe("Connect answers the finger", () => {
+  const dim = /\.gate button:active,\s*\.gate button\.busy,\s*\.gate button:disabled \{([^}]*)\}/.exec(
+    css.replace(/\/\*[\s\S]*?\*\//g, ""),
+  );
+
+  it("the press, the wait and the leaving card are one dim, written once", () => {
+    expect(dim, "the three states must share a rule, not drift apart").not.toBeNull();
+    const opacity = /opacity: ([\d.]+);/.exec(dim![1]);
+    expect(opacity, "the dim must be an opacity").not.toBeNull();
+    expect(Number(opacity![1])).toBeGreaterThan(0.3); // still legibly the pill
+    expect(Number(opacity![1])).toBeLessThan(1); // and visibly not the live one
+  });
+
+  it("dims the accent rather than naming a second fill for it", () => {
+    expect(dim![1]).not.toMatch(/background|color|#[0-9a-fA-F]{3,8}/);
+    // and no fade: a press that arrives late is not a press
+    expect(dim![1]).not.toContain("transition");
+  });
+
+  it("the class the sheet dims is the class the module sets", () => {
+    expect(css).toContain(`.gate button.${BUSY_CLASS},`);
+  });
+
+  it("the press cannot be left to the tap flash, which the app turns off", () => {
+    // html, body opt the whole app out of the system's whitish blink, so a
+    // button that declares nothing for a finger answers it with nothing
+    expect(css).toContain("-webkit-tap-highlight-color: transparent;");
+  });
+});
+
+describe("the third answer's line costs the card nothing", () => {
+  it("is lifted out of the flow, so nothing above it ever moves for it", () => {
+    const note = rule(".gate-note");
+    expect(note).toContain("position: absolute;");
+    expect(note).toContain("bottom: 0;"); // in the card's own bottom padding
+    expect(rule(".gate")).toContain("position: relative;"); // its frame
+    // no height, no margin: it cannot push the pill down even by accident
+    for (const prop of ["height", "margin", "padding"]) {
+      expect(note, `.gate-note must not declare ${prop}`).not.toMatch(
+        new RegExp(`(?:^|;)\\s*${prop}\\s*:`),
+      );
+    }
+  });
+
+  it("is the card's own muted grey, and paints no border and no motion", () => {
+    const note = rule(".gate-note");
+    expect(note).toContain("color: var(--muted);"); // the version line's grey
+    expect(note).not.toMatch(/#[0-9a-fA-F]{3,8}|rgb|hsl/);
+    expect(note).not.toMatch(/border|animation/); // neither is its vocabulary
+  });
+
+  it("fades in on the sheet's usual short fade", () => {
+    const note = rule(".gate-note");
+    expect(note).toContain("opacity: 0;");
+    const fade = /transition: opacity ([\d.]+)s/.exec(note);
+    expect(fade, "the line must fade rather than blink").not.toBeNull();
+    expect(Number(fade![1])).toBeGreaterThan(0);
+    expect(Number(fade![1])).toBeLessThanOrEqual(0.3);
+    expect(rule(`.gate-note.${NOTE_CLASS}`).trim()).toBe("opacity: 1;");
+  });
+});
+
+describe("the card ships as 0.3.101", () => {
   it("the version on the badge is the version of this change", () => {
-    expect(main).toMatch(/^const APP_VERSION = "0\.3\.100"; \/\/ \S/m);
+    expect(main).toMatch(/^const APP_VERSION = "0\.3\.101"; \/\/ \S/m);
   });
 });
