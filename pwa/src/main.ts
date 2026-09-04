@@ -170,7 +170,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.102"; // The refusal ring reads at the width of the phone's own, and the card keeps its layer so the caret never draws from a stale spot
+const APP_VERSION = "0.3.103"; // The board's build now runs with only the few settings it needs, and npm can no longer be talked into loading anything extra
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

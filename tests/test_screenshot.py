@@ -151,6 +151,135 @@ def test_screenshot_unknown_pin_id_lists_available(tmp_path):
     assert "twen" in msg and "desert-not-barren" in msg
 
 
+# --- what the build is launched with ------------------------------------------
+# The build runs the site's own config and package scripts, which the agent
+# edits, so the exact argv and the exact environment are part of the contract:
+# nothing the worker holds may ride along, and no .npmrc may talk npm into
+# preloading code or swapping the shell.
+
+# a sample of what the worker actually carries (render.yaml) plus the two npm
+# settings that would be code execution if they reached the child
+SECRET_NAMES = (
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "PARATROOPER_GITHUB_TOKEN",
+    "PARATROOPER_APP_TOKEN",
+    "PARATROOPER_REMOTE",
+    "SPOTIFY_CLIENT_ID",
+    "SPOTIFY_CLIENT_SECRET",
+    "REDIS_URL",
+    "NODE_OPTIONS",
+    "npm_config_script_shell",
+)
+
+
+class _FakeProc:
+    """Stands in for npm: succeeds, says nothing."""
+
+    returncode = 0
+
+    async def communicate(self):
+        return b"", b""
+
+
+def _record_launches(monkeypatch) -> list[dict]:
+    """Swap the subprocess launcher for a recorder, so the npm calls can be
+    read back without npm (or the registry) coming near the test. Only npm is
+    faked — Playwright spawns its driver the same way and still needs to."""
+    calls = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def fake_exec(*cmd, **kwargs):
+        if cmd[:1] != ("npm",):
+            return await real_exec(*cmd, **kwargs)
+        calls.append({"cmd": cmd, **kwargs})
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return calls
+
+
+def test_npm_argv_is_pinned(tmp_path, monkeypatch):
+    """Both npm calls, argv for argv: install scripts off on the install, and
+    on the build the two injectable settings nailed shut on the command line
+    — ahead of the script name, where npm reads them as its own flags."""
+    calls = _record_launches(monkeypatch)
+    site = _fixture_site(tmp_path)  # no node_modules -> the install runs too
+    asyncio.run(screenshot.screenshot_board(site, tmp_path / "board.png", build=True))
+
+    assert [c["cmd"] for c in calls] == [
+        (
+            "npm", "ci", "--no-audit", "--no-fund",
+            "--ignore-scripts", "--node-options=", "--script-shell=/bin/sh",
+        ),
+        (
+            "npm", "run",
+            "--ignore-scripts", "--node-options=", "--script-shell=/bin/sh", "build",
+        ),
+    ]
+    build = calls[1]["cmd"]
+    for flag in ("--ignore-scripts", "--node-options=", "--script-shell=/bin/sh"):
+        assert build.index(flag) < build.index("build"), flag
+    assert all(c["cwd"] == site for c in calls)
+
+
+def test_npm_env_is_the_allowlist_and_nothing_else(tmp_path, monkeypatch):
+    """Every npm child gets the allowlist, and the worker's secrets stay home."""
+    for name in SECRET_NAMES:
+        monkeypatch.setenv(name, "sekret-value")
+    monkeypatch.setenv("HOME", "/home/app")
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    monkeypatch.setenv("TMPDIR", "/tmp")
+    calls = _record_launches(monkeypatch)
+    site = tmp_path / "site"
+    site.mkdir()
+    # faked npm builds nothing, so the capture stops at the missing dist: this
+    # test is about what npm was handed, not about the picture
+    with pytest.raises(ScreenshotError):
+        asyncio.run(screenshot.screenshot_board(site, tmp_path / "b.png"))
+
+    assert len(calls) == 2
+    for call in calls:
+        env = call["env"]
+        assert set(env) == {"PATH", "HOME", "LANG", "TMPDIR", "CI"}
+        assert env["CI"] == "1"
+        assert env["HOME"] == "/home/app"
+        for name in SECRET_NAMES:
+            assert name not in env
+        assert "sekret-value" not in "".join(env.values())
+
+
+def test_clean_env_drops_what_the_host_has_not_set(monkeypatch):
+    """LANG and TMPDIR ride along only when they exist; PATH is never empty,
+    since Python would then search the checkout the agent writes into."""
+    monkeypatch.setenv("HOME", "/home/app")
+    monkeypatch.delenv("LANG", raising=False)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    assert set(screenshot._clean_env()) == {"PATH", "HOME", "CI"}
+
+    monkeypatch.delenv("PATH", raising=False)
+    assert screenshot._clean_env()["PATH"] == screenshot.FALLBACK_PATH
+
+
+def test_browser_is_launched_with_the_same_scrubbed_env(tmp_path, monkeypatch):
+    """Chromium is a child of this step as well, so it is handed the allowlist
+    too — once, at launch — and still renders the board."""
+    seen = []
+    real = screenshot._clean_env
+
+    def spy():
+        seen.append(real())
+        return seen[-1]
+
+    monkeypatch.setattr(screenshot, "_clean_env", spy)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sekret-value")
+    img = _shot(_fixture_site(tmp_path), tmp_path / "board.png")
+
+    assert len(seen) == 1  # build=False: the browser is the only child
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in seen[0]
+    assert img.getpixel((300, 300)) == (200, 200, 200)  # and the capture worked
+
+
 # --- the tool wrapper (tools.py) ---------------------------------------------
 
 def _tool_handlers(ctx) -> dict:

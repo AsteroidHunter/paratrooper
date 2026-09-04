@@ -12,6 +12,10 @@ Chromium runs with ``--no-sandbox`` (managed hosts like Render block the user
 namespaces Chromium's own sandbox needs). The browser binary is installed
 separately (``playwright install chromium``) in the worker image (Phase 5.2);
 this code is exercised end-to-end at the 5.4 smoke.
+
+Everything this step launches gets a hand-built environment and hardened npm
+flags rather than the worker's own environment — see ``ENV_PASSTHROUGH`` and
+``NPM_HARDENING`` below for why.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import os
 import re
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -26,7 +31,27 @@ from pathlib import Path
 
 DEFAULT_VIEWPORT = (1440, 1440)  # square-ish desktop; the board is square
 DEFAULT_SELECTOR = ".cloth"
-DEFAULT_BUILD_CMD = ("npm", "run", "build")
+# The build executes the site's own config, plugins and package scripts — files
+# the agent edits and a pull request can change — so the environment it runs in
+# must hold nothing worth stealing. Only what a build genuinely needs crosses
+# over: PATH to find node and npm, HOME for npm's cache and config, LANG and
+# TMPDIR where the host sets them. Left behind: the worker's entire secret set
+# (CLAUDE_CODE_OAUTH_TOKEN, PARATROOPER_*, SPOTIFY_*, REDIS_URL — render.yaml),
+# and NODE_OPTIONS/npm_config_*, which are code injection wearing an
+# environment variable's clothes. NODE_ENV is absent by design too: nothing in
+# the site reads ``process.env``, and astro and vite set their own.
+ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "TMPDIR")
+FALLBACK_PATH = "/usr/local/bin:/usr/bin:/bin"
+# Two npm settings hand out code execution, and either can come from an .npmrc
+# the agent is free to write: node-options (preloaded into every node the build
+# spawns) and script-shell (the interpreter npm runs scripts with). A command
+# line beats every .npmrc, so that is where they live — ahead of the script
+# name, npm's own place for npm's own flags. ``--ignore-scripts`` drops package
+# install hooks from ``npm ci`` and pre/post scripts from ``npm run``; the
+# ``build`` script itself still runs.
+NPM_HARDENING = ("--ignore-scripts", "--node-options=", "--script-shell=/bin/sh")
+INSTALL_CMD = ("npm", "ci", "--no-audit", "--no-fund", *NPM_HARDENING)
+DEFAULT_BUILD_CMD = ("npm", "run", *NPM_HARDENING, "build")
 # The board's polaroid markup (src/pages/index.astro in the site repo): each
 # pin renders as a clickable ``.board-pin`` div carrying its id in
 # ``data-pin-id``; clicking it opens the ``.polaroid-overlay`` lightbox (a
@@ -43,9 +68,23 @@ class ScreenshotError(RuntimeError):
     """The build failed or the board element never appeared."""
 
 
+def _clean_env() -> dict[str, str]:
+    """The allowlist made concrete: all any child of this step is handed."""
+    env = {k: v for k in ENV_PASSTHROUGH if (v := os.environ.get(k))}
+    # never leave PATH out: Python would fall back to ``os.defpath``, whose
+    # empty leading entry searches the checkout the agent writes into
+    env["PATH"] = env.get("PATH") or FALLBACK_PATH
+    env["CI"] = "1"  # npm non-interactive
+    return env
+
+
 async def _run(cmd: tuple[str, ...], cwd: Path) -> None:
     proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        *cmd,
+        cwd=cwd,
+        env=_clean_env(),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
     out, _ = await proc.communicate()
     if proc.returncode != 0:
@@ -150,7 +189,7 @@ async def screenshot_board(
     if build:
         # fresh clones have no node_modules; install once per container life
         if not (site_root / "node_modules").is_dir():
-            await _run(("npm", "ci", "--no-audit", "--no-fund"), site_root)
+            await _run(INSTALL_CMD, site_root)
         await _run(build_cmd, site_root)
 
     dist = site_root / dist_subdir
@@ -159,7 +198,9 @@ async def screenshot_board(
 
     with _serve(dist) as base_url:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = await p.chromium.launch(
+                headless=True, args=["--no-sandbox"], env=_clean_env()
+            )
             try:
                 page = await browser.new_page(
                     viewport={"width": viewport[0], "height": viewport[1]}

@@ -874,8 +874,8 @@ describe("the third answer's line costs the card nothing", () => {
   });
 });
 
-describe("the card ships as 0.3.102", () => {
+describe("the card ships as 0.3.103", () => {
   it("the version on the badge is the version of this change", () => {
-    expect(main).toMatch(/^const APP_VERSION = "0\.3\.102"; \/\/ \S/m);
+    expect(main).toMatch(/^const APP_VERSION = "0\.3\.103"; \/\/ \S/m);
   });
 });
