@@ -712,8 +712,44 @@ const rule = (selector: string): string => {
 
 describe("the gate's rules paint a border and move nothing", () => {
   it("green and red are the tokens and nothing else — no colour is written here", () => {
-    expect(rule(".gate input.ok").trim()).toBe("border-color: var(--gate-ok);");
-    expect(rule(".gate input.bad").trim()).toBe("border-color: var(--gate-bad);");
+    for (const [sel, own, other] of [
+      [".gate input.ok", "--gate-ok", "--gate-bad"],
+      [".gate input.bad", "--gate-bad", "--gate-ok"],
+    ] as const) {
+      const body = rule(sel);
+      expect(body, `${sel} must wear ${own}`).toContain(`var(${own})`);
+      expect(body, `${sel} must not wear ${other}`).not.toContain(other);
+      // and no colour of its own, in any notation
+      expect(body, `${sel} writes a colour`).not.toMatch(/#[0-9a-f]{3,8}|\b(?:rgb|hsl)a?\(/i);
+    }
+  });
+
+  it("the refusal is drawn at the width of the ring iOS puts round a focused box", () => {
+    // 3px is WebKit's platformFocusRingWidth, which the UA sheet hands the box
+    // through `:focus-visible { outline-style: auto }`. An author outline beats
+    // that one, so a refused box shows red while it is focused instead of blue
+    // over red — and an outline is painted outside the border box, so nothing
+    // about the box's layout moves to say it.
+    const bad = rule(".gate input.bad");
+    expect(bad).toMatch(/(?:^|;)\s*outline: 3px solid var\(--gate-bad\);/);
+    expect(bad).toMatch(/(?:^|;)\s*outline-offset: 0;/);
+    // the one pixel is still under it: the ring is an addition, not a swap
+    expect(bad).toMatch(/(?:^|;)\s*border-color: var\(--gate-bad\);/);
+    // and only the refusal was asked to speak up
+    expect(rule(".gate input.ok"), "green must stay at its one pixel").not.toContain("outline");
+  });
+
+  it("the card keeps its own layer, so the caret never draws from a stale rect", () => {
+    // The caret is not page paint on iOS: it is a UIKit view attached to the
+    // enclosing compositing layer, placed from a rect the page reported. The
+    // lift's transition gave the card a layer and tore it down on the frame
+    // the transition ended, and on that frame the phone re-attached the caret
+    // from the rect it still held — the pre-lift one. A standing layer means
+    // there is no teardown at the landing; .lift keeps its for the same reason.
+    expect(rule(".gate")).toMatch(/(?:^|;)\s*will-change: transform;/);
+    expect(rule(".lift"), "the thread wrapper set the precedent").toMatch(
+      /(?:^|;)\s*will-change: transform;/,
+    );
   });
 
   it("the box's size, fill and place are the same in all three states", () => {
@@ -838,8 +874,8 @@ describe("the third answer's line costs the card nothing", () => {
   });
 });
 
-describe("the card ships as 0.3.101", () => {
+describe("the card ships as 0.3.102", () => {
   it("the version on the badge is the version of this change", () => {
-    expect(main).toMatch(/^const APP_VERSION = "0\.3\.101"; \/\/ \S/m);
+    expect(main).toMatch(/^const APP_VERSION = "0\.3\.102"; \/\/ \S/m);
   });
 });

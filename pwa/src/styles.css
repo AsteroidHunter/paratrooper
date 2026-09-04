@@ -300,6 +300,19 @@ html, body {
      class is on would already be gone at the close and the card would snap
      home instead of riding the keyboard down */
   transition: transform var(--kb-anim);
+  /* And the card keeps its own compositor layer for its whole life, not just
+     while the lift is in flight. The caret in the box is not page paint: on
+     iOS it is a UIKit view, attached to the enclosing compositing layer and
+     placed from a rect the page reported. The lift's transition gave the card
+     a layer, and took it away again on the frame the transition ended — and
+     on that frame the phone re-attached the caret to whatever layer was left,
+     from the rect it still held: the one from BEFORE the lift. One frame at
+     the old spot, then the jump up as the page's next report landed. A
+     standing layer means there is no teardown at the landing, so there is
+     nothing to re-attach and no stale rect to draw from; what remains is the
+     page's own refresh inside one container, which in the ordinary case is
+     not visible. Same reason .lift keeps its layer between edges. */
+  will-change: transform;
 }
 #app.kb .gate,
 #app.kbearly .gate {
@@ -343,18 +356,34 @@ html, body {
   font: inherit;
 }
 /* The server's answer to Connect, worn on the box's own boundary and nothing
-   else. Only border-color changes: the width stays at the one pixel the rule
-   above sets (so the text inside does not move), and so do the box's share of
-   the card, its padding, its radius, its fill and the mark that makes the app
-   own its focus. Green holds for the beat before the chat replaces the card;
-   red stays until the next keystroke, so what was typed is still there to be
-   corrected. Neither colour is written here — the tokens are, so the sign-in
-   screen cannot be given a green the rest of the app has never heard of. */
+   else. Nothing here touches layout in either answer: not the width, not the
+   padding, not the radius, not the fill, not the mark that makes the app own
+   its focus — so the text inside sits in exactly the same place in all three
+   states. Yes is the one pixel the rule above already draws, recoloured.
+   No is that same pixel plus a ring OUTSIDE it, drawn where the phone draws
+   its own: the refusal was reading thinner than the blue ring iOS puts round
+   a focused field, and 3px is that ring's width — WebKit's
+   RenderTheme::platformFocusRingWidth, whose comment ties the figure to
+   [UIFocusRingStyle borderThickness], reaching the field through the UA
+   sheet's `:focus-visible { outline-style: auto }`. So red now reads at the
+   weight blue reads at, and because an author outline beats the UA's, red is
+   what shows WHILE the box is focused rather than blue drawn over it — which
+   matters, because tapping the box to correct the token does not clear the
+   refusal (only the next keystroke does). An outline is free of layout by
+   construction: it is painted outside the border box, it follows the radius,
+   and it rides the shake's transform with everything else. Green is left at
+   its one pixel — only the refusal was asked to speak up. Green holds for the
+   beat before the chat replaces the card; red stays until the next keystroke,
+   so what was typed is still there to be corrected. Neither colour is written
+   here — the tokens are, so the sign-in screen cannot be given a green the
+   rest of the app has never heard of. */
 .gate input.ok {
   border-color: var(--gate-ok);
 }
 .gate input.bad {
   border-color: var(--gate-bad);
+  outline: 3px solid var(--gate-bad);
+  outline-offset: 0;
 }
 /* And the wrong-passcode shake under the red, the way iOS refuses a passcode:
    a few oscillations losing height, over inside half a second. translateX
