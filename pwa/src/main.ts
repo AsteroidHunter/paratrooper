@@ -92,6 +92,7 @@ import type { MorphBox } from "./shift";
 import { zoomClipCuts, zoomClipInset, zoomClipRest, zoomFit, zoomReturn } from "./zoom";
 import {
   bindComposeDismiss,
+  bindGateFlight,
   bindLift,
   bindPicker,
   bindSendShield,
@@ -170,7 +171,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.103"; // The board's build now runs with only the few settings it needs, and npm can no longer be talked into loading anything extra
+const APP_VERSION = "0.3.104"; // The sign-in box draws no cursor while the card is in flight, so iOS has no stale spot to draw it at
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -517,6 +518,9 @@ function renderTokenGate(): void {
       <button id="token-save">Connect</button>
       <div id="token-note" class="gate-note" role="status" aria-live="polite"></div>
     </div>`;
+  // the caret's hold while the card is in flight (shell.ts bindGateFlight):
+  // bound here because the card is rebuilt with the markup above
+  bindGateFlight(app.querySelector<HTMLElement>(".gate")!);
   const input = document.getElementById("token-input") as HTMLInputElement;
   const save = document.getElementById("token-save") as HTMLButtonElement;
   // the third answer's line: empty until there is something to say, and out of

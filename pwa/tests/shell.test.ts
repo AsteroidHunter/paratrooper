@@ -6,10 +6,12 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { holdDiagEvents, holdDiagReset } from "../src/hold";
 import {
+  CARET_CATCHUP_MS,
   DISMISS_DOWNNESS,
   DISMISS_TRAVEL_REM,
   EARLY_LIFT_MAX_MS,
   FOCUSING_MAX_MS,
+  GATE_INFLIGHT_CLASS,
   HEAL_THRESHOLD_PX,
   INSET_KEY,
   KB_ANIM_MS,
@@ -23,6 +25,7 @@ import {
   composerTapVerdict,
   computeShell,
   createDismissSwipe,
+  createGateFlight,
   createPickerLifecycle,
   earlyLiftActive,
   edgeBoxTop,
@@ -2024,5 +2027,176 @@ describe("wiring: the bar's swipe is a blur and nothing else", () => {
     expect(main).toContain('thread.addEventListener(\n    "touchmove",');
     expect(main).toContain("e.preventDefault(); // we own this gesture");
     expect(main).toContain("{ passive: false },");
+  });
+});
+
+// --- the sign-in card's caret is held while the card is in flight ------------
+// 0.3.102 gave the card a standing compositor layer to stop the caret drawing
+// from a stale spot on the landing; the owner's 60fps recording, on 0.3.103,
+// showed the same flash on every rise (7-13px low from the re-aim to two
+// frames past the landing; a one-frame ghost 123px low on a jump-started
+// rise). The page's caret rect is frozen for the whole transform transition
+// and WebKit fixes it up only after; nothing makes it fresh mid-flight. So the
+// sheet paints no caret while the card is in flight, and the flight core below
+// says when that is. These pins are the shape of that hold, on a plain clock.
+
+/** A hand-turned clock for the beat: `wait` records, `tick` fires what is due. */
+function clock() {
+  const due: { at: number; fn: () => void; off: boolean }[] = [];
+  let now = 0;
+  return {
+    wait: (ms: number, fn: () => void): (() => void) => {
+      const entry = { at: now + ms, fn, off: false };
+      due.push(entry);
+      return () => {
+        entry.off = true;
+      };
+    },
+    tick(ms: number): void {
+      now += ms;
+      for (const d of due.splice(0)) {
+        if (d.at <= now) {
+          if (!d.off) d.fn();
+        } else due.push(d);
+      }
+    },
+  };
+}
+
+function flightHarness(moving = () => false) {
+  const c = clock();
+  const applied: boolean[] = [];
+  const flight = createGateFlight({
+    apply: (v) => applied.push(v),
+    moving,
+    wait: c.wait,
+  });
+  return { c, applied, flight };
+}
+
+describe("createGateFlight — no caret from the transition's run to a beat past its last end", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+
+  it("the beat is the measured catch-up: right from the third frame after the landing", () => {
+    expect(CARET_CATCHUP_MS).toBe(50);
+  });
+
+  it("run hides; end alone does not show — the beat does, and only once it has run out", () => {
+    const { c, applied, flight } = flightHarness();
+    flight.run();
+    expect(applied).toEqual([true]);
+    flight.end();
+    expect(applied, "the landing frame itself is the stale draw").toEqual([true]);
+    c.tick(CARET_CATCHUP_MS - 1);
+    expect(applied).toEqual([true]);
+    c.tick(1);
+    expect(applied).toEqual([true, false]);
+    expect(flight.inflight()).toBe(false);
+  });
+
+  it("a retarget (cancel, then a new run inside the beat) holds through to the LAST end", () => {
+    const { c, applied, flight } = flightHarness();
+    flight.run();
+    flight.cancel(); // the report disagreed with the early aim
+    c.tick(10);
+    flight.run(); // the re-aimed transition
+    c.tick(CARET_CATCHUP_MS); // the cancelled transition's beat would have fired here
+    expect(applied, "the cancel's beat was called off by the run").toEqual([true]);
+    flight.end();
+    c.tick(CARET_CATCHUP_MS);
+    expect(applied).toEqual([true, false]);
+  });
+
+  it("the other order (run, then the old one's cancel) reads the same: the engine is asked at the beat", () => {
+    let stillMoving = true;
+    const { c, applied, flight } = flightHarness(() => stillMoving);
+    flight.run();
+    flight.run(); // the new transition's run arrived first
+    flight.cancel(); // then the old one's cancel: by events alone, nothing runs
+    c.tick(CARET_CATCHUP_MS);
+    expect(applied, "getAnimations says the card is still moving, so the hold stays").toEqual([true]);
+    stillMoving = false;
+    flight.end();
+    c.tick(CARET_CATCHUP_MS);
+    expect(applied).toEqual([true, false]);
+  });
+
+  it("a blur releases at once and drops a pending beat — an unfocused box draws no caret", () => {
+    const { c, applied, flight } = flightHarness();
+    flight.run();
+    flight.end();
+    flight.blur();
+    expect(applied).toEqual([true, false]);
+    c.tick(CARET_CATCHUP_MS);
+    expect(applied, "the beat fired into nothing").toEqual([true, false]);
+    // and a blur with nothing pending is not a second write
+    flight.blur();
+    expect(applied).toEqual([true, false]);
+  });
+
+  it("a cancel with no run after it releases on the beat (the card rebuilt mid-flight)", () => {
+    const { c, applied, flight } = flightHarness();
+    flight.run();
+    flight.cancel();
+    c.tick(CARET_CATCHUP_MS);
+    expect(applied).toEqual([true, false]);
+  });
+
+  it("a lift that never transitions never enters flight, so nothing here can hide the caret for good", () => {
+    const { c, applied, flight } = flightHarness();
+    c.tick(10_000);
+    flight.blur();
+    expect(applied, "no run, no write: the class is never set").toEqual([]);
+    expect(flight.inflight()).toBe(false);
+  });
+
+  it("the class is one word the sheet reads", () => {
+    expect(GATE_INFLIGHT_CLASS).toBe("inflight");
+    expect(css).toMatch(/\n#app\.lifting \.gate input,\n\.gate\.inflight input \{\n  caret-color: transparent;\n\}/);
+  });
+});
+
+describe("bindGateFlight — the card's own transition events, the card alone", () => {
+  const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const binder = shell.slice(
+    shell.indexOf("export function bindGateFlight("),
+    shell.indexOf("\n}\n", shell.indexOf("export function bindGateFlight(")) + 3,
+  );
+
+  it("run, end and cancel of the card's transform feed the core; the note's fade does not", () => {
+    expect(binder).toContain(
+      'e.target === gate && (e as TransitionEvent).propertyName === "transform"',
+    );
+    for (const ev of ["transitionrun", "transitionend", "transitioncancel"]) {
+      expect(binder).toContain(`gate.addEventListener("${ev}", (e) => {`);
+    }
+    expect(binder).toContain("if (own(e)) flight.run();");
+    expect(binder).toContain("if (own(e)) flight.end();");
+    expect(binder).toContain("if (own(e)) flight.cancel();");
+  });
+
+  it("the focus leaving the box releases the hold", () => {
+    expect(binder).toContain('gate.addEventListener("focusout", () => flight.blur());');
+  });
+
+  it("the engine is what says the card is still moving, read only at the beat", () => {
+    expect(binder).toContain("gate.getAnimations?.() ?? []");
+    expect(binder).toContain('a.transitionProperty === "transform"');
+    expect(binder).toContain('a.playState === "running"');
+  });
+
+  it("the class goes on the card, and main.ts binds the card it just rendered", () => {
+    expect(binder).toContain("gate.classList.toggle(GATE_INFLIGHT_CLASS, inflight)");
+    const render = main.slice(main.indexOf("function renderTokenGate("));
+    expect(render).toContain('bindGateFlight(app.querySelector<HTMLElement>(".gate")!);');
+    expect(render.indexOf("bindGateFlight(")).toBeLessThan(render.indexOf("createTokenGate("));
+  });
+
+  it("the settle window paints the same hold from the focus tap, before any transition event", () => {
+    // .lifting is toggled in the one writer, in the style pass that starts the lift
+    expect(shell).toContain('appEl.classList.toggle("lifting", lifting);');
+    expect(css).toContain("#app.lifting .gate input,");
   });
 });

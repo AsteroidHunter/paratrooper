@@ -703,6 +703,96 @@ export function createDismissSwipe() {
   };
 }
 
+// The caret's hold while the sign-in card is in flight. The caret in the token
+// box is not page paint: on iOS it is a UIKit view, placed from a rect the page
+// reported, and the page does not report a new one while a transform
+// transition is running — WebKit freezes the page-side value of an
+// accelerated transition until it ends and fixes the caret up afterwards. So
+// through the whole lift the page's caret rect is the pre-lift one, and on the
+// landing the phone draws from it once before the fix-up lands: the cursor
+// flashes at the old spot, or a few pixels low after a re-aim, then jumps. The
+// owner's 60fps recording showed exactly that, on every rise, with a standing
+// compositor layer already in place (that fix changed nothing; it is left, it
+// is harmless). Nothing the page can do makes that rect fresh mid-flight. What
+// it can do is draw no caret from one it knows is stale: the sheet paints the
+// caret transparent while the card is in flight (styles.css `.gate.inflight
+// input`, and `#app.lifting .gate input` from the focus tap itself, before any
+// transition event has had a frame), and this core says when "in flight" is.
+//
+// In flight is from the card's transform transition starting to a beat after
+// its LAST ending. A re-aim (the viewport's report disagreeing with the early
+// aim, or a keyboard that changed height while up) cancels the running
+// transition and starts another, so a cancel is not a landing on its own: the
+// beat runs, and at its end the card is asked whether a transform transition
+// is still running — the engine's own answer, so the release does not depend on
+// the order the cancel and the new run arrived in. The beat is the measured
+// catch-up: the recording put the caret right from the third frame after the
+// landing, 50ms. A blur releases at once: an unfocused box draws no caret, so
+// there is nothing to hold, and the hold must not sit on the box waiting for
+// an end that a rebuilt card may never fire. And a lift that never transitions
+// at all — a remembered inset of zero on a screen the keyboard never answers —
+// never enters flight here, so nothing here can hide the caret for good.
+export const GATE_INFLIGHT_CLASS = "inflight";
+export const CARET_CATCHUP_MS = 50;
+
+export interface GateFlightDeps {
+  /** The card enters or leaves flight: the class the sheet reads. */
+  apply: (inflight: boolean) => void;
+  /**
+   * Whether the card's transform is in a running transition right now, asked
+   * at the beat's end. The engine's answer (getAnimations), not a memory of
+   * events, so a retarget's cancel-then-run and run-then-cancel read the same.
+   */
+  moving: () => boolean;
+  /** A clock: run `fn` after `ms`, and hand back the way to call it off. */
+  wait: (ms: number, fn: () => void) => () => void;
+}
+
+export function createGateFlight(deps: GateFlightDeps) {
+  let running = false; // a transform transition has started and not yet ended
+  let inflight = false; // what the sheet was last told
+  let callOff: (() => void) | null = null; // the pending beat, if any
+  const set = (v: boolean): void => {
+    if (v === inflight) return;
+    inflight = v;
+    deps.apply(v);
+  };
+  const dropBeat = (): void => {
+    callOff?.();
+    callOff = null;
+  };
+  // an ending, of either kind: the beat, and at its end the engine decides
+  const settle = (): void => {
+    running = false;
+    dropBeat();
+    callOff = deps.wait(CARET_CATCHUP_MS, () => {
+      callOff = null;
+      if (!running && !deps.moving()) set(false);
+    });
+  };
+  return {
+    run(): void {
+      running = true;
+      dropBeat(); // a run inside a beat is a retarget: the hold carries on
+      set(true);
+    },
+    end(): void {
+      settle();
+    },
+    cancel(): void {
+      settle();
+    },
+    blur(): void {
+      running = false;
+      dropBeat();
+      set(false);
+    },
+    inflight(): boolean {
+      return inflight;
+    },
+  };
+}
+
 // --- DOM layer: one reader, one writer, everything converges ------------------
 // No DOM access at import time — window/document are only touched inside
 // functions, so the pure core above imports cleanly in any environment
@@ -792,6 +882,42 @@ export function bindLift(el: HTMLElement): void {
     if (e.target !== el || e.propertyName !== "transform") return;
     liftLanded("end");
   });
+}
+
+// The sign-in card (main.ts renderTokenGate binds it once per render, like the
+// wrapper above). The card's own transition events feed the flight core: its
+// transform's run, end and cancel, on the card alone — the note's opacity
+// fade bubbles through here too and is not the card moving. The focus leaving
+// the box releases the hold outright. `moving` is the engine's own list of the
+// card's animations, read only at the beat's end.
+export function bindGateFlight(gate: HTMLElement): void {
+  const flight = createGateFlight({
+    apply: (inflight) => gate.classList.toggle(GATE_INFLIGHT_CLASS, inflight),
+    moving: () =>
+      (gate.getAnimations?.() ?? []).some(
+        (a) =>
+          typeof CSSTransition !== "undefined" &&
+          a instanceof CSSTransition &&
+          a.transitionProperty === "transform" &&
+          a.playState === "running",
+      ),
+    wait: (ms, fn) => {
+      const id = setTimeout(fn, ms);
+      return () => clearTimeout(id);
+    },
+  });
+  const own = (e: Event): boolean =>
+    e.target === gate && (e as TransitionEvent).propertyName === "transform";
+  gate.addEventListener("transitionrun", (e) => {
+    if (own(e)) flight.run();
+  });
+  gate.addEventListener("transitionend", (e) => {
+    if (own(e)) flight.end();
+  });
+  gate.addEventListener("transitioncancel", (e) => {
+    if (own(e)) flight.cancel();
+  });
+  gate.addEventListener("focusout", () => flight.blur());
 }
 
 // Register the one listener for a landing. main.ts uses it for the thread's

@@ -355,6 +355,24 @@ html, body {
   color: var(--text);
   font: inherit;
 }
+/* No cursor while the card is in flight. The cursor in this box is the phone's
+   own view, placed from a spot the page reports, and the page reports no new
+   spot while the card's transform transition runs: WebKit freezes its
+   page-side value until the end, then fixes the cursor up. So for the whole
+   rise the reported spot is the pre-lift one, and on the landing frame the
+   phone draws from it once before the fix-up: the cursor flashes at the old
+   spot, or a few pixels low after a re-aim, and jumps. A cursor that is not
+   painted cannot flash. .lifting is the shell's settle window, on from the
+   focus tap itself in the same style pass as the lift, before any transition
+   event exists; .inflight is the card's own transition, run to a beat past
+   its last end (shell.ts bindGateFlight), which outlasts the window when the
+   viewport's report came late and re-aimed. Transparent, not display or
+   visibility: the box keeps its focus, its keyboard and its typing, and
+   characters typed inside the flight land as they always did. */
+#app.lifting .gate input,
+.gate.inflight input {
+  caret-color: transparent;
+}
 /* The server's answer to Connect, worn on the box's own boundary and nothing
    else. Nothing here touches layout in either answer: not the width, not the
    padding, not the radius, not the fill, not the mark that makes the app own
