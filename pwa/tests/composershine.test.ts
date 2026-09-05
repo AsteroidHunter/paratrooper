@@ -342,6 +342,6 @@ describe("the gesture hook owns the glow and its origin, and forces no layout", 
   });
 
   it("ships as 0.3.106", () => {
-    expect(main).toMatch(/^const APP_VERSION = "0\.3\.109"; \/\/ \S/m);
+    expect(main).toMatch(/^const APP_VERSION = "0\.3\.110"; \/\/ \S/m);
   });
 });

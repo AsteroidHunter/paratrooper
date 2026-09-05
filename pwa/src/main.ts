@@ -171,7 +171,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.109"; // The song service keys and the queue address are lifted out of the environment at start-up, so the agent never sees them
+const APP_VERSION = "0.3.110"; // A start-up step hands the worker its secrets through a private file, so the record of how the worker was launched never held them
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

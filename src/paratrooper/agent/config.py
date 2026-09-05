@@ -15,10 +15,14 @@ Two kinds of configuration, deliberately separated:
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = "config/paths.toml"
 DEFAULT_BRANCH = "main"
@@ -191,6 +195,59 @@ def github_token() -> str:
 # These are read once at boot, removed from the environment, and kept here.
 
 SPOTIFY_VARS = ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET")
+
+# names the path the start-up wrapper wrote, and by being set at all says the
+# wrapper ran. There is no third state and nothing is guessed from the file's
+# presence: set means the file must be there, unset means read the environment.
+SECRETS_FILE_VAR = "PARATROOPER_SECRETS_FILE"
+
+
+def load_worker_secrets() -> dict[str, str]:
+    """Read the values the start-up wrapper handed over, put them back into
+    ``os.environ`` for the boot readers that follow, and delete the file.
+    Returns what was read.
+
+    The wrapper exists because ``/proc/<pid>/environ`` is fixed at exec time:
+    the worker can only avoid holding a value in its launch record by never
+    being started with it. Values arriving this way land in ``os.environ``
+    after the process started, so they are in no launch record, and the readers
+    that follow take them straight back out again.
+
+    Which path runs is decided by one explicit variable and never by guessing.
+    With ``PARATROOPER_SECRETS_FILE`` set the file must exist; a missing one is
+    a boot error naming the path. With it unset — local development, where
+    nothing wraps the process — the values are read from the environment
+    directly, exactly as before."""
+    path = os.environ.get(SECRETS_FILE_VAR)
+    if not path:
+        return {}  # no wrapper: the environment already holds them
+    handoff = Path(path)
+    if not handoff.is_file():
+        raise ConfigError(
+            f"{SECRETS_FILE_VAR} names {path} but there is no file there. The "
+            "start-up wrapper writes it and the worker reads it once at boot; "
+            f"if this process is meant to read the environment directly, unset "
+            f"{SECRETS_FILE_VAR}."
+        )
+    values: dict[str, str] = {}
+    for number, line in enumerate(handoff.read_text().splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, separator, value = line.partition("=")
+        if not separator or not name:
+            raise ConfigError(f"{path} line {number} is not NAME=value: {line!r}")
+        values[name] = value
+    os.environ.update(values)
+    # emptied before it is removed: if the unlink is refused for any reason the
+    # values are gone regardless, which is the half that matters
+    with contextlib.suppress(OSError):
+        handoff.write_text("")
+    try:
+        handoff.unlink()
+    except OSError as exc:
+        logger.warning("could not delete the secrets handoff %s: %s", path, exc)
+    return values
 
 _spotify: tuple[str, str] | None = None
 _spotify_taken = False

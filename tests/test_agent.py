@@ -1465,6 +1465,88 @@ def test_the_queue_address_is_taken_only_once(monkeypatch):
     assert queue_mod.take_url() == "redis://:hunter2@localhost:6399/0"
 
 
+def test_the_wrapper_handoff_is_read_once_and_deleted(tmp_path, monkeypatch):
+    """The file is the whole point of the wrapper: the values reach os.environ
+    only after this process started, so they sit in no launch record, and the
+    file itself must not outlive the read."""
+    import paratrooper.agent.config as config_mod
+
+    handoff = tmp_path / "paratrooper-secrets"
+    handoff.write_text(
+        "SPOTIFY_CLIENT_ID=spot-id\n"
+        "SPOTIFY_CLIENT_SECRET=spot-secret\n"
+        # the address carries '=' inside it: only the first one separates
+        "REDIS_URL=redis://:pass@host:6379/0?client_name=paratrooper\n"
+        "\n"
+        "# a comment and a blank line are skipped\n"
+        "PARATROOPER_GITHUB_APP_ID=12345\n"
+    )
+    for name in ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "REDIS_URL",
+                 "PARATROOPER_GITHUB_APP_ID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(config_mod.SECRETS_FILE_VAR, str(handoff))
+
+    values = config_mod.load_worker_secrets()
+
+    assert values["SPOTIFY_CLIENT_ID"] == "spot-id"
+    assert values["REDIS_URL"] == "redis://:pass@host:6379/0?client_name=paratrooper"
+    assert values["PARATROOPER_GITHUB_APP_ID"] == "12345"
+    assert os.environ["SPOTIFY_CLIENT_SECRET"] == "spot-secret"
+    assert not handoff.exists()
+
+
+def test_a_missing_handoff_is_a_boot_error_naming_the_path(tmp_path, monkeypatch):
+    """No fallback: with the wrapper declared, a file that is not there is a
+    worker that stops at the door and says which path it wanted."""
+    import paratrooper.agent.config as config_mod
+
+    missing = tmp_path / "not-written"
+    monkeypatch.setenv(config_mod.SECRETS_FILE_VAR, str(missing))
+    with pytest.raises(ConfigError, match=re.escape(str(missing))):
+        config_mod.load_worker_secrets()
+
+
+def test_a_malformed_handoff_line_is_a_boot_error(tmp_path, monkeypatch):
+    import paratrooper.agent.config as config_mod
+
+    handoff = tmp_path / "paratrooper-secrets"
+    handoff.write_text("SPOTIFY_CLIENT_ID=spot-id\nthis is not a pair\n")
+    monkeypatch.setenv(config_mod.SECRETS_FILE_VAR, str(handoff))
+    with pytest.raises(ConfigError, match="line 2"):
+        config_mod.load_worker_secrets()
+
+
+def test_without_the_wrapper_the_environment_is_read_directly(monkeypatch):
+    """Local development runs the worker unwrapped. That path is chosen by the
+    variable being unset, never by looking to see whether a file happens to
+    exist somewhere."""
+    import paratrooper.agent.config as config_mod
+
+    monkeypatch.delenv(config_mod.SECRETS_FILE_VAR, raising=False)
+    assert config_mod.load_worker_secrets() == {}
+
+
+def test_worker_image_hands_the_secrets_over_through_the_wrapper():
+    """The image has to run the wrapper as its process, not the worker: an
+    ENTRYPOINT that still ran python directly would put every value back into
+    the launch record."""
+    root = Path(__file__).resolve().parents[1]
+    dockerfile = (root / "Dockerfile.worker").read_text()
+    assert "COPY docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint" in dockerfile
+    assert 'ENTRYPOINT ["worker-entrypoint"]' in dockerfile
+    assert "CMD [" not in dockerfile  # the old direct start is gone
+
+    script = (root / "docker" / "worker-entrypoint.sh").read_text()
+    assert script.startswith("#!/bin/sh")
+    assert "exec python -m paratrooper.web.worker_runner" in script
+    for name in ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "REDIS_URL",
+                 "PARATROOPER_GITHUB_APP_ID", "PARATROOPER_GITHUB_APP_INSTALLATION_ID"):
+        assert name in script, name
+    assert 'unset "$name"' in script  # written, then dropped, then exec
+    # the Claude credential stays: the CLI authenticates with it
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in script
+
+
 @pytest.mark.parametrize("with_token", [True, False])
 def test_run_job_env_carries_no_worker_only_secret(tmp_path, monkeypatch, with_token):
     """What the session hands the CLI is now an exact list. Nothing Spotify,

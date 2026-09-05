@@ -53,7 +53,15 @@ RUN useradd --create-home --home-dir /home/app --uid 1000 --shell /bin/bash app 
     && mkdir -p /home/app/.claude /home/app/.ssh /app/site_checkout /tmp/paratrooper-inbox \
     && chown -R app:app /home/app /app/site_checkout /tmp/paratrooper-inbox \
     && chmod 0700 /home/app/.ssh
+# The start-up wrapper, not the worker, is the process this image runs first.
+# It writes the worker-only secrets to a private file, drops them from its own
+# environment and execs the worker, so the worker's /proc/1/environ — which the
+# agent runs as the same user and could read — never held them.
+COPY docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint
+RUN chmod 0755 /usr/local/bin/worker-entrypoint
+
 USER app
 
-# clones the site repo on first boot, then consumes jobs from the queue
-CMD ["python", "-m", "paratrooper.web.worker_runner"]
+# hands the secrets over, then clones the site repo on first boot and consumes
+# jobs from the queue
+ENTRYPOINT ["worker-entrypoint"]
