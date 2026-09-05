@@ -27,7 +27,12 @@ from paratrooper.agent.config import (
     require_env,
     validate_branch_prefix,
 )
-from paratrooper.agent.hooks import git_violation, make_main_guard_hook
+from paratrooper.agent.hooks import (
+    file_read_violation,
+    git_violation,
+    make_file_guard_hook,
+    make_main_guard_hook,
+)
 from paratrooper.agent.siterepo import SiteRepo
 from paratrooper.agent.tools import ToolContext, build_tool_server
 
@@ -152,6 +157,93 @@ def test_hook_returns_deny_shape():
     assert deny["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
     assert call("Bash", "git status") == {}
     assert call("Write") == {}  # non-Bash tools pass through untouched
+
+
+# --- the file tools: the launch record and the secret mount ------------------
+#
+# Read, Glob and Grep open files with no command line, so the shell guard's
+# /proc/*/environ rule never ran for any of them: one Read of /proc/1/environ
+# hands over every value the worker started with, the Claude token included.
+
+def _call_file_hook(hook, tool_name, tool_input):
+    return asyncio.run(hook({"tool_name": tool_name, "tool_input": tool_input}, None, None))
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("Read", {"file_path": "/proc/1/environ"}),
+        ("Read", {"file_path": "/proc/self/environ"}),
+        ("Read", {"file_path": "/etc/secrets/paratrooper-98cc-github-app.pem"}),
+        ("Read", {"file_path": "/etc/secrets/x"}),
+        ("Read", {"file_path": "../../proc/self/environ"}),  # a relative spelling
+        ("Read", {"file_path": "'/proc/1/environ'"}),  # quoted
+        ("Glob", {"pattern": "/proc/**"}),  # the whole root, not just the file
+        ("Glob", {"pattern": "/proc/*/environ"}),
+        ("Glob", {"pattern": "/etc/secrets/*"}),
+        ("Grep", {"pattern": "PARATROOPER", "path": "/proc"}),
+        ("Grep", {"pattern": "ghp_", "path": "/proc/1/environ"}),
+        ("Grep", {"pattern": "BEGIN RSA", "path": "/etc/secrets"}),
+    ],
+)
+def test_file_guard_denies_the_secret_files(tool_name, tool_input):
+    out = _call_file_hook(make_file_guard_hook(), tool_name, tool_input)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    assert out["hookEventName"] == "PreToolUse"
+
+
+def test_file_guard_denial_names_the_file_and_the_way_on():
+    """A refusal the agent can't act on is one it will route around, so each
+    names what it refused and where the agent's work actually lives."""
+    hook = make_file_guard_hook()
+    record = _call_file_hook(hook, "Read", {"file_path": "/proc/1/environ"})
+    reason = record["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "launch record" in reason, reason
+    assert "site checkout" in reason, reason
+    key = _call_file_hook(hook, "Read", {"file_path": "/etc/secrets/key.pem"})
+    assert "/etc/secrets" in key["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("Read", {"file_path": "/app/site_checkout/src/content/pins/twen.json"}),
+        ("Read", {"file_path": "package.json"}),
+        ("Glob", {"pattern": "src/content/**/*.json"}),
+        ("Grep", {"pattern": "tangerine", "path": "src/content"}),
+        ("Grep", {"pattern": "processing"}),  # the word starts with proc; not a path
+        ("Read", {"file_path": "docs/etc/secrets-notes.md"}),  # nor is this the mount
+        # a tool the guard is not registered for passes through, the way the
+        # shell guard passes everything that isn't Bash
+        ("Write", {"file_path": "/proc/1/environ"}),
+    ],
+)
+def test_file_guard_leaves_ordinary_reads_alone(tool_name, tool_input):
+    assert _call_file_hook(make_file_guard_hook(), tool_name, tool_input) == {}
+
+
+def test_file_read_violation_is_pure_and_reads_either_root():
+    assert file_read_violation("/proc/1/environ") is not None
+    assert file_read_violation("/etc/secrets/key.pem") is not None
+    assert file_read_violation("/proc") is not None  # the root itself
+    assert file_read_violation("") is None
+    assert file_read_violation("src/content/pins/twen.json") is None
+
+
+def test_shell_guard_also_refuses_the_secret_mount():
+    """The same folder closed on the other road. The shell guard already refused
+    /proc/*/environ; the GitHub App's private key lands in /etc/secrets, and the
+    site build runs repo code the agent edits, so the shell has to be shut too."""
+    for command in (
+        "cat /etc/secrets/paratrooper-98cc-github-app.pem",
+        "ls /etc/secrets",
+        "ls -la /etc/secrets/",
+        """python -c "print(open('/etc/secrets/key.pem').read())" """,
+        "cp /etc/secrets/key.pem /tmp/k && echo done",
+    ):
+        reason = git_violation(command, "main")
+        assert reason is not None, command
+        assert "/etc/secrets" in reason, command
 
 
 # --- the paratrooper/* branch cap (effectful: counts the site checkout) -------
@@ -1232,6 +1324,45 @@ def test_run_job_rejects_an_unusable_branch_word_before_starting(tmp_path, monke
     with pytest.raises(ConfigError, match="branch_prefix"):
         asyncio.run(worker_mod.run_job(job, config=cfg))
     assert not ran
+
+
+def test_run_job_closes_the_secret_files_to_the_file_tools(tmp_path, monkeypatch):
+    """Both halves of the rule have to reach the session: the CLI's own refusal
+    of the two roots, and the guard registered for the three tools that open
+    files without a command line. With only the Bash matcher, as before, a Read
+    of /proc/1/environ was an ordinary file read."""
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {}
+
+    def fake_build_tool_server(ctx):
+        return {"name": "paratrooper"}, []
+
+    async def fake_query(*, prompt, options):
+        captured["options"] = options
+        if False:
+            yield
+
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
+    monkeypatch.setattr(worker_mod, "query", fake_query)
+
+    job = worker_mod.Job(job_id="j7", thread_id="t1", text="read the pin file")
+    assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
+
+    options = captured["options"]
+    assert options.disallowed_tools == ["Read(//proc/**)", "Read(//etc/secrets/**)"]
+    matchers = options.hooks["PreToolUse"]
+    assert [m.matcher for m in matchers] == ["Bash", "Read", "Glob", "Grep"]
+    # registered is not the same as working: each file matcher must really deny
+    realistic = {
+        "Read": {"file_path": "/proc/1/environ"},
+        "Glob": {"pattern": "/proc/**"},
+        "Grep": {"pattern": "TOKEN", "path": "/proc"},
+    }
+    for matcher in matchers[1:]:
+        deny = _call_file_hook(matcher.hooks[0], matcher.matcher, realistic[matcher.matcher])
+        assert deny["hookSpecificOutput"]["permissionDecision"] == "deny", matcher.matcher
 
 
 def test_is_text_delta_classifier():

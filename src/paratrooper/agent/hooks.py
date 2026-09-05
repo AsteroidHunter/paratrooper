@@ -1,4 +1,5 @@
-"""PreToolUse hook: fence the agent's shell onto git and the ``gh`` PR commands.
+"""PreToolUse hooks: fence the agent's shell, and close the secret files to its
+file tools.
 
 The namespace is one configured word — ``[site] branch_prefix``, ``paratrooper``
 by default — threaded in from the worker. Every check, message and branch count
@@ -57,6 +58,16 @@ Push refspecs are judged by their **destination**: the part after the last
 stripped, so ``HEAD:refs/heads/main`` and ``refs/heads/main`` are as forbidden
 as ``main``, and every destination (including ``--delete`` / ``:branch``
 deletions) must be a paratrooper/* branch.
+
+The shell is not the only reader in the session. ``Read``, ``Glob`` and ``Grep``
+open files without going near a command line, so the third rule above ran for
+none of them: one ``Read`` of ``/proc/1/environ`` handed over every value the
+worker started with. :func:`make_file_guard_hook` closes that, refusing any
+``file_path``, ``path`` or ``pattern`` that names the launch record or the
+deploy's secret-file mount (:data:`DENIED_READ_ROOTS`). It is registered for
+those three tools the way the shell guard is registered for ``Bash``, and the
+session lists the same two roots in ``disallowed_tools`` so the CLI refuses them
+on its own even if the hook is never reached.
 
 This is a fence, not a security boundary: it constrains a cooperative agent's
 shell, and a determined adversary with arbitrary code execution can encode its
@@ -121,6 +132,34 @@ _TOKEN_VAR_RE = re.compile("|".join(TOKEN_VARS))
 # `cat /proc/self/environ`, `tr -d '\0' < /proc/1/environ`, open() from python:
 # the file, not the reader, is what the rule names
 _PROC_ENVIRON_RE = re.compile(r"/proc/[^/\s'\"]+/environ")
+
+# where the deploy mounts its key files (Render puts a secret file at
+# /etc/secrets/<name>). Nothing the agent legitimately does reads that folder.
+# the trailing guard lets `ls /etc/secrets` be caught alongside a named file
+# inside it, while leaving an unrelated `/etc/secrets-notes` alone
+_SECRETS_MOUNT = "/etc/secrets"
+_SECRETS_MOUNT_RE = re.compile(rf"{re.escape(_SECRETS_MOUNT)}(?![\w-])")
+
+PROC_DENIAL = (
+    "reading /proc is forbidden: /proc/<pid>/environ is the worker's launch record, "
+    "and every secret the process started with is inside it"
+)
+SECRETS_MOUNT_DENIAL = (
+    f"reading {_SECRETS_MOUNT} is forbidden: that is where the deploy mounts the "
+    "worker's key files, and nothing the agent does needs them"
+)
+
+# the same two names in the shape the file tools need: a whole directory each,
+# because a glob or a grep one level up reaches the file inside just as well as
+# naming it does
+_ROOT_DENIALS = {"/proc": PROC_DENIAL, _SECRETS_MOUNT: SECRETS_MOUNT_DENIAL}
+DENIED_READ_ROOTS = tuple(_ROOT_DENIALS)
+
+# the file tools this fences, and the tool_input keys that name a file or a
+# directory: Read's file_path, Glob's and Grep's path, and the pattern either
+# one searches with
+FILE_TOOLS = ("Read", "Glob", "Grep")
+_FILE_TARGET_KEYS = ("file_path", "path", "pattern")
 
 # command substitution bodies — `$(...)` and backticks — are inspected even when
 # the outer command is an allowed git/gh one, so `gh pr create --body "$(...)"`
@@ -204,6 +243,7 @@ def _regex_backstop(command: str, default_branch: str) -> str | None:
             "reading /proc/*/environ is forbidden: it would dump the GitHub token "
             f"out of the worker's environment — git and gh read it themselves, so {GITHUB_ROUTE}",
         ),
+        (_SECRETS_MOUNT_RE.pattern, SECRETS_MOUNT_DENIAL),
     ]
     for pattern, reason in checks:
         if re.search(pattern, command):
@@ -552,6 +592,71 @@ def cap_violation(
     )
 
 
+def file_read_violation(target: str) -> str | None:
+    """Return a denial reason if ``target`` — one ``file_path``, ``path`` or
+    ``pattern`` a file tool was handed — names the launch record or the deploy's
+    secret mount; else ``None``. Pure function, the unit the file guard is
+    tested on.
+
+    Both roots are closed whole (:data:`DENIED_READ_ROOTS`), not just the file
+    inside them: a glob of ``/proc/**`` or a grep rooted at ``/proc`` reaches
+    ``/proc/<pid>/environ`` as surely as opening it by name does. A relative
+    spelling is caught only where the denied path appears inside it
+    (``../../proc/self/environ``); like everything in this module it is a fence
+    around a cooperative agent, and the session lists the same two roots in
+    ``disallowed_tools`` so the CLI refuses them without consulting this."""
+    text = target.strip().strip("'\"")
+    if not text:
+        return None
+    for root, reason in _ROOT_DENIALS.items():
+        if text == root or text.startswith(f"{root}/"):
+            return reason
+    if _PROC_ENVIRON_RE.search(text):
+        return PROC_DENIAL
+    if _SECRETS_MOUNT_RE.search(text):
+        return SECRETS_MOUNT_DENIAL
+    return None
+
+
+def _deny(reason: str) -> dict[str, Any]:
+    """The PreToolUse deny shape both guards return; a deny here wins even under
+    ``bypassPermissions``, since hooks evaluate before the permission mode."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def make_file_guard_hook() -> (
+    Callable[[dict[str, Any], str | None, Any], Awaitable[dict[str, Any]]]
+):
+    """Build the PreToolUse hook for the file tools. Register via
+    ``HookMatcher(matcher="Read", hooks=[hook])`` and the same for ``Glob`` and
+    ``Grep``. It carries its own tool-name check (the shell guard's covers
+    ``Bash`` alone), so a wider registration changes nothing. Nothing to
+    configure: the two closed roots are the same on every deployment."""
+
+    async def hook(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict:
+        if input_data.get("tool_name") not in FILE_TOOLS:
+            return {}
+        tool_input = input_data.get("tool_input") or {}
+        for key in _FILE_TARGET_KEYS:
+            value = tool_input.get(key)
+            if not isinstance(value, str):
+                continue
+            reason = file_read_violation(value)
+            if reason is not None:
+                return _deny(
+                    f"{reason}. Everything the agent works on is inside the site checkout."
+                )
+        return {}
+
+    return hook
+
+
 def make_main_guard_hook(
     default_branch: str = "main",
     repo_root: str | Path | None = None,
@@ -575,15 +680,9 @@ def make_main_guard_hook(
             reason = cap_violation(command, repo_root, branch_prefix)
         if reason is None:
             return {}
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": (
-                    f"{reason}. Paratrooper pushes feature branches and opens PRs only; "
-                    "publishing to the live site is a separate human-approved step."
-                ),
-            }
-        }
+        return _deny(
+            f"{reason}. Paratrooper pushes feature branches and opens PRs only; "
+            "publishing to the live site is a separate human-approved step."
+        )
 
     return hook

@@ -36,15 +36,20 @@ from .config import (
     spotify_credentials,
     validate_branch_prefix,
 )
-from .hooks import make_main_guard_hook
+from .hooks import make_file_guard_hook, make_main_guard_hook
 from .memory import Changelog, format_digest
 from .prompt import build_system_prompt
 from .siterepo import write_askpass_helper
 from .tools import SERVER_NAME, ToolContext, build_tool_server
 
 DEFAULT_MODEL = "claude-opus-4-8"
-# headless built-ins the agent needs; Bash is gated by the main-guard hook
+# headless built-ins the agent needs; Bash is gated by the main-guard hook and
+# the three file tools by the file guard
 BUILTIN_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+# the CLI's own refusal of the two secret-bearing roots, in its permission-rule
+# syntax. The file guard denies the same two; this one does not depend on the
+# hook being reached at all.
+DENIED_READS = ["Read(//proc/**)", "Read(//etc/secrets/**)"]
 
 EventCallback = Callable[[dict], Awaitable[None] | None]
 
@@ -165,6 +170,9 @@ async def run_job(
         repo_root=config.site_root,
         branch_prefix=config.branch_prefix,
     )
+    # the shell guard's twin for the tools that open files without a command
+    # line: one Read of /proc/1/environ would hand over the whole environment
+    file_guard = make_file_guard_hook()
 
     options = ClaudeAgentOptions(
         model=model,
@@ -177,10 +185,18 @@ async def run_job(
         env=session_env,
         mcp_servers={SERVER_NAME: server},
         allowed_tools=tool_names + BUILTIN_TOOLS,
+        disallowed_tools=DENIED_READS,
         # headless least-privilege: listed tools run, unlisted are denied without
         # prompting; the main-guard hook denies dangerous Bash (deny beats this mode)
         permission_mode="dontAsk",
-        hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[guard])]},
+        hooks={
+            "PreToolUse": [
+                HookMatcher(matcher="Bash", hooks=[guard]),
+                HookMatcher(matcher="Read", hooks=[file_guard]),
+                HookMatcher(matcher="Glob", hooks=[file_guard]),
+                HookMatcher(matcher="Grep", hooks=[file_guard]),
+            ]
+        },
         # a single oversized CLI message (e.g. an image read) overflows the
         # default 1MB json buffer and kills the whole job — give it headroom
         max_buffer_size=10 * 1024 * 1024,
