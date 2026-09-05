@@ -8,7 +8,8 @@
 // motion is the system's centred alert, so here the numbers ARE the point and
 // are pinned outright: 1.1 down to 1 with no travel, 200ms, standard
 // ease-in-out, one clock shared by the dim and the card and by both
-// directions, and a dismissal that is a fade and nothing else.
+// directions, and a dismissal that is a fade and nothing else. That clock is
+// what every phone gets: the sheet carries no reduced-motion rule to cut it.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -56,6 +57,8 @@ function parse(sheet: string): Rule[] {
 }
 
 const alertRules = parse(alertCss);
+/** The sheet with its prose taken out, so pins land on rules, not comments. */
+const alertSheet = alertCss.replace(/\/\*[\s\S]*?\*\//g, "");
 
 /** Every rule whose selector list contains exactly this selector. */
 function rules(sheet: Rule[], selector: string): Rule[] {
@@ -270,18 +273,22 @@ describe("the notification card arrives and leaves as the system alert does", ()
     expect(Number(held![1])).toBe(transition(dialogIn.body).ms);
   });
 
-  it("reduced motion names every rule that times anything", () => {
-    const reduced = alertRules.filter((r) =>
-      r.at.some((a) => a.includes("prefers-reduced-motion")),
+  it("arrives the same way for everyone: no reduced-motion rule at all", () => {
+    // The sheet used to cut both directions to 1ms when the phone asked for
+    // reduced motion, and it no longer does. There is nothing here that setting
+    // is meant to take away: a fade and a settle from 1.1 to 1 over a fifth of
+    // a second, with nothing crossing the screen and nothing spinning. The
+    // arriving message bubble in styles.css still answers the setting, which is
+    // a separate decision about a separate animation, so this is a claim about
+    // the alert's own sheet and nothing else.
+    expect(alertRules.some((r) => r.at.some((a) => a.includes("prefers-reduced-motion")))).toBe(
+      false,
     );
-    expect(reduced).toHaveLength(1);
-    const timed = alertRules.filter((r) => r.at.length === 0 && times(r));
+    expect(alertSheet).not.toContain("prefers-reduced-motion");
+    // and the base pair is still the only pair that times anything, with no
+    // duration restated anywhere for a later rule to flatten
+    const timed = alertRules.filter((r) => times(r));
     expect(timed.map((r) => r.selectors.join(", "))).toEqual([".alert-dialog", ".alert-card"]);
-    expect(reduced[0].selectors).toEqual(
-      expect.arrayContaining(timed.flatMap((r) => r.selectors)),
-    );
-    expect(decl(reduced[0].body, "transition-duration")).toBe("1ms");
-    // equal specificity: it only wins by coming last
-    expect(reduced[0].index).toBeGreaterThan(Math.max(...timed.map((r) => r.index)));
+    expect(alertSheet).not.toContain("transition-duration");
   });
 });

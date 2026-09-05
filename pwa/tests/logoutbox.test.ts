@@ -169,6 +169,11 @@ describe("the log-out question is the notification card, wearing other words", (
       "transform var(--alert-anim)",
     );
     expect(alertSheet).not.toMatch(/transition:[^;]*\d+(?:ms|s)\b/); // no second timing
+    // nor a rule that cuts it back: the box used to be flattened to 1ms when
+    // the phone asked for reduced motion, and that rule is gone, so this box
+    // and the card both arrive the way they were drawn on every phone
+    expect(alertSheet).not.toContain("transition-duration");
+    expect(alertSheet).not.toContain("prefers-reduced-motion");
     // the JS side waits out that same fade, from one constant
     const held = /const ALERT_TRANSITION_MS = (\d+);/.exec(main);
     expect(held, "missing ALERT_TRANSITION_MS").not.toBeNull();

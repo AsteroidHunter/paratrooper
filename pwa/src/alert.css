@@ -12,7 +12,15 @@
      ease-in-out, which is what the system spends presenting and dismissing its
      own centred alert. The dim and the card are never given separate numbers,
      so neither direction can drift off the other's clock, and neither box can
-     be quicker than the other. */
+     be quicker than the other.
+
+     One clock for everyone, too: asking for reduced motion used to cut this to
+     1ms, and it no longer does. The whole of it is a fade and a settle from 1.1
+     to 1 over a fifth of a second, with nothing travelling across the screen
+     and nothing spinning, so there is no motion here big enough to be worth
+     taking away. The one thing in the app that still answers that setting is
+     the arriving message bubble in styles.css, which is a different question
+     about a different animation. */
   --alert-anim: 200ms ease-in-out;
   position: fixed;
   inset: 0;
@@ -139,13 +147,4 @@
      --sent-text are one value each in both appearances, exactly as the bubble
      resolves them, so nothing here may re-state a pill's colour. */
   .alert-quiet { background: rgba(118, 118, 128, 0.32); }
-}
-
-/* Every rule that times anything is named here, and that is now just the base
-   pair: the leaving rule states no timing of its own, so flattening the base
-   dialog flattens the dismissal with it, and the entering rules are a start
-   state with transition: none, which has no duration to cut. */
-@media (prefers-reduced-motion: reduce) {
-  .alert-dialog,
-  .alert-card { transition-duration: 1ms; }
 }
