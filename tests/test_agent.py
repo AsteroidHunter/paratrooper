@@ -246,6 +246,40 @@ def test_shell_guard_also_refuses_the_secret_mount():
         assert "/etc/secrets" in reason, command
 
 
+# --- the scrub switch: the Claude credential out of the agent's shells --------
+#
+# The CLI must keep the credential; the shells it opens must not. The switch is
+# a CLI feature, so the SDK pin and the bundled CLI's version are what make it
+# something the image is known to carry rather than something it might.
+
+MIN_SCRUB_CLI = (2, 1, 83)  # the release the switch first appears in
+
+
+def test_the_agent_sdk_is_pinned_exactly():
+    """An open range let each image build take whatever SDK was newest that day,
+    so which CLI it carried — and whether that CLI had the switch — moved with
+    the build date."""
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert re.search(r'"claude-agent-sdk==\d+\.\d+\.\d+"', pyproject), pyproject
+
+
+def test_the_bundled_cli_carries_the_scrub_switch():
+    """Pinning the SDK is half the guarantee; the other half is reading the CLI
+    that pin actually ships. Below 2.1.83 the session sets the switch and
+    nothing behind it scrubs anything, which is the one failure the setting
+    cannot announce by itself."""
+    import claude_agent_sdk
+
+    cli = Path(claude_agent_sdk.__file__).resolve().parent / "_bundled" / "claude"
+    assert cli.exists(), f"no bundled CLI at {cli}"
+    proc = subprocess.run([str(cli), "-v"], capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    found = re.search(r"(\d+)\.(\d+)\.(\d+)", proc.stdout)
+    assert found, proc.stdout
+    version = tuple(int(part) for part in found.groups())
+    assert version >= MIN_SCRUB_CLI, f"bundled CLI {proc.stdout.strip()} predates the switch"
+
+
 # --- the paratrooper/* branch cap (effectful: counts the site checkout) -------
 
 def _seed_site_checkout(tmp_path, n_branches):
@@ -1240,8 +1274,8 @@ def test_run_job_hands_github_auth_to_the_session_env(tmp_path, monkeypatch):
 
 
 def test_run_job_without_github_token_skips_auth_env(tmp_path, monkeypatch):
-    """No PAT (local dev) must mean no partial wiring: the session env stays
-    empty and the job still runs cleanly."""
+    """No PAT (local dev) must mean no partial wiring: the session env carries
+    nothing but the scrub switch and the job still runs cleanly."""
     import paratrooper.agent.worker as worker_mod
 
     captured: dict = {}
@@ -1324,6 +1358,41 @@ def test_run_job_rejects_an_unusable_branch_word_before_starting(tmp_path, monke
     with pytest.raises(ConfigError, match="branch_prefix"):
         asyncio.run(worker_mod.run_job(job, config=cfg))
     assert not ran
+
+
+@pytest.mark.parametrize("with_token", [True, False])
+def test_run_job_sets_the_scrub_switch_either_way(tmp_path, monkeypatch, with_token):
+    """The switch guards the Claude credential, which every session has,
+    with or without a GitHub token — so it cannot ride inside the block that
+    only runs when a PAT is configured. Its companion is the explicit
+    allowed_tools list: the switch resets the permission mode to `default`, and
+    that list is then the only thing denying an unlisted tool."""
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {}
+
+    def fake_build_tool_server(ctx):
+        return {"name": "paratrooper"}, ["mcp__paratrooper__report_pr"]
+
+    async def fake_query(*, prompt, options):
+        captured["options"] = options
+        if False:
+            yield
+
+    if with_token:
+        monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "ghp-sekret")
+    else:
+        monkeypatch.delenv("PARATROOPER_GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
+    monkeypatch.setattr(worker_mod, "query", fake_query)
+
+    job = worker_mod.Job(job_id="j8", thread_id="t1", text="add the pin")
+    assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
+
+    options = captured["options"]
+    assert options.env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+    assert options.allowed_tools == ["mcp__paratrooper__report_pr"] + worker_mod.BUILTIN_TOOLS
 
 
 def test_run_job_closes_the_secret_files_to_the_file_tools(tmp_path, monkeypatch):

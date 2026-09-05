@@ -171,7 +171,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.107"; // The agent's file tools are refused the worker's launch record and the deploy's key folder, and its shell is refused them too
+const APP_VERSION = "0.3.108"; // The Claude credential is stripped from every shell the agent opens, and the agent SDK is pinned to a version whose bundled CLI does the stripping
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

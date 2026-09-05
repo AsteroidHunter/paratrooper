@@ -23,7 +23,10 @@ dependencies = [
 [project.optional-dependencies]
 # Worker service: Agent SDK + git/Spotify/screenshot tooling.
 agent = [
-    "claude-agent-sdk>=0.1.0",
+    # pinned exactly: the subprocess env scrub is a feature of the CLI the SDK
+    # bundles, not of the SDK, so an open range meant the image took whatever
+    # was newest at build time and the switch's presence moved with the date
+    "claude-agent-sdk==0.2.110",
     "httpx>=0.27",
     "playwright>=1.44",
     "redis>=5.0",

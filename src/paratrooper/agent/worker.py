@@ -50,6 +50,10 @@ BUILTIN_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 # syntax. The file guard denies the same two; this one does not depend on the
 # hook being reached at all.
 DENIED_READS = ["Read(//proc/**)", "Read(//etc/secrets/**)"]
+# Claude Code's own switch for stripping provider credentials from the
+# subprocesses it opens; carried by the bundled CLI from 2.1.83, which the
+# pinned SDK version is checked against in the tests
+SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
 
 EventCallback = Callable[[dict], Awaitable[None] | None]
 
@@ -140,9 +144,15 @@ async def run_job(
         gh_token = github_token()
     except ConfigError:
         gh_token = None
-    session_env: dict[str, str] = {}
+    # Anthropic's scrub switch. The CLI must keep the Claude credential — it is
+    # what it authenticates with — but with this set it deletes that credential
+    # and the other provider keys from the environment of every Bash shell, hook
+    # and stdio MCP subprocess it opens, so the agent's own shell never sees it.
+    # It also resets the permission mode to `default`, which is why the explicit
+    # allowed_tools list below is load-bearing and not decoration.
+    session_env: dict[str, str] = {SCRUB_VAR: "1"}
     if gh_token:
-        session_env = {
+        session_env |= {
             "GH_TOKEN": gh_token,
             "GIT_ASKPASS": write_askpass_helper(),
             "PARATROOPER_GIT_ASKPASS_TOKEN": gh_token,
