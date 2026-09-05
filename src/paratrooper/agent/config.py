@@ -183,6 +183,45 @@ def github_token() -> str:
     return require_env("PARATROOPER_GITHUB_TOKEN")
 
 
+# --- worker-only secrets, held here instead of in the environment ------------
+#
+# The Agent SDK builds the CLI's environment from os.environ and can only merge
+# on top of it, never subtract, so absence from os.environ is the only lever
+# that keeps a value out of the agent's session and out of every shell it opens.
+# These are read once at boot, removed from the environment, and kept here.
+
+SPOTIFY_VARS = ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET")
+
+_spotify: tuple[str, str] | None = None
+_spotify_taken = False
+
+
+def take_spotify_credentials() -> tuple[str, str] | None:
+    """Read Spotify's id and secret out of the environment **once**, remove both
+    names from it, and hold the pair in module state. Returns the pair, or
+    ``None`` when Spotify is not configured.
+
+    Absence is not a fallback: name search is an optional feature and links
+    resolve without it, exactly as before. Called from the worker's boot, before
+    any session exists; a second call returns what the first one took, since the
+    environment no longer has it."""
+    global _spotify, _spotify_taken
+    if _spotify_taken:
+        return _spotify
+    client_id = os.environ.pop("SPOTIFY_CLIENT_ID", "")
+    client_secret = os.environ.pop("SPOTIFY_CLIENT_SECRET", "")
+    _spotify = (client_id, client_secret) if client_id and client_secret else None
+    _spotify_taken = True
+    return _spotify
+
+
 def spotify_credentials() -> tuple[str, str]:
-    """``(client_id, client_secret)`` for the Spotify client-credentials flow."""
-    return require_env("SPOTIFY_CLIENT_ID"), require_env("SPOTIFY_CLIENT_SECRET")
+    """``(client_id, client_secret)`` for the Spotify client-credentials flow.
+    Raises :class:`ConfigError` when Spotify is not configured, which the caller
+    treats as "no name search" rather than an error."""
+    creds = take_spotify_credentials()
+    if creds is None:
+        raise ConfigError(
+            "Spotify is not configured: set " + " and ".join(SPOTIFY_VARS)
+        )
+    return creds

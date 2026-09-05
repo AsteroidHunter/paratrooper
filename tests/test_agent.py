@@ -1274,8 +1274,8 @@ def test_run_job_hands_github_auth_to_the_session_env(tmp_path, monkeypatch):
 
 
 def test_run_job_without_github_token_skips_auth_env(tmp_path, monkeypatch):
-    """No PAT (local dev) must mean no partial wiring: the session env carries
-    nothing but the scrub switch and the job still runs cleanly."""
+    """No PAT (local dev) must mean no partial wiring: the three GitHub values
+    are simply absent and the job still runs cleanly."""
     import paratrooper.agent.worker as worker_mod
 
     captured: dict = {}
@@ -1298,7 +1298,7 @@ def test_run_job_without_github_token_skips_auth_env(tmp_path, monkeypatch):
 
     assert result.status == "done"
     env = captured["options"].env
-    for key in ("GH_TOKEN", "GIT_ASKPASS", "PARATROOPER_GIT_ASKPASS_TOKEN", "GIT_TERMINAL_PROMPT"):
+    for key in ("GH_TOKEN", "GIT_ASKPASS", "PARATROOPER_GIT_ASKPASS_TOKEN"):
         assert key not in env
 
 
@@ -1393,6 +1393,113 @@ def test_run_job_sets_the_scrub_switch_either_way(tmp_path, monkeypatch, with_to
     options = captured["options"]
     assert options.env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
     assert options.allowed_tools == ["mcp__paratrooper__report_pr"] + worker_mod.BUILTIN_TOOLS
+
+
+def _fresh_secret_state(monkeypatch):
+    """Both boot readers are read-once-and-keep, so a test that wants to watch
+    the taking has to start from before it happened."""
+    import paratrooper.agent.config as config_mod
+    import paratrooper.web.queue as queue_mod
+
+    monkeypatch.setattr(config_mod, "_spotify", None)
+    monkeypatch.setattr(config_mod, "_spotify_taken", False)
+    monkeypatch.setattr(queue_mod, "_url", None)
+    return config_mod, queue_mod
+
+
+def test_worker_boot_takes_the_worker_only_secrets_out_of_the_environment(monkeypatch):
+    """The Spotify pair and the queue address must be gone from os.environ by
+    the time the worker starts consuming, because the SDK builds the CLI's
+    environment from os.environ and can only add to it. Gone from there, still
+    held by the worker: both readers keep what they took."""
+    from paratrooper.web import worker_runner
+
+    config_mod, queue_mod = _fresh_secret_state(monkeypatch)
+    monkeypatch.setenv("REDIS_URL", "redis://:hunter2@localhost:6399/0")
+    monkeypatch.setenv("PARATROOPER_REDIS_URL", "redis://:other@localhost:6399/1")
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "spot-id")
+    monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "spot-secret")
+
+    built: list = []
+
+    class StubWorker:
+        def __init__(self, queue, **kwargs):
+            built.append(queue)
+
+        async def run(self):
+            return None
+
+    monkeypatch.setattr(worker_runner, "Worker", StubWorker)
+    worker_runner.main()
+
+    for name in ("REDIS_URL", "PARATROOPER_REDIS_URL", *config_mod.SPOTIFY_VARS):
+        assert name not in os.environ, name
+    # the loser of the two queue names goes too, since it carries a password all
+    # the same
+    assert built, "the worker was never constructed"
+    assert config_mod.spotify_credentials() == ("spot-id", "spot-secret")
+    kwargs = queue_mod.connect().connection_pool.connection_kwargs
+    assert kwargs["password"] == "hunter2"  # a reconnect still has the address
+
+
+def test_spotify_stays_optional_when_it_is_not_configured(monkeypatch):
+    """Absent Spotify is a feature switch, not a fallback: name search is off,
+    links still resolve, and nothing about the boot fails."""
+    config_mod, _ = _fresh_secret_state(monkeypatch)
+    for name in config_mod.SPOTIFY_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    assert config_mod.take_spotify_credentials() is None
+    with pytest.raises(ConfigError, match="SPOTIFY_CLIENT_ID"):
+        config_mod.spotify_credentials()
+
+
+def test_the_queue_address_is_taken_only_once(monkeypatch):
+    """Reading is destructive, so the value has to survive it — otherwise the
+    second connect() in a process would find nothing and raise."""
+    config_mod, queue_mod = _fresh_secret_state(monkeypatch)
+    monkeypatch.setenv("REDIS_URL", "redis://:hunter2@localhost:6399/0")
+
+    assert queue_mod.take_url() == "redis://:hunter2@localhost:6399/0"
+    assert "REDIS_URL" not in os.environ
+    assert queue_mod.take_url() == "redis://:hunter2@localhost:6399/0"
+
+
+@pytest.mark.parametrize("with_token", [True, False])
+def test_run_job_env_carries_no_worker_only_secret(tmp_path, monkeypatch, with_token):
+    """What the session hands the CLI is now an exact list. Nothing Spotify,
+    nothing about the queue: those live in the worker's memory, and the CLI's
+    environment is the one place they must not be."""
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {}
+
+    def fake_build_tool_server(ctx):
+        return {"name": "paratrooper"}, []
+
+    async def fake_query(*, prompt, options):
+        captured["options"] = options
+        if False:
+            yield
+
+    if with_token:
+        monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "ghp-sekret")
+    else:
+        monkeypatch.delenv("PARATROOPER_GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
+    monkeypatch.setattr(worker_mod, "query", fake_query)
+
+    job = worker_mod.Job(job_id="j9", thread_id="t1", text="add the pin")
+    assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
+
+    env = captured["options"].env
+    expected = {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "GIT_TERMINAL_PROMPT"}
+    if with_token:
+        expected |= {"GH_TOKEN", "GIT_ASKPASS", "PARATROOPER_GIT_ASKPASS_TOKEN"}
+    assert set(env) == expected
+    assert not [k for k in env if k.startswith("SPOTIFY_")]
+    assert "REDIS_URL" not in env and "PARATROOPER_REDIS_URL" not in env
 
 
 def test_run_job_closes_the_secret_files_to_the_file_tools(tmp_path, monkeypatch):

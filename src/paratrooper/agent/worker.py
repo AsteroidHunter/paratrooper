@@ -138,7 +138,7 @@ async def run_job(
     # GitHub auth for the agent's shell: `gh` reads GH_TOKEN directly, and git
     # authenticates through the same askpass helper the clone bootstrap uses
     # (token rides only in env values — never argv, never the helper file).
-    # Without a configured token (local dev) the session env stays empty and
+    # Without a configured token (local dev) those three are simply absent and
     # the session runs exactly as before.
     try:
         gh_token = github_token()
@@ -150,13 +150,15 @@ async def run_job(
     # and stdio MCP subprocess it opens, so the agent's own shell never sees it.
     # It also resets the permission mode to `default`, which is why the explicit
     # allowed_tools list below is load-bearing and not decoration.
-    session_env: dict[str, str] = {SCRUB_VAR: "1"}
+    session_env: dict[str, str] = {
+        SCRUB_VAR: "1",
+        "GIT_TERMINAL_PROMPT": "0",  # fail fast, never hang on a prompt
+    }
     if gh_token:
         session_env |= {
             "GH_TOKEN": gh_token,
             "GIT_ASKPASS": write_askpass_helper(),
             "PARATROOPER_GIT_ASKPASS_TOKEN": gh_token,
-            "GIT_TERMINAL_PROMPT": "0",  # fail fast, never hang on a prompt
         }
 
     async def emit_update(text: str) -> None:

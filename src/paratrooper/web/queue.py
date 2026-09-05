@@ -25,9 +25,34 @@ def _results_channel(thread_id: str) -> str:
 
 INTERRUPT_CHANNEL = "paratrooper:interrupt"
 
+URL_VARS = ("REDIS_URL", "PARATROOPER_REDIS_URL")
+
+# the address, held here after the first read instead of in the environment
+_url: str | None = None
+
+
+def take_url() -> str | None:
+    """Read the queue address out of the environment **once**, remove both names
+    from it, and hold the value here.
+
+    The address carries the store's password, and the Agent SDK can only merge
+    over ``os.environ``, so taking the name out of it is the only way to keep
+    the password out of the agent's session. Remembering the value is what makes
+    that free: a later :func:`connect` (the web service opens one per process,
+    the worker one at boot) reads it from here."""
+    global _url
+    if _url is None:
+        # both names are taken, not just the one that wins, so the loser cannot
+        # sit in the environment carrying the same password
+        primary = os.environ.pop("REDIS_URL", "")
+        secondary = os.environ.pop("PARATROOPER_REDIS_URL", "")
+        _url = primary or secondary or None
+    return _url
+
 
 def connect(url: str | None = None) -> redis.Redis:
-    """Connect to Key Value. URL from ``url`` or ``$REDIS_URL`` (Render sets this).
+    """Connect to Key Value. URL from ``url`` or ``$REDIS_URL`` (Render sets this),
+    the latter read once and then kept out of the environment (:func:`take_url`).
 
     ``socket_timeout=None`` is load-bearing: redis-py 8 changed the default
     read timeout from "block forever" to 5s, which kills every blocking read we
@@ -35,7 +60,7 @@ def connect(url: str | None = None) -> redis.Redis:
     both pub/sub ``listen()`` loops (idle far longer than 5s). Explicit None
     restores indefinite blocking reads regardless of installed redis-py major.
     """
-    url = url or os.environ.get("REDIS_URL") or os.environ.get("PARATROOPER_REDIS_URL")
+    url = url or take_url()
     if not url:
         raise RuntimeError("no Redis URL (set REDIS_URL)")
     return redis.from_url(

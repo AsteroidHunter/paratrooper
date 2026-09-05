@@ -18,7 +18,7 @@ from pathlib import Path
 
 from redis import exceptions as redis_exc
 
-from ..agent.config import Config, github_token, load_config
+from ..agent.config import Config, github_token, load_config, take_spotify_credentials
 from ..agent.siterepo import SiteRepo
 from ..agent.worker import Job, run_job
 from .inbox import DiskInbox, RedisInbox, key_age_seconds
@@ -254,7 +254,14 @@ def main() -> None:
 
     print(f"paratrooper worker starting, version "
           f"{os.environ.get('RENDER_GIT_COMMIT', 'dev')[:7]}", flush=True)
-    asyncio.run(Worker(JobQueue(connect())).run())
+    # Take the worker-only secrets out of the environment before anything can
+    # start a session. The agent's CLI inherits os.environ and the SDK can only
+    # add to it, so a value still sitting there at session time is a value in
+    # every shell the agent opens. Both readers keep what they took, so the
+    # queue client and the Spotify helper work exactly as before.
+    take_spotify_credentials()
+    client = connect()  # takes the queue address, password and all, with it
+    asyncio.run(Worker(JobQueue(client)).run())
 
 
 if __name__ == "__main__":
