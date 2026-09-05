@@ -362,10 +362,15 @@ describe("newborn enter wiring — born content never materializes mid-motion", 
 describe("live-arrival stamps — the receive side of the same enter", () => {
   const dec = fnBody("decorate");
 
-  it("a stamp born beside a live .anim row enters; replay/history stay static", () => {
+  it("a stamp born beside a live row enters; replay/history stay static", () => {
     expect(dec).toContain("enterNewborn(stamp)");
     expect(dec).toContain("!suppressAnim");
-    expect(dec).toContain('querySelector(".msg.anim")');
+    // Two live entrances now, and the liveness test has to name both or a
+    // whole class of replies stops carrying its stamp in. .anim is the pop a
+    // bubble born in its seat plays; .arriving is the morph a reply plays when
+    // it grew out of the typing dots instead (arrival.ts), and a reply that
+    // opens a new hour is exactly a stamp born over one of those.
+    expect(dec).toContain('querySelector(".msg.anim, .msg.arriving")');
   });
 
   it("only a freshly created stamp enters — a refreshed one never re-pops", () => {
