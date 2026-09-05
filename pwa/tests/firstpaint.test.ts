@@ -126,9 +126,10 @@ describe("the built page blocks its first paint on nothing", () => {
     }
     // and it survived at ONE pace. The page's own <style> is the first one in
     // the document (the app's sheet is folded in after it), and it is the only
-    // one this claim is about: the app's bubbles do stop under a reduced-motion
-    // setting, and should, since a person starts those. The page's turn is not
-    // started by anyone, so nothing here slows it and nothing here stops it.
+    // one this claim is about. Nothing in the app answers a reduced-motion
+    // setting any more, on instruction — the bubbles, the alert boxes and this
+    // turn all move the same way for everyone — so the check below is that the
+    // page never grew a rule of its own, not that it agrees with the app's.
     const own = PAGE.slice(PAGE.indexOf("<style>"), PAGE.indexOf("</style>"));
     const turns = [...own.matchAll(/animation:\s*ld-spin\s+(\d+)ms/g)].map((m) => Number(m[1]));
     expect(turns).toHaveLength(1); // one duration in the served page, not two

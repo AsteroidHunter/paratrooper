@@ -2,6 +2,8 @@
 // Same-origin /api + /ws (the FastAPI service serves this bundle in production).
 import "./styles.css";
 import "./alert.css";
+import { arrivalOffered, arrivalShape, runArrival } from "./arrival";
+import type { Arrival, DotsSeat } from "./arrival";
 import { BLUR_EDGE, decodeBlurhash } from "./blurhash";
 import { createBootGate } from "./bootgate";
 import { bubbleLineWidths, fitBubbles, fitScale } from "./bubblefit";
@@ -171,7 +173,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.110"; // A start-up step hands the worker its secrets through a private file, so the record of how the worker was launched never held them
+const APP_VERSION = "0.3.111"; // The typing dots' own bubble grows into the reply it was waiting for, so the thread no longer drops 40px and climbs back
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -2263,14 +2265,34 @@ function wrapperFor(seq: number): HTMLElement | null {
   return threadEl().querySelector<HTMLElement>(`.evt[data-seq="${seq}"]`);
 }
 
+// The dots' own div, offered to the next bubble rowEl builds and taken by at
+// most one of them. A reply landing behind the dots does not get a new box: it
+// gets THAT one, so the shape the reader has been watching becomes the message
+// and the thread never loses the dots' height in between (arrival.ts holds the
+// whole reasoning). Offered rather than passed down through renderInto because
+// only the renderers know whether the frame draws a bubble at all — an internal
+// marker draws none, and the offer then comes back untaken.
+let dotsOffered: HTMLDivElement | null = null;
+let dotsTaken = false;
+
 function rowEl(wrapper: HTMLElement, role: string, cls: string, at: number): HTMLDivElement {
   // each bubble sits in a full-width .row so the peek-time label can pin to
   // the screen's right edge (clipped by the thread until the pull reveals it)
   const row = document.createElement("div");
   row.className = `row ${role}`;
   if (role !== "system") row.dataset.time = fmtTime(at);
-  const div = document.createElement("div");
-  div.className = `msg ${role} ${cls}${suppressAnim ? "" : " anim"}`;
+  const offer = dotsOffered !== null && arrivalShape(role, cls) ? dotsOffered : null;
+  const div = offer ?? document.createElement("div");
+  if (offer) {
+    dotsOffered = null;
+    dotsTaken = true;
+    offer.removeAttribute("id"); // it is a message now: hideTyping must not find it
+  }
+  // .arriving carries the morph, and carries it INSTEAD of .anim: the pop-in
+  // is the separate second entrance this replaces, and a pop played over a box
+  // that is already growing is the two motions again
+  const entrance = offer ? " arriving" : suppressAnim ? "" : " anim";
+  div.className = `msg ${role} ${cls}${entrance}`;
   row.appendChild(div);
   wrapper.appendChild(row);
   return div;
@@ -2316,7 +2338,10 @@ function decorate(): void {
       // so they stay static — the bootgate rules hold untouched. The send
       // path's own wrapper renders suppressed (no .anim), so its stamp is
       // entered once, by shift play, never here.
-      if (born && !suppressAnim && w.querySelector(".msg.anim")) {
+      // .arriving is the other live entrance: a reply that grew out of the
+      // dots carries no .anim (the pop is what it replaced), and a stamp born
+      // over it still has to enter rather than materialize
+      if (born && !suppressAnim && w.querySelector(".msg.anim, .msg.arriving")) {
         enterNewborn(stamp);
         holdDiagRecord("flight", { phase: "enter", n: 1, src: "live" });
       }
@@ -2353,11 +2378,25 @@ function applyEvent(m: ServerMsg): void {
   if (oldestSeq === 0 || seq < oldestSeq) oldestSeq = seq;
   const isTail = prevMax === 0 || seq > prevMax;
 
-  if (isTail && m.role !== "user" && m.kind !== "job") hideTyping(); // a bubble replaces the dots
+  // The dots' answer, and the ORDER of it. A frame that ends the dots either
+  // has a bubble to put in their place or it does not, and only renderInto
+  // knows which. So the dots' box is OFFERED first and the removal is left
+  // until after: a reply takes the box and becomes it, so no height ever
+  // leaves; anything else (a photo, a PR row, an internal marker that draws
+  // nothing at all) hands the offer back and the box is removed exactly as it
+  // always was, settle and all. Removing first was the drop — the settle then
+  // corrected a thread that had lost 40px and not yet gained the message
+  // (arrival.ts holds the measurement and the reasoning).
+  const endsDots = isTail && m.role !== "user" && m.kind !== "job";
+  const dots = endsDots ? document.querySelector<HTMLDivElement>("#typing") : null;
+  const seat = dots ? dotsSeat(dots) : null;
+  if (dots && arrivalOffered(true, isTail, !suppressAnim)) offerDots(dots);
   const wrapper = document.createElement("div");
   wrapper.className = "evt";
   wrapper.dataset.seq = String(seq);
   renderInto(wrapper, m);
+  const morphing = takeDotsOffer();
+  if (endsDots && !morphing) hideTyping(); // nothing grew into them: the old removal
   // insert in seq order among keyed wrappers; a tail seq lands at the absolute
   // end so in-flight optimistic (unkeyed) bubbles keep their place above it
   const next = eventWrappers().find((w) => w.dataset.seq && Number(w.dataset.seq) > seq);
@@ -2387,7 +2426,13 @@ function applyEvent(m: ServerMsg): void {
     // bottom that a spurious unfollow lost; before the pin below, so the pin
     // finds following already asserted (the resume block owns the rule)
     resumeArrival();
-    if (followTail) scrollToBottom();
+    // A morph owns the scroll for its own beat and pins the bottom in the same
+    // frame as every height it writes, so there is nothing here for a ride to
+    // do: the distance it would ride is being closed frame by frame instead.
+    // Starting one anyway would leave a jump ride in the air whose own scroll
+    // events read away-from-bottom, against a pin that is already exact.
+    if (morphing && seat) startArrival(wrapper, seat);
+    else if (followTail) scrollToBottom();
   }
   if (m.kind === "published") flipCorrelatedPr(m);
   updateReceipt(); // any event can move the watermark (user row, job row, working)
@@ -3437,6 +3482,83 @@ function hideTyping(): void {
   // that, and without it the view stayed where the taller content had put it and
   // the dots' height was left on screen as white under the last message
   settleContent("typing");
+}
+
+// --- the reply taking the dots' box over --------------------------------------
+// hideTyping above is the dots ENDING: they led nowhere, their height leaves,
+// and the settle answers for it. This is the dots BECOMING something, where
+// there is no removal to answer for because nothing is removed. arrival.ts
+// holds the whole reasoning; these three are the wiring.
+
+/** the dots exactly as they stand, read before a single byte is written */
+function dotsSeat(dots: HTMLElement): DotsSeat {
+  const r = dots.getBoundingClientRect();
+  return {
+    box: {
+      width: r.width,
+      height: r.height,
+      margin: parseFloat(getComputedStyle(dots).marginTop) || 0,
+    },
+    lit: Array.from(dots.children, (d) => parseFloat(getComputedStyle(d).opacity) || 0),
+  };
+}
+
+/** offer the dots' div to whatever bubble this frame is about to render */
+function offerDots(dots: HTMLDivElement): void {
+  dotsOffered = dots;
+  dotsTaken = false;
+}
+
+/** did a bubble take it? the offer is closed either way, taken or handed back */
+function takeDotsOffer(): boolean {
+  const took = dotsTaken;
+  dotsOffered = null;
+  dotsTaken = false;
+  if (took && typingExpiry) {
+    clearTimeout(typingExpiry); // the dots ended by becoming the reply
+    typingExpiry = null;
+  }
+  return took;
+}
+
+// the one morph in the air. A second reply during the first is rare and lands
+// on a plain bubble (the dots are the first one's now), but the loop still has
+// to be closed rather than left writing into a seat somebody else owns.
+let arrival: Arrival | null = null;
+
+/**
+ * Run the morph on the bubble that took the dots' box.
+ *
+ * Everything it measures has to be final first, which is why it runs here and
+ * not at the handover: decorate() has just decided whether the row sits inside
+ * a run (10px of top margin, or 2px), and the fit has to be written before the
+ * seat is read or the box would grow to the 75% cap and then be narrowed off
+ * it. That is the same door the send path opens for the same reason.
+ */
+function startArrival(wrapper: HTMLElement, seat: DotsSeat): void {
+  const bubble = wrapper.querySelector<HTMLElement>(".msg.arriving");
+  const row = bubble?.parentElement;
+  if (!bubble || !row) return;
+  fitBubblesNow(wrapper); // the seat must be final before the morph measures it
+  arrival?.cancel();
+  arrival = runArrival(row, bubble, bubble.textContent ?? "", seat, {
+    // The bottom, re-taken in the SAME frame as the height that moved it. This
+    // is the whole scroll story of an arrival now: no correction, no ride, and
+    // nothing left over at the end for one to do. force, because a ride here
+    // would be riding to a bottom that is still moving, and its own mid-flight
+    // events read away-from-bottom against a pin that is already exact.
+    pin: () => {
+      if (followTail) scrollToBottom(true);
+    },
+    done: () => {
+      arrival = null;
+      // the box is a plain bubble again, so the fit can finally see it: a .msg
+      // with element children is somebody else's geometry and was skipped for
+      // the whole morph, and its rendered lines are what decide its width
+      scheduleBubbleFit(wrapper);
+      if (followTail) scrollToBottom(true);
+    },
+  });
 }
 
 // --- networking --------------------------------------------------------------

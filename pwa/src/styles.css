@@ -712,8 +712,27 @@ html, body {
 @keyframes pop-in {
   from { opacity: 0; transform: scale(0.88) translateY(8px); }
 }
-@media (prefers-reduced-motion: reduce) {
-  .msg.anim { animation: none; }
+/* An incoming bubble arrives the same way for everyone. The reduced-motion
+   rule that used to flatten this one went with the alert boxes' and the
+   loading globe's: the app now has no reduced-motion handling anywhere, on
+   instruction, and this is one animation rather than none or two. */
+
+/* --- the reply arriving: the dots' own bubble becomes the message ------------
+   .arriving is on that box only while it grows, and it is what the box wears
+   INSTEAD of .anim — the pop was the separate second entrance this replaces.
+   arrival.ts owns the beat, the crossfade and the reasoning; this is the
+   shape. Clipped, because the text is laid out at the width it will end at and
+   the growing box uncovers it rather than re-wrapping it line by line, and
+   positioned, because the dots have to stay exactly where the dots' own
+   padding had them until they have faded out. */
+.msg.arriving { position: relative; overflow: hidden; }
+.msg.arriving > .arrive-ink { display: block; }
+.msg.arriving > .arrive-dots {
+  position: absolute;
+  left: var(--dots-pad-x);
+  top: var(--dots-pad-y);
+  display: flex;
+  gap: 5px;
 }
 /* The only link the thread ever draws is the PR row's, and it takes the sent
    bubble's own fill — one accent in the thread, in either appearance, rather
@@ -838,23 +857,31 @@ html, body {
 
 .filechip { display: inline-block; margin-top: 4px; font-size: 0.8rem; opacity: 0.9; }
 
-/* --- typing indicator: gray bubble with three animated dots --- */
+/* --- typing indicator: gray bubble with three animated dots ---
+   The inset is stated once and read twice: this box's own padding, and the
+   seat the dots keep inside the message they become, which has the .msg
+   padding by then and must not step the dots sideways on the first frame of
+   the morph (arrival.ts). */
+.typing, .msg.arriving { --dots-pad-x: 14px; --dots-pad-y: 12px; }
 .typing {
   align-self: flex-start;
   background: var(--received);
   border-radius: 18px 18px 18px 4px;
-  padding: 12px 14px;
+  padding: var(--dots-pad-y) var(--dots-pad-x);
   display: flex;
   gap: 5px;
   margin-top: 6px;
 }
-.typing span {
+.typing span, .arrive-dots span {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--muted);
-  animation: blink 1.2s infinite both;
 }
+/* only the LIVE dots blink. Inside a morph the wave is stopped and each dot
+   holds the opacity it was caught at, because the composing it stands for is
+   over the moment the message exists (arrival.ts DotsSeat). */
+.typing span { animation: blink 1.2s infinite both; }
 .typing span:nth-child(2) { animation-delay: 0.2s; }
 .typing span:nth-child(3) { animation-delay: 0.4s; }
 @keyframes blink { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
