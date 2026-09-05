@@ -171,7 +171,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.104"; // The sign-in box draws no cursor while the card is in flight, so iOS has no stale spot to draw it at
+const APP_VERSION = "0.3.105"; // The launch globe turns at the slower pace for everyone, so the reduced-motion rule that used to hold that pace is gone
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

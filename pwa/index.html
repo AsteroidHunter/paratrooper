@@ -193,6 +193,23 @@
          It travels the way the planet does, west to east, so the land drifts
          across the face and off the right-hand limb.
 
+         One turn every 5200ms, and it never stops. This is the one thing on
+         screen that says the app is still working, and a loading indicator
+         holding perfectly still is one saying the app has died: the first
+         report of it from a phone that froze it was that the animation was
+         broken. The phone does not stop this by itself, and the app's other
+         spinners have never stopped either, so a freeze here could only ever
+         come from a rule written for it. The guidance says the same, counting
+         motion in a preload phase as essential where a still indicator could
+         have someone believe the content is frozen or broken, and the answer
+         taken elsewhere is to halve the pace rather than take it away.
+
+         This pace IS that half, and it is now the pace everybody gets. The
+         turn used to run twice as fast and drop to this only when reduced
+         motion was asked for; the slower turn read better either way, so the
+         number stayed and the second rule went. There is one duration in the
+         page, stated here, and nothing further down restates it.
+
          A translate, and nothing but a translate, for the reason the dot it
          replaced was a rotate: during a boot the main thread is the busiest it
          ever is, so nothing may run per frame in script, and a transform is
@@ -204,7 +221,7 @@
         top: 0;
         width: 400%;
         height: 100%;
-        animation: ld-spin 2600ms linear infinite;
+        animation: ld-spin 5200ms linear infinite;
         will-change: transform;
       }
 
@@ -261,41 +278,6 @@
         }
         to {
           transform: translateX(0);
-        }
-      }
-
-      /* Asked for reduced motion: the rotation SLOWS. It does not stop.
-
-         It used to stop, and that was the wrong call. This is the one thing on
-         screen that says the app is still working, and a loading indicator
-         holding perfectly still is a loading indicator saying the app has died:
-         the first report of it from a phone with the setting on was that the
-         animation was broken. The phone does not stop this by itself, and the
-         app's other spinners have never stopped under the same setting, so the
-         only thing that ever froze it was this rule. It matters more now than
-         it did, not less: the dot that used to carry this was one of two
-         moving things, and the globe is the only one left, so a freeze here is
-         a page with nothing moving on it at all.
-
-         The guidance says the same. Motion in a preload phase counts as
-         essential where a still indicator could have someone believe the
-         content is frozen or broken, and the technique that asks for the
-         setting to be honoured covers motion a person starts by doing
-         something, which nobody starts by opening the app. The usual answer
-         elsewhere is to halve the pace rather than take it away, and one
-         well-known component set shipped the freeze, was told a frozen bar
-         looks broken, and went back to slowing it.
-
-         So this is the same turn at half speed. Stating only the duration
-         leaves the name, the easing and the endless count exactly as they are
-         above, so there is one revolution described in one place.
-
-         The panel still fades in and still fades out, because a change of
-         opacity is not movement and the alternative is the page appearing and
-         vanishing as cuts. */
-      @media (prefers-reduced-motion: reduce) {
-        #loading .earth {
-          animation-duration: 5200ms;
         }
       }
 

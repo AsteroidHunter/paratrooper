@@ -101,20 +101,19 @@ interface Rule {
   sel: string[]; // the selectors this block was written against
   decls: Record<string, string>;
   media: string; // "" for a rule at the top level of the sheet
-  order: number; // where it sits in the sheet, which is what settles a tie
 }
 
+// in sheet order, which is what settles a tie between two rules written
+// against the same selector: the later one wins
 const RULES: Rule[] = [];
 const FRAMES: Record<string, Array<[string, Record<string, string>]>> = {};
 
 {
-  let order = 0;
   const push = (head: string, body: string, media: string): void => {
     RULES.push({
       sel: head.split(",").map((s) => s.trim().replace(/\s+/g, " ")),
       decls: decls(body),
       media,
-      order: order++,
     });
   };
   for (const b of blocks(STYLE_SRC)) {
@@ -142,13 +141,6 @@ function styleOf(selector: string, media = ""): Record<string, string> {
     if (r.media === media && r.sel.includes(selector)) Object.assign(out, r.decls);
   }
   return out;
-}
-
-// where the last rule written against a selector sits in the sheet
-function orderOf(selector: string, media = ""): number {
-  const hit = RULES.filter((r) => r.media === media && r.sel.includes(selector));
-  if (!hit.length) throw new Error(`no rule for ${selector}`);
-  return hit[hit.length - 1].order;
 }
 
 // the number out of a vmin length
@@ -458,7 +450,9 @@ describe("the rotation: one world's worth of travel, and no seam", () => {
     expect(turn.length).toBe(1); // one track: the turn is the whole of it
     expect(turn[0].name).toBe("ld-spin");
     expect([turn[0].ease, turn[0].count]).toEqual(["linear", "infinite"]);
-    expect(turn[0].ms >= 2000 && turn[0].ms <= 3000).toBe(true);
+    // calm rather than urgent. This is the slower of the two paces the page
+    // used to carry, and it is now the pace everybody gets.
+    expect(turn[0].ms >= 4000 && turn[0].ms <= 6000).toBe(true);
   });
 
   it("animates nothing but transform and opacity, so no frame needs the layout", () => {
@@ -480,53 +474,39 @@ describe("the rotation: one world's worth of travel, and no seam", () => {
   });
 });
 
-describe("asked for reduced motion, the rotation slows rather than stopping", () => {
-  const reduce = "(prefers-reduced-motion: reduce)";
-
-  it("keeps turning, at half the pace", () => {
-    // It used to stop, and that was wrong. This is the one thing on screen
-    // saying the app is still working, and a loading indicator holding
-    // perfectly still is one saying the app has died: the first report of it
-    // from a phone with the setting on was that the animation was broken. The
-    // guidance agrees, treating motion in a preload phase as essential where a
-    // still indicator could have someone think the content is frozen, and
-    // halving the pace is what is done elsewhere instead.
-    //
-    // It matters more than it did rather than less. The dot used to carry this
-    // and there were two moving things; the globe is the only one left, so a
-    // freeze here is a page with nothing moving on it at all.
-    const slow = styleOf("#loading .earth", reduce);
-    expect(slow.animation).toBeUndefined(); // nothing is turned off
-    expect(Number(slow["animation-duration"].replace("ms", ""))).toBe(
-      anims(EARTH.animation)[0].ms * 2,
+describe("one pace for everyone, and nothing that restates it", () => {
+  it("says how long a turn takes once, in the rule that carries the turn", () => {
+    // The page used to state the pace twice: a fast turn here and a slower one
+    // under a reduced-motion rule further down. The slower turn is the one
+    // that ships now, for everybody, so the second rule could only repeat the
+    // default and it is gone. One duration, in one place.
+    const timed = RULES.filter((r) => r.sel.includes("#loading .earth")).flatMap((r) =>
+      Object.keys(r.decls).filter((p) => p === "animation" || p === "animation-duration"),
     );
+    expect(timed).toEqual(["animation"]);
   });
 
-  it("stops nothing anywhere on the page, which is what the old rule did", () => {
-    // the app's three other spinners have never stopped under this setting
-    // either; the only thing that ever froze the scene was the rule this
-    // replaced
+  it("hangs no reduced-motion rule on the turn, or on anything else in the page", () => {
+    // The reason the turn never freezes outlived the rule and now sits with
+    // the declaration above. This is the one thing on screen saying the app is
+    // still working, and a loading indicator holding perfectly still is one
+    // saying the app has died: the first report of it from a phone that froze
+    // it was that the animation was broken. The phone does not stop this by
+    // itself, and the app's other spinners have never stopped under the
+    // setting either, so a freeze here could only ever come from a rule
+    // written for it, and the page carries none.
+    expect(RULES.some((r) => r.media.includes("prefers-reduced-motion"))).toBe(false);
+    expect(styleOf("#loading .earth", "(prefers-reduced-motion: reduce)")).toEqual({});
+    expect(STYLE_SRC).not.toContain("prefers-reduced-motion");
+  });
+
+  it("stops nothing anywhere on the page, which is what the old rule once did", () => {
+    // the guidance counts motion in a preload phase as essential where a still
+    // indicator could have someone believe the content is frozen or broken,
+    // and the answer taken elsewhere is to halve the pace rather than take it
+    // away. That half is what the one duration above now says.
     expect(STYLE_SRC).not.toMatch(/animation:\s*none/);
     expect(STYLE_SRC).not.toMatch(/animation-play-state/);
-  });
-
-  it("says only the duration, on the one rule that turns, standing after it", () => {
-    // stating just the duration leaves the name, the easing and the endless
-    // count exactly as the rule above says them, so there is one revolution
-    // described in one place. It is written against the very same selector, so
-    // it can only win by standing later in the sheet.
-    expect(Object.keys(styleOf("#loading .earth", reduce))).toEqual(["animation-duration"]);
-    expect(orderOf("#loading .earth", reduce)).toBeGreaterThan(orderOf("#loading .earth"));
-    expect(RULES.filter((r) => r.media === reduce).flatMap((r) => r.sel)).toEqual([
-      "#loading .earth",
-    ]);
-  });
-
-  it("still fades, because a change of opacity is not movement", () => {
-    // the alternative is the page appearing and vanishing as cuts, which is
-    // harsher than the thing reduced motion is asked for to avoid
-    expect(styleOf("#loading", reduce).transition).toBeUndefined();
-    expect(styleOf("#loading .scene", reduce).animation).toBeUndefined();
   });
 });
 

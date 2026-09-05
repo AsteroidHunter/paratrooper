@@ -118,25 +118,23 @@ describe("the built page blocks its first paint on nothing", () => {
     expect(id).toBeTruthy();
     for (const u of uses) expect(u[0]).toContain(`href="#${id}"`);
     expect(/\bd="[Mm][^"]{5000,}"/.test(PAGE)).toBe(true); // the shape itself, not a stub
-    // the scene arriving and the globe turning, plus the answer for anyone
-    // who asked for reduced motion, which slows that turn rather than stopping
-    // it: a still loading indicator reads as an app that has died, and this is
-    // now the only moving thing on the page
+    // the scene arriving and the globe turning: a still loading indicator
+    // reads as an app that has died, and the globe is now the only moving
+    // thing on the page, so the turn has to survive the build and never stop
     for (const name of ["ld-spin", "ld-appear"]) {
       expect([name, PAGE.includes(`@keyframes ${name}`)]).toEqual([name, true]);
     }
-    expect(PAGE).toContain("prefers-reduced-motion: reduce");
-    // and the slow-down survived the build as a slow-down. The page's own
-    // <style> is the first one in the document (the app's sheet is folded in
-    // after it), and it is the only one this claim is about: the app's bubbles
-    // do stop under the same setting, and should, since a person starts those.
+    // and it survived at ONE pace. The page's own <style> is the first one in
+    // the document (the app's sheet is folded in after it), and it is the only
+    // one this claim is about: the app's bubbles do stop under a reduced-motion
+    // setting, and should, since a person starts those. The page's turn is not
+    // started by anyone, so nothing here slows it and nothing here stops it.
     const own = PAGE.slice(PAGE.indexOf("<style>"), PAGE.indexOf("</style>"));
-    const full = Number(/animation:\s*ld-spin\s+(\d+)ms/.exec(own)?.[1]);
-    const slow = Number(
-      /prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?animation-duration:\s*(\d+)ms/.exec(own)?.[1],
-    );
-    expect(full).toBeGreaterThan(0);
-    expect(slow).toBe(full * 2);
+    const turns = [...own.matchAll(/animation:\s*ld-spin\s+(\d+)ms/g)].map((m) => Number(m[1]));
+    expect(turns).toHaveLength(1); // one duration in the served page, not two
+    expect(turns[0]).toBeGreaterThan(0);
+    expect(own).not.toContain("prefers-reduced-motion"); // no override to restate it
+    expect(own).not.toMatch(/animation-duration/);
     expect(own).not.toMatch(/animation:\s*none/);
     // and the scene fetches nothing: no picture, no font, no second file
     const scene = PAGE.slice(PAGE.indexOf("#loading"), PAGE.indexOf('<div id="app">'));
@@ -150,8 +148,8 @@ describe("the built page blocks its first paint on nothing", () => {
     for (const prop of CUSTOM_PROPS) expect([prop, PAGE.includes(prop)]).toEqual([prop, true]);
     // the at-rules survive too, which a naive concatenation would be the first
     // thing to lose. The document carries at-rules of its own (the loading
-    // page's display-mode and reduced-motion rules, and its orbit), so the
-    // counts are floors and the names are what makes the sweep exact.
+    // page's display-mode rule, and its orbit), so the counts are floors and
+    // the names are what makes the sweep exact.
     expect(PAGE.split("@media").length - 1).toBeGreaterThanOrEqual(
       STYLES_CSS.split("@media").length - 1,
     );
