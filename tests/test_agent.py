@@ -1411,6 +1411,34 @@ def test_push_branch_pushes_only_inside_the_namespace(tmp_path, monkeypatch):
     assert pushed == ["paratrooper/twen-new-photo"]  # nothing else was attempted
 
 
+def test_push_branch_reports_the_push_even_from_a_remote_it_cannot_name(tmp_path, monkeypatch):
+    """The link back is a convenience for the reply. Building it must not gate
+    the push: a remote this cannot read as owner/repo is still a remote the push
+    landed on, and answering "failed" for a push that worked is the worse lie."""
+    import paratrooper.agent.tools as tools_mod
+
+    pushed: list[str] = []
+
+    class _Repo:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def configured_remote(self):
+            return "/srv/site.git"
+
+        def push_branch(self, branch):
+            pushed.append(branch)
+
+    monkeypatch.setattr(tools_mod, "SiteRepo", _Repo)
+    ctx = _handoff_ctx(tmp_path)
+    handlers = _tool_handlers(ctx)
+
+    out = asyncio.run(handlers["push_branch"]({"branch": "paratrooper/x"}))
+    assert not out.get("is_error"), out
+    assert pushed == ["paratrooper/x"]
+    assert _payload(out) == {"pushed": "paratrooper/x"}  # no link, and no failure
+
+
 def test_open_pull_request_opens_one_and_records_it(tmp_path, monkeypatch):
     """Opening the pull request and recording it are the same step now. The
     Publish button used to depend on the agent remembering a second call."""

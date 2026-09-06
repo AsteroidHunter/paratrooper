@@ -23,6 +23,7 @@ returns both the server and the matching ``allowed_tools`` list.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass
 from datetime import UTC
@@ -246,9 +247,16 @@ def build_tool_server(ctx: ToolContext):
 
         def _run() -> dict:
             repo = _site_repo(ctx)
-            owner, name = github.owner_repo(repo.configured_remote())
+            remote = repo.configured_remote()
             repo.push_branch(branch)
-            return {"pushed": branch, "url": github.branch_url(owner, name, branch)}
+            payload = {"pushed": branch}
+            # the link back is a convenience for the reply, so it is built after
+            # the push and never gates it: a remote this cannot read as
+            # owner/repo is still a remote the push may have landed on
+            with contextlib.suppress(github.GitHubError):
+                owner, name = github.owner_repo(remote)
+                payload["url"] = github.branch_url(owner, name, branch)
+            return payload
 
         try:
             payload = await anyio.to_thread.run_sync(_run)
