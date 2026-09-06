@@ -1395,6 +1395,16 @@ def test_run_job_sets_the_scrub_switch_either_way(tmp_path, monkeypatch, with_to
     assert options.allowed_tools == ["mcp__paratrooper__report_pr"] + worker_mod.BUILTIN_TOOLS
 
 
+def test_worker_image_carries_the_tool_the_scrub_switch_needs():
+    """The switch above is not free on Linux: the CLI implements it by running
+    every agent shell under bubblewrap, and refuses to start at all when the
+    binary is missing — which is a dead worker, every message failing, not a
+    quiet loss of isolation. The Mac needs no such binary, so the image is the
+    only place this can be caught."""
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.worker").read_text()
+    assert re.search(r"apt-get install[^\n]*\bbubblewrap\b", dockerfile)
+
+
 def _fresh_secret_state(monkeypatch):
     """Both boot readers are read-once-and-keep, so a test that wants to watch
     the taking has to start from before it happened."""

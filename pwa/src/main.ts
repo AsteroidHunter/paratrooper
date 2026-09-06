@@ -173,7 +173,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.112"; // The worker still goes to sleep about five minutes after the last turn when a rebuild lands inside the wait, instead of staying awake until the next message
+const APP_VERSION = "0.3.113"; // The worker's image now carries the sandbox tool its shell isolation needs, so a message runs a turn again instead of coming back as a failed command
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

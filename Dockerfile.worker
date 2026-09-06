@@ -14,7 +14,16 @@ ENV PYTHONUNBUFFERED=1
 # refuses every other route (curl/python/node to github.com, `gh api`), so the
 # binary has to actually be here — without it the agent falls back to raw REST.
 # Installed from GitHub's own apt repository (keyring + signed-by source line).
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl \
+# bubblewrap: the CLI's subprocess env scrub (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,
+# set for every session) is implemented on Linux by running each agent shell
+# under `bwrap`, and the CLI refuses to start at all when it cannot find it —
+# every message dies with "bubblewrap is required for subprocess env scrubbing".
+# The macOS CLI needs no such binary, which is why only the Linux image cares.
+# Debian's build is not setuid: it relies on unprivileged user namespaces, which
+# the platform permits, so it works as the non-root user below. socat is NOT
+# needed with it: the CLI only spawns socat to bridge a restricted network, and
+# the scrub leaves the network alone.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl bubblewrap \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && install -m 0755 -d /etc/apt/keyrings /etc/apt/sources.list.d \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
