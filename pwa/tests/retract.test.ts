@@ -138,16 +138,19 @@ describe("send path wiring — held replies are taken, not rendered", () => {
     expect(fnBody("transmit")).toContain("retract_seqs: retractSeqs");
   });
 
+  // rewritten for 0.3.116: the bare appendChild became seatRow, the one tail
+  // rule every reorder now goes through (tailorder.ts), which reads the same
+  // way here and no longer drops the wrapper past OTHER failed bubbles
   it("failure (and only failure) renders the taken replies, above the failed bubble", () => {
     const gate = body.indexOf("failedSends.has(w)");
     expect(gate).toBeGreaterThan(-1);
     const after = body.slice(gate);
     const render = after.indexOf("applyEvent(frame)");
-    const reappend = after.indexOf("threadEl().appendChild(w)");
+    const reseat = after.indexOf("seatRow(w)");
     expect(render).toBeGreaterThan(-1);
-    // the failed wrapper is re-appended AFTER the replies render, so the
+    // the failed wrapper is re-seated AFTER the replies render, so the
     // replies sit above it — the order a reload rebuilds
-    expect(reappend).toBeGreaterThan(render);
+    expect(reseat).toBeGreaterThan(render);
     expect(after).toContain('route: "send-fail"');
   });
 

@@ -10,16 +10,18 @@
 // looping blink, and .typing has no entrance rule to replay).
 //
 // Order rule preserved from applyEvent: keyed tail appends slot above
-// .evt.restored wrappers (a prior session's unsent sends stay pinned at the
-// very tail), so the resting order from the top is: messages, dots, restored
-// failures. moveTypingAfter anchors to the wrapper that just landed, so it
-// composes with either append site without re-deriving that rule.
+// .evt.failed wrappers (an unsent send stays pinned at the very tail, whether
+// it failed this session or was restored from a previous one), so the resting
+// order from the top is: messages, dots, failures. moveTypingAfter anchors to
+// the wrapper that just landed, so it composes with either append site without
+// re-deriving that rule. The marker was .evt.restored, which named only the
+// restored half; tailorder.ts now holds one rule for both.
 
-/** initial placement for a fresh #typing: above restored failures, else the end */
+/** initial placement for a fresh #typing: above the unsent tail, else the end */
 export function placeTyping(thread: HTMLElement, dots: HTMLElement): void {
-  const restored = thread.querySelector<HTMLElement>(".evt.restored");
-  if (restored) {
-    if (dots.nextElementSibling !== restored) thread.insertBefore(dots, restored);
+  const unsent = thread.querySelector<HTMLElement>(".evt.failed");
+  if (unsent) {
+    if (dots.nextElementSibling !== unsent) thread.insertBefore(dots, unsent);
   } else if (thread.lastElementChild !== dots) {
     thread.appendChild(dots);
   }

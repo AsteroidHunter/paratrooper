@@ -83,9 +83,21 @@ describe("flightSettled — the parked stamp lands when the last flight ends", (
     expect(fly.lastIndexOf("flightSettled()")).toBeGreaterThan(fly.indexOf('phase: "cancel"'));
   });
 
+  // rewritten for 0.3.116: the gate now parks a retry's SEAT beside the stamp,
+  // so the one early return became a count check and a two-slot emptiness check
   it("waits for the LAST flight: one counter, floored, drained per settle", () => {
     expect(body).toContain("if (flightsUp > 0) flightsUp--");
-    expect(body).toContain("if (flightsUp > 0 || !receiptPending) return");
+    expect(body).toContain("if (flightsUp > 0) return");
+    expect(body).toContain("if (!landings.length && !receiptPending) return");
+  });
+
+  it("a parked landing rides the same settle, seated before the stamp reads it", () => {
+    // the seat the retry takes moves the anchor the stamp hangs off, so it is
+    // applied first and inside the same shift
+    const land = body.indexOf("applyLanding(w, at)");
+    expect(land).toBeGreaterThan(body.indexOf("beginSiblingShift()"));
+    expect(land).toBeLessThan(body.indexOf("updateReceipt()"));
+    expect(body).toContain("landPending = []");
   });
 
   it("applies through the sibling-shift machinery, so the seat's hop glides", () => {
@@ -106,10 +118,11 @@ describe("flightSettled — the parked stamp lands when the last flight ends", (
     expect(body.indexOf("receiptPending = false")).toBeLessThan(body.indexOf("updateReceipt()"));
   });
 
-  it("a fresh shell resets the counter and the slot", () => {
+  it("a fresh shell resets the counter and both slots", () => {
     const shell = fnBody("renderChat");
     expect(shell).toContain("flightsUp = 0");
     expect(shell).toContain("receiptPending = false");
+    expect(shell).toContain("landPending = []");
   });
 });
 

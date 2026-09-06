@@ -40,7 +40,7 @@ class FakeNode {
   querySelector(sel: string): FakeNode | null {
     for (const k of this.kids) {
       if (sel === "#typing" && k.id === "typing") return k;
-      if (sel === ".evt.restored" && k.classes.includes("evt") && k.classes.includes("restored")) {
+      if (sel === ".evt.failed" && k.classes.includes("evt") && k.classes.includes("failed")) {
         return k;
       }
     }
@@ -59,7 +59,12 @@ function thread(...kids: FakeNode[]): FakeNode {
 
 const msg = (id: string): FakeNode => new FakeNode(id, "evt");
 const dots = (): FakeNode => new FakeNode("typing");
-const restored = (): FakeNode => new FakeNode("old-fail", "evt", "restored");
+// a prior session's unsent send: restored from the outbox and marked failed,
+// which is the class the order rule reads (main.ts markFailed)
+const restored = (): FakeNode => new FakeNode("old-fail", "evt", "restored", "failed");
+// this session's failure: no restored marker at all, and it holds the tail
+// exactly the same way
+const failed = (): FakeNode => new FakeNode("new-fail", "evt", "failed");
 
 describe("moveTypingAfter", () => {
   it("a send during dots: the appended wrapper ends up above them", () => {
@@ -80,10 +85,10 @@ describe("moveTypingAfter", () => {
     expect(order(t)).toEqual(["m1", "w1", "w2", "typing"]);
   });
 
-  it("keyed tail append above restored: final order messages, dots, restored", () => {
+  it("keyed tail append above the unsent tail: messages, dots, failures", () => {
     const t = thread(msg("m1"), dots(), restored());
     const w = msg("w1");
-    t.insertBefore(w, t.querySelector(".evt.restored")); // applyEvent's tail slot
+    t.insertBefore(w, t.querySelector(".evt.failed")); // applyEvent's tail slot
     moveTypingAfter(el(t), el(w));
     expect(order(t)).toEqual(["m1", "w1", "typing", "old-fail"]);
   });
@@ -112,16 +117,24 @@ describe("placeTyping", () => {
     expect(order(t)).toEqual(["m1", "m2", "typing"]);
   });
 
+  // rewritten for 0.3.116: the marker the rule reads is .evt.failed, so a
+  // failure from THIS session holds the dots up the same way a restored one does
   it("fresh dots slot above restored failures, never below them", () => {
     const t = thread(msg("m1"), restored());
     placeTyping(el(t), el(dots()));
     expect(order(t)).toEqual(["m1", "typing", "old-fail"]);
   });
 
+  it("fresh dots slot above a live failure too, not only a restored one", () => {
+    const t = thread(msg("m1"), failed());
+    placeTyping(el(t), el(dots()));
+    expect(order(t)).toEqual(["m1", "typing", "new-fail"]);
+  });
+
   it("dots already in position are left alone", () => {
-    const t = thread(msg("m1"), dots(), restored());
+    const t = thread(msg("m1"), dots(), failed());
     const d = t.kids[1];
     placeTyping(el(t), el(d));
-    expect(order(t)).toEqual(["m1", "typing", "old-fail"]);
+    expect(order(t)).toEqual(["m1", "typing", "new-fail"]);
   });
 });
