@@ -280,6 +280,34 @@ def test_browser_is_launched_with_the_same_scrubbed_env(tmp_path, monkeypatch):
     assert img.getpixel((300, 300)) == (200, 200, 200)  # and the capture worked
 
 
+def test_browser_keeps_its_own_sandbox(tmp_path, monkeypatch):
+    """The browser is launched with nothing that turns its sandbox off. The
+    ``--no-sandbox`` flag was here on the assumption that managed hosts block
+    the user namespaces the sandbox needs; a probe on the running worker found
+    them permitted and the renderers really confined without it, so the flag
+    went. This is Chromium's own sandbox and no other: the browser runs in the
+    worker's own process, outside the bubblewrap sandbox the CLI wraps the
+    agent's shell commands in. The capture at the end is the point, since a
+    browser that would not start under its own sandbox would fail right here."""
+    from playwright.async_api import BrowserType
+
+    seen = []
+    real_launch = BrowserType.launch
+
+    async def spy(self, **kwargs):
+        seen.append(kwargs)
+        return await real_launch(self, **kwargs)
+
+    monkeypatch.setattr(BrowserType, "launch", spy)
+    img = _shot(_fixture_site(tmp_path), tmp_path / "board.png")
+
+    assert len(seen) == 1
+    assert seen[0].get("headless") is True
+    for flag in seen[0].get("args") or []:
+        assert "sandbox" not in flag, flag
+    assert img.getpixel((300, 300)) == (200, 200, 200)
+
+
 # --- the tool wrapper (tools.py) ---------------------------------------------
 
 def _tool_handlers(ctx) -> dict:

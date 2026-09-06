@@ -177,7 +177,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.119"; // A message that failed to send now drops below anything you send after it, so Try Again seats it where a reload would and the bubble itself never moves
+const APP_VERSION = "0.3.120"; // The browser that takes the board screenshot now runs with its own protection turned on, and the worker's account can be logged into again for a look around
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

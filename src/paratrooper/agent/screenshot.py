@@ -8,10 +8,17 @@ open and capture the opened view). Building (rather than a persistent dev
 server) means each screenshot reflects exactly the committed state; the server
 is spun up per-capture and torn down.
 
-Chromium runs with ``--no-sandbox`` (managed hosts like Render block the user
-namespaces Chromium's own sandbox needs). The browser binary is installed
-separately (``playwright install chromium``) in the worker image (Phase 5.2);
-this code is exercised end-to-end at the 5.4 smoke.
+Chromium runs with its own sandbox on: no ``--no-sandbox``. The flag used to be
+here because managed hosts were assumed to block the user namespaces that
+sandbox needs, and a probe on the running worker on 2026-09-04 found the
+opposite — the namespaces are permitted, the browser starts without the flag,
+and its renderers really are confined (each in its own user namespace, each
+reporting a seccomp filter), none of which is true with the flag on. Note this
+is Chromium's sandbox and nothing else: the browser is launched from the
+worker's own Python process, which is outside the bubblewrap sandbox the Claude
+CLI wraps the agent's shell commands in, so the two never meet. The browser
+binary is installed separately (``playwright install chromium``) in the worker
+image (Phase 5.2); this code is exercised end-to-end at the 5.4 smoke.
 
 Everything this step launches gets a hand-built environment and hardened npm
 flags rather than the worker's own environment — see ``ENV_PASSTHROUGH`` and
@@ -198,9 +205,8 @@ async def screenshot_board(
 
     with _serve(dist) as base_url:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True, args=["--no-sandbox"], env=_clean_env()
-            )
+            # no args: Chromium keeps its own sandbox (see the module docstring)
+            browser = await p.chromium.launch(headless=True, env=_clean_env())
             try:
                 page = await browser.new_page(
                     viewport={"width": viewport[0], "height": viewport[1]}

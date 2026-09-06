@@ -39,7 +39,12 @@ COPY src ./src
 COPY config ./config
 RUN pip install --no-cache-dir -e ".[agent]"
 
-# Chromium + its OS dependencies for screenshot_board (run with --no-sandbox).
+# Chromium + its OS dependencies for screenshot_board. It runs with its own
+# sandbox on: a probe on the running worker found unprivileged user namespaces
+# permitted here, so the browser needs no --no-sandbox and its renderers are
+# genuinely confined. That sandbox is Chromium's own and has nothing to do with
+# the bubblewrap above, which only wraps the agent's shell commands; the browser
+# is launched from the worker's own process, outside it.
 # The browsers land in a shared path rather than root's cache, so the
 # unprivileged runtime user below can actually read them.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
@@ -53,8 +58,16 @@ RUN python -m playwright install --with-deps chromium \
 # The empty ~/.ssh is Render's price of admission: its SSH closes the session
 # the instant it logs in unless the running user already owns one at 0700, and
 # the sandbox probe rides in over exactly that shell.
+# The folder alone is not enough, which cost a login on the platform to find
+# out: `useradd` leaves the new account marked locked, and Render refuses SSH
+# into a container whose running account is locked, so the session closes the
+# moment it opens. `usermod -p '*'` clears the lock and leaves a password field
+# that matches no password, so only a key Render itself holds gets in. Do not
+# reach for `passwd -u` instead: it refuses to unlock a passwordless account and
+# fails the image build outright.
 ENV HOME=/home/app
 RUN useradd --create-home --home-dir /home/app --uid 1000 --shell /bin/bash app \
+    && usermod -p '*' app \
     && mkdir -p /home/app/.claude /home/app/.ssh /app/site_checkout /tmp/paratrooper-inbox \
     && chown -R app:app /home/app /app/site_checkout /tmp/paratrooper-inbox \
     && chmod 0700 /home/app/.ssh
