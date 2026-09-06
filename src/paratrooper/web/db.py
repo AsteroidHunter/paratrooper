@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     subscription TEXT NOT NULL
 );
 
+-- small key/value rows the service keeps about itself, not about the thread.
+-- One row so far: the fingerprint of the sign-in token the push registrations
+-- above were made under, so a rotated token can be noticed at start-up.
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS attachments (
     key          TEXT PRIMARY KEY,   -- inbox key already stored in messages.attachments
     thumb        BLOB NOT NULL,      -- small webp; the only pixels that outlive the inbox TTL
@@ -430,6 +438,31 @@ class ThreadStore:
     def remove_subscription(self, endpoint: str) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))
+            self._conn.commit()
+
+    def clear_subscriptions(self) -> int:
+        """Drop every registered push address; returns how many went. Used when
+        the sign-in token changes: the rows were registered by a device holding
+        the old token and none of them may outlive it."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM push_subscriptions")
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
+    # --- service settings (small key/value rows about the service itself) ---
+
+    def setting(self, key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM settings WHERE key=?", (key,)
+            ).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES (?,?)", (key, value)
+            )
             self._conn.commit()
 
     def close(self) -> None:

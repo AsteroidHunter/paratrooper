@@ -270,6 +270,15 @@ export function rememberRegisteredEndpoint(endpoint: string): void {
   }
 }
 
+/** Log out: this device no longer claims to have registered anything. */
+export function forgetRegisteredEndpoint(): void {
+  try {
+    localStorage.removeItem(ENDPOINT_KEY);
+  } catch {
+    /* private mode can refuse storage outright; there is nothing to forget */
+  }
+}
+
 /**
  * The JSON body for POST /api/push/subscribe: the subscription itself, plus
  * `replaces` when this registration supersedes a different address.
@@ -319,6 +328,24 @@ function openLinkDB(): Promise<IDBDatabase | null> {
  * quietly on every failure — the page's registration already succeeded.
  */
 export async function savePushLink(link: PushLink): Promise<void> {
+  await writeLinkStore((store) => store.put({ id: PUSH_LINK_ID, ...link }));
+}
+
+/**
+ * Log out: delete the record above.
+ *
+ * That record is a copy of the app token, left on the device so the service
+ * worker can re-register with no page running. Logging out threw the page's
+ * copy away and left this one, so the token outlived the session that was
+ * ended and the worker could go on registering with it. Resolves quietly on
+ * every failure, exactly like the write: a log out must always finish.
+ */
+export async function clearPushLink(): Promise<void> {
+  await writeLinkStore((store) => store.delete(PUSH_LINK_ID));
+}
+
+/** One readwrite transaction against the worker's record, failures and all. */
+async function writeLinkStore(work: (store: IDBObjectStore) => void): Promise<void> {
   const db = await openLinkDB();
   if (!db) return;
   await new Promise<void>((resolve) => {
@@ -333,7 +360,7 @@ export async function savePushLink(link: PushLink): Promise<void> {
     transaction.onerror = () => resolve();
     transaction.onabort = () => resolve();
     try {
-      transaction.objectStore(PUSH_LINK_STORE).put({ id: PUSH_LINK_ID, ...link });
+      work(transaction.objectStore(PUSH_LINK_STORE));
     } catch {
       resolve();
     }

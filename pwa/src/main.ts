@@ -53,7 +53,9 @@ import type { Dims } from "./photofit";
 import { WAIT_CLASS, createPhotoQueue, nearMargin } from "./photolazy";
 import { receiptFor } from "./receipts";
 import {
+  clearPushLink,
   createPushSetup,
+  forgetRegisteredEndpoint,
   lastRegisteredEndpoint,
   registerBody,
   rememberRegisteredEndpoint,
@@ -571,7 +573,48 @@ const gateFetch: Fetcher = (url, init) => fetch(url, init);
 // socket (on purpose, so its close arms nothing), any reconnect already armed,
 // the pending cache write and the cached thread itself, which is credentialed
 // content. The caller renders whatever comes next.
+// Log out: take this device off notifications, both ends.
+//
+// Stopping the popup's state machine was all logging out used to do, and it did
+// not touch either half of the registration. The server kept the row and went on
+// pushing every reply to a phone that had been signed out, and the service
+// worker kept its own copy of the app token in IndexedDB, so a rotation event
+// could re-register with a credential the session had already thrown away.
+//
+// Fired and not awaited, because leaving the chat cannot wait on the network: the
+// token is captured here, before the caller clears it, and the on-device copies
+// go whether or not the server was reachable. A server that never hears about it
+// still loses the row at the next token rotation (the boot check), and the phone
+// no longer holds anything to register with meanwhile.
+function unregisterPushOnLogout(): void {
+  const bearer = token;
+  const registration = pushRegistration;
+  void (async () => {
+    let endpoint = lastRegisteredEndpoint();
+    try {
+      const subscription = await registration?.pushManager.getSubscription();
+      if (subscription?.endpoint) endpoint = subscription.endpoint;
+    } catch {
+      /* the memo is the fallback, and may itself be null */
+    }
+    if (bearer && endpoint) {
+      try {
+        await fetch("/api/push/unsubscribe", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ endpoint }),
+        });
+      } catch {
+        /* best effort: the on-device copies go below regardless */
+      }
+    }
+    forgetRegisteredEndpoint();
+    await clearPushLink();
+  })();
+}
+
 function leaveChat(): void {
+  unregisterPushOnLogout(); // first: it needs the token the next lines throw away
   pushNotifications?.stop();
   pushNotifications = null;
   localStorage.removeItem(TOKEN_KEY);

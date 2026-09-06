@@ -13,6 +13,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from .models import EVENT_POLICY
 
@@ -21,6 +22,76 @@ logger = logging.getLogger(__name__)
 NOTIFICATION_EXCERPT_CHARS = 200
 PUSH_TIMEOUT_SECONDS = 10
 FINGERPRINT_CHARS = 8
+
+# --- who may be registered as a push address ---------------------------------
+#
+# A registered endpoint is an address this service will POST to, over and over,
+# with the app's own notification text. Until this list existed, any address at
+# all could be registered, so one authenticated request turned the service into
+# a sender aimed wherever the caller liked, and a second one could name an
+# existing row as "replaced" and delete the phone's real registration with it.
+#
+# The list is the browser push services, and browser push services only. A
+# subscription's endpoint is minted by the browser, not by us and not by the
+# page, so anything outside this set was not minted by a browser and is not a
+# device of ours. Hostnames are matched exactly and https only.
+#
+# Sources (read rather than guessed, 2026-09-05):
+#   web.push.apple.com                  Apple, Safari and iOS home-screen apps —
+#                                       the one this app actually runs on
+#   fcm.googleapis.com                  Google FCM, Chrome and Chromium browsers
+#   android.googleapis.com              Google's older GCM host, still handed out
+#                                       to some Chromium builds
+#   updates.push.services.mozilla.com   Mozilla autopush, Firefox
+#
+# These are vendor-operated names and can change. A registration refused here
+# shows up as the notification setup failing on the device, which is the signal
+# to come back and re-read the vendors' current hosts.
+PUSH_SERVICE_HOSTS = frozenset({
+    "web.push.apple.com",
+    "fcm.googleapis.com",
+    "android.googleapis.com",
+    "updates.push.services.mozilla.com",
+})
+
+# what the phone is told when an address is refused
+NOT_A_PUSH_SERVICE = "that is not a browser notification address"
+
+
+def is_push_service_endpoint(endpoint: object) -> bool:
+    """Was ``endpoint`` minted by one of the browser push services above?
+
+    Everything about the URL is checked, not just its start: a string like
+    ``https://evil.example/web.push.apple.com`` has the right letters in it and
+    the wrong host, and only parsing tells the two apart.
+    """
+    if not isinstance(endpoint, str) or not endpoint:
+        return False
+    try:
+        parsed = urlparse(endpoint)
+    except ValueError:
+        return False
+    if parsed.scheme != "https":
+        return False
+    return (parsed.hostname or "").lower() in PUSH_SERVICE_HOSTS
+
+
+# the settings row holding the fingerprint of the token the stored registrations
+# were made under (see ``drop_subscriptions_on_token_change`` in app.py)
+TOKEN_SETTING = "app_token_fingerprint"
+
+
+def token_fingerprint(token: str) -> str:
+    """A comparable stand-in for the sign-in token, safe to keep on disk.
+
+    Registrations are made by a device that presented the token, so they are
+    only meaningful while that token is the token: rotating it is how a device
+    is taken off the app, and a registration that outlives the rotation is a
+    push still going to a phone that has been signed out. The full SHA-256 is
+    stored rather than the token itself, so the thread database never holds the
+    credential it is asked about.
+    """
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def endpoint_fingerprint(endpoint: str) -> str:

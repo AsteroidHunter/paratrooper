@@ -49,7 +49,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from redis import exceptions as redis_exc
 
-from ..agent.config import Config, load_config
+from ..agent.config import Config, ConfigError, app_token, load_config
 from . import push
 from .auth import require_token, verify_token
 from .batching import ThreadCoordinator
@@ -453,6 +453,39 @@ async def _linger_after_restart(state: AppState) -> None:
         logger.info("start-up drain check: drained, suspend armed in %.0fs", state.linger_s)
 
 
+def drop_subscriptions_on_token_change(store: ThreadStore) -> int:
+    """Delete every push registration when the sign-in token has changed since
+    they were made; returns how many were dropped.
+
+    Rotating the token is how a device is taken off this app, and it was the one
+    thing that did not reach the notification registrations: the rows sat on the
+    disk under the old token and the service kept pushing to them, so a phone
+    signed out by a rotation went on receiving every reply. The store keeps a
+    fingerprint of the token its rows were registered under; a boot that finds a
+    different one clears the table and writes the new fingerprint, and the next
+    app open re-registers exactly as a fresh install does.
+
+    A database that has never held a fingerprint (every database, the first boot
+    after this shipped) counts as different, so the existing rows go once and are
+    re-made on the next open. Best-effort about a missing token: the service
+    cannot serve a single route without one, and this is not the place to say so.
+    """
+    try:
+        current = push.token_fingerprint(app_token())
+    except ConfigError:
+        logger.warning("no app token configured: leaving push registrations alone")
+        return 0
+    if store.setting(push.TOKEN_SETTING) == current:
+        return 0
+    dropped = store.clear_subscriptions()
+    store.set_setting(push.TOKEN_SETTING, current)
+    logger.info(
+        "sign-in token changed: dropped %d push registration(s) made under the old one",
+        dropped,
+    )
+    return dropped
+
+
 async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
     for ws in list(state.sockets.get(thread_id, set())):
         try:
@@ -621,6 +654,9 @@ def _lifespan(injected: AppState | None):
             return
         config = load_config()
         store = ThreadStore(config.inbox.parent / "threads.sqlite")
+        # before anything can push: registrations made under a token that is no
+        # longer the token do not survive the boot that notices
+        await asyncio.to_thread(drop_subscriptions_on_token_change, store)
         queue = JobQueue(connect())
 
         async def enqueue_cb(thread_id, job_id, text, attachments):
@@ -867,11 +903,21 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         "replaces" is transport, not part of the subscription, so it is taken
         off before the record is stored. Adding comes first: a failure between
         the two steps must leave the phone reachable, never unreachable.
+
+        Both addresses are checked against the browser push services
+        (``push.PUSH_SERVICE_HOSTS``) before either is acted on. A registered
+        endpoint is an address this service will POST its own notification text
+        to, and "replaces" deletes a row by name, so an unchecked pair let one
+        request aim the sender wherever it liked AND unregister the phone.
         """
         replaces = subscription.pop("replaces", None)
         endpoint = subscription.get("endpoint")
         if not endpoint:
             raise HTTPException(status_code=400, detail="subscription missing endpoint")
+        if not push.is_push_service_endpoint(endpoint):
+            raise HTTPException(status_code=400, detail=push.NOT_A_PUSH_SERVICE)
+        if replaces is not None and not push.is_push_service_endpoint(replaces):
+            raise HTTPException(status_code=400, detail=push.NOT_A_PUSH_SERVICE)
         store = st().store
         # keyed by endpoint, so re-registering an unchanged address is an upsert
         await asyncio.to_thread(store.add_subscription, endpoint, json.dumps(subscription))
@@ -882,6 +928,24 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                 push.endpoint_fingerprint(endpoint),
                 push.endpoint_fingerprint(replaces),
             )
+        return {"ok": True}
+
+    @app.post("/api/push/unsubscribe", dependencies=[Depends(require_token)])
+    async def push_unsubscribe(body: dict) -> dict:
+        """Take this device's push address off the service — the log-out half of
+        the pair above.
+
+        Logging out used to leave the registration standing, so a phone that had
+        been signed out kept receiving every reply until the address happened to
+        rotate. The app calls this with the token it is about to throw away.
+        Idempotent: an address that is not registered is not an error, since a
+        log out must always finish."""
+        endpoint = body.get("endpoint")
+        if not push.is_push_service_endpoint(endpoint):
+            raise HTTPException(status_code=400, detail=push.NOT_A_PUSH_SERVICE)
+        await asyncio.to_thread(st().store.remove_subscription, endpoint)
+        logger.info("push subscription %s unregistered on log out",
+                    push.endpoint_fingerprint(str(endpoint)))
         return {"ok": True}
 
     @app.websocket("/ws")

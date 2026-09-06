@@ -2162,14 +2162,18 @@ def test_push_routes(client, monkeypatch):
     monkeypatch.delenv("VAPID_PUBLIC_KEY", raising=False)
     auth = {"Authorization": "Bearer tok"}
     assert client.get("/api/push/key", headers=auth).json() == {"key": None}  # not configured
-    sub = {"endpoint": "https://push.example/xyz", "keys": {"p256dh": "k", "auth": "a"}}
+    sub = {"endpoint": "https://web.push.apple.com/xyz", "keys": {"p256dh": "k", "auth": "a"}}
     assert client.post("/api/push/subscribe", headers=auth, json=sub).json() == {"ok": True}
     assert client.app.state.app_state.store.subscriptions() == [sub]
     assert client.post("/api/push/subscribe", headers=auth, json={}).status_code == 400
 
 
+# a real browser push address: registration now refuses anything else
 def _sub(name):
-    return {"endpoint": f"https://push.example/{name}", "keys": {"p256dh": "k", "auth": "a"}}
+    return {
+        "endpoint": f"https://web.push.apple.com/{name}",
+        "keys": {"p256dh": "k", "auth": "a"},
+    }
 
 
 def test_subscribing_with_replaces_drops_the_rotated_away_row(client, caplog):
@@ -2233,10 +2237,134 @@ def test_replaces_naming_an_unknown_address_is_a_harmless_no_op(client):
     response = client.post(
         "/api/push/subscribe",
         headers=auth,
-        json={**sub, "replaces": "https://push.example/never-registered"},
+        json={**sub, "replaces": "https://web.push.apple.com/never-registered"},
     )
     assert response.json() == {"ok": True}
     assert store.subscriptions() == [sub]
+
+
+# --- only a browser push service may be registered ----------------------------
+
+def test_only_browser_push_services_may_be_registered(client):
+    """A registered endpoint is an address this service POSTs its own text to,
+    over and over. Anything a browser did not mint is refused."""
+    auth = {"Authorization": "Bearer tok"}
+    store = client.app.state.app_state.store
+    for endpoint in (
+        "https://attacker.example/collect",
+        "http://web.push.apple.com/plain-http",  # https only
+        "https://evil.example/web.push.apple.com/looks-right",  # host, not letters
+        "https://web.push.apple.com.evil.example/suffix",
+        "not a url at all",
+    ):
+        refused = client.post(
+            "/api/push/subscribe", headers=auth,
+            json={"endpoint": endpoint, "keys": {"p256dh": "k", "auth": "a"}},
+        )
+        assert refused.status_code == 400, endpoint
+        assert refused.json()["detail"] == "that is not a browser notification address"
+    assert store.subscriptions() == []
+
+    # and every service the app can actually be installed on is accepted
+    from paratrooper.web import push
+
+    for host in push.PUSH_SERVICE_HOSTS:
+        ok = client.post(
+            "/api/push/subscribe", headers=auth,
+            json={"endpoint": f"https://{host}/device", "keys": {"p256dh": "k", "auth": "a"}},
+        )
+        assert ok.status_code == 200, host
+    assert len(store.subscriptions()) == len(push.PUSH_SERVICE_HOSTS)
+
+
+def test_replaces_cannot_name_an_address_a_browser_never_minted(client):
+    """"replaces" deletes a row by name, so an unchecked one let a single
+    request unregister the phone. The registration it rode in on goes too."""
+    auth = {"Authorization": "Bearer tok"}
+    store = client.app.state.app_state.store
+    real = _sub("the-phone")
+    client.post("/api/push/subscribe", headers=auth, json=real)
+
+    refused = client.post(
+        "/api/push/subscribe", headers=auth,
+        json={**_sub("attacker"), "replaces": "https://attacker.example/collect"},
+    )
+    assert refused.status_code == 400
+    assert store.subscriptions() == [real]  # the phone is still registered
+
+
+# --- a rotated sign-in token takes every registration with it -----------------
+
+def test_a_changed_sign_in_token_drops_every_registration(tmp_path, monkeypatch):
+    """Rotating the token is how a device is taken off the app. A registration
+    that outlives the rotation is a push going to a phone that is signed out."""
+    from paratrooper.web import push
+    from paratrooper.web.app import drop_subscriptions_on_token_change
+
+    monkeypatch.setenv("PARATROOPER_APP_TOKEN", "first-token")
+    store = ThreadStore(tmp_path / "t.sqlite")
+    store.add_subscription("https://web.push.apple.com/a", '{"endpoint": "a"}')
+    store.add_subscription("https://web.push.apple.com/b", '{"endpoint": "b"}')
+
+    # a database that has never held a fingerprint counts as changed: the rows
+    # on it were registered under a token nothing here can vouch for
+    assert drop_subscriptions_on_token_change(store) == 2
+    assert store.subscriptions() == []
+    assert store.setting(push.TOKEN_SETTING) == push.token_fingerprint("first-token")
+
+    # the same token again is a no-op, so a redeploy costs nobody their setup
+    store.add_subscription("https://web.push.apple.com/c", '{"endpoint": "c"}')
+    assert drop_subscriptions_on_token_change(store) == 0
+    assert len(store.subscriptions()) == 1
+
+    # and the rotation itself
+    monkeypatch.setenv("PARATROOPER_APP_TOKEN", "second-token")
+    assert drop_subscriptions_on_token_change(store) == 1
+    assert store.subscriptions() == []
+    assert store.setting(push.TOKEN_SETTING) == push.token_fingerprint("second-token")
+    # the token itself is never what is written down
+    assert "second-token" not in (store.setting(push.TOKEN_SETTING) or "")
+
+
+def test_the_token_fingerprint_check_survives_a_missing_token(tmp_path, monkeypatch):
+    """The service cannot serve a route without a token, and this is not the
+    place that says so: it leaves the rows alone and lets the boot continue."""
+    from paratrooper.web.app import drop_subscriptions_on_token_change
+
+    monkeypatch.delenv("PARATROOPER_APP_TOKEN", raising=False)
+    store = ThreadStore(tmp_path / "t.sqlite")
+    store.add_subscription("https://web.push.apple.com/a", '{"endpoint": "a"}')
+    assert drop_subscriptions_on_token_change(store) == 0
+    assert len(store.subscriptions()) == 1
+
+
+# --- log out unregisters this device ------------------------------------------
+
+def test_logging_out_unregisters_the_device(client):
+    auth = {"Authorization": "Bearer tok"}
+    store = client.app.state.app_state.store
+    mine, other = _sub("this-phone"), _sub("some-other-device")
+    for sub in (mine, other):
+        client.post("/api/push/subscribe", headers=auth, json=sub)
+
+    gone = client.post(
+        "/api/push/unsubscribe", headers=auth, json={"endpoint": mine["endpoint"]}
+    )
+    assert gone.json() == {"ok": True}
+    assert store.subscriptions() == [other]
+
+    # idempotent: a log out must always finish, even a second one
+    assert client.post(
+        "/api/push/unsubscribe", headers=auth, json={"endpoint": mine["endpoint"]}
+    ).status_code == 200
+    # and it is the same gate and the same address check as registration
+    assert client.post(
+        "/api/push/unsubscribe", json={"endpoint": mine["endpoint"]}
+    ).status_code == 401
+    assert client.post(
+        "/api/push/unsubscribe", headers=auth, json={"endpoint": "https://attacker.example/x"}
+    ).status_code == 400
+    assert store.subscriptions() == [other]
 
 
 def test_watchdog_clears_stuck_job():

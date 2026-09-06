@@ -8,7 +8,9 @@ import {
   PUSH_LINK_DB,
   PUSH_LINK_ID,
   PUSH_LINK_STORE,
+  clearPushLink,
   createPushSetup,
+  forgetRegisteredEndpoint,
   lastRegisteredEndpoint,
   registerBody,
   rememberRegisteredEndpoint,
@@ -471,6 +473,17 @@ describe("the page's memory of its last registered endpoint", () => {
     expect(lastRegisteredEndpoint()).toBeNull();
     fakeLocalStorage(); // leave nothing throwing behind for later cases
   });
+
+  it("forgets the memo on log out, and does not mind having nothing to forget", () => {
+    fakeLocalStorage();
+    rememberRegisteredEndpoint("https://push.example/first");
+    forgetRegisteredEndpoint();
+    expect(lastRegisteredEndpoint()).toBeNull();
+    expect(() => forgetRegisteredEndpoint()).not.toThrow();
+    refuseLocalStorage();
+    expect(() => forgetRegisteredEndpoint()).not.toThrow();
+    fakeLocalStorage();
+  });
 });
 
 describe("the record the service worker reads", () => {
@@ -518,6 +531,21 @@ describe("the record the service worker reads", () => {
     const factory = globalThis.indexedDB;
     (globalThis as { indexedDB?: IDBFactory }).indexedDB = undefined;
     await expect(savePushLink(link)).resolves.toBeUndefined();
+    globalThis.indexedDB = factory;
+  });
+
+  it("goes on log out: the record is a copy of the app token", async () => {
+    await savePushLink(link);
+    expect(await readLink()).not.toBeNull();
+    await clearPushLink();
+    expect(await readLink()).toBeNull();
+  });
+
+  it("clears quietly with no record and with no IndexedDB at all", async () => {
+    await expect(clearPushLink()).resolves.toBeUndefined(); // nothing stored yet
+    const factory = globalThis.indexedDB;
+    (globalThis as { indexedDB?: IDBFactory }).indexedDB = undefined;
+    await expect(clearPushLink()).resolves.toBeUndefined();
     globalThis.indexedDB = factory;
   });
 });
@@ -704,6 +732,31 @@ describe("centered notification popup wiring", () => {
     expect(start).toContain("key: publicKeyForWorker");
     expect(start).toContain("token,"); // the same bearer authHeaders() sends
     expect(start).toContain("endpoint: subscription.endpoint");
+  });
+
+  it("unregisters this device on log out, both ends of the registration", () => {
+    const off = sourceBetween("function unregisterPushOnLogout(", "function leaveChat(");
+    // the token is taken before leaveChat clears it, and it is what the
+    // unregister request is sent with
+    expect(off).toContain("const bearer = token;");
+    expect(off).toContain('fetch("/api/push/unsubscribe"');
+    expect(off).toContain("Authorization: `Bearer ${bearer}`");
+    // the address is the one the browser holds now, with the page's memo as the
+    // fallback for a device whose subscription cannot be read
+    expect(off).toContain("registration?.pushManager.getSubscription()");
+    expect(off).toContain("lastRegisteredEndpoint()");
+    // and the on-device copies go whether or not the server was reachable: both
+    // calls sit outside the fetch's own try
+    expect(off).toContain("forgetRegisteredEndpoint();");
+    expect(off).toContain("await clearPushLink();");
+    expect(off.indexOf("forgetRegisteredEndpoint();")).toBeGreaterThan(
+      off.indexOf('fetch("/api/push/unsubscribe"'),
+    );
+    // leaveChat runs it FIRST, before the lines that throw the token away
+    const leave = sourceBetween("function leaveChat(", "// --- chat shell");
+    expect(leave.indexOf("unregisterPushOnLogout();")).toBeLessThan(
+      leave.indexOf("localStorage.removeItem(TOKEN_KEY)"),
+    );
   });
 
   it("gives the worker the key the page itself just fetched from the key route", () => {
