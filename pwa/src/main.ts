@@ -178,7 +178,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.121"; // Scrolling springs the bubbles: they lag the drag by their distance from your finger and settle back gently, held at zero through every send, reply, ride and keyboard lift so nothing else is disturbed
+const APP_VERSION = "0.3.122"; // Phase 3 lands on top of the springy scroll: the browser that takes the board screenshot now runs with its own protection turned on, and the worker's account can be logged into again for a look around
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

@@ -2387,6 +2387,61 @@ def test_run_job_closes_the_secret_files_to_the_file_tools(tmp_path, monkeypatch
         assert deny["hookSpecificOutput"]["permissionDecision"] == "deny", matcher.matcher
 
 
+# --- the worker image's shape (checklist 3.1) --------------------------------
+
+
+def test_worker_image_shape():
+    """The whole image in one reading. Every line pinned here was paid for on
+    the platform rather than reasoned out, and each one silently undoes a
+    different piece of this plan if it is dropped in a later edit:
+
+    * ``USER app`` is the entire privilege change. Without it the worker, the
+      agent's shells, the site build and the browser are all root again.
+    * the browsers live at a shared readable path instead of root's cache, or
+      the account below cannot open the one binary it must.
+    * ``~/.ssh`` at 0700 owned by that account is what Render's SSH wants, and
+      the unlock line is the other half of the same admission: ``useradd``
+      leaves the account marked locked and Render refuses a locked account, so
+      the session closes the instant it opens. ``usermod -p '*'`` clears the
+      lock while matching no password. ``passwd -u`` is the wrong form and
+      fails the build.
+    * the entrypoint wrapper is what keeps the worker-only secrets out of the
+      launch record; a plain ``CMD`` would put them all back.
+    * bubblewrap is what the CLI's env scrub needs on Linux, and its absence is
+      a worker where every message fails.
+    * ``gh`` stays gone: the shell holds no GitHub credential any more.
+    """
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.worker").read_text()
+    # the negative checks read this instead: the file's comments name the two
+    # things that must not be run, and saying why is the point of writing them
+    built = "\n".join(
+        line for line in dockerfile.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    assert re.search(r"^USER app$", built, re.M)
+
+    assert "ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in dockerfile
+    assert "chmod -R a+rX /ms-playwright" in dockerfile  # readable by the account below
+
+    assert "/home/app/.ssh" in dockerfile
+    assert "chmod 0700 /home/app/.ssh" in dockerfile
+    assert "usermod -p '*' app" in built
+    assert "passwd -u" not in built  # fails the build; see the docstring
+
+    assert "COPY docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint" in built
+    assert 'ENTRYPOINT ["worker-entrypoint"]' in built
+    assert "CMD [" not in built
+
+    assert re.search(r"apt-get install[^\n]*\bbubblewrap\b", built)
+
+    assert "cli.github.com" not in built
+    assert "githubcli-archive-keyring" not in built
+    assert not re.search(r"apt-get install[^\n]*\bgh\b", built)
+
+    # and the browser keeps its own sandbox: nothing in the image turns it off
+    assert "--no-sandbox" not in built
+
+
 def test_is_text_delta_classifier():
     """Typing dots must fire only on message-text streaming, not tool/thinking
     deltas."""
