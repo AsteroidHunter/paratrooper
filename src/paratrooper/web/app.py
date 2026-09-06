@@ -83,6 +83,7 @@ from .publish import (
 from .queue import JobQueue, connect
 from .render_control import RenderControl
 from .thumbs import image_blurhash, make_thumbnail
+from .uploads import MAX_UPLOAD_BYTES, NOT_A_PHOTO, TOO_LARGE, image_kind
 
 logger = logging.getLogger(__name__)
 
@@ -459,6 +460,25 @@ async def _linger_after_restart(state: AppState) -> None:
         logger.info("start-up drain check: drained, suspend armed in %.0fs", state.linger_s)
 
 
+UPLOAD_CHUNK_BYTES = 64 * 1024
+
+
+async def _read_within_cap(file: UploadFile) -> bytes:
+    """The upload's bytes, or a refusal the moment it goes over the cap.
+
+    Read in chunks and stopped at the first byte past the limit, so an oversized
+    body is refused while it is still arriving rather than after the whole of it
+    has been taken in and measured."""
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=TOO_LARGE)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def drop_subscriptions_on_token_change(store: ThreadStore) -> int:
     """Delete every push registration when the sign-in token has changed since
     they were made; returns how many were dropped.
@@ -757,7 +777,12 @@ def create_app(injected: AppState | None = None) -> FastAPI:
 
     @app.post("/api/upload", response_model=UploadResponse, dependencies=[Depends(require_token)])
     async def upload(file: UploadFile) -> UploadResponse:
-        content = await file.read()
+        # Both checks come before anything is stored. The blob store never
+        # evicts on its own, so a byte written is a byte kept, and the cap is
+        # counted while the body is still arriving rather than after.
+        content = await _read_within_cap(file)
+        if image_kind(content) is None:
+            raise HTTPException(status_code=415, detail=NOT_A_PHOTO)
         key = new_key(file.filename)
         await st().inbox.put(key, content)  # cross-service store (Key Value on Render)
         # persist a small preview NOW — the inbox blob expires in ~24h and this

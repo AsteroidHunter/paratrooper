@@ -5531,6 +5531,25 @@ async function send(): Promise<void> {
 // and File objects stay held for the next retry. retractSeqs ride the FIRST
 // attempt only: a retry follows a failure, and the failure path already
 // rendered the held replies (the server still has their rows).
+/**
+ * Put the server's own words on screen when it refuses a photo.
+ *
+ * Only for a refusal — a 4xx, which is a decision about this file and will be
+ * the same decision next time. A 5xx is a service that fell over and the retry
+ * treatment already covers it, so nothing is said about those beyond the
+ * failed bubble.
+ */
+async function showUploadRefusal(response: Response): Promise<void> {
+  if (response.status < 400 || response.status >= 500) return;
+  let detail = "";
+  try {
+    detail = String(((await response.json()) as { detail?: unknown }).detail ?? "");
+  } catch {
+    /* no body, or not JSON: the failed bubble is the whole message */
+  }
+  if (detail) localBubble("agent", "error", `⚠ ${detail}`);
+}
+
 async function transmit(
   w: HTMLElement, text: string, files: File[], retractSeqs: number[] = [],
 ): Promise<void> {
@@ -5544,7 +5563,13 @@ async function transmit(
     } catch {
       return markFailed(w, text, files);
     }
-    if (!r.ok) return markFailed(w, text, files);
+    if (!r.ok) {
+      // A refused photo is not a failed network: the server said WHY in plain
+      // words, and a Try Again on the same file would be refused the same way.
+      // Say it, once, above the failed bubble.
+      await showUploadRefusal(r);
+      return markFailed(w, text, files);
+    }
     keys.push((await r.json()).inbox_key);
   }
   let resp: Response;

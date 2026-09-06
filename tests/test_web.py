@@ -1298,6 +1298,70 @@ def test_health_open(client):
     assert body["ok"] is True and "version" in body
 
 
+# --- upload limits ------------------------------------------------------------
+
+def test_image_kind_reads_the_bytes_not_the_name():
+    from paratrooper.web.uploads import image_kind
+
+    assert image_kind(_png_bytes()) == "png"
+    assert image_kind(b"\xff\xd8\xff\xe0rest of a jpeg") == "jpeg"
+    assert image_kind(b"GIF89a....") == "gif"
+    assert image_kind(b"RIFF\x00\x00\x00\x00WEBPVP8 ") == "webp"
+    assert image_kind(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00") == "heif"
+    # and the things that only claim to be images
+    assert image_kind(b"plain text") is None
+    assert image_kind(b"") is None
+    assert image_kind(b"<?php echo 1; ?>") is None
+    assert image_kind(b"\x00\x00\x00\x18ftypqt  ") is None  # a video box, not a photo
+
+
+def test_upload_refuses_anything_that_is_not_a_photo(client):
+    auth = {"Authorization": "Bearer tok"}
+    refused = client.post(
+        "/api/upload", headers=auth,
+        # named and declared as a png, and none of that is what is checked
+        files={"file": ("innocent.png", b"#!/bin/sh\nrm -rf /", "image/png")},
+    )
+    assert refused.status_code == 415
+    assert refused.json()["detail"] == (
+        "That is not a photo I can open, so it was not sent. Send a JPEG, PNG or HEIC."
+    )
+
+
+def test_upload_refuses_anything_over_the_cap_before_storing_it(client, monkeypatch):
+    from paratrooper.web import app as app_mod
+
+    auth = {"Authorization": "Bearer tok"}
+    stored: list = []
+    monkeypatch.setattr(
+        client.app.state.app_state.inbox, "put",
+        lambda key, content: stored.append(key),  # noqa: ARG005
+    )
+    # a real png, past the cap: the bytes are an image, and it still refuses
+    monkeypatch.setattr(app_mod, "MAX_UPLOAD_BYTES", 1024)
+    big = _png_bytes(size=(400, 400))
+    assert len(big) > 1024
+    refused = client.post(
+        "/api/upload", headers=auth, files={"file": ("big.png", big, "image/png")}
+    )
+    assert refused.status_code == 413
+    assert "not sent" in refused.json()["detail"]
+    assert stored == []  # nothing reached the store, which never evicts
+
+
+def test_the_cap_is_one_number_and_a_good_photo_still_goes_through(client):
+    from paratrooper.web.uploads import MAX_UPLOAD_BYTES
+
+    assert MAX_UPLOAD_BYTES == 25 * 1024 * 1024
+    auth = {"Authorization": "Bearer tok"}
+    ok = client.post(
+        "/api/upload", headers=auth, files={"file": ("photo.jpg", _png_bytes(), "image/jpeg")}
+    )
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["size"] == len(_png_bytes()) and body["inbox_key"].endswith(".jpg")
+
+
 # --- security headers ---------------------------------------------------------
 
 def test_style_hashes_name_every_inline_block_in_document_order(tmp_path):
@@ -1412,7 +1476,9 @@ def test_auth_check(client):
 
 def test_upload_and_send_flow(client):
     auth = {"Authorization": "Bearer tok"}
-    up = client.post("/api/upload", headers=auth, files={"file": ("p.png", b"bytes", "image/png")})
+    up = client.post(
+        "/api/upload", headers=auth, files={"file": ("p.png", _png_bytes(), "image/png")}
+    )
     assert up.status_code == 200
     key = up.json()["inbox_key"]
     assert key.endswith(".png")
@@ -1848,12 +1914,12 @@ def test_thumb_route_serves_persisted_previews(client):
     assert client.get(f"/api/thumb/{key}", params={"token": "wrong"}).status_code == 401
     assert client.get("/api/thumb/nope.png", params={"token": "tok"}).status_code == 404
 
-    # a non-image upload stores no thumbnail: history keeps its chip via 404
+    # a non-image upload never gets as far as a thumbnail now: it is refused at
+    # the door (see the upload limits below), so nothing is stored to look up
     up2 = client.post(
         "/api/upload", headers=auth, files={"file": ("f.txt", b"plain text", "text/plain")}
     )
-    key2 = up2.json()["inbox_key"]
-    assert client.get(f"/api/thumb/{key2}", params={"token": "tok"}).status_code == 404
+    assert up2.status_code == 415
 
 
 # --- image contracts: each Docker image must import without the other's deps ---
