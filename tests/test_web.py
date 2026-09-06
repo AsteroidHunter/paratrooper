@@ -943,6 +943,115 @@ def test_owner_repo_from_remote():
     assert owner_repo_from_remote("git@github.com:o/r") == ("o", "r")
 
 
+# --- publish: what a tap is allowed to merge ----------------------------------
+#
+# The owner and repository come from configuration and only the number comes off
+# the phone, so every one of these drives the real GitHub calls through a mock
+# transport: the refusal has to be produced by what the API actually answered,
+# not by a stubbed-out helper.
+
+def _pr(ref="paratrooper/desert-new-photo", full_name="o/r", sha="head1"):
+    return {"number": 5, "head": {"ref": ref, "sha": sha, "repo": {"full_name": full_name}}}
+
+
+def _github(handler):
+    """An httpx client whose requests never leave the process."""
+    import httpx as _httpx
+
+    return _httpx.Client(transport=_httpx.MockTransport(handler))
+
+
+def _pr_transport(pr, *, merge_status=200, merge_body=None):
+    """Answer the PR read with ``pr`` and the merge with ``merge_status``,
+    recording what the merge was actually asked to do."""
+    import json as _json
+
+    import httpx as _httpx
+
+    seen: dict = {}
+
+    def handler(request: _httpx.Request) -> _httpx.Response:
+        if request.method == "GET":
+            return _httpx.Response(200, json=pr)
+        seen["url"] = str(request.url)
+        seen["body"] = _json.loads(request.content)
+        body = merge_body if merge_body is not None else {"sha": "merged1", "merged": True}
+        return _httpx.Response(merge_status, json=body)
+
+    return handler, seen
+
+
+def test_publish_refuses_a_pull_request_that_is_not_the_agents_branch():
+    from paratrooper.web import publish as pub
+
+    handler, _ = _pr_transport(_pr(ref="main"))
+    with _github(handler) as http:
+        got = pub.get_pull_request("o", "r", 5, token="t", client=http)
+    with pytest.raises(PublishError, match="not one of Paratrooper's own branches"):
+        pub.check_publishable(got, owner="o", repo="r", branch_prefix="paratrooper")
+
+    # and a branch that merely starts with the letters is not the namespace
+    handler, _ = _pr_transport(_pr(ref="paratrooperX/sneaky"))
+    with _github(handler) as http:
+        got = pub.get_pull_request("o", "r", 5, token="t", client=http)
+    with pytest.raises(PublishError, match="not one of Paratrooper's own branches"):
+        pub.check_publishable(got, owner="o", repo="r", branch_prefix="paratrooper")
+
+
+def test_publish_refuses_a_pull_request_from_another_repository():
+    from paratrooper.web import publish as pub
+
+    handler, _ = _pr_transport(_pr(full_name="someone-else/fork"))
+    with _github(handler) as http:
+        got = pub.get_pull_request("o", "r", 5, token="t", client=http)
+    with pytest.raises(PublishError, match="different repository"):
+        pub.check_publishable(got, owner="o", repo="r", branch_prefix="paratrooper")
+
+
+def test_publish_pins_the_head_commit_into_the_merge():
+    """The screenshot the owner approved was of ONE commit, so that commit is
+    what the merge asks for."""
+    from paratrooper.web import publish as pub
+
+    handler, seen = _pr_transport(_pr(sha="c0ffee"))
+    with _github(handler) as http:
+        got = pub.get_pull_request("o", "r", 5, token="t", client=http)
+        head = pub.check_publishable(got, owner="o", repo="r", branch_prefix="paratrooper")
+        result = pub.merge_pull_request("o", "r", 5, token="t", sha=head, client=http)
+    assert head == "c0ffee"
+    assert seen["body"] == {"merge_method": "squash", "sha": "c0ffee"}
+    assert result["merged"] is True
+
+
+def test_publish_refuses_a_branch_that_moved_since_the_screenshot():
+    """GitHub answers 409 when the pinned commit is no longer the head. That is
+    the branch-changed case and it must read as one."""
+    from paratrooper.web import publish as pub
+
+    handler, _ = _pr_transport(
+        _pr(sha="c0ffee"), merge_status=409,
+        merge_body={"message": "Head branch was modified. Review and try merging again."},
+    )
+    with _github(handler) as http, pytest.raises(PublishError, match="branch changed"):
+        pub.merge_pull_request("o", "r", 5, token="t", sha="c0ffee", client=http)
+
+
+def test_publish_route_shows_the_refusal_on_the_phone(client, monkeypatch):
+    """A refusal reaches the phone as the 409 detail it already renders."""
+    import paratrooper.web.app as app_mod
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
+    monkeypatch.setattr(
+        app_mod, "get_pull_request",
+        lambda *a, **kw: _pr(ref="main", full_name="AsteroidHunter/webpage"),
+    )
+    auth = {"Authorization": "Bearer tok"}
+    r = client.post("/api/publish", headers=auth,
+                    json={"thread_id": "d", "pr": "https://github.com/o/r/pull/3"})
+    assert r.status_code == 409
+    assert "not one of Paratrooper's own branches" in r.json()["detail"]
+
+
 # --- push (6.1) ---------------------------------------------------------------
 
 def test_push_config_off_when_unset(monkeypatch):
@@ -2496,6 +2605,9 @@ def test_publish_maps_error_to_409_with_detail(client, monkeypatch):
     def boom(*a, **kw):
         raise PublishError("merge failed (405): Pull Request is not mergeable")
 
+    monkeypatch.setattr(
+        app_mod, "get_pull_request", lambda *a, **kw: _pr(full_name="AsteroidHunter/webpage")
+    )
     monkeypatch.setattr(app_mod, "merge_pull_request", boom)
     auth = {"Authorization": "Bearer tok"}
     r = client.post("/api/publish", headers=auth,
@@ -2508,11 +2620,22 @@ def test_publish_success_persists_confirmation(client, monkeypatch):
     import paratrooper.web.app as app_mod
 
     monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
-    monkeypatch.setattr(app_mod, "merge_pull_request", lambda *a, **kw: {"sha": "abc123"})
+    monkeypatch.setattr(
+        app_mod, "get_pull_request",
+        lambda *a, **kw: _pr(full_name="AsteroidHunter/webpage", sha="c0ffee"),
+    )
+    merged: dict = {}
+
+    def record(*a, **kw):
+        merged.update(kw)
+        return {"sha": "abc123"}
+
+    monkeypatch.setattr(app_mod, "merge_pull_request", record)
     auth = {"Authorization": "Bearer tok"}
     r = client.post("/api/publish", headers=auth,
                     json={"thread_id": "d", "pr": "7"})
     assert r.json() == {"merged": True, "sha": "abc123"}
+    assert merged["sha"] == "c0ffee"  # the merge was pinned to the read-back head
     rows = client.get("/api/thread/d", headers=auth).json()["messages"]
     assert rows[-1]["kind"] == "published" and "PR #7" in rows[-1]["payload"]
 
@@ -2663,47 +2786,36 @@ def test_migration_leaves_unmeasurable_thumb_null_and_still_boots(tmp_path):
 # --- pr ref must survive persistence + empty-ref publish (the replay bug) ------
 
 
-def test_find_open_pr_resolves_single_prefixed_pr(monkeypatch):
+def _pr_list(prs):
     import httpx as _httpx
 
+    return lambda request: _httpx.Response(200, json=prs)
+
+
+def test_find_open_pr_resolves_single_prefixed_pr():
     from paratrooper.web import publish as pub
 
     prs = [
         {"number": 3, "head": {"ref": "dependabot/npm"}},
         {"number": 2, "head": {"ref": "paratrooper/desert-new-photo"}},
     ]
-
-    def fake_get(url, **kw):
-        return _httpx.Response(200, json=prs, request=_httpx.Request("GET", url))
-
-    monkeypatch.setattr(pub.httpx, "get", fake_get)
-    found = pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper")
+    with _github(_pr_list(prs)) as http:
+        found = pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper", client=http)
     assert found["number"] == 2
 
 
-def test_find_open_pr_zero_or_many_is_an_error(monkeypatch):
-    import httpx as _httpx
-
+def test_find_open_pr_zero_or_many_is_an_error():
     from paratrooper.web import publish as pub
 
-    def fake_empty(url, **kw):
-        return _httpx.Response(200, json=[], request=_httpx.Request("GET", url))
-
-    monkeypatch.setattr(pub.httpx, "get", fake_empty)
-    with pytest.raises(PublishError, match="no open PR"):
-        pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper")
+    with _github(_pr_list([])) as http, pytest.raises(PublishError, match="no open PR"):
+        pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper", client=http)
 
     two = [
         {"number": 1, "head": {"ref": "paratrooper/a"}},
         {"number": 2, "head": {"ref": "paratrooper/b"}},
     ]
-
-    def fake_two(url, **kw):
-        return _httpx.Response(200, json=two, request=_httpx.Request("GET", url))
-
-    monkeypatch.setattr(pub.httpx, "get", fake_two)
-    with pytest.raises(PublishError, match="2 open PRs"):
-        pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper")
+    with _github(_pr_list(two)) as http, pytest.raises(PublishError, match="2 open PRs"):
+        pub.find_open_pr("o", "r", token="t", branch_prefix="paratrooper", client=http)
 
 
 def test_publish_empty_ref_resolves_open_pr(client, monkeypatch):
@@ -2716,7 +2828,14 @@ def test_publish_empty_ref_resolves_open_pr(client, monkeypatch):
 
     def fake_find(owner, repo, *, token, branch_prefix=""):
         seen["prefix"] = branch_prefix
-        return {"number": 2, "head": {"ref": "paratrooper/desert-new-photo"}}
+        return {
+            "number": 2,
+            "head": {
+                "ref": "paratrooper/desert-new-photo",
+                "sha": "c0ffee",
+                "repo": {"full_name": "AsteroidHunter/webpage"},
+            },
+        }
 
     monkeypatch.setattr(app_mod, "find_open_pr", fake_find)
     monkeypatch.setattr(app_mod, "merge_pull_request", lambda *a, **kw: {"sha": "d34d"})

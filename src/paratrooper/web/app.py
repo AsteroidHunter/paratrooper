@@ -66,7 +66,9 @@ from .models import (
 )
 from .publish import (
     PublishError,
+    check_publishable,
     find_open_pr,
+    get_pull_request,
     merge_pull_request,
     merge_token,
     owner_repo_from_remote,
@@ -811,18 +813,29 @@ def create_app(injected: AppState | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="site remote not configured")
         try:
             owner, repo = owner_repo_from_remote(remote)
+            token = merge_token()
             if req.pr.strip():
                 number = parse_pr_number(req.pr)
+                # only the NUMBER came off the phone, so nothing about the
+                # branch behind it is known until it is read back from GitHub
+                found = await asyncio.to_thread(
+                    get_pull_request, owner, repo, number, token=token
+                )
             else:
                 # pr rows persisted before 6da5b3c carry an empty payload —
                 # resolve the one open agent PR instead of 409ing on it
                 found = await asyncio.to_thread(
                     find_open_pr, owner, repo,
-                    token=merge_token(), branch_prefix=state.config.branch_prefix,
+                    token=token, branch_prefix=state.config.branch_prefix,
                 )
                 number = int(found["number"])
+            # the agent's own branch, on the configured repository, at the
+            # commit it is sitting on right now — anything else refuses below
+            head_sha = check_publishable(
+                found, owner=owner, repo=repo, branch_prefix=state.config.branch_prefix
+            )
             result = await asyncio.to_thread(
-                merge_pull_request, owner, repo, number, token=merge_token()
+                merge_pull_request, owner, repo, number, token=token, sha=head_sha
             )
         except PublishError as exc:
             # surface WHY (already merged, conflicts, bad PR ref) instead of a 500
