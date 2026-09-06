@@ -10,11 +10,48 @@ worker runner). The store's TTL is what reclaims it.
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 
 # Accepted upload extensions -> stored as-is; the worker re-encodes to webp.
 _ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}
+
+# --- keys that are allowed to become part of a path --------------------------
+#
+# A photo key is minted here and travels a long way: into a persisted thread
+# row, across the queue in a job, and back out on the worker, where it is joined
+# onto that machine's inbox folder. Every one of those hops is a chance for the
+# value to be something other than what was minted — the attachment list on a
+# send is client-supplied, and a key that has been through a database is a key
+# somebody could have written.
+#
+# So the joins do not trust it. ``Path(key).name`` was doing that work and is
+# not the same promise: it silently rewrites a bad value into a different one
+# (``..`` becomes the empty string, and the join lands on the folder itself)
+# rather than refusing it. This is the strict form, and anything else raises.
+#
+# The class is what the keys actually are: a timestamp, a uuid hex, a dot and an
+# extension. Nothing here needs a slash, a backslash, a leading dot or a space.
+_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+class UnsafeKey(ValueError):
+    """A key that must never be joined onto a path."""
+
+
+def safe_segment(value: object) -> str:
+    """Return ``value`` once it is a single safe path segment; raise otherwise.
+
+    One segment: no separator of either kind, no ``..``, no leading dot, and a
+    strict character class. The check is on the whole value, so there is no
+    "cleaned up" version of a bad key that gets used anyway.
+    """
+    if not isinstance(value, str) or not _SAFE_SEGMENT_RE.match(value):
+        raise UnsafeKey(f"not a usable photo key: {value!r}")
+    if ".." in value:
+        raise UnsafeKey(f"not a usable photo key: {value!r}")
+    return value
 
 # --- what may be uploaded ----------------------------------------------------
 #
@@ -75,13 +112,13 @@ def save_upload(inbox_dir: str | Path, filename: str | None, content: bytes) -> 
     so a crafted filename can't traverse out of the inbox."""
     inbox_dir = Path(inbox_dir)
     inbox_dir.mkdir(parents=True, exist_ok=True)
-    key = f"{uuid.uuid4().hex}{_safe_ext(filename)}"
+    key = safe_segment(f"{uuid.uuid4().hex}{_safe_ext(filename)}")
     (inbox_dir / key).write_bytes(content)
     return key, len(content)
 
 
 def delete_staged(inbox_dir: str | Path, key: str) -> None:
-    """Remove a staged upload (called by the worker after optimizing it). Keys
-    are basename-only, so this can't escape the inbox."""
-    target = Path(inbox_dir) / Path(key).name
-    target.unlink(missing_ok=True)
+    """Remove a staged upload (called by the worker after optimizing it).
+    Refuses any key that is not a single safe segment, so this cannot reach
+    outside the inbox and cannot land on the inbox folder itself."""
+    (Path(inbox_dir) / safe_segment(key)).unlink(missing_ok=True)

@@ -872,6 +872,82 @@ def test_new_key_extension():
     assert new_key("../evil").count("/") == 0
 
 
+# --- keys that become paths ----------------------------------------------------
+
+# Every one of these is a value that could arrive as an attachment key: the list
+# on a send is client-supplied, and it rides a persisted row and the queue
+# before the worker joins it onto its own inbox folder.
+TRAVERSALS = [
+    "../../etc/passwd",
+    "..",
+    ".",
+    "../secret.png",
+    "sub/dir.png",
+    "sub\\dir.png",
+    "/etc/passwd",
+    ".hidden.png",
+    "with space.png",
+    "key\x00.png",
+    "key\n.png",
+    "",
+    "a" * 200,
+    None,
+    42,
+]
+
+
+def test_safe_segment_refuses_everything_that_is_not_one_segment():
+    from paratrooper.web.uploads import UnsafeKey, safe_segment
+
+    for value in TRAVERSALS:
+        with pytest.raises(UnsafeKey):
+            safe_segment(value)
+    # and the keys the app actually mints go straight through, unchanged
+    for good in (new_key("photo.jpeg"), new_key(None), "abc123.png", "a"):
+        assert safe_segment(good) == good
+
+
+def test_the_inbox_refuses_a_key_that_would_leave_its_folder(tmp_path):
+    from paratrooper.web.uploads import UnsafeKey
+
+    inbox = DiskInbox(tmp_path / "inbox")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"not yours")
+
+    async def scenario():
+        for value in TRAVERSALS + ["../outside.png"]:
+            with pytest.raises(UnsafeKey):
+                await inbox.put(value, b"written")
+            with pytest.raises(UnsafeKey):
+                await inbox.get(value)
+            with pytest.raises(UnsafeKey):
+                await inbox.delete(value)
+        # nothing was written, nothing was read, nothing was removed
+        assert outside.read_bytes() == b"not yours"
+        # and a real key still round-trips
+        key = new_key("photo.png")
+        await inbox.put(key, b"pixels")
+        assert await inbox.get(key) == b"pixels"
+        await inbox.delete(key)
+
+    _run(scenario())
+
+
+def test_delete_staged_refuses_a_traversal_instead_of_trimming_it(tmp_path):
+    from paratrooper.web.uploads import UnsafeKey
+
+    (tmp_path / "outside.png").write_bytes(b"not yours")
+    staged = tmp_path / "inbox"
+    staged.mkdir()
+    for value in TRAVERSALS + ["../outside.png"]:
+        with pytest.raises(UnsafeKey):
+            delete_staged(staged, value)
+    assert (tmp_path / "outside.png").exists()
+    # ``Path(key).name`` used to turn ".." into "" and land the unlink on the
+    # inbox folder itself; the folder is still here because nothing was trimmed
+    assert staged.is_dir()
+
+
 def _aged_key(seconds_old: int, filename: str = "photo.jpeg") -> str:
     """An inbox key that looks minted ``seconds_old`` ago. Built by rewinding a
     real key's own stamp, so it can't drift from whatever new_key mints."""

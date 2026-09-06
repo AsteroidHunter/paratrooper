@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Protocol
 
-from .uploads import _safe_ext
+from .uploads import _safe_ext, safe_segment
 
 INBOX_PREFIX = "paratrooper:inbox:"
 DEFAULT_TTL = 24 * 3600  # staged uploads must survive deploys + queue waits
@@ -53,20 +53,32 @@ class InboxStore(Protocol):
 
 
 class DiskInbox:
-    """Filesystem-backed inbox (local dev / single-host / tests)."""
+    """Filesystem-backed inbox (local dev / single-host / the worker's own
+    scratch copies).
+
+    Every key here becomes a path, and the keys arrive from a long way off: the
+    attachment list on a send is client-supplied and rides a persisted thread
+    row and the queue before the worker joins it onto this folder. So each of
+    the three joins refuses anything that is not a single safe segment
+    (:func:`uploads.safe_segment`) rather than trimming it into one.
+    """
 
     def __init__(self, directory: str | Path) -> None:
         self.dir = Path(directory)
 
+    def _path(self, key: str) -> Path:
+        return self.dir / safe_segment(key)
+
     async def put(self, key: str, content: bytes) -> None:
+        target = self._path(key)  # checked before the folder is even made
         self.dir.mkdir(parents=True, exist_ok=True)
-        (self.dir / Path(key).name).write_bytes(content)
+        target.write_bytes(content)
 
     async def get(self, key: str) -> bytes:
-        return (self.dir / Path(key).name).read_bytes()
+        return self._path(key).read_bytes()
 
     async def delete(self, key: str) -> None:
-        (self.dir / Path(key).name).unlink(missing_ok=True)
+        self._path(key).unlink(missing_ok=True)
 
 
 class RedisInbox:
