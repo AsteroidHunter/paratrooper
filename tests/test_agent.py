@@ -2133,11 +2133,15 @@ def test_a_refused_mint_is_an_error_and_nothing_else_is_tried(monkeypatch, tmp_p
     assert "could not be decoded" in str(err.value)
     assert "67890" in str(err.value)  # names the installation that refused
 
-    # and with no site repository configured there is nothing to ask for
-    cfg.remote = None
-    with pytest.raises(ConfigError) as cfg_err:
-        installation_token(cfg)
-    assert "PARATROOPER_REMOTE" in str(cfg_err.value)
+    # and with no site repository configured, or one that is not a GitHub
+    # repository, there is nothing to ask a token for. Both are ConfigError,
+    # which is the one type the worker is documented to expect from a run with
+    # no usable credential; anything else would fail every turn instead.
+    for remote in (None, "/srv/site.git"):
+        cfg.remote = remote
+        with pytest.raises(ConfigError) as cfg_err:
+            installation_token(cfg)
+        assert "PARATROOPER_REMOTE" in str(cfg_err.value), remote
 
 
 def _no_app_configured(config):

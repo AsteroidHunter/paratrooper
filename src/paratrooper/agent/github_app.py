@@ -28,7 +28,7 @@ import httpx
 import jwt
 
 from .config import Config, ConfigError, GitHubApp, take_github_app
-from .github import GITHUB_API, owner_repo
+from .github import GITHUB_API, GitHubError, owner_repo
 
 # GitHub refuses a JWT whose lifetime is over ten minutes, and rejects one whose
 # `iat` is in its future, so the issue time is backdated by a minute against
@@ -149,6 +149,17 @@ def installation_token(
             "nothing to ask for without it"
         )
     if _held is None or _held.stale(now=now):
-        _, repo = owner_repo(config.remote)
+        try:
+            _, repo = owner_repo(config.remote)
+        except GitHubError as exc:
+            # a local rehearsal pointed at a bare repository lands here. Raised
+            # as a ConfigError so the caller meets the one exception type it is
+            # documented to expect from a worker that has no usable credential,
+            # rather than an unhandled one that fails every turn.
+            raise ConfigError(
+                f"PARATROOPER_REMOTE does not name a GitHub repository "
+                f"({config.remote!r}): an installation token is minted for one "
+                "named repository, and this whole mechanism is GitHub's"
+            ) from exc
         _held = mint_installation_token(app, repositories=[repo], client=client)
     return _held.token
