@@ -1298,6 +1298,100 @@ def test_health_open(client):
     assert body["ok"] is True and "version" in body
 
 
+# --- security headers ---------------------------------------------------------
+
+def test_style_hashes_name_every_inline_block_in_document_order(tmp_path):
+    """The built page inlines two style blocks (the loading page, and the whole
+    stylesheet the build folds in). Both are named, by the bytes the browser
+    hashes."""
+    import base64
+    import hashlib
+
+    from paratrooper.web.headers import style_hashes
+
+    page = tmp_path / "index.html"
+    page.write_text("<head><style>a{color:red}</style>\n<style>b{color:blue}</style></head>")
+    expected = [
+        f"'sha256-{base64.b64encode(hashlib.sha256(block.encode()).digest()).decode()}'"
+        for block in ("a{color:red}", "b{color:blue}")
+    ]
+    assert style_hashes(page) == expected
+    # a build this cannot read gets a policy with no hashes rather than a
+    # policy with a hole in it
+    assert style_hashes(tmp_path / "not-there.html") == []
+
+
+def test_the_policy_allows_what_the_app_does_and_nothing_more():
+    from paratrooper.web.headers import content_security_policy
+
+    policy = content_security_policy(["'sha256-abc'"])
+    directives = dict(
+        (part.split(" ", 1) + [""])[:2] for part in
+        (p.strip() for p in policy.split(";"))
+    )
+    assert directives["default-src"] == "'self'"
+    assert directives["frame-ancestors"] == "'none'"
+    assert directives["object-src"] == "'none'"
+    # the bundle is a file; nothing inline may run as script, ever
+    assert directives["script-src"] == "'self'"
+    assert "unsafe-inline" not in directives["script-src"]
+    assert "unsafe-eval" not in policy
+    # the two style blocks are named, not waved through
+    assert directives["style-src"] == "'self' 'sha256-abc'"
+    # what the app actually needs: local photos, the base64 screenshots, the
+    # blob previews the composer makes, the socket and API on this origin,
+    # the manifest and the service worker
+    assert directives["img-src"] == "'self' data: blob:"
+    assert directives["connect-src"] == "'self'"
+    assert directives["manifest-src"] == "'self'"
+    assert directives["worker-src"] == "'self'"
+
+
+def test_every_response_carries_the_policy(client):
+    """One layer, so it is on the page, on an API answer and on a refusal
+    alike — a header that arrives only on the routes somebody remembered is not
+    a policy."""
+    from paratrooper.web.headers import PERMISSIONS_POLICY
+
+    auth = {"Authorization": "Bearer tok"}
+    for response in (
+        client.get("/api/health"),
+        client.get("/api/thread/d", headers=auth),
+        client.get("/api/thread/d"),  # 401
+    ):
+        headers = response.headers
+        assert "frame-ancestors 'none'" in headers["content-security-policy"]
+        assert headers["x-frame-options"] == "DENY"
+        assert headers["referrer-policy"] == "no-referrer"
+        assert headers["x-content-type-options"] == "nosniff"
+        assert headers["permissions-policy"] == PERMISSIONS_POLICY
+    assert "camera=()" in PERMISSIONS_POLICY and "geolocation=()" in PERMISSIONS_POLICY
+
+
+def test_the_socket_still_opens_under_the_header_layer(client):
+    """The layer is plain ASGI so it cannot come between the socket and its
+    handler. Proof, not reasoning: a socket that opens and replays."""
+    store = client.app.state.app_state.store
+    _seed(store, "d", 2)
+    with client.websocket_connect("/ws?token=tok&thread=d&since=0") as sock:
+        assert sock.receive_json()["payload"] == "m0"
+
+
+# --- the repository the phone is allowed to link to ---------------------------
+
+def test_config_route_names_the_configured_repository(client):
+    auth = {"Authorization": "Bearer tok"}
+    assert client.get("/api/config").status_code == 401
+    body = client.get("/api/config", headers=auth).json()
+    assert body == {"repo_url": "https://github.com/AsteroidHunter/webpage"}
+
+
+def test_config_route_says_null_when_no_remote_is_configured(client):
+    auth = {"Authorization": "Bearer tok"}
+    client.app.state.app_state.config.remote = None
+    assert client.get("/api/config", headers=auth).json() == {"repo_url": None}
+
+
 def test_auth_required(client):
     assert client.post("/api/send", json={"thread_id": "d", "text": "hi"}).status_code == 401
     assert client.get("/api/thread/d").status_code == 401

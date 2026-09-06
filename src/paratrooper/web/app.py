@@ -54,6 +54,12 @@ from . import push
 from .auth import require_token, verify_token
 from .batching import ThreadCoordinator
 from .db import ThreadStore, ThumbMeta
+from .headers import (
+    SecurityHeaders,
+    content_security_policy,
+    security_headers,
+    style_hashes,
+)
 from .inbox import InboxStore, RedisInbox, new_key
 from .models import (
     EVENT_POLICY,
@@ -885,6 +891,24 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         await _send_to_sockets(state, req.thread_id, {"seq": seq, **published.model_dump()})
         return JSONResponse({"merged": True, "sha": result.get("sha")})
 
+    @app.get("/api/config", dependencies=[Depends(require_token)])
+    async def site_config() -> dict:
+        """The one thing the phone cannot know on its own: which repository this
+        service publishes to.
+
+        The pull request link in a pr bubble is written by the agent, so it is
+        content, and the phone was turning it into a tappable link unchecked. It
+        now renders a link only for an address inside this repository, and this
+        is where that address comes from — configuration on the server, not the
+        message. Null when no remote is configured, which the phone reads as
+        "link nothing"."""
+        remote = st().config.remote
+        try:
+            owner, repo = owner_repo_from_remote(remote or "")
+        except PublishError:
+            return {"repo_url": None}
+        return {"repo_url": f"https://github.com/{owner}/{repo}"}
+
     @app.get("/api/push/key", dependencies=[Depends(require_token)])
     async def push_key() -> dict:
         return {"key": push.public_key()}  # null when push isn't configured
@@ -1178,6 +1202,15 @@ def create_app(injected: AppState | None = None) -> FastAPI:
     pwa_dist = _pwa_dist()
     if pwa_dist is not None:
         app.mount("/", StaticFiles(directory=str(pwa_dist), html=True), name="pwa")
+
+    # The policy last, so it wraps everything above it including the static
+    # mount. The style hashes are read out of the built page once, here: the two
+    # inline blocks are fixed for the life of a build (headers.py says why they
+    # are hashed rather than nonced), so this is the moment to read them.
+    hashes = style_hashes(pwa_dist / "index.html") if pwa_dist is not None else []
+    policy = content_security_policy(hashes)
+    app.add_middleware(SecurityHeaders, headers=security_headers(policy))
+    logger.info("content security policy: %s", policy)
 
     return app
 

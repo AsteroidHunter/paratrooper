@@ -617,6 +617,7 @@ function leaveChat(): void {
   unregisterPushOnLogout(); // first: it needs the token the next lines throw away
   pushNotifications?.stop();
   pushNotifications = null;
+  prLinkPrefix = null; // the next session asks the server again before it links
   localStorage.removeItem(TOKEN_KEY);
   token = "";
   lastSeq = 0; // full replay on next login
@@ -726,6 +727,7 @@ function renderChat(): void {
   });
   armPushDialogEntrance();
   startPushNotifications();
+  void loadPrLinkPrefix(); // which pull request links this session may link
   // Log Out is gated behind the same centred alert the notification card comes
   // up in, so a stray tap can't log out: Cancel is the quiet pill, Log Out the
   // one the box is asking for. Both answers play the box out before anything
@@ -2523,6 +2525,43 @@ function prUrl(payload: unknown): string | null {
   return null;
 }
 
+// --- which pull request links may be tapped ----------------------------------
+//
+// The address in a pr bubble is written by the agent, so it is content, and the
+// bubble was turning it into a tappable link whatever it said. A link is the one
+// thing on this screen that takes the reader somewhere, so it is the one thing
+// that has to be checked against something the message cannot influence: the
+// repository this service publishes to, read from the server's own config.
+//
+// Fail closed. Until the answer arrives, and for ever on a service with no
+// remote configured, no link is made and the address is shown as plain text —
+// which says exactly as much, and goes nowhere.
+let prLinkPrefix: string | null = null;
+
+/** Is this an address inside the configured repository? */
+function isSiteRepoLink(url: string): boolean {
+  return prLinkPrefix !== null && url.startsWith(prLinkPrefix);
+}
+
+/** Ask the server which repository it publishes to, once per signed-in session. */
+async function loadPrLinkPrefix(): Promise<void> {
+  if (!token) return;
+  let repoUrl: unknown;
+  try {
+    const response = await fetch("/api/config", { headers: authHeaders() });
+    if (!response.ok) return; // no answer is the closed answer
+    repoUrl = ((await response.json()) as { repo_url?: unknown }).repo_url;
+  } catch {
+    return;
+  }
+  if (typeof repoUrl !== "string" || !repoUrl) return;
+  const prefix = `${repoUrl.replace(/\/+$/, "")}/`;
+  if (prefix === prLinkPrefix) return;
+  prLinkPrefix = prefix;
+  // bubbles already drawn as plain text become links now the answer is in
+  for (const [seq, m] of store) if (m.kind === "pr") rerender(seq);
+}
+
 function thumbUrl(key: string): string {
   return `/api/thumb/${encodeURIComponent(key)}?token=${encodeURIComponent(token)}`;
 }
@@ -3272,7 +3311,7 @@ function renderScreenshot(_m: ServerMsg, wrapper: HTMLElement, at: number, value
 function renderPr(m: ServerMsg, wrapper: HTMLElement, at: number): void {
   const url = prUrl(m.payload);
   const div = rowEl(wrapper, "agent", "pr", at);
-  if (url) {
+  if (url && isSiteRepoLink(url)) {
     div.append("Opened a PR: ");
     const a = document.createElement("a");
     a.href = url;
@@ -3280,6 +3319,10 @@ function renderPr(m: ServerMsg, wrapper: HTMLElement, at: number): void {
     a.rel = "noopener";
     a.textContent = url;
     div.appendChild(a);
+  } else if (url) {
+    // an address outside the configured repository is shown, never linked: it
+    // says the same thing and takes nobody anywhere
+    div.append("Opened a PR: ", url);
   } else {
     div.textContent = "Opened a PR.";
   }
