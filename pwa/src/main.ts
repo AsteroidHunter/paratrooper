@@ -110,6 +110,7 @@ import {
   watchScrollWrites,
 } from "./shell";
 import { bootBlankGap, installLoadingScreen, installStartupImage, watchQuiet } from "./splash";
+import { createSpringField } from "./springscroll";
 import { seatBefore } from "./tailorder";
 import type { Standing } from "./tailorder";
 import { afterSocketClose, createTokenGate } from "./tokengate";
@@ -177,7 +178,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.119"; // A message that failed to send now drops below anything you send after it, so Try Again seats it where a reload would and the bubble itself never moves
+const APP_VERSION = "0.3.121"; // Scrolling springs the bubbles: they lag the drag by their distance from your finger and settle back gently, held at zero through every send, reply, ride and keyboard lift so nothing else is disturbed
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -820,10 +821,12 @@ function renderChat(): void {
   thread.addEventListener("wheel", () => {
     cancelGlide();
     lastGestureAt = performance.now();
+    armSpring(null); // a wheel has no finger: the springs anchor on the viewport centre
   }, { passive: true });
-  thread.addEventListener("pointerdown", () => {
+  thread.addEventListener("pointerdown", (e) => {
     cancelGlide();
     lastGestureAt = performance.now();
+    if (e.pointerType !== "touch") armSpring(e.clientY); // touch arms in touchstart
   });
   thread.addEventListener("scroll", () => {
     // No watchdog here, deliberately, and it must not come back. A pass that
@@ -872,6 +875,10 @@ function renderChat(): void {
     scrollGhostLook("scroll", {
       sh: thread.scrollHeight, st: thread.scrollTop, ch: thread.clientHeight,
     }, ghostCtx());
+    // the springy transcript: lag the participating rows by this scroll and let
+    // them settle (springscroll.ts). A no-op unless a real gesture armed it, and
+    // frozen while the app owns a motion — its own writes are never a drag.
+    springHandleScroll();
     downBtn.scrolled(followTail); // away restarts its 4s stillness window; bottom hides it
     // start BANKING older pages while the user is still ~1.5 screens away —
     // inserts happen separately, at glide boundaries
@@ -888,6 +895,7 @@ function renderChat(): void {
   if (hasScrollend) {
     thread.addEventListener("scrollend", () => {
       lastScrollAt = 0; // the browser says the glide is over — authoritative
+      disarmSpring(); // momentum is over: the next drag re-arms and re-measures
       tryApplyOlder();
     });
   }
@@ -916,6 +924,7 @@ function renderChat(): void {
       peeking = null;
       threadTouching = true; // no history inserts under a resting finger
       lastGestureAt = performance.now();
+      armSpring(e.touches[0].clientY); // the finger is the springs' anchor
     },
     { passive: true },
   );
@@ -923,6 +932,7 @@ function renderChat(): void {
     "touchmove",
     (e) => {
       lastGestureAt = performance.now();
+      springTouchY = e.touches[0].clientY; // the anchor tracks the finger
       const dx = e.touches[0].clientX - startX;
       const dy = e.touches[0].clientY - startY;
       if (peeking === null) {
@@ -953,6 +963,14 @@ function renderChat(): void {
   thread.addEventListener("touchcancel", endPeek);
   // fresh thread DOM: the store must match (login/logout re-renders the shell)
   store.clear();
+  // the springy transcript belonged to the old thread's rows: drop it whole
+  if (springRaf) cancelAnimationFrame(springRaf);
+  springRaf = 0;
+  disarmSpring();
+  springField.reset();
+  springEls = [];
+  springApplied = new Set<number>();
+  springDirty = true;
   replyHold.reset(); // parked frames die with the old shell; replay re-delivers
   oldestSeq = 0;
   pendingOlder = []; // banked pages hold stale seqs from the old session
@@ -1678,6 +1696,164 @@ function fitBubblesNow(root: ParentNode | null): void {
   if (!root) return;
   const els = Array.from(root.querySelectorAll<HTMLElement>(".msg"));
   if (els.length) fitBubbles(els.map(fitTarget));
+}
+
+// --- springy transcript (springscroll.ts owns the physics) --------------------
+// The bubbles lag the scroll through their own springs and settle back, the
+// effect Messages has carried since iOS 7 (WWDC 2013 session 217; Ash Furrow's
+// ASHSpringyCollectionView). The pure field takes row geometry, the scroll
+// position and an anchor and hands back a per-row displacement; this wiring
+// reads the geometry (once per gesture, never per frame), writes each
+// displacement as the compositor-only `translate` longhand (kept off the peek's
+// `transform`, styles.css), pumps the springs on rAF, arms on a real gesture and
+// its momentum, and — the load-bearing part — holds the whole effect frozen at
+// zero through every motion the app owns, so the flight's FLIP shift always
+// measures clean seats and no pin, ride or lift is ever fought.
+const springField = createSpringField();
+let springEls: HTMLElement[] = []; // the rows the last measure read, index-aligned
+let springApplied = new Set<number>(); // indices carrying a live translate now
+let springThreadTop = 0; // thread's screen-Y, cached at measure (stable per gesture)
+let springClientH = 0; // thread clientHeight, cached at measure
+let springRaf = 0; // the relax pump; 0 = not scheduled
+let springArmed = false; // a real gesture (or its momentum) is driving the scroll
+let springTouchY: number | null = null; // the finger's screen-Y anchor; null = centre
+let springDirty = true; // the row table is stale (content changed): re-measure next scroll
+let springQuietTimer: ReturnType<typeof setTimeout> | null = null; // disarms when scroll goes quiet
+
+// A drag or its momentum is "live" until the scroll falls quiet: every armed
+// scroll refreshes this, and a still-hold release (which fires no scroll at all)
+// disarms once it lapses. So an app write that lands after the gesture is over
+// can never be mistaken for a drag — only a scroll close behind a real one is.
+const SPRING_QUIET_MS = 180;
+
+function bumpSpringQuiet(): void {
+  if (springQuietTimer) clearTimeout(springQuietTimer);
+  springQuietTimer = setTimeout(disarmSpring, SPRING_QUIET_MS);
+}
+
+// The hold-off. While any motion the app owns is in flight the springs must read
+// zero and stay there, so nothing they write can corrupt a FLIP measurement, an
+// instant pin, a ride, the keyboard lift or a seat/receipt move. Every state is
+// one the app already tracks; a seat move and the receipt crossfade both run
+// through beginSiblingShift, which freezes the field outright before it measures.
+function springBlocked(): boolean {
+  return (
+    flightsUp > 0 ||
+    airborneRows.size > 0 ||
+    arrival !== null ||
+    glide !== null ||
+    glideRaf !== 0 ||
+    landingHold ||
+    resumeWindowOpen() ||
+    shiftAnims.length > 0 ||
+    app.classList.contains("kb")
+  );
+}
+
+// Rebuild the field's row table from the thread's laid-out rows (the same walk
+// the sibling shift and the tail-gap probe use: .evt wrappers are display:
+// contents, so their children are the real flex rows). offsetTop is scroll-
+// independent, so this one read serves the whole gesture and its momentum with
+// no further layout reads until the content changes.
+function measureSpring(): void {
+  const t = document.getElementById("thread");
+  if (!t) return;
+  springEls = laidOutRows(t) as HTMLElement[];
+  springThreadTop = t.getBoundingClientRect().top;
+  springClientH = t.clientHeight;
+  springField.measure(springEls.map((el) => ({ top: el.offsetTop, height: el.offsetHeight })));
+  springDirty = false;
+}
+
+// Write the current displacements as `translate`, and clear the transform off
+// any row that has just reached rest — so a settled thread carries no inline
+// translate at all (the zero-at-rest invariant, visible in the DOM).
+function applySpring(): void {
+  const disp = springField.displacements();
+  for (const [i, dy] of disp) {
+    const el = springEls[i];
+    if (el) el.style.translate = `0 ${dy.toFixed(2)}px`;
+  }
+  for (const i of springApplied) {
+    if (disp.has(i)) continue;
+    const el = springEls[i];
+    if (!el) continue;
+    el.style.removeProperty("translate");
+    if (!el.getAttribute("style")) el.removeAttribute("style"); // no empty style attribute
+  }
+  springApplied = new Set(disp.keys());
+}
+
+// The relax pump: one rAF chain, alive exactly while a spring is still moving.
+// It ends itself the moment every spring is home (active() false), so a settled
+// thread schedules no frames.
+function springPump(): void {
+  if (springRaf) return;
+  const step = (now: number): void => {
+    springRaf = 0;
+    if (springBlocked()) {
+      springFreeze();
+      return;
+    }
+    springField.frame(now);
+    applySpring();
+    if (springField.active()) springRaf = requestAnimationFrame(step);
+  };
+  springRaf = requestAnimationFrame(step);
+}
+
+// Zero the effect NOW and clear its transforms, synchronously. Called at the top
+// of every measurement the app makes (beginSiblingShift) and whenever a blocked
+// state is entered, so the rects those passes read are the true seats.
+function springFreeze(): void {
+  if (springRaf) cancelAnimationFrame(springRaf);
+  springRaf = 0;
+  springField.freeze();
+  applySpring();
+}
+
+// The scroll handler's one line. Reads scrollTop only (cheap, no forced layout);
+// an app write or an idle move just rebases the delta reference, a real gesture
+// injects and pumps. Blocked, it freezes instead — the app's own ride is never
+// mistaken for a drag.
+function springHandleScroll(): void {
+  const t = document.getElementById("thread");
+  if (!t) return;
+  const st = t.scrollTop;
+  if (springBlocked()) {
+    springFreeze();
+    springField.rebase(st);
+    return;
+  }
+  if (!springArmed) {
+    springField.rebase(st); // an app write or idle drift: reference only, no stretch
+    return;
+  }
+  if (springDirty) measureSpring();
+  springField.scroll(st, springClientH, springThreadTop, threadTouching ? springTouchY : null);
+  bumpSpringQuiet(); // momentum keeps the arm alive; its lapse disarms
+  springPump();
+}
+
+// A real gesture began (finger, wheel or pointer on the thread): arm the effect
+// and take a fresh geometry reading for it. Momentum after a finger lifts keeps
+// the arm; the scroll going quiet (scrollend, or the debounce) disarms it.
+function armSpring(touchY: number | null): void {
+  springArmed = true;
+  springTouchY = touchY;
+  measureSpring();
+  const t = document.getElementById("thread");
+  if (t) {
+    springField.rebase(t.scrollTop);
+  }
+  bumpSpringQuiet(); // a still hold that never scrolls still disarms in time
+}
+
+function disarmSpring(): void {
+  if (springQuietTimer) clearTimeout(springQuietTimer);
+  springQuietTimer = null;
+  springArmed = false;
+  springTouchY = null;
 }
 
 // --- scrolling: glide when following the tail, chevron when reading history ----
@@ -2484,6 +2660,7 @@ function decorate(): void {
       prevAt = at;
     }
   }
+  springDirty = true; // rows may have moved seats, runs, or stamps: re-measure next drag
   jankSpan("decorate", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
 }
 
@@ -5312,6 +5489,12 @@ function stampOverNewbornShot(el: HTMLElement, before: Map<HTMLElement, number>)
 }
 
 function beginSiblingShift(): { play(): void } {
+  // the springy transcript is zeroed before a single rect is read: a row still
+  // carrying a spring displacement would corrupt this FLIP's before/after delta,
+  // and the shift's own transforms would fight it. It stays frozen for the whole
+  // beat because springBlocked() reads shiftAnims (springscroll.ts wiring).
+  springFreeze();
+  springDirty = true; // the insert about to happen re-lays the tail
   // eligibility is the pre-send view: pinned (or near) the bottom. A send from
   // deep in history pins with an intentional jump cut — animating THAT would
   // turn the instant pin into a slow scroll of the whole distance.
