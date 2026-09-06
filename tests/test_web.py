@@ -1153,10 +1153,9 @@ class _FakeCoordinator:
         return False  # holds no batches; linger tests inject state.render to reach this
 
 
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("PARATROOPER_APP_TOKEN", "tok")
-    cfg = Config(
+def _config(tmp_path):
+    """The paths config the app is built from, all under a throwaway root."""
+    return Config(
         inbox=tmp_path / "inbox",
         site_root=tmp_path / "site",
         pins_dir=tmp_path / "pins",
@@ -1167,6 +1166,12 @@ def client(tmp_path, monkeypatch):
         default_branch="main",
         branch_prefix="paratrooper",
     )
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARATROOPER_APP_TOKEN", "tok")
+    cfg = _config(tmp_path)
     state = AppState(
         config=cfg,
         store=ThreadStore(tmp_path / "threads.sqlite"),
@@ -1808,8 +1813,11 @@ class _FakeRender:
 class _FakeJobQueue:
     def __init__(self, pending=0):
         self.pending = pending
+        self.polls = 0  # drain checks that got as far as asking the queue
+        self.r = None  # the real lifespan hands this to RedisInbox; never used here
 
     async def pending_jobs(self):
+        self.polls += 1
         return self.pending
 
 
@@ -1944,6 +1952,101 @@ def test_send_route_resets_linger(client):
     client.post("/api/send", headers=auth, json={"thread_id": "d", "text": "again"})
     assert state.linger_task is not first  # replaced, never stacked
     assert render.suspended == 0  # long linger: nothing fired during the test
+
+
+def _booted_app(tmp_path, monkeypatch, render, queue):
+    """The app on its REAL lifespan (no injected state) — the boot the deployed
+    service takes, with Key Value, the render control and the result relay
+    faked. A long linger keeps every countdown it arms from ever firing."""
+    import paratrooper.web.app as app_mod
+
+    class Control:  # RenderControl.from_env(): the cost saver is configured
+        @staticmethod
+        def from_env():
+            return render
+
+    async def no_relay(_state):  # the real relay wants a pub/sub client
+        return None
+
+    monkeypatch.setenv("PARATROOPER_APP_TOKEN", "tok")
+    monkeypatch.setenv("PARATROOPER_WORKER_LINGER_S", "9999")
+    monkeypatch.setattr(app_mod, "load_config", lambda: _config(tmp_path))
+    monkeypatch.setattr(app_mod, "connect", lambda: None)
+    monkeypatch.setattr(app_mod, "JobQueue", lambda _client: queue)
+    monkeypatch.setattr(app_mod, "RenderControl", Control)
+    monkeypatch.setattr(app_mod, "_result_relay", no_relay)
+    return create_app()
+
+
+def test_start_up_arms_the_countdown_a_redeploy_killed(tmp_path, monkeypatch):
+    """The redeploy gap: a countdown lives only in the memory of the process
+    that armed it, so a fresh one re-runs the drain check itself — once, with
+    the queue client and the render control already on the state — and arms its
+    own countdown over the same interval, instead of waiting for a message that
+    may never come."""
+    render, queue = _FakeRender(), _FakeJobQueue(0)
+    with TestClient(_booted_app(tmp_path, monkeypatch, render, queue)) as c:
+        state = c.app.state.app_state
+        assert queue.polls == 1  # the check ran, and ran once
+        # and it ran late enough to reach both: nothing else could have armed it
+        assert state.render is render and state.queue is queue
+        assert state.linger_task is not None and not state.linger_task.done()
+        assert state.linger_s == 9999.0  # PARATROOPER_WORKER_LINGER_S, as anywhere else
+        assert render.suspended == 0  # boot arms the countdown, it never suspends
+    assert state.linger_task is None  # and shutdown drops it again
+
+
+def test_start_up_leaves_a_busy_worker_alone(tmp_path, monkeypatch):
+    """Work still in the queue at boot means the worker is needed: arm nothing,
+    exactly as any other drain check would, and let the end of that turn do it."""
+    render, queue = _FakeRender(), _FakeJobQueue(1)
+    with TestClient(_booted_app(tmp_path, monkeypatch, render, queue)) as c:
+        state = c.app.state.app_state
+        assert queue.polls == 1 and state.linger_task is None
+        assert render.suspended == 0
+        assert c.get("/api/health").json()["ok"] is True
+
+
+def test_start_up_survives_a_failing_drain_check(tmp_path, monkeypatch):
+    """A Key Value that won't answer the check costs a nap, never the boot:
+    the failure is swallowed and the service comes up serving."""
+    render, queue = _FakeRender(), _FakeJobQueue(0)
+    asked = []
+
+    async def unreachable():
+        asked.append(1)
+        raise RuntimeError("key value unreachable")
+
+    queue.pending_jobs = unreachable
+    with TestClient(_booted_app(tmp_path, monkeypatch, render, queue)) as c:
+        state = c.app.state.app_state
+        assert asked == [1]  # the check ran, and its failure went no further
+        assert state.linger_task is None  # a check that failed arms nothing
+        assert c.get("/api/health").json()["ok"] is True
+
+
+def test_worker_traffic_drops_a_countdown_armed_blind():
+    """The one countdown the drain check can get wrong: a turn the worker picked
+    up before this process started is invisible to it (the coordinator's memory
+    of that turn died with the old process, and the queue counts only unclaimed
+    work), so boot can arm a countdown mid-turn. The worker's next word says
+    otherwise and drops it; the turn's own terminal arms the next one."""
+    from paratrooper.web.app import _maybe_suspend_worker, _relay_result
+    from paratrooper.web.models import ResultMessage
+
+    async def scenario():
+        enq, intr, *_ = _recorders()
+        coord = ThreadCoordinator(enq, intr, window=0.02)
+        render = _FakeRender()
+        state = _linger_state(render, coord, _FakeJobQueue(0), linger_s=0.05)
+        await _maybe_suspend_worker(state)  # boot: nothing visible -> armed
+        assert state.linger_task is not None
+        await _relay_result(state, "d", ResultMessage(job_id="j1", kind="typing"))
+        assert state.linger_task is None
+        await asyncio.sleep(0.1)  # well past the linger window
+        assert render.suspended == 0  # the working worker was left alone
+
+    _run(scenario())
 
 
 def test_push_routes(client, monkeypatch):

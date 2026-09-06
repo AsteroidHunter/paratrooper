@@ -17,7 +17,8 @@ route map either. A route added here is open until its own declaration says
 otherwise; there is no blanket to fall back on.
 
 ``create_app`` accepts injected state so tests run without Redis; in production
-the lifespan connects Key Value and starts the result-relay task.
+the lifespan connects Key Value, starts the result-relay task, and re-runs the
+worker's drain check so a suspend countdown a redeploy killed is armed again.
 """
 
 from __future__ import annotations
@@ -413,11 +414,41 @@ async def _linger_then_suspend(state: AppState) -> None:
         # re-check with the same drain test that armed us: anything that arrived
         # during the linger (buffered batch, queued job) keeps the worker awake
         if state.render is not None and await _worker_idle(state):
+            logger.info("linger elapsed, still drained: suspending the worker")
             await state.render.suspend_worker()
     except (redis_exc.ConnectionError, redis_exc.TimeoutError) as exc:
         # best-effort like every render call: a missed nap costs money, not
         # correctness — the next drain arms a fresh countdown
         logger.warning("linger suspend check failed: %s", exc)
+
+
+async def _linger_after_restart(state: AppState) -> None:
+    """Run the drain check once at boot, for a worker this process inherited.
+
+    The countdown lives only in the memory of the process that armed it, and the
+    drain check ran nowhere but at the end of a turn and the end of a send. So a
+    redeploy landing inside a live linger window simply dropped it: nothing
+    re-ran the check, and the worker stayed awake until the next message from
+    the phone — twice on 2026-09-04, once for three hours. A fresh process
+    therefore re-runs the same check itself and arms its own countdown, instead
+    of waiting for a message that may never come.
+
+    Anything pending at boot is not this function's business: it leaves the
+    countdown unarmed exactly as any other drain would, and the end of that turn
+    arms one. Best-effort like every render call — a missed nap costs money, not
+    correctness, and the service must come up whatever this finds.
+    """
+    if state.render is None:  # feature off: the worker runs always-on
+        return
+    try:
+        await _maybe_suspend_worker(state)
+    except Exception as exc:
+        logger.warning("start-up drain check failed: %s", exc)
+        return
+    if state.linger_task is None:
+        logger.info("start-up drain check: work pending, leaving the worker awake")
+    else:
+        logger.info("start-up drain check: drained, suspend armed in %.0fs", state.linger_s)
 
 
 async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
@@ -503,6 +534,14 @@ async def _relay_result(state: AppState, thread_id: str, result: ResultMessage) 
     cancel came before anything was saved, so no event of that run (a done that
     lost the race included) may reach the store or a socket; only the terminal
     bookkeeping still runs, releasing the rerun."""
+    # A word from the worker is proof it is working, so a countdown must never
+    # fire under it. Only a countdown armed blind can be running here: this
+    # process cannot see a turn the worker picked up before it started (the
+    # coordinator's memory of it died with the old process, and the queue counts
+    # only unclaimed work), so the boot check can arm one mid-turn. Every other
+    # countdown is armed on a drain the coordinator could see, and is already
+    # cancelled before a turn starts — there this is a no-op.
+    _cancel_linger(state)
     policy = EVENT_POLICY[result.kind]
     sockets = len(state.sockets.get(thread_id, set()))
     if state.coordinator.was_superseded(thread_id, result.job_id):
@@ -597,6 +636,9 @@ def _lifespan(injected: AppState | None):
         app.state.app_state = state
         state.relay_task = asyncio.ensure_future(_result_relay(state))
         await recover_unprocessed(state)  # restart swallowed nothing silently
+        # last, with the queue client and the render control on the state, and
+        # after recovery has put anything it found back in front of the worker
+        await _linger_after_restart(state)
         try:
             yield
         finally:
