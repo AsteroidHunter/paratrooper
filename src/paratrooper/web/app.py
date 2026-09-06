@@ -999,12 +999,17 @@ def create_app(injected: AppState | None = None) -> FastAPI:
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket) -> None:
+        # The token first, and nothing else read until it has passed. The
+        # catch-up number used to be parsed above this line, so a handshake
+        # carrying a non-numeric one raised out of int() before anybody had
+        # asked who was calling: an unauthenticated request that produced a
+        # traceback instead of the close it should have got.
         token = websocket.query_params.get("token")
-        thread_id = websocket.query_params.get("thread", "default")
-        since = int(websocket.query_params.get("since", "0"))
         if not verify_token(token):
             await websocket.close(code=4401)
             return
+        thread_id = websocket.query_params.get("thread", "default")
+        since = int(websocket.query_params.get("since", "0"))
         await websocket.accept()
         state = st()
         state.sockets.setdefault(thread_id, set()).add(websocket)

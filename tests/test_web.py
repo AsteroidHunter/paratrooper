@@ -1298,6 +1298,69 @@ def test_health_open(client):
     assert body["ok"] is True and "version" in body
 
 
+# --- malformed credentials are refused, not crashed on ------------------------
+
+def test_a_high_byte_in_the_sign_in_header_is_the_same_401_as_a_wrong_token(client, caplog):
+    """A wrong token is a quiet 401. A token with a byte outside ASCII in it was
+    a 500 with a traceback, because the constant-time compare refuses to answer
+    about such a string at all. Same request, same answer, either way."""
+    import logging
+
+    with caplog.at_level(logging.ERROR):
+        # sent as raw bytes, the way a request carries them: a header is bytes
+        # on the wire and the server decodes it latin-1, so any byte at all can
+        # reach the compare
+        for value in (
+            b"Bearer caf\xe9",
+            b"Bearer \xff\xfe\x80",
+            b"Bearer \x00tok",
+            b"caf\xe9",          # not even a bearer header
+            b"Bearer ",
+            b"Bearer \xc3\xa9",  # utf-8 bytes, which decode to two characters
+        ):
+            for route in ("/api/auth/check", "/api/thread/d"):
+                answer = client.get(route, headers={b"Authorization": value})
+                assert answer.status_code == 401, (route, value)
+    assert "Traceback" not in caplog.text
+    assert "TypeError" not in caplog.text
+    # the real token still passes, so the gate did not simply start saying no
+    assert client.get("/api/auth/check", headers={"Authorization": "Bearer tok"}).status_code == 204
+
+
+def test_a_high_byte_in_the_image_token_is_refused_the_same_way(client, caplog):
+    """The thumbnail reads carry the token in the query string (an <img src>
+    cannot set a header), so they meet the same bytes."""
+    import logging
+
+    with caplog.at_level(logging.ERROR):
+        for token in ("café", "ÿþ", "tok "):
+            r = client.get("/api/thumb/whatever.png", params={"token": token})
+            assert r.status_code == 401, token
+    assert "Traceback" not in caplog.text
+
+
+def test_the_socket_checks_the_token_before_it_reads_anything_else(client):
+    """A handshake nobody has authenticated must close, not raise. The catch-up
+    number is parsed only after the token has passed."""
+    from starlette.websockets import WebSocketDisconnect
+
+    for query in (
+        "token=wrong&since=not-a-number",
+        "token=caf%C3%A9&since=nonsense",
+        "since=nonsense",                       # no token at all
+        "token=tok%00&since=%2D%2D",
+    ):
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with client.websocket_connect(f"/ws?{query}") as sock:
+                sock.receive_json()
+        assert refused.value.code == 4401, query
+
+    # and the authenticated handshake still opens and replays
+    _seed(client.app.state.app_state.store, "d", 1)
+    with client.websocket_connect("/ws?token=tok&thread=d&since=0") as sock:
+        assert sock.receive_json()["payload"] == "m0"
+
+
 # --- upload limits ------------------------------------------------------------
 
 def test_image_kind_reads_the_bytes_not_the_name():
