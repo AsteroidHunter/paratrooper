@@ -79,7 +79,17 @@ services:
         value: subscription  # manual mode, no fallback (Open Q#4)
       - key: CLAUDE_CODE_OAUTH_TOKEN
         sync: false
-      - key: PARATROOPER_GITHUB_TOKEN
+      # The worker authenticates to GitHub as the paratrooper-98cc App: it signs
+      # a JWT with the App's private key and trades it for an installation token
+      # that lives an hour. That replaces the personal access token that used to
+      # sit here, which never expired. Three values, all set by hand: these two
+      # ids, and the private key, which is a secret FILE at
+      # /etc/secrets/paratrooper-98cc-github-app.pem — a Blueprint cannot declare
+      # a secret file, so it is added in the dashboard. The worker reads the key
+      # once at boot and removes the file.
+      - key: PARATROOPER_GITHUB_APP_ID
+        sync: false
+      - key: PARATROOPER_GITHUB_APP_INSTALLATION_ID
         sync: false
       - key: PARATROOPER_REMOTE
         sync: false

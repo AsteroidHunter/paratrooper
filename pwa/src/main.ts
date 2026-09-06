@@ -173,7 +173,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.114"; // Pushing a branch and opening a pull request are the worker's own steps now, so the agent that edits the board no longer holds a key to the website
+const APP_VERSION = "0.3.115"; // The worker signs in to GitHub as Paratrooper itself with a key that expires every hour, so pull requests now come from the bot and the old personal key can be deleted
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -1691,7 +1693,7 @@ def test_run_job_gives_the_credential_to_the_tools_and_not_to_the_session(tmp_pa
         if False:
             yield
 
-    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "ghp-sekret")
+    monkeypatch.setattr(worker_mod, "installation_token", lambda config: "ghs-minted")
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
     monkeypatch.setattr(worker_mod, "query", fake_query)
@@ -1700,11 +1702,11 @@ def test_run_job_gives_the_credential_to_the_tools_and_not_to_the_session(tmp_pa
     result = asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path)))
 
     assert result.status == "done"
-    assert captured["ctx"].github_token == "ghp-sekret"  # the tools have it
+    assert captured["ctx"].github_token == "ghs-minted"  # the tools have it
     env = captured["options"].env
     for gone in ("GH_TOKEN", "GIT_ASKPASS", "PARATROOPER_GIT_ASKPASS_TOKEN"):
         assert gone not in env, gone
-    assert "ghp-sekret" not in "".join(env.values())
+    assert "ghs-minted" not in "".join(env.values())
 
 
 def test_run_job_without_a_github_token_hands_the_tools_none(tmp_path, monkeypatch):
@@ -1723,7 +1725,10 @@ def test_run_job_without_a_github_token_hands_the_tools_none(tmp_path, monkeypat
         if False:
             yield
 
-    monkeypatch.delenv("PARATROOPER_GITHUB_TOKEN", raising=False)
+    import paratrooper.agent.config as config_mod
+
+    monkeypatch.delenv("PARATROOPER_GITHUB_APP_ID", raising=False)
+    monkeypatch.setattr(config_mod, "_github_app", None)
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
     monkeypatch.setattr(worker_mod, "query", fake_query)
@@ -1759,7 +1764,7 @@ def test_run_job_refreshes_the_checkout_before_the_turn(tmp_path, monkeypatch):
         if False:
             yield
 
-    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "ghp-sekret")
+    monkeypatch.setattr(worker_mod, "installation_token", lambda config: "ghs-minted")
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", lambda ctx: ({"name": "p"}, []))
     monkeypatch.setattr(worker_mod, "query", fake_query)
@@ -1768,7 +1773,7 @@ def test_run_job_refreshes_the_checkout_before_the_turn(tmp_path, monkeypatch):
     job = worker_mod.Job(job_id="j5", thread_id="t1", text="add the pin")
     assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
     assert "fetched" in calls
-    assert calls[0]["github_token"] == "ghp-sekret"
+    assert calls[0]["github_token"] == "ghs-minted"
 
     class _Broken(_Repo):
         def fetch(self):
@@ -1856,10 +1861,10 @@ def test_run_job_sets_the_scrub_switch_either_way(tmp_path, monkeypatch, with_to
         if False:
             yield
 
-    if with_token:
-        monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "ghp-sekret")
-    else:
-        monkeypatch.delenv("PARATROOPER_GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(
+        worker_mod, "installation_token",
+        (lambda config: "ghs-minted") if with_token else _no_app_configured,
+    )
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
     monkeypatch.setattr(worker_mod, "query", fake_query)
@@ -1882,19 +1887,252 @@ def test_worker_image_carries_the_tool_the_scrub_switch_needs():
     assert re.search(r"apt-get install[^\n]*\bbubblewrap\b", dockerfile)
 
 
+# --- the GitHub App: hourly installation tokens (checklist 2.2) --------------
+
+
+def _rsa_pair():
+    """One throwaway RSA pair for the JWT tests. Generated once: keygen is the
+    slowest thing in this file by a wide margin."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    public = key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+    return private, public
+
+
+_PRIVATE_PEM, _PUBLIC_PEM = _rsa_pair()
+
+
+def _configure_app(monkeypatch, tmp_path, private_pem, *, name="paratrooper-98cc-github-app.pem"):
+    """Set the App up the way the deploy does: two ids in the environment (the
+    start-up wrapper puts them there) and the private key in a mounted file."""
+    import paratrooper.agent.config as config_mod
+    import paratrooper.agent.github_app as app_mod
+
+    monkeypatch.setattr(config_mod, "_github_app", None)
+    monkeypatch.setattr(app_mod, "_held", None)
+    key_file = tmp_path / name
+    key_file.write_text(private_pem)
+    monkeypatch.setenv("PARATROOPER_GITHUB_APP_ID", "12345")
+    monkeypatch.setenv("PARATROOPER_GITHUB_APP_INSTALLATION_ID", "67890")
+    monkeypatch.setenv(config_mod.GITHUB_APP_KEY_FILE_VAR, str(key_file))
+    return key_file
+
+
+def test_the_app_key_is_read_once_and_its_file_removed(monkeypatch, tmp_path):
+    """The key reaches memory and the file does not survive the read. The two
+    ids leave the environment with it, so nothing about the App is sitting in
+    what the SDK hands the CLI."""
+    from paratrooper.agent.config import GITHUB_APP_VARS, take_github_app
+
+    key_file = _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    app = take_github_app()
+
+    assert app.app_id == "12345" and app.installation_id == "67890"
+    assert app.private_key == _PRIVATE_PEM
+    assert not key_file.exists()
+    for name in GITHUB_APP_VARS:
+        assert name not in os.environ, name
+    # read-once-and-keep: a second call answers from memory, with no file left
+    assert take_github_app() is app
+
+
+def test_a_missing_app_value_or_key_is_an_error_naming_it(monkeypatch, tmp_path):
+    """No fallback: the personal token is gone, so a half-configured worker has
+    to say which piece is missing rather than find another way in. Nothing is
+    consumed on the way to that error, so the failure is the same every time."""
+    import paratrooper.agent.config as config_mod
+    from paratrooper.agent.config import ConfigError, take_github_app
+
+    for missing in config_mod.GITHUB_APP_VARS:
+        key_file = _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+        monkeypatch.delenv(missing, raising=False)
+        with pytest.raises(ConfigError) as err:
+            take_github_app()
+        assert missing in str(err.value)
+        assert key_file.exists(), "a failed boot must not consume the key"
+
+    _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    monkeypatch.setenv(config_mod.GITHUB_APP_KEY_FILE_VAR, str(tmp_path / "not-there.pem"))
+    with pytest.raises(ConfigError) as err:
+        take_github_app()
+    assert "not-there.pem" in str(err.value)
+    # the other ids are still in the environment: nothing was taken
+    for name in config_mod.GITHUB_APP_VARS:
+        assert name in os.environ, name
+
+    empty = _configure_app(monkeypatch, tmp_path, "")
+    with pytest.raises(ConfigError) as err:
+        take_github_app()
+    assert "empty" in str(err.value) and empty.exists()
+
+
+def test_a_refused_key_deletion_warns_and_the_worker_carries_on(monkeypatch, tmp_path, caplog):
+    """Akash's decision, 2026-09-04: the worker runs as an unprivileged account
+    against a file the platform owns, so the deletion may not be permitted at
+    all, and a permissions problem must not take the worker offline. This is the
+    rehearsal of the outcome the first boot on Render may hand back."""
+    from paratrooper.agent.config import take_github_app
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    key_file = _configure_app(monkeypatch, locked, _PRIVATE_PEM)
+    key_file.chmod(0o444)
+    locked.chmod(0o555)  # no unlink, no rewrite
+    try:
+        with caplog.at_level(logging.WARNING):
+            app = take_github_app()
+    finally:
+        locked.chmod(0o755)
+        key_file.chmod(0o644)
+
+    assert app.private_key == _PRIVATE_PEM  # the boot went through
+    assert key_file.exists()  # and the file really did survive
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("could not delete" in w for w in warnings), warnings
+    assert any(str(key_file) in w for w in warnings), warnings
+    assert not any(_PRIVATE_PEM[:40] in w for w in warnings)  # never the key itself
+
+
+def test_the_app_jwt_carries_the_claims_github_checks(monkeypatch, tmp_path):
+    """GitHub rejects a JWT whose lifetime is over ten minutes or whose issue
+    time is in its own future, and both are easy to get wrong against clock
+    drift, so the claims are asserted rather than assumed."""
+    import jwt as pyjwt
+
+    from paratrooper.agent.config import take_github_app
+    from paratrooper.agent.github_app import JWT_LIFETIME, build_jwt
+
+    _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    token = build_jwt(take_github_app(), issued_at=1_000_000)
+
+    claims = pyjwt.decode(token, _PUBLIC_PEM, algorithms=["RS256"],
+                          options={"verify_exp": False})
+    assert claims["iss"] == "12345"
+    assert claims["iat"] < 1_000_000  # backdated against drift
+    assert claims["exp"] - claims["iat"] <= 600  # GitHub's ceiling
+    assert claims["exp"] == 1_000_000 + JWT_LIFETIME
+    assert pyjwt.get_unverified_header(token)["alg"] == "RS256"
+
+
+def test_minting_asks_the_installation_and_narrows_to_the_repository(monkeypatch, tmp_path):
+    """The request shape, in full: the installation's own endpoint, the JWT as
+    the bearer, and the token narrowed to the one repository the site lives in
+    rather than everything the App is installed on."""
+    import jwt as pyjwt
+
+    from paratrooper.agent.config import take_github_app
+    from paratrooper.agent.github_app import mint_installation_token
+
+    _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    seen: list = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(201, json={
+            "token": "ghs_minted", "expires_at": "2026-09-05T23:59:00Z",
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        minted = mint_installation_token(
+            take_github_app(), repositories=["webpage"], client=client
+        )
+
+    assert minted.token == "ghs_minted"
+    request = seen[0]
+    assert request.url.path == "/app/installations/67890/access_tokens"
+    assert request.url.host == "api.github.com"
+    assert json.loads(request.content) == {"repositories": ["webpage"]}
+    bearer = request.headers["authorization"].removeprefix("Bearer ")
+    assert pyjwt.decode(bearer, _PUBLIC_PEM, algorithms=["RS256"])["iss"] == "12345"
+
+
+def test_the_minted_token_is_reused_until_ten_minutes_are_left(monkeypatch, tmp_path):
+    """One mint an hour, not one a message: the cache is what makes a per-turn
+    credential cheap. The margin exists because a token that expires mid-push is
+    a failed turn, and ten minutes is longer than any turn has taken."""
+    from paratrooper.agent.github_app import REFRESH_MARGIN, installation_token
+
+    _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    cfg = _tool_cfg(tmp_path)
+    cfg.remote = "https://github.com/AsteroidHunter/webpage.git"
+    expiry = datetime(2026, 9, 5, 23, 0, tzinfo=UTC)
+    mints: list = []
+
+    def handler(request):
+        mints.append(json.loads(request.content))
+        return httpx.Response(201, json={
+            "token": f"ghs_{len(mints)}", "expires_at": expiry.isoformat(),
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        fresh = expiry - timedelta(seconds=REFRESH_MARGIN + 60)
+        assert installation_token(cfg, client=client, now=fresh) == "ghs_1"
+        assert installation_token(cfg, client=client, now=fresh) == "ghs_1"  # held
+        nearly = expiry - timedelta(seconds=REFRESH_MARGIN - 60)
+        assert installation_token(cfg, client=client, now=nearly) == "ghs_2"
+
+    assert mints == [{"repositories": ["webpage"]}] * 2  # narrowed both times
+
+
+def test_a_refused_mint_is_an_error_and_nothing_else_is_tried(monkeypatch, tmp_path):
+    """Decision 8: every failure is an error to the turn, never a retry with
+    another credential. A quiet degrade here would leave a change looking pushed
+    when nothing had been."""
+    from paratrooper.agent.config import ConfigError
+    from paratrooper.agent.github_app import GitHubAppError, installation_token
+
+    _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    cfg = _tool_cfg(tmp_path)
+    cfg.remote = "https://github.com/AsteroidHunter/webpage.git"
+
+    def handler(request):
+        return httpx.Response(401, text='{"message":"A JSON web token could not be decoded"}')
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GitHubAppError) as err:
+            installation_token(cfg, client=client)
+    assert "401" in str(err.value)
+    assert "could not be decoded" in str(err.value)
+    assert "67890" in str(err.value)  # names the installation that refused
+
+    # and with no site repository configured there is nothing to ask for
+    cfg.remote = None
+    with pytest.raises(ConfigError) as cfg_err:
+        installation_token(cfg)
+    assert "PARATROOPER_REMOTE" in str(cfg_err.value)
+
+
+def _no_app_configured(config):
+    """What the minter does on a run with no GitHub App configured at all."""
+    raise ConfigError("required environment variable PARATROOPER_GITHUB_APP_ID is unset")
+
+
 def _fresh_secret_state(monkeypatch):
-    """Both boot readers are read-once-and-keep, so a test that wants to watch
+    """The boot readers are read-once-and-keep, so a test that wants to watch
     the taking has to start from before it happened."""
     import paratrooper.agent.config as config_mod
+    import paratrooper.agent.github_app as app_mod
     import paratrooper.web.queue as queue_mod
 
     monkeypatch.setattr(config_mod, "_spotify", None)
     monkeypatch.setattr(config_mod, "_spotify_taken", False)
+    monkeypatch.setattr(config_mod, "_github_app", None)
+    monkeypatch.setattr(app_mod, "_held", None)
     monkeypatch.setattr(queue_mod, "_url", None)
     return config_mod, queue_mod
 
 
-def test_worker_boot_takes_the_worker_only_secrets_out_of_the_environment(monkeypatch):
+def test_worker_boot_takes_the_worker_only_secrets_out_of_the_environment(monkeypatch, tmp_path):
     """The Spotify pair and the queue address must be gone from os.environ by
     the time the worker starts consuming, because the SDK builds the CLI's
     environment from os.environ and can only add to it. Gone from there, still
@@ -1906,6 +2144,7 @@ def test_worker_boot_takes_the_worker_only_secrets_out_of_the_environment(monkey
     monkeypatch.setenv("PARATROOPER_REDIS_URL", "redis://:other@localhost:6399/1")
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "spot-id")
     monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "spot-secret")
+    key_file = _configure_app(monkeypatch, Path(str(tmp_path)), _PRIVATE_PEM)
 
     built: list = []
 
@@ -1924,6 +2163,13 @@ def test_worker_boot_takes_the_worker_only_secrets_out_of_the_environment(monkey
     # the loser of the two queue names goes too, since it carries a password all
     # the same
     assert built, "the worker was never constructed"
+    # the App's two ids leave the environment the same way, and its private key
+    # is in memory with its file gone: the site build runs repository code the
+    # agent edits, and no deny rule reaches inside that
+    for name in config_mod.GITHUB_APP_VARS:
+        assert name not in os.environ, name
+    assert not key_file.exists()
+    assert config_mod.take_github_app().app_id == "12345"
     assert config_mod.spotify_credentials() == ("spot-id", "spot-secret")
     kwargs = queue_mod.connect().connection_pool.connection_kwargs
     assert kwargs["password"] == "hunter2"  # a reconnect still has the address
@@ -2051,10 +2297,10 @@ def test_run_job_env_carries_no_worker_only_secret(tmp_path, monkeypatch, with_t
         if False:
             yield
 
-    if with_token:
-        monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "ghp-sekret")
-    else:
-        monkeypatch.delenv("PARATROOPER_GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(
+        worker_mod, "installation_token",
+        (lambda config: "ghs-minted") if with_token else _no_app_configured,
+    )
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
     monkeypatch.setattr(worker_mod, "query", fake_query)

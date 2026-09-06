@@ -7,10 +7,12 @@ Two kinds of configuration, deliberately separated:
   photos), ``pins_dir``, ``archive_dir``; plus the changelog path and the
   site-repo remote/default-branch/branch-prefix.
 * **Secrets** are **environment variables, never a config file** — the app
-  bearer token, GitHub PAT, ``CLAUDE_CODE_OAUTH_TOKEN`` / ``ANTHROPIC_API_KEY``,
-  Spotify id/secret, VAPID keys. Read via :func:`require_env` / the typed
-  accessors, which **hard-error loudly** when a required secret is missing
-  (matching the no-silent-fallback posture for auth).
+  bearer token, the GitHub App's ids, ``CLAUDE_CODE_OAUTH_TOKEN`` /
+  ``ANTHROPIC_API_KEY``, Spotify id/secret, VAPID keys. Read via
+  :func:`require_env` / the typed accessors, which **hard-error loudly** when a
+  required secret is missing (matching the no-silent-fallback posture for auth).
+  The one secret that is a file rather than a variable is the App's private key,
+  which the platform mounts and :func:`take_github_app` reads once and removes.
 """
 
 from __future__ import annotations
@@ -182,9 +184,100 @@ def app_token() -> str:
     return require_env("PARATROOPER_APP_TOKEN")
 
 
-def github_token() -> str:
-    """Fine-grained PAT (Contents + Pull requests write) for branch push + PR open."""
-    return require_env("PARATROOPER_GITHUB_TOKEN")
+# --- the GitHub App the worker authenticates as (checklist 2.2) --------------
+#
+# The personal access token this replaced never expired, so a leak was
+# permanent. These three describe an App instead: the worker signs a JWT with
+# the private key and trades it for an installation token that lives an hour.
+# The names are the ones already set on the deploy and are read verbatim.
+
+GITHUB_APP_VARS = ("PARATROOPER_GITHUB_APP_ID", "PARATROOPER_GITHUB_APP_INSTALLATION_ID")
+# where the deploy mounts the key. The file name is the App's own, so the path
+# is fixed rather than configured; one explicit variable overrides it, for a
+# local run, and nothing is ever guessed from whether a file happens to exist.
+GITHUB_APP_KEY_FILE = "/etc/secrets/paratrooper-98cc-github-app.pem"
+GITHUB_APP_KEY_FILE_VAR = "PARATROOPER_GITHUB_APP_KEY_FILE"
+
+
+@dataclass(frozen=True)
+class GitHubApp:
+    """Everything needed to mint an installation token, held in memory only."""
+
+    app_id: str
+    installation_id: str
+    private_key: str
+
+
+_github_app: GitHubApp | None = None
+
+
+def _remove_key_file(path: Path) -> None:
+    """Empty the private key file and delete it.
+
+    The deny rules keep the agent's own tools out of ``/etc/secrets``, but the
+    site build runs repository code the agent edits and no deny rule reaches
+    inside that. Taking the file away closes that road for good.
+
+    **A failed deletion warns and carries on** (Akash's decision, 2026-09-04):
+    the worker runs as an unprivileged account against a file the platform owns,
+    so it may not be permitted at all, and a permissions problem must not take
+    the worker offline. Emptying first means even a refused deletion leaves
+    nothing readable behind. The log line either way is the record of which it
+    was on this deploy."""
+    emptied = False
+    try:
+        path.write_text("")
+        emptied = True
+    except OSError as exc:
+        logger.warning("could not empty the GitHub App private key file %s: %s", path, exc)
+    try:
+        path.unlink()
+        logger.info("read the GitHub App private key and deleted %s", path)
+    except OSError as exc:
+        logger.warning(
+            "could not delete the GitHub App private key file %s: %s "
+            "(the key is in memory and the worker carries on; the file was%s emptied)",
+            path, exc, "" if emptied else " NOT",
+        )
+
+
+def take_github_app() -> GitHubApp:
+    """The App's identity and private key, read once and held here.
+
+    Reads the two ids from the environment (the start-up wrapper puts them
+    there, so they are in no launch record) and the key from the mounted file,
+    then takes the ids out of the environment and removes the file. Every
+    missing piece raises :class:`ConfigError` naming it; nothing falls back to a
+    personal token, because from this item on there is not one.
+
+    Nothing is consumed until all three are in hand, so a boot that fails on a
+    missing value leaves the environment and the file exactly as it found them.
+    """
+    global _github_app
+    if _github_app is not None:
+        return _github_app
+    app_id, installation_id = (os.environ.get(name, "") for name in GITHUB_APP_VARS)
+    for name, value in zip(GITHUB_APP_VARS, (app_id, installation_id), strict=True):
+        if not value:
+            raise ConfigError(
+                f"required environment variable {name} is unset or empty: it names "
+                "the GitHub App the worker pushes and opens pull requests as"
+            )
+    key_file = Path(os.environ.get(GITHUB_APP_KEY_FILE_VAR) or GITHUB_APP_KEY_FILE)
+    try:
+        private_key = key_file.read_text()
+    except OSError as exc:
+        raise ConfigError(
+            f"the GitHub App's private key could not be read from {key_file}: {exc} "
+            f"(set {GITHUB_APP_KEY_FILE_VAR} to point somewhere else)"
+        ) from exc
+    if not private_key.strip():
+        raise ConfigError(f"the GitHub App's private key file {key_file} is empty")
+    _github_app = GitHubApp(app_id, installation_id, private_key)
+    for name in GITHUB_APP_VARS:
+        os.environ.pop(name, None)
+    _remove_key_file(key_file)
+    return _github_app
 
 
 # --- worker-only secrets, held here instead of in the environment ------------

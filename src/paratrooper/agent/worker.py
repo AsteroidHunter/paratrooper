@@ -34,11 +34,11 @@ from .auth import configure_auth
 from .config import (
     Config,
     ConfigError,
-    github_token,
     load_config,
     spotify_credentials,
     validate_branch_prefix,
 )
+from .github_app import installation_token
 from .hooks import make_file_guard_hook, make_main_guard_hook
 from .memory import Changelog, format_digest
 from .prompt import build_system_prompt
@@ -162,14 +162,19 @@ async def run_job(
     except ConfigError:
         spotify_creds = None  # Spotify name-search is optional; links still resolve
 
-    # The GitHub credential the worker holds. It reaches the three handoff tools
-    # and stops there. It is deliberately NOT in session_env below: the SDK
-    # builds the CLI's environment from os.environ plus that dict, so a token
-    # placed there is a token in every shell the agent opens, which is the whole
-    # thing this phase removes. Without one (local dev) the tools say so and the
-    # rest of the session runs exactly as before.
+    # The GitHub credential the worker holds: an installation token for the
+    # paratrooper-98cc App, minted here and good for an hour. It reaches the
+    # three handoff tools and stops there. It is deliberately NOT in session_env
+    # below: the SDK builds the CLI's environment from os.environ plus that
+    # dict, so a token placed there is a token in every shell the agent opens,
+    # which is the whole thing this phase removes.
+    #
+    # ConfigError means the App is not configured at all, which is a local run:
+    # the tools say so and the rest of the session behaves as before. A refusal
+    # from GitHub is not caught — there is no second credential to try, and a
+    # turn that quietly ran without one would look like it had pushed.
     try:
-        gh_token = github_token()
+        gh_token = installation_token(config)
     except ConfigError:
         gh_token = None
     # Anthropic's scrub switch. The CLI must keep the Claude credential — it is
