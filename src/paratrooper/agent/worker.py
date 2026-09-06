@@ -1,13 +1,14 @@
 """The worker entry point: run one pin-update job through the Agent SDK.
 
 Ties Phase 3 together. Per request: lock in auth (subscription/api, no fallback),
-build the in-process tool server + the custom system prompt (with the hot memory
-digest) + the main-guard PreToolUse hook, then drive a headless ``query()``
-session. The agent does its own git/gh through Bash (branch off origin/main or
-continue an open PR's branch; the hook fences main/merges) and reports the PR
-back via the report_pr tool. Progress (logs, screenshot, PR) is streamed to an
-optional callback so the web service can relay it over the socket; the final
-result + artifacts are returned.
+refresh the checkout from the remote, build the in-process tool server + the
+custom system prompt (with the hot memory digest) + the main-guard PreToolUse
+hook, then drive a headless ``query()`` session. The agent does its own local git
+through Bash (branch off origin/main or continue an open PR's branch; the hook
+fences main/merges); everything that reaches GitHub is a worker-owned tool, with
+the credential held here and kept out of the session's environment. Progress
+(logs, screenshot, PR) is streamed to an optional callback so the web service can
+relay it over the socket; the final result + artifacts are returned.
 
 One session per request, started fresh — matching the task-based session model.
 """
@@ -15,9 +16,11 @@ One session per request, started fresh — matching the task-based session model
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+import anyio
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -31,16 +34,18 @@ from .auth import configure_auth
 from .config import (
     Config,
     ConfigError,
-    github_token,
     load_config,
     spotify_credentials,
     validate_branch_prefix,
 )
+from .github_app import installation_token
 from .hooks import make_file_guard_hook, make_main_guard_hook
 from .memory import Changelog, format_digest
 from .prompt import build_system_prompt
-from .siterepo import write_askpass_helper
+from .siterepo import SiteRepo
 from .tools import SERVER_NAME, ToolContext, build_tool_server
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-opus-4-8"
 # headless built-ins the agent needs; Bash is gated by the main-guard hook and
@@ -106,6 +111,28 @@ async def _emit(cb: EventCallback | None, event: dict) -> None:
         await res
 
 
+def _refresh_checkout(config: Config, token: str) -> None:
+    """Bring ``origin/*`` up to date before a turn starts.
+
+    A failure warns and lets the turn run. This is a refresh of state the agent
+    used to refresh for itself, and when its own ``git fetch`` failed the turn
+    carried on; turning a network blip into a failed message would be a new way
+    for every request to die, which is not what taking a credential away is
+    supposed to cost. Anything that actually needs the remote — the push, the
+    pull request — fails loudly on its own with the same cause."""
+    try:
+        SiteRepo(
+            config.site_root,
+            default_branch=config.default_branch,
+            github_token=token,
+            remote=config.remote,
+            git_name=config.git_name,
+            git_email=config.git_email,
+        ).fetch()
+    except Exception as exc:
+        logger.warning("could not refresh the site checkout before the turn: %s", exc)
+
+
 async def run_job(
     job: Job,
     *,
@@ -135,13 +162,19 @@ async def run_job(
     except ConfigError:
         spotify_creds = None  # Spotify name-search is optional; links still resolve
 
-    # GitHub auth for the agent's shell: `gh` reads GH_TOKEN directly, and git
-    # authenticates through the same askpass helper the clone bootstrap uses
-    # (token rides only in env values — never argv, never the helper file).
-    # Without a configured token (local dev) those three are simply absent and
-    # the session runs exactly as before.
+    # The GitHub credential the worker holds: an installation token for the
+    # paratrooper-98cc App, minted here and good for an hour. It reaches the
+    # three handoff tools and stops there. It is deliberately NOT in session_env
+    # below: the SDK builds the CLI's environment from os.environ plus that
+    # dict, so a token placed there is a token in every shell the agent opens,
+    # which is the whole thing this phase removes.
+    #
+    # ConfigError means the App is not configured at all, which is a local run:
+    # the tools say so and the rest of the session behaves as before. A refusal
+    # from GitHub is not caught — there is no second credential to try, and a
+    # turn that quietly ran without one would look like it had pushed.
     try:
-        gh_token = github_token()
+        gh_token = installation_token(config)
     except ConfigError:
         gh_token = None
     # Anthropic's scrub switch. The CLI must keep the Claude credential — it is
@@ -154,25 +187,28 @@ async def run_job(
         SCRUB_VAR: "1",
         "GIT_TERMINAL_PROMPT": "0",  # fail fast, never hang on a prompt
     }
+
+    # The agent used to run `git fetch` itself. It cannot now, so the worker
+    # refreshes origin/* before the session: without this the agent branches off
+    # whatever the default branch looked like at boot and never sees the branch
+    # of a pull request it is meant to continue.
     if gh_token:
-        session_env |= {
-            "GH_TOKEN": gh_token,
-            "GIT_ASKPASS": write_askpass_helper(),
-            "PARATROOPER_GIT_ASKPASS_TOKEN": gh_token,
-        }
+        await anyio.to_thread.run_sync(_refresh_checkout, config, gh_token)
 
     async def emit_update(text: str) -> None:
         # the post_update tool's live channel: an agent-authored interim bubble
         await emit("update", text)
 
     # No branch/PR yet: the agent branches (or continues an open PR's branch)
-    # in its own shell only when it actually changes the board, then records
-    # the PR via report_pr — pure conversation never touches git.
+    # in its own shell only when it actually changes the board, and the push
+    # and pull request tools record what they did — pure conversation never
+    # touches git.
     ctx = ToolContext(
         config=config,
         changelog=changelog,
         spotify_creds=spotify_creds,
         emit_update=emit_update,
+        github_token=gh_token,
     )
     server, tool_names = build_tool_server(ctx)
     # the guard fences the agent onto the configured <prefix>/* branches; the site

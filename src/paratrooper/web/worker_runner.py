@@ -20,11 +20,12 @@ from redis import exceptions as redis_exc
 
 from ..agent.config import (
     Config,
-    github_token,
     load_config,
     load_worker_secrets,
+    take_github_app,
     take_spotify_credentials,
 )
+from ..agent.github_app import installation_token
 from ..agent.siterepo import SiteRepo
 from ..agent.worker import Job, run_job
 from .inbox import DiskInbox, RedisInbox, key_age_seconds
@@ -206,7 +207,7 @@ class Worker:
         SiteRepo(
             cfg.site_root,
             default_branch=cfg.default_branch,
-            github_token=github_token(),
+            github_token=installation_token(cfg),
             remote=cfg.remote,
             git_name=cfg.git_name,
             git_email=cfg.git_email,
@@ -270,6 +271,11 @@ def main() -> None:
     # in every shell the agent opens. Both readers keep what they took, so the
     # queue client and the Spotify helper work exactly as before.
     take_spotify_credentials()
+    # The GitHub App, the same way: its two ids come out of the environment and
+    # its private key is read out of the mounted file and the file removed, all
+    # before any session exists. A missing value or an unreadable key stops the
+    # boot naming it; there is no personal token to fall back to any more.
+    take_github_app()
     client = connect()  # takes the queue address, password and all, with it
     asyncio.run(Worker(JobQueue(client)).run())
 

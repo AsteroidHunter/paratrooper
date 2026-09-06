@@ -28,6 +28,10 @@ agent = [
     # was newest at build time and the switch's presence moved with the date
     "claude-agent-sdk==0.2.110",
     "httpx>=0.27",
+    # RS256 for the GitHub App's JWT: the worker signs one with the App's
+    # private key and trades it for an hourly installation token. The [crypto]
+    # extra is what pulls in the RSA backend PyJWT needs to sign at all.
+    "pyjwt[crypto]>=2.8",
     "playwright>=1.44",
     "redis>=5.0",
     "pydantic>=2.0",  # the worker shares the web's wire-contract models

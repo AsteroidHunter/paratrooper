@@ -1,13 +1,21 @@
-"""The agent's custom in-process tools (checklist 3.1).
+"""The agent's custom in-process tools (checklist 3.1, extended at 2.1).
 
 Each tool is a thin async ``@tool`` wrapper around the SDK-independent core
 modules, bundled into one in-process MCP server via ``create_sdk_mcp_server``.
-The wrappers close over a :class:`ToolContext` (config + changelog + artifacts)
-so the handlers stay arg-only as the SDK expects. Git lives elsewhere: the agent
-runs git/gh through its own Bash (fenced by the main-guard hook) and reports the
-resulting PR back through ``report_pr``. Synchronous core work is offloaded to a
-thread so the event loop isn't blocked; tools return
+The wrappers close over a :class:`ToolContext` (config + changelog + credential
++ artifacts) so the handlers stay arg-only as the SDK expects. Synchronous core
+work is offloaded to a thread so the event loop isn't blocked; tools return
 ``{"content": [...], "is_error"?: bool}``.
+
+**The GitHub handoff.** Local git (branch, add, commit) stays in the agent's own
+Bash, fenced by the main-guard hook. Everything that reaches GitHub —
+``push_branch``, ``open_pull_request``, ``list_pull_requests`` — is a tool here
+instead, run by the worker with a credential the agent never sees and cannot
+read out of its environment, because it is not in it. That is the whole point of
+the three: with no token in the session, the agent has nothing to authenticate
+with, so these are not a convenience over ``gh``, they are the only road.
+``report_pr`` is gone; ``open_pull_request`` records the pull request itself, so
+the Publish button no longer depends on the agent remembering a second call.
 
 Tool names the agent sees are ``mcp__paratrooper__<name>`` — :func:`build_tool_server`
 returns both the server and the matching ``allowed_tools`` list.
@@ -15,6 +23,7 @@ returns both the server and the matching ``allowed_tools`` list.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass
 from datetime import UTC
@@ -24,22 +33,35 @@ import anyio
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from ..placement import NewItem, check_overlaps, place_pin, sanity_check
-from . import images, pins, screenshot, spotify
+from . import github, images, pins, screenshot, spotify
 from .config import OPENED_ASSET, PREVIEW_ASSET, Config
+from .hooks import base_denial, normalize_prefix, push_denial
 from .memory import Changelog, ChangelogEntry
+from .siterepo import SiteRepo
 
 SERVER_NAME = "paratrooper"
+
+# what a tool says when it is asked to reach GitHub on a run that has no
+# credential (local CLI use). Not a fallback: there is no second road to try.
+NO_CREDENTIAL = (
+    "this worker has no GitHub credential configured, so nothing can be pushed "
+    "or opened from here"
+)
 
 
 @dataclass
 class ToolContext:
     config: Config
     changelog: Changelog
-    # The PR's head branch as reported by the report_pr tool — bookkeeping for
-    # the worker's "pr" event and JobResult, not a gate. The agent branches in
-    # its own shell; a purely conversational message never touches git.
+    # The head branch of the work in flight, set by push_branch and
+    # open_pull_request — bookkeeping for the worker's "pr" event and JobResult,
+    # not a gate. The agent branches in its own shell; a purely conversational
+    # message never touches git.
     branch: str | None = None
     spotify_creds: tuple[str, str] | None = None
+    # the GitHub credential the worker holds. It reaches the three handoff tools
+    # and nothing else — never ClaudeAgentOptions.env, never a shell.
+    github_token: str | None = None
     now: Any = None  # callable -> ISO timestamp; injectable for tests
     # artifacts captured as the tools run, so the worker can relay them to the
     # thread (screenshot, PR url) without parsing SDK message internals
@@ -56,6 +78,31 @@ def _ok(payload: dict) -> dict:
 
 def _err(message: str) -> dict:
     return {"content": [{"type": "text", "text": message}], "is_error": True}
+
+
+def _site_repo(ctx: ToolContext) -> SiteRepo:
+    """The worker's own git handle on the checkout, carrying the credential."""
+    return SiteRepo(
+        ctx.config.site_root,
+        default_branch=ctx.config.default_branch,
+        github_token=ctx.github_token,
+        remote=ctx.config.remote,
+        git_name=ctx.config.git_name,
+        git_email=ctx.config.git_email,
+    )
+
+
+def _agent_branch_violation(ctx: ToolContext, branch: str) -> str | None:
+    """The branch fence, in the guard's own wording, checked where the
+    credential actually is. The shell hook says the same thing about a
+    ``git push``; this is the copy that matters, because this is the one with a
+    token behind it."""
+    prefix = normalize_prefix(ctx.config.branch_prefix)
+    if not branch:
+        return "name the branch to push, e.g. " + f"{prefix}<slug>"
+    if not branch.startswith(prefix) or len(branch) == len(prefix):
+        return push_denial(branch, prefix)
+    return None
 
 
 def build_tool_server(ctx: ToolContext):
@@ -187,18 +234,105 @@ def build_tool_server(ctx: ToolContext):
         except Exception as exc:
             return _err(f"move_pin failed: {exc}")
 
-    @tool("report_pr", "Report the PR for this update so the app can show its link and "
-          "Publish button. Call it after opening a new PR, AND after pushing more "
-          "commits to an already-open one. Args: url (the PR link), branch (the PR's "
-          "head branch).", {"url": str, "branch": str})
-    async def report_pr_tool(args: dict) -> dict:
-        url = str(args.get("url", "")).strip()
+    @tool("push_branch", "Push the branch you committed on to GitHub. Your shell cannot "
+          "reach GitHub at all, so this is the only way a commit leaves this machine. "
+          "Args: branch (the branch you are on).", {"branch": str})
+    async def push_branch_tool(args: dict) -> dict:
         branch = str(args.get("branch", "")).strip()
-        if not url or not branch:
-            return _err("report_pr needs both url and branch")
-        ctx.last_pr = url
+        violation = _agent_branch_violation(ctx, branch)
+        if violation:
+            return _err(violation)
+        if not ctx.github_token:
+            return _err(NO_CREDENTIAL)
+
+        def _run() -> dict:
+            repo = _site_repo(ctx)
+            remote = repo.configured_remote()
+            repo.push_branch(branch)
+            payload = {"pushed": branch}
+            # the link back is a convenience for the reply, so it is built after
+            # the push and never gates it: a remote this cannot read as
+            # owner/repo is still a remote the push may have landed on
+            with contextlib.suppress(github.GitHubError):
+                owner, name = github.owner_repo(remote)
+                payload["url"] = github.branch_url(owner, name, branch)
+            return payload
+
+        try:
+            payload = await anyio.to_thread.run_sync(_run)
+        except Exception as exc:
+            return _err(f"push_branch failed: {exc}")
         ctx.branch = branch
-        return _ok({"recorded": {"pr": url, "branch": branch}})
+        return _ok(payload)
+
+    @tool("open_pull_request", "Open the pull request for a branch you pushed, so Akash "
+          "gets his Publish button. Call it every time you push, including on a branch "
+          "that already has one: it hands back the open pull request instead of making "
+          "a second. Args: branch, title, body.",
+          {"branch": str, "title": str, "body": str})
+    async def open_pull_request_tool(args: dict) -> dict:
+        branch = str(args.get("branch", "")).strip()
+        violation = _agent_branch_violation(ctx, branch)
+        if violation:
+            return _err(violation)
+        # the base is the site's default branch, always. It is read out of the
+        # arguments only so that a request naming a different one is refused
+        # rather than quietly retargeted.
+        base = str(args.get("base") or ctx.config.default_branch).strip()
+        if base != ctx.config.default_branch:
+            return _err(base_denial(base, ctx.config.default_branch))
+        title = str(args.get("title", "")).strip()
+        if not title:
+            return _err("open_pull_request needs a title")
+        body = str(args.get("body", "")).strip()
+        if not ctx.github_token:
+            return _err(NO_CREDENTIAL)
+
+        def _run() -> dict:
+            repo = _site_repo(ctx)
+            owner, name = github.owner_repo(repo.configured_remote())
+            existing = github.find_open_pull_request(
+                owner, name, branch=branch, token=ctx.github_token
+            )
+            if existing is not None:
+                return {**existing, "existing": True}
+            opened = github.create_pull_request(
+                owner, name, branch=branch, base=base, title=title, body=body,
+                token=ctx.github_token,
+            )
+            return {**opened, "existing": False}
+
+        try:
+            entry = await anyio.to_thread.run_sync(_run)
+        except Exception as exc:
+            return _err(f"open_pull_request failed: {exc}")
+        # what the app's PR bubble and Publish button are built from. Recorded
+        # here rather than by a separate call the agent has to remember.
+        ctx.last_pr = entry["url"]
+        ctx.branch = branch
+        return _ok(entry)
+
+    @tool("list_pull_requests", "The open pull requests Paratrooper has waiting. Check "
+          "this FIRST on any board change: an open one means unpublished work to "
+          "continue on its branch rather than start again. No args.", {})
+    async def list_pull_requests_tool(args: dict) -> dict:
+        if not ctx.github_token:
+            return _err(NO_CREDENTIAL)
+
+        def _run() -> dict:
+            repo = _site_repo(ctx)
+            owner, name = github.owner_repo(repo.configured_remote())
+            return {
+                "pull_requests": github.open_pull_requests(
+                    owner, name, token=ctx.github_token,
+                    branch_prefix=normalize_prefix(ctx.config.branch_prefix),
+                )
+            }
+
+        try:
+            return _ok(await anyio.to_thread.run_sync(_run))
+        except Exception as exc:
+            return _err(f"list_pull_requests failed: {exc}")
 
     @tool("screenshot_board", "Build the site and screenshot the board (.cloth). Optional "
           "pin_id: click that polaroid open and capture the opened view instead. Returns "
@@ -261,7 +395,9 @@ def build_tool_server(ctx: ToolContext):
         process_image_tool,
         resolve_spotify_tool,
         move_pin_tool,
-        report_pr_tool,
+        push_branch_tool,
+        open_pull_request_tool,
+        list_pull_requests_tool,
         screenshot_board_tool,
         post_update_tool,
         fetch_history_tool,

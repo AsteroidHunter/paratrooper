@@ -11,28 +11,30 @@ Three layers of enforcement on every ``Bash`` command, and a deny wins even
 under ``bypassPermissions`` (hooks evaluate before permission mode):
 
 1. **A pure allowlist** (:func:`git_violation`). The agent may create, switch
-   to, push, rename, and delete only ``paratrooper/*`` branches. The single
-   carve-out is the workflow's local reset of the default branch, accepted only
-   in its exact shape ``git checkout -B <default> origin/<default>``. Merges,
-   ``gh pr merge``, ``gh api``, force pushes and ``push --all/--mirror`` stay
-   forbidden as before; fetches, adds, commits and the pathspec forms of
-   checkout (``git checkout -- .``) stay allowed.
+   to, rename, and delete only ``paratrooper/*`` branches, all of it local. The
+   single carve-out is the workflow's local reset of the default branch,
+   accepted only in its exact shape ``git checkout -B <default>
+   origin/<default>``. Merges stay forbidden as before; adds, commits, diffs and
+   the pathspec forms of checkout (``git checkout -- .``) stay allowed.
 
-2. **One road to GitHub**. The session env hands the shell a real GitHub token
-   (``GH_TOKEN`` for ``gh``, ``PARATROOPER_GIT_ASKPASS_TOKEN`` for git), so a
-   plain ``curl`` is a fully authorised API client and would sail straight past
-   the branch allowlist — it isn't a git command. Three rules close that:
+2. **No road to GitHub at all** (checklist 2.1). The session env used to hand
+   the shell a real GitHub token (``GH_TOKEN`` for ``gh``,
+   ``PARATROOPER_GIT_ASKPASS_TOKEN`` for git), which made a plain ``curl`` a
+   fully authorised API client. It no longer carries one: pushing and pull
+   requests are worker-owned tools now (:data:`GITHUB_ROUTE`), and the shell has
+   nothing to authenticate with. The rules here say so out loud rather than
+   letting the agent discover it as a credential prompt:
 
+   * every git subcommand that opens a connection — ``push``, ``fetch``,
+     ``pull``, ``clone``, ``ls-remote`` — is refused and names the tool that
+     took it over;
+   * ``gh`` is refused outright (its allowlist is empty and the binary is no
+     longer in the image);
    * a command that names ``github.com`` / ``githubusercontent.com`` is refused
-     unless its head token is ``git`` (its own allowlist then applies) or
-     ``gh`` (:func:`_check_gh` then applies);
-   * ``gh`` itself is an allowlist: ``gh pr list|view|create|status|checks``,
-     ``gh auth status`` and the version/help forms. ``gh api``, ``gh pr merge``,
-     ``gh repo``, ``gh release``, ``gh secret``, ``gh auth login`` and the rest
-     are refused;
-   * nothing may read the token back out of the environment — the var names
-     themselves (outside git/gh), ``env`` / ``printenv`` / bare ``set`` /
-     ``export -p``, and any ``/proc/*/environ`` read.
+     unless its head token is ``git`` or ``gh``, whose own rules then apply;
+   * nothing may read a token variable back out of the environment, and
+     ``env`` / ``printenv`` / bare ``set`` / ``export -p`` and any
+     ``/proc/*/environ`` read stay closed.
 
    Every one of these denials names the sanctioned route, so the agent can
    recover on the next turn instead of inventing another way around.
@@ -53,11 +55,11 @@ first, so ``FOO=bar git push origin main`` is read as the git command it is. A
 whole-string regex backstop catches nestings the splitter might miss (``bash
 -c``, ``python -c``, backticks, ``$(...)``).
 
-Push refspecs are judged by their **destination**: the part after the last
-``:`` (the whole token if there is none) with a leading ``refs/heads/``
-stripped, so ``HEAD:refs/heads/main`` and ``refs/heads/main`` are as forbidden
-as ``main``, and every destination (including ``--delete`` / ``:branch``
-deletions) must be a paratrooper/* branch.
+The branch fence itself did not move, it changed hands. The shell's own pushes
+are gone, so the destination rule that used to run here now runs in the
+``push_branch`` tool, on the same wording (:func:`push_denial`) — the check is
+where the credential is, which is the only place it can be enforced rather than
+merely requested.
 
 The shell is not the only reader in the session. ``Read``, ``Glob`` and ``Grep``
 open files without going near a command line, so the third rule above ran for
@@ -115,7 +117,8 @@ _BRANCH_LIST_FLAGS = {
 # named in every refusal below so the agent learns the way through, not just the
 # way blocked: a denial it can't act on is a denial it will try to route around
 GITHUB_ROUTE = (
-    "reach GitHub only through git or `gh pr create`/`gh pr list`/`gh pr view`"
+    "reach GitHub only through the push_branch, open_pull_request and "
+    "list_pull_requests tools"
 )
 
 # every GitHub host the token would authenticate against: the API, the web app,
@@ -123,9 +126,11 @@ GITHUB_ROUTE = (
 _GITHUB_HOSTS_PATTERN = r"github\.com|githubusercontent\.com"
 _GITHUB_HOST_RE = re.compile(_GITHUB_HOSTS_PATTERN, re.IGNORECASE)
 
-# the token variables the worker puts in the session env (see worker.py). Any
-# spelling — $VAR, ${VAR}, os.environ["VAR"], process.env.VAR, the bare word —
-# contains the name, so a substring match covers them all.
+# the token variables that used to be in the session env (see worker.py). None
+# of them is set for the agent any more, so a reference to one now finds nothing
+# — the rule stays because a name being empty is not a reason to let the agent
+# go looking. Any spelling — $VAR, ${VAR}, os.environ["VAR"], process.env.VAR,
+# the bare word — contains the name, so a substring match covers them all.
 TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN", "PARATROOPER_GIT_ASKPASS_TOKEN")
 _TOKEN_VAR_RE = re.compile("|".join(TOKEN_VARS))
 
@@ -162,8 +167,8 @@ FILE_TOOLS = ("Read", "Glob", "Grep")
 _FILE_TARGET_KEYS = ("file_path", "path", "pattern")
 
 # command substitution bodies — `$(...)` and backticks — are inspected even when
-# the outer command is an allowed git/gh one, so `gh pr create --body "$(...)"`
-# can't smuggle a fetch or the token out through an argument
+# the outer command is an allowed local git one, so `git commit -m "$(...)"`
+# can't smuggle a fetch or a credential read out through an argument
 _SUBSTITUTION_RE = re.compile(r"\$\([^)]*\)|`[^`]*`")
 
 # binaries that can speak HTTP or run arbitrary code; paired with a GitHub host
@@ -173,17 +178,46 @@ _SUBSTITUTION_RE = re.compile(r"\$\([^)]*\)|`[^`]*`")
 # names a GitHub host.
 _REACH_BINARIES = r"curl|wget|python3?|node|deno|bun|perl|ruby|php|nc|ssh|scp|rsync"
 
-# `gh` is an allowlist of its own: exactly the pull-request reads and the one
-# write (create) the prompt's workflow asks for, plus auth/version diagnostics
-_GH_ALLOWED = {
-    ("pr", "list"), ("pr", "view"), ("pr", "create"), ("pr", "status"), ("pr", "checks"),
-    ("auth", "status"),
-}
-_GH_INFO = {"version", "--version", "-v", "help", "--help", "-h"}
+# `gh` was an allowlist of pull-request commands while the shell held a token.
+# It holds none now and the binary is out of the worker image, so the allowlist
+# is empty: every spelling of `gh`, including `--version`, is refused and points
+# at the tools. Kept as a set rather than deleted so the shape of the check —
+# and the way to reopen a command if one is ever wanted back — stays visible.
+_GH_ALLOWED: set[tuple[str, ...]] = set()
+_GH_INFO: set[str] = set()
 _GH_ALLOWED_TEXT = (
-    "only `gh pr list`, `gh pr view`, `gh pr create`, `gh pr status`, "
-    "`gh pr checks`, `gh auth status` and `gh --version` are allowed"
+    "`gh` is not installed and no gh command is allowed: it needed a token in "
+    "the shell, and the shell has none"
 )
+
+# git subcommands that open a connection to the remote. Each needed the
+# credential the session no longer carries, so each names what took it over
+# instead of leaving the agent to meet a credential prompt it cannot answer.
+_CONNECTING_GIT = {
+    "push": (
+        "pushing from the shell is forbidden: nothing here can authenticate to "
+        "GitHub any more. Commit locally, then call the push_branch tool with "
+        "your branch name and the worker pushes it"
+    ),
+    "fetch": (
+        "fetching from the shell is forbidden: the worker refreshes the "
+        "checkout from the remote before every message, so origin/* is already "
+        "current and nothing here needs the network"
+    ),
+    "pull": (
+        "pulling from the shell is forbidden: the worker refreshes the checkout "
+        "from the remote before every message, so use the origin/* refs the "
+        "checkout already has"
+    ),
+    "clone": (
+        "cloning from the shell is forbidden: the site checkout is the one the "
+        "worker cloned at boot, and there is no credential here for a second"
+    ),
+    "ls-remote": (
+        "reading the remote from the shell is forbidden: call the "
+        "list_pull_requests tool for what is open"
+    ),
+}
 
 # commands whose whole purpose is to print the environment the token lives in
 _ENV_DUMP_HEADS = {"env", "printenv"}
@@ -214,7 +248,6 @@ def _is_agent_branch(name: str, branch_prefix: str = BRANCH_PREFIX) -> bool:
 def _regex_backstop(command: str, default_branch: str) -> str | None:
     """Catch the dangerous shapes even inside substitutions/quoting the token
     splitter can't fully resolve."""
-    db = re.escape(default_branch)
     checks = [
         (r"\bgit\s+merge\b", "git merge is forbidden (the agent never merges)"),
         (r"\bgh\s+pr\s+merge\b", f"gh pr merge is forbidden: {GITHUB_ROUTE}"),
@@ -222,26 +255,20 @@ def _regex_backstop(command: str, default_branch: str) -> str | None:
             r"\bgh\s+api\b",
             f"raw GitHub API calls are forbidden: {GITHUB_ROUTE}",
         ),
-        (r"\bgit\s+push\b.*--force\b", "force-push is forbidden"),
-        (
-            r"\bgit\s+push\b.*--(?:all|mirror|branches)\b",
-            "git push --all/--mirror is forbidden",
-        ),
-        (
-            rf"\bgit\s+push\b.*(?:\s|:|refs/heads/){db}\b",
-            f"pushing to '{default_branch}' is forbidden",
-        ),
+        # one rule for every push, whatever its flags or destination: the shell
+        # has no credential, so there is no shape of it that could work
+        (r"\bgit\s+push\b", f"{_CONNECTING_GIT['push']} — {GITHUB_ROUTE}"),
         # a fetcher or an interpreter in the same line as a GitHub host: catches
         # `bash -c "curl ..."`, `python -c "...urlopen(...)"` and friends even
         # when the splitter can't expose the inner command as a head token
         (
             rf"(?i)\b(?:{_REACH_BINARIES})\b[^\n]{{0,400}}?(?:{_GITHUB_HOSTS_PATTERN})",
-            f"reaching GitHub outside git/gh is forbidden: {GITHUB_ROUTE}",
+            f"reaching GitHub from the shell is forbidden: {GITHUB_ROUTE}",
         ),
         (
             _PROC_ENVIRON_RE.pattern,
-            "reading /proc/*/environ is forbidden: it would dump the GitHub token "
-            f"out of the worker's environment — git and gh read it themselves, so {GITHUB_ROUTE}",
+            "reading /proc/*/environ is forbidden: it is the worker's launch record, "
+            f"and nothing in a shell has any business in it — {GITHUB_ROUTE}",
         ),
         (_SECRETS_MOUNT_RE.pattern, SECRETS_MOUNT_DENIAL),
     ]
@@ -253,7 +280,7 @@ def _regex_backstop(command: str, default_branch: str) -> str | None:
 
 def _substitution_violation(command: str) -> str | None:
     """Command substitutions are judged on their own, whatever the outer head
-    token is: ``gh pr create --body "$(printenv GH_TOKEN)"`` is an allowed gh
+    token is: ``git commit -m "$(printenv GH_TOKEN)"`` is an allowed local git
     command wrapped around a forbidden one."""
     for body in _SUBSTITUTION_RE.findall(command):
         if _GITHUB_HOST_RE.search(body):
@@ -264,34 +291,32 @@ def _substitution_violation(command: str) -> str | None:
         if _TOKEN_VAR_RE.search(body):
             return (
                 "reading the GitHub token from inside a command substitution is "
-                "forbidden: git and gh already read it from the environment, and "
-                f"nothing else may see it — {GITHUB_ROUTE}"
+                "forbidden: no shell in this session has one, and nothing here may "
+                f"go looking for it — {GITHUB_ROUTE}"
             )
     return None
 
 
 def _check_gh(tokens: list[str]) -> str | None:
-    """Allowlist for ``gh``: the pull-request commands the workflow needs, plus
-    auth/version diagnostics. Everything else — ``api``, ``repo``, ``release``,
-    ``secret``, ``auth login``, ``run``, ``workflow``, ``pr merge/close/edit`` —
-    is refused, because ``gh`` holds the same token a raw API call would."""
+    """``gh`` is refused, whatever follows it.
+
+    It used to be an allowlist of pull-request commands, which was the right
+    shape while the shell held a token: the commands it allowed were the ones
+    the workflow needed. The token is gone and so is the binary, so the honest
+    answer to every ``gh`` line is the same one, with the tools named."""
     rest = tokens[1:]
-    if not rest or rest[0] in _GH_INFO:
-        return None
-    if tuple(rest[:2]) in _GH_ALLOWED:
-        return None
     if rest[:2] == ["pr", "merge"]:
         return (
             "gh pr merge is forbidden: merging is the web service's job, after Akash "
             f"taps Publish — {GITHUB_ROUTE}"
         )
-    if rest[0] == "api":
+    if rest[:1] == ["api"]:
         return (
             "gh api is forbidden: a raw GitHub API call is not a route the agent has "
             f"— {GITHUB_ROUTE}"
         )
-    named = " ".join(rest[:2])
-    return f"'gh {named}' is forbidden: {_GH_ALLOWED_TEXT} — {GITHUB_ROUTE}"
+    named = " ".join(["gh", *rest[:2]])
+    return f"'{named}' is forbidden: {_GH_ALLOWED_TEXT} — {GITHUB_ROUTE}"
 
 
 def _strip_assignments(tokens: list[str]) -> list[str]:
@@ -318,43 +343,33 @@ def _check_env_dump(tokens: list[str]) -> str | None:
     if not dumps:
         return None
     return (
-        f"'{' '.join(tokens[:2])}' is forbidden: it would dump the environment, and the "
-        "GitHub token lives there — git and gh read it themselves, so "
+        f"'{' '.join(tokens[:2])}' is forbidden: it would dump the environment, which "
+        "is where the credentials this session does still carry live — "
         f"{GITHUB_ROUTE}"
     )
 
 
 def _check_github_reach(head: str, tokens: list[str]) -> str | None:
-    """Refuse a non-git/gh command that names a GitHub host or a token variable.
+    """Refuse a command that names a GitHub host or a token variable.
     Judged per decomposed piece, so the second half of a pipe or an ``&&`` chain
     is checked on its own head token rather than the whole line's. ``tokens`` is
     the whole piece, assignments included — ``HOST=api.github.com`` on its own is
     still a GitHub reach even though it runs nothing."""
     if head in ("git", "gh"):
-        return None  # their own allowlists decide (see _check_subcommand)
+        return None  # their own rules decide (see _check_subcommand)
     piece = " ".join(tokens)
     named = f"'{head}'" if _PLAIN_WORD_RE.fullmatch(head) else "this command"
     if _GITHUB_HOST_RE.search(piece):
         return (
-            f"reaching GitHub with {named} is forbidden: the shell's GitHub token "
-            f"is for git and gh only — {GITHUB_ROUTE}"
+            f"reaching GitHub with {named} is forbidden: nothing in this shell can "
+            f"authenticate to GitHub — {GITHUB_ROUTE}"
         )
     if _TOKEN_VAR_RE.search(piece):
         return (
-            f"referencing the GitHub token in {named} is forbidden: git and gh "
-            "already read it from the environment, and nothing else may see it — "
-            f"{GITHUB_ROUTE}"
+            f"referencing the GitHub token in {named} is forbidden: this session "
+            f"carries none, and nothing here may go looking for one — {GITHUB_ROUTE}"
         )
     return None
-
-
-def _push_destination(token: str) -> str:
-    """Resolve a push refspec token to the branch it would write: the part
-    after the last ``:`` (the whole token if there is none), minus a leading
-    ``refs/heads/``. So ``main``, ``HEAD:main``, ``refs/heads/main`` and
-    ``HEAD:refs/heads/main`` all resolve to ``main``."""
-    dest = token.rsplit(":", 1)[-1]
-    return dest.removeprefix("refs/heads/")
 
 
 def _split_flags(rest: list[str]) -> tuple[set[str], list[str]]:
@@ -406,28 +421,29 @@ def _check_checkout_switch(
     )
 
 
-def _check_push(rest: list[str], branch_prefix: str = BRANCH_PREFIX) -> str | None:
-    """Allowlist for ``git push``: force/--all rules as before, then every
-    refspec destination (deletions included) must be a <prefix>/* branch."""
-    if "--force" in rest or "-f" in rest or any(t.startswith("+") for t in rest):
-        return "force-push is forbidden"
-    if "--all" in rest or "--mirror" in rest or "--branches" in rest:
-        return "git push --all/--mirror is forbidden — push a single feature branch"
-    _, positionals = _split_flags(rest)
-    refspecs = positionals[1:]  # the first positional is the remote
-    if not refspecs:
-        return (
-            "git push without an explicit refspec is forbidden: name the branch, "
-            f"e.g. git push -u origin {branch_prefix}<slug>"
-        )
-    for tok in refspecs:
-        dest = _push_destination(tok)
-        if not _is_agent_branch(dest, branch_prefix):
-            return (
-                f"pushing to '{dest}' is forbidden: only {branch_prefix}* branches "
-                "may be pushed or deleted on the remote"
-            )
-    return None
+def push_denial(dest: str, branch_prefix: str = BRANCH_PREFIX) -> str:
+    """The one wording for a push destination outside the agent's namespace.
+
+    It reads the same as it always did; what changed is who says it. The shell
+    cannot push at all now, so this is spoken by the ``push_branch`` tool, which
+    is the process holding the credential and therefore the only place the rule
+    is enforced rather than requested."""
+    branch_prefix = normalize_prefix(branch_prefix)
+    return (
+        f"pushing to '{dest}' is forbidden: only {branch_prefix}* branches may be "
+        "pushed"
+    )
+
+
+def base_denial(base: str, default_branch: str) -> str:
+    """The wording for a pull request aimed anywhere but the default branch.
+    Same reasoning as :func:`push_denial`: the tool holds the credential, so the
+    tool is where the merge target is fenced."""
+    return (
+        f"opening a pull request into '{base}' is forbidden: Paratrooper's pull "
+        f"requests always target '{default_branch}', which is the branch Akash "
+        "publishes from"
+    )
 
 
 def _check_branch(rest: list[str], branch_prefix: str = BRANCH_PREFIX) -> str | None:
@@ -472,8 +488,8 @@ def _check_subcommand(
     rest = command[2:]
     if sub == "merge":
         return "git merge is forbidden — the agent never merges"
-    if sub == "push":
-        return _check_push(rest, branch_prefix)
+    if sub in _CONNECTING_GIT:
+        return f"{_CONNECTING_GIT[sub]} — {GITHUB_ROUTE}"
     if sub in ("checkout", "switch"):
         return _check_checkout_switch(sub, rest, default_branch, branch_prefix)
     if sub == "branch":

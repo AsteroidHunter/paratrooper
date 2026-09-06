@@ -6,14 +6,16 @@ FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
-# git: site-repo clone + branch/commit/push. ca-certificates: HTTPS to GitHub.
+# git: the boot clone, the agent's local branch/commit work, and the worker's
+# own fetch and push. ca-certificates: HTTPS to GitHub. curl: fetches the
+# nodesource installer below (the agent's own curl cannot reach GitHub).
 # node/npm: screenshot_board runs the site's `npm run build` (Astro) — the
 # Claude SDK itself needs no Node (bundled native CLI), but the SITE build does.
-# gh: the ONLY sanctioned road to the GitHub API. The prompt tells the agent to
-# open and inspect PRs with `gh pr create`/`gh pr list`, and the PreToolUse guard
-# refuses every other route (curl/python/node to github.com, `gh api`), so the
-# binary has to actually be here — without it the agent falls back to raw REST.
-# Installed from GitHub's own apt repository (keyring + signed-by source line).
+# `gh` is deliberately NOT here any more (checklist 2.1). It was the sanctioned
+# road to the GitHub API while the agent's shell held a token; the shell holds
+# none now, pushing and pull requests are worker-owned tools, and a GitHub
+# client sitting on the PATH with nothing to authenticate with is just one more
+# thing for a prompt injection to reach for.
 # bubblewrap: the CLI's subprocess env scrub (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,
 # set for every session) is implemented on Linux by running each agent shell
 # under `bwrap`, and the CLI refuses to start at all when it cannot find it —
@@ -25,14 +27,8 @@ ENV PYTHONUNBUFFERED=1
 # the scrub leaves the network alone.
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl bubblewrap \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && install -m 0755 -d /etc/apt/keyrings /etc/apt/sources.list.d \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends nodejs gh \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # The license file rides with it: the package metadata names the license by
