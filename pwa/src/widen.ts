@@ -49,20 +49,49 @@
 //      off, so the base rules' transitions run from the wide look to rest on
 //      the keyboard's clock from the same frame the lift leaves. The classic
 //      first-last-invert-play, with the flush doing the invert.
+//   3. The caret's hold across the rise. 0.3.131 made the switch wait for the
+//      lift to stop and gave the text box a standing compositor layer, and on
+//      the phone that took the caret below the bar from every open down to an
+//      occasional one — the same place the sign-in card ended up (shell.ts
+//      createGateFlight, which carries the mechanism in full). The caret on
+//      iOS is a UIKit view placed from a rect the page reported, and the page
+//      cannot make that rect fresh while an accelerated transition runs;
+//      WebKit freezes the page-side value until the end and fixes the caret up
+//      afterwards, a beat later. Nothing the page can do makes it fresh. What
+//      it can do is draw no caret from a rect it knows is stale: the sheet
+//      paints the caret transparent (styles.css `.compose.nocaret textarea`)
+//      and this module says when.
+//        On from the shell's up edge, which is the focus tap's own style pass,
+//      the same one .focusing lands in — a colour is paint, so this changes no
+//      layout and the 0.3.89 rule is untouched. Off one frame after the layout
+//      switch, so the caret's FIRST paint is at the final geometry, and then a
+//      beat after that frame (CARET_CATCHUP_MS, measured off the owner's own
+//      60fps recording for the card: the caret was right from the third frame
+//      after a landing). And off at once on every other way a rise can end —
+//      the down edge, whether that is a close or a keyboard that never proved
+//      itself, a blur, and a form rebuilt under it — so the caret can never
+//      stay hidden. Transparent, not display or visibility: the box keeps its
+//      focus, its keyboard and its typing, characters typed during the rise
+//      land as they always did, and a tap that placed a caret (tapcaret.ts)
+//      still placed it.
 //
 // Same shape as the shell's other decisions: a pure core with injected
 // effects (unit-tested on a plain clock), and one binder that hangs it on the
 // DOM.
 
-import { LIFT_SETTLE_MS } from "./shell";
+import { CARET_CATCHUP_MS, LIFT_SETTLE_MS } from "./shell";
 
 export interface WidenDeps {
   /** put the wide layout on, or take it off without a motion (a reset) */
   setWide(on: boolean): void;
   /** the close's first frame: rest layout + the wide look, flushed, released */
   flip(): void;
+  /** paint the caret transparent, or give it back. A colour: no layout, ever. */
+  setCaretHidden(on: boolean): void;
   /** a clock: run `fn` after `ms`, and hand back the way to call it off */
   wait(ms: number, fn: () => void): () => void;
+  /** the next animation frame, and the way to call it off */
+  frame(fn: () => void): () => void;
 }
 
 /**
@@ -72,12 +101,20 @@ export interface WidenDeps {
  */
 export const WIDEN_SETTLE_MS = LIFT_SETTLE_MS;
 
+/**
+ * The beat between the switch's first paint and the caret coming back: the
+ * phone's own catch-up, measured for the sign-in card and reused here rather
+ * than guessed at a second time (shell.ts owns the number).
+ */
+export const WIDEN_CARET_MS = CARET_CATCHUP_MS;
+
 export interface WidenState {
   up: boolean;
   proven: boolean;
   ended: boolean;
   landed: boolean;
   wide: boolean;
+  hidden: boolean;
 }
 
 export function createWiden(deps: WidenDeps) {
@@ -86,11 +123,32 @@ export function createWiden(deps: WidenDeps) {
   let ended = false; // the bar's own transition has finished, or the clock gave up
   let landed = false; // the lift's transform has stopped moving (shell.ts's landing)
   let wide = false; // the layout as applied
+  let hidden = false; // the caret's hold, as the sheet was last told
   let callOff: (() => void) | null = null;
+  let caretOff: (() => void) | null = null; // the release's frame, then its beat
 
   const dropClock = (): void => {
     callOff?.();
     callOff = null;
+  };
+
+  // the release, pending: one frame, then the beat. Called off by anything
+  // that ends the rise before it runs.
+  const dropRelease = (): void => {
+    caretOff?.();
+    caretOff = null;
+  };
+
+  const setHidden = (v: boolean): void => {
+    if (v === hidden) return;
+    hidden = v;
+    deps.setCaretHidden(v);
+  };
+
+  /** the caret is the box's again, now, whatever the rise was doing */
+  const show = (): void => {
+    dropRelease();
+    setHidden(false);
   };
 
   // the one rule: wide when, and only when, all four facts are in
@@ -98,6 +156,15 @@ export function createWiden(deps: WidenDeps) {
     if (up && proven && ended && landed && !wide) {
       wide = true;
       deps.setWide(true);
+      // one frame, so the switch has painted and the caret's first appearance
+      // is at the final geometry; then the phone's catch-up beat
+      dropRelease();
+      caretOff = deps.frame(() => {
+        caretOff = deps.wait(WIDEN_CARET_MS, () => {
+          caretOff = null;
+          setHidden(false);
+        });
+      });
     }
   };
 
@@ -110,6 +177,10 @@ export function createWiden(deps: WidenDeps) {
       if (isUp) {
         ended = false;
         landed = false;
+        // the caret goes here, in the rise's own style pass: from this frame
+        // to the switch the page's caret rect is the pre-lift one and every
+        // draw from it is wrong
+        setHidden(true);
         // the backstop is the BAR's transition only. The landing has the
         // shell's own clock behind it and must not be guessed at here: a
         // report slower than this window (the trail's slowest genuine one was
@@ -119,10 +190,26 @@ export function createWiden(deps: WidenDeps) {
           callOff = null;
           ended = true;
           settle();
+          // Nothing has reported a keyboard in the whole of this window, so
+          // there is very likely no keyboard coming (a hardware one, or iOS
+          // declining to present) and no switch to wait for. The shell's own
+          // down edge is a second away (FOCUSING_MAX_MS) and a second with no
+          // cursor in a focused box is worse than the flicker this holds off,
+          // so the caret comes back here. Every genuine report in the trail
+          // arrived long inside this window: median 80ms, nine in ten under
+          // 151ms, the slowest 319ms. A report later than that lands with the
+          // caret already back and the switch may flicker once — on a path
+          // already outside everything that has ever been measured.
+          if (!wide && !proven) show();
         });
         return;
       }
-      // the close. From the wide layout it is the flip; from a rise that never
+      // The down edge, and it is BOTH ends of the rise: a close from the wide
+      // layout, and a rise the keyboard never answered, whose transforms the
+      // sheet is already taking home. Either way the hold is over, before the
+      // flip's flush so the two are one style pass.
+      show();
+      // From the wide layout the close is the flip; from a rise that never
       // reached the layout (unproven, or still moving) the sheet's own
       // transitions take the bar home and there is nothing to switch.
       if (wide) {
@@ -152,9 +239,19 @@ export function createWiden(deps: WidenDeps) {
       landed = true;
       settle();
     },
+    /**
+     * The box lost focus (the binder's focusout). An unfocused box draws no
+     * caret, so there is nothing left to hold, and the hold must not sit on a
+     * box waiting for a switch that a blurred rise will never reach. The
+     * shell's down edge follows and does the rest.
+     */
+    blurred(): void {
+      show();
+    },
     /** a fresh form (renderChat rebuilds the bar): nothing is wide, nothing is pending */
     reset(): void {
       dropClock();
+      show(); // the hold belonged to the form that has gone; the new one starts clear
       up = false;
       proven = false;
       ended = false;
@@ -162,16 +259,17 @@ export function createWiden(deps: WidenDeps) {
       wide = false;
     },
     state(): WidenState {
-      return { up, proven, ended, landed, wide };
+      return { up, proven, ended, landed, wide, hidden };
     },
   };
 }
 
 export type Widen = ReturnType<typeof createWiden>;
 
-/** the two class names the sheet reads, written once */
+/** the three class names the sheet reads, written once */
 export const WIDE_CLASS = "wide";
 export const FLIP_CLASS = "flip";
+export const NOCARET_CLASS = "nocaret";
 
 /**
  * The effects on the live form. `lookup` rather than an element: renderChat
@@ -203,9 +301,14 @@ export function composeWidenDeps(
       }
       form.classList.remove(FLIP_CLASS);
     },
+    setCaretHidden: (on) => lookup()?.classList.toggle(NOCARET_CLASS, on),
     wait: (ms, fn) => {
       const id = setTimeout(fn, ms);
       return () => clearTimeout(id);
+    },
+    frame: (fn) => {
+      const id = requestAnimationFrame(fn);
+      return () => cancelAnimationFrame(id);
     },
   };
 }
@@ -213,7 +316,8 @@ export function composeWidenDeps(
 /**
  * Hang the core on a freshly rendered bar: the face piece's transitionend is
  * the "ended" fact (its transform only — the visibility entry ends too, and is
- * not the motion), and a rebuilt form starts from nothing.
+ * not the motion), a focusout gives the caret straight back, and a rebuilt form
+ * starts from nothing.
  */
 export function bindWiden(form: HTMLElement, widen: Widen): void {
   widen.reset();
@@ -222,4 +326,8 @@ export function bindWiden(form: HTMLElement, widen: Widen): void {
     if (e.target !== cap || e.propertyName !== "transform") return;
     widen.ended();
   });
+  // focusout, not blur: blur does not bubble, and the bar is what is bound.
+  // The shell's down edge follows within its focusing window and finishes the
+  // rise; this is only so the hold cannot outlive the focus it was taken for.
+  form.addEventListener("focusout", () => widen.blurred());
 }

@@ -183,7 +183,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.131"; // The caret stays in the box for the whole keyboard rise: the pill's layout switch waits for the lift to stop moving, and the text box keeps its layer across it
+const APP_VERSION = "0.3.133"; // No cursor is drawn while the compose bar rises: it comes back at its final spot once the layout has switched and the keyboard is still
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

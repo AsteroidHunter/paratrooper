@@ -26,11 +26,13 @@
 // the pill's own corner radius.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { LIFT_SETTLE_MS } from "../src/shell";
+import { CARET_CATCHUP_MS, LIFT_SETTLE_MS } from "../src/shell";
 import {
   FLIP_CLASS,
   FLIP_PIECES,
   WIDE_CLASS,
+  NOCARET_CLASS,
+  WIDEN_CARET_MS,
   WIDEN_SETTLE_MS,
   bindWiden,
   composeWidenDeps,
@@ -92,6 +94,7 @@ const WIDE_CAP = "#app .compose.wide .cap";
 const FLIP_ATTACH = "#app .compose.flip .attach";
 const FLIP_TEXT = "#app .compose.flip textarea";
 const FLIP_CAP = "#app .compose.flip .cap";
+const NOCARET_TEXT = "#app .compose.nocaret textarea";
 
 // --- the sheet ---------------------------------------------------------------
 
@@ -287,6 +290,43 @@ describe("the flip: the wide look drawn in the resting layout, for one flushed s
   });
 });
 
+describe("the caret's hold: a colour, and only a colour", () => {
+  const nocaret = rule(NOCARET_TEXT);
+
+  it("paints the caret transparent and touches nothing else", () => {
+    expect(decl(nocaret, "caret-color")).toBe("transparent");
+    expect(nocaret.replace(/\s/g, "")).toBe("caret-color:transparent;");
+  });
+
+  it("changes no layout, so the rule the rise is built on is untouched", () => {
+    // 0.3.89: nothing about the focused box's box may move before the keyboard
+    // is proven, and this class goes on in the focus tap's own style pass
+    for (const prop of [
+      "position", "inset", "top", "right", "bottom", "left", "width", "height",
+      "margin", "padding", "border", "display", "visibility", "opacity",
+      "transform", "font", "font-size", "line-height", "overflow", "transition",
+    ]) {
+      expect(sets(nocaret, prop), `the hold sets ${prop}`).toBe(false);
+    }
+  });
+
+  it("leaves the box its own caret colour at rest, and the text its own colour always", () => {
+    expect(decl(rule(".compose textarea"), "caret-color")).toBe("var(--accent)");
+    expect(sets(nocaret, "color")).toBe(false); // typed characters are never hidden
+    // the only two rules in the sheet that hold a caret, and they are the two
+    // boxes the keyboard lifts: this one and the sign-in card's
+    const holds = rules
+      .filter((r) => /caret-color:\s*transparent/.test(r.body))
+      .map((r) => r.sel);
+    expect(holds).toEqual(["#app.lifting .gate input,\n.gate.inflight input", NOCARET_TEXT]);
+  });
+
+  it("is the class the driver writes, spelled once", () => {
+    expect(NOCARET_CLASS).toBe("nocaret");
+    expect(NOCARET_TEXT).toContain(`.compose.${NOCARET_CLASS} textarea`);
+  });
+});
+
 describe("the face piece is the pill's left end drawn again, under the text and above the face", () => {
   const cap = rule(".cap");
   const field = rule(".field");
@@ -348,13 +388,25 @@ describe("the face piece is the pill's left end drawn again, under the text and 
 // --- the driver ---------------------------------------------------------------
 
 function harness() {
-  const log: string[] = [];
-  let pending: (() => void) | null = null;
+  const log: string[] = []; // the layout's own writes and its settle clock
+  const caret: string[] = []; // the caret's hold, its frame and its beat
+  let pending: (() => void) | null = null; // the settle backstop
+  let paint: (() => void) | null = null; // the release's frame
+  let beat: (() => void) | null = null; // the release's catch-up beat
   let cancelled = 0;
   const widen = createWiden({
     setWide: (on) => log.push(`wide:${on}`),
     flip: () => log.push("flip"),
+    setCaretHidden: (on) => caret.push(on ? "hide" : "show"),
     wait: (ms, fn) => {
+      if (ms === WIDEN_CARET_MS) {
+        caret.push(`beat:${ms}`);
+        beat = fn;
+        return () => {
+          cancelled += 1;
+          if (beat === fn) beat = null;
+        };
+      }
       log.push(`wait:${ms}`);
       pending = fn;
       return () => {
@@ -362,17 +414,48 @@ function harness() {
         if (pending === fn) pending = null;
       };
     },
+    frame: (fn) => {
+      caret.push("frame");
+      paint = fn;
+      return () => {
+        cancelled += 1;
+        if (paint === fn) paint = null;
+      };
+    },
   });
   return {
     widen,
     log,
+    caret,
     tick: () => {
       const fn = pending;
       pending = null;
       fn?.();
     },
+    /** the frame after the switch */
+    nextFrame: () => {
+      const fn = paint;
+      paint = null;
+      fn?.();
+    },
+    /** the phone's catch-up beat, at the end of that frame */
+    tickBeat: () => {
+      const fn = beat;
+      beat = null;
+      fn?.();
+    },
+    /** both, in order: the caret comes back */
+    release: () => {
+      const f = paint;
+      paint = null;
+      f?.();
+      const b = beat;
+      beat = null;
+      b?.();
+    },
     cancelled: () => cancelled,
     armed: () => pending !== null,
+    releasing: () => paint !== null || beat !== null,
   };
 }
 
@@ -387,7 +470,9 @@ describe("createWiden — the layout switch waits for the proof, the end and the
     expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`]); // and the bar's own end is not enough either
     h.widen.landed(true); // the lift wrapper's transitionend: the transform has stopped
     expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`, "wide:true"]);
-    expect(h.widen.state()).toEqual({ up: true, proven: true, ended: true, landed: true, wide: true });
+    expect(h.widen.state()).toEqual({
+      up: true, proven: true, ended: true, landed: true, wide: true, hidden: true,
+    });
   });
 
   it("a late report: the motion ends first, the proof arrives after, the switch waits for it", () => {
@@ -576,9 +661,187 @@ describe("createWiden — the close", () => {
     h.widen.proven(true);
     h.widen.reset();
     expect(h.cancelled()).toBe(1);
-    expect(h.widen.state()).toEqual({ up: false, proven: false, ended: false, landed: false, wide: false });
+    expect(h.widen.state()).toEqual({
+      up: false, proven: false, ended: false, landed: false, wide: false, hidden: false,
+    });
     h.tick(); // a clock that was already called off fires nothing
     expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`]);
+  });
+});
+
+// THE CARET'S HOLD. 0.3.131 took the caret below the bar from every open to an
+// occasional one by removing the two things the page could remove: the layout
+// switch landing inside the lift's motion, and the box's compositor layer
+// being released under the caret. What is left is the phone's own redraw from
+// a rect WebKit freezes for the length of an accelerated transition, which the
+// page has no say in. So the page draws no caret from a rect it knows is
+// stale. The rule is the sign-in card's (shell.ts createGateFlight), with the
+// layout switch as the release point instead of the card's transition, since
+// the switch is the last thing that moves this box's geometry.
+describe("createWiden — the caret is not drawn from a rect the page knows is stale", () => {
+  it("hidden from the up edge, through the whole rise, and back one frame plus a beat after the switch", () => {
+    const h = harness();
+    h.widen.keyboard(true); // the focus tap's own style pass
+    expect(h.caret).toEqual(["hide"]);
+    h.widen.proven(true);
+    h.widen.ended();
+    expect(h.caret).toEqual(["hide"]); // still moving: still no caret
+    h.widen.landed(true); // the switch
+    expect(h.log).toContain("wide:true");
+    expect(h.caret).toEqual(["hide", "frame"]); // the switch has not painted yet
+    h.nextFrame(); // it has now, at the final geometry
+    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`]);
+    expect(h.widen.state().hidden).toBe(true); // the phone has not caught up yet
+    h.tickBeat();
+    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`, "show"]);
+    expect(h.widen.state().hidden).toBe(false);
+  });
+
+  it("the beat is the phone's own catch-up, measured once for the card and read here", () => {
+    expect(WIDEN_CARET_MS).toBe(CARET_CATCHUP_MS);
+    const src = readFileSync(new URL("../src/widen.ts", import.meta.url), "utf8");
+    expect(src).toContain("export const WIDEN_CARET_MS = CARET_CATCHUP_MS;");
+    // and it is a frame FIRST, so the caret's first paint is the final geometry
+    // rather than whatever the beat happens to land on
+    expect(src).toMatch(/caretOff = deps\.frame\(\(\) => \{\n\s*caretOff = deps\.wait\(WIDEN_CARET_MS,/);
+  });
+
+  it("the close gives it straight back, before the flip, in one style pass", () => {
+    const h = harness();
+    h.widen.keyboard(true);
+    h.widen.proven(true);
+    h.widen.ended();
+    h.widen.landed(true);
+    h.release();
+    h.widen.keyboard(false);
+    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`, "show"]); // already back
+    expect(h.log.at(-1)).toBe("flip");
+    // and from a close taken DURING the hold, the show comes before the flip
+    const g = harness();
+    g.widen.keyboard(true);
+    g.widen.proven(true);
+    g.widen.ended();
+    g.widen.landed(true); // wide, release pending
+    expect(g.widen.state().hidden).toBe(true);
+    g.widen.keyboard(false);
+    expect(g.widen.state().hidden).toBe(false);
+    expect(g.caret).toEqual(["hide", "frame", "show"]); // the pending release, called off
+    expect(g.releasing()).toBe(false);
+  });
+
+  it("a rise the keyboard never answered gives it back at the bar's own backstop", () => {
+    // the 0.3.90 shape: .kb never latches, the shell's focusing window expires
+    // a full second later and the sheet's transitions take the bar home. No
+    // switch, so the release never runs — and a second with no cursor in a
+    // focused box is worse than the flicker the hold is for, so the settle
+    // window gives it back instead of waiting for the down edge.
+    const h = harness();
+    h.widen.keyboard(true);
+    h.widen.ended();
+    expect(h.widen.state().hidden).toBe(true); // the motion ended; the proof may still come
+    h.tick(); // the settle clock: still no proof, so the hold gives up
+    expect(h.caret).toEqual(["hide", "show"]);
+    expect(h.widen.state()).toMatchObject({ wide: false, hidden: false });
+    h.widen.keyboard(false); // the lapse, later: nothing left to do
+    expect(h.caret).toEqual(["hide", "show"]);
+    expect(h.log).not.toContain("wide:true");
+    expect(h.log).not.toContain("flip");
+  });
+
+  it("a PROVEN rise still holds through its backstop: only the unproven one gives up", () => {
+    // a late landing is not an abandoned rise. The proof is in, so the switch
+    // is coming and the caret waits for it however long the lift takes.
+    const h = harness();
+    h.widen.keyboard(true);
+    h.widen.proven(true);
+    h.widen.ended();
+    h.tick(); // the settle window runs out with the lift still moving
+    expect(h.widen.state().hidden).toBe(true);
+    expect(h.caret).toEqual(["hide"]);
+    h.widen.landed(true);
+    h.release();
+    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`, "show"]);
+  });
+
+  it("a blur gives it back at once and calls the pending release off", () => {
+    const h = harness();
+    h.widen.keyboard(true);
+    h.widen.proven(true);
+    h.widen.ended();
+    h.widen.landed(true);
+    expect(h.releasing()).toBe(true);
+    h.widen.blurred();
+    expect(h.caret).toEqual(["hide", "frame", "show"]);
+    expect(h.releasing()).toBe(false);
+    // and the release, had it survived, writes nothing now
+    h.release();
+    expect(h.caret).toEqual(["hide", "frame", "show"]);
+    // a blur mid-rise, before any switch, frees it just the same
+    const g = harness();
+    g.widen.keyboard(true);
+    g.widen.blurred();
+    expect(g.caret).toEqual(["hide", "show"]);
+  });
+
+  it("a form rebuilt under the hold starts the new one clear", () => {
+    const h = harness();
+    h.widen.keyboard(true);
+    expect(h.widen.state().hidden).toBe(true);
+    h.widen.reset(); // renderChat replaced the bar mid-rise
+    expect(h.caret).toEqual(["hide", "show"]);
+    expect(h.widen.state().hidden).toBe(false);
+  });
+
+  it("EVERY way a rise can end frees the caret: it can never be left hidden", () => {
+    // the same guarantee shell.ts holds for the card ("a lift that never
+    // transitions never enters flight, so nothing here can hide the caret for
+    // good"). Hidden is only ever set on an up edge, and the shell delivers a
+    // down edge for every up edge — a close, a blur, or the focusing window
+    // lapsing inside FOCUSING_MAX_MS when no keyboard ever came.
+    const endings: [string, (h: ReturnType<typeof harness>) => void][] = [
+      ["the switch and its release", (h) => {
+        h.widen.proven(true);
+        h.widen.ended();
+        h.widen.landed(true);
+        h.release();
+      }],
+      ["the down edge from wide", (h) => {
+        h.widen.proven(true);
+        h.widen.ended();
+        h.widen.landed(true);
+        h.widen.keyboard(false);
+      }],
+      ["the down edge mid-rise", (h) => h.widen.keyboard(false)],
+      ["the lapse with no proof", (h) => {
+        h.widen.ended();
+        h.tick();
+        h.widen.keyboard(false);
+      }],
+      ["a blur", (h) => h.widen.blurred()],
+      ["a rebuilt form", (h) => h.widen.reset()],
+    ];
+    for (const [name, end] of endings) {
+      const h = harness();
+      h.widen.keyboard(true);
+      expect(h.widen.state().hidden, `${name}: the hold never started`).toBe(true);
+      end(h);
+      expect(h.widen.state().hidden, `${name}: the caret was left hidden`).toBe(false);
+      expect(h.caret.at(-1), `${name}: the last write is not a show`).toBe("show");
+    }
+  });
+
+  it("a re-tap takes it again, and the hold is written once per edge", () => {
+    const h = harness();
+    h.widen.keyboard(true);
+    h.widen.keyboard(true); // a duplicate up edge
+    h.widen.proven(true);
+    h.widen.proven(true);
+    expect(h.caret).toEqual(["hide"]); // one write, not two
+    h.widen.keyboard(false);
+    h.widen.keyboard(false); // a duplicate down edge
+    expect(h.caret).toEqual(["hide", "show"]);
+    h.widen.keyboard(true); // the re-tap
+    expect(h.caret).toEqual(["hide", "show", "hide"]);
   });
 });
 
@@ -621,6 +884,33 @@ describe("composeWidenDeps — the effects on the live form", () => {
     expect([...form.classes]).toEqual([WIDE_CLASS]);
     deps.setWide(false);
     expect([...form.classes]).toEqual([]);
+  });
+
+  it("the caret's hold is one class on the same form, and independent of the layout's", () => {
+    const form = fakeEl("form");
+    const deps = composeWidenDeps(() => form as unknown as HTMLElement, () => {});
+    deps.setCaretHidden(true);
+    expect([...form.classes]).toEqual([NOCARET_CLASS]);
+    deps.setWide(true); // the switch, while the hold is still on
+    expect([...form.classes]).toEqual([NOCARET_CLASS, WIDE_CLASS]);
+    deps.setCaretHidden(false); // the release, a frame and a beat later
+    expect([...form.classes]).toEqual([WIDE_CLASS]);
+  });
+
+  it("no form on screen: the hold writes nothing and throws nothing", () => {
+    const deps = composeWidenDeps(() => null, () => {});
+    expect(() => deps.setCaretHidden(true)).not.toThrow();
+    expect(() => deps.setCaretHidden(false)).not.toThrow();
+  });
+
+  it("the frame is the engine's own, and it can be called off", () => {
+    const src = readFileSync(new URL("../src/widen.ts", import.meta.url), "utf8");
+    expect(src).toContain("const id = requestAnimationFrame(fn);");
+    expect(src).toContain("return () => cancelAnimationFrame(id);");
+    // and no DOM is touched at import time: it lives inside the factory
+    expect(src.slice(0, src.indexOf("export function composeWidenDeps"))).not.toContain(
+      "requestAnimationFrame(",
+    );
   });
 
   it("the flip is wide off, flip on, one flush per moving piece, flip off — in that order, in one call", () => {
@@ -672,7 +962,9 @@ describe("bindWiden — the face piece's own transitionend is the end of the mot
     const h = harness();
     h.widen.keyboard(true);
     bindWiden(form as unknown as HTMLElement, h.widen);
-    expect(h.widen.state()).toEqual({ up: false, proven: false, ended: false, landed: false, wide: false });
+    expect(h.widen.state()).toEqual({
+      up: false, proven: false, ended: false, landed: false, wide: false, hidden: false,
+    });
     const fire = cap.listeners.get("transitionend")!;
     h.widen.keyboard(true);
     h.widen.proven(true);
@@ -682,7 +974,25 @@ describe("bindWiden — the face piece's own transitionend is the end of the mot
     expect(h.widen.state().ended).toBe(false);
     h.widen.landed(true);
     fire({ target: cap, propertyName: "transform" });
-    expect(h.widen.state()).toEqual({ up: true, proven: true, ended: true, landed: true, wide: true });
+    expect(h.widen.state()).toEqual({
+      up: true, proven: true, ended: true, landed: true, wide: true, hidden: true,
+    });
+  });
+
+  it("a focusout on the bar gives the caret back, whatever the rise was doing", () => {
+    // focusout, not blur: blur does not bubble and the bar is what is bound.
+    // An unfocused box draws no caret, so there is nothing left to hold.
+    const cap = fakeEl(".cap");
+    const form = fakeEl("form", { ".cap": cap });
+    const h = harness();
+    bindWiden(form as unknown as HTMLElement, h.widen);
+    h.widen.keyboard(true);
+    expect(h.widen.state().hidden).toBe(true);
+    const out = form.listeners.get("focusout");
+    expect(out, "the bar hears no focusout").toBeDefined();
+    out!({ target: form });
+    expect(h.widen.state().hidden).toBe(false);
+    expect(h.caret).toEqual(["hide", "show"]);
   });
 });
 

@@ -1386,6 +1386,32 @@ html, body {
   transition: none;
 }
 
+/* NO CURSOR WHILE THE BAR IS RISING (widen.ts). The cursor in this box is the
+   phone's own view, placed from a spot the page reports, and the page reports
+   no new spot while a transform transition runs: WebKit freezes its page-side
+   value until the end, then fixes the cursor up a beat later. For the whole
+   rise the reported spot is therefore the pre-lift one, at the bottom of the
+   screen, and any frame the phone chooses to draw from it puts the cursor
+   below the bar. 0.3.131 removed the two things the page could remove — the
+   layout switch landing inside the lift's motion, and the box's layer being
+   released under the caret — and on the phone that took it from every open to
+   an occasional one; what is left is the phone's own redraw, which the page
+   has no say in. A cursor that is not painted cannot flash, so it is not
+   painted until the switch has landed, the lift is still, and the fix-up beat
+   has passed. Exactly the treatment the sign-in card already has (the rule
+   further up this sheet, shell.ts createGateFlight); this box waits on the
+   layout switch instead of the card's transition, because the switch is the
+   last thing that moves its geometry.
+     Transparent, not display or visibility, and a colour is paint: no layout
+   changes, so the 0.3.89 rule (nothing about the focused box's box may move
+   before the keyboard is proven) is untouched. The box keeps its focus, its
+   keyboard and its typing; characters typed during the rise land as they
+   always did, a tap that placed a caret still placed it, and the class comes
+   off on every way a rise can end. */
+#app .compose.nocaret textarea {
+  caret-color: transparent;
+}
+
 /* The picker session window (.settling, shell.ts): the ＋ greys and the whole
    field looks switched off from the ＋ tap that OPENS the picker all the way
    through teardown-complete — so there is no off/on blink after a dismissal;
