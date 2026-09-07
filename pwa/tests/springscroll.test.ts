@@ -20,6 +20,7 @@ import {
   profileFor,
   relaxLag,
   resistanceFor,
+  speedOver,
   windowBounds,
 } from "../src/springscroll";
 import type { SpringField, SpringRow } from "../src/springscroll";
@@ -412,6 +413,91 @@ describe("createSpringField — the return: from the next frame, 90% in a tenth 
   });
 });
 
+describe("speedOver — the drive speed, from the readings that moved", () => {
+  it("is zero until there are two readings to draw a slope through", () => {
+    expect(speedOver([], 0)).toBe(0);
+    expect(speedOver([{ t: 0, s: 100 }], FRAME)).toBe(0);
+  });
+
+  it("is the slope across the whole run, not across the last pair", () => {
+    // 3 px over 50 ms is 0.06 px/ms however the 3 px were delivered
+    const even = [{ t: 0, s: 100 }, { t: 25, s: 101.5 }, { t: 50, s: 103 }];
+    const lumpy = [{ t: 0, s: 100 }, { t: 33, s: 100 }, { t: 50, s: 103 }];
+    expect(speedOver(even, 50)).toBeCloseTo(0.06, 9);
+    expect(speedOver(lumpy, 50)).toBeCloseTo(0.06, 9); // the lump does not spike it
+  });
+
+  it("a run whose newest reading is older than the hold is a stop, not a gap", () => {
+    const run = [{ t: 0, s: 100 }, { t: 16, s: 101 }];
+    expect(speedOver(run, 30, 28)).toBeCloseTo(1 / 16, 9); // 14 ms stale: still a gap
+    expect(speedOver(run, 60, 28)).toBe(0); // 44 ms stale: stopped
+    expect(speedOver(run, 20, 0)).toBe(0); // no budget at all: stopped at once
+  });
+});
+
+describe("createSpringField — the phone delivers scrollTop on three frames in four", () => {
+  // What the owner's own scroll-jank records say (2026-09-07, gestures 2 to 5):
+  // 59.3 to 59.9 animation frames a second but only 31 to 39 scroll events, and
+  // the position handed over quantised to whole device pixels. Driven off one
+  // frame's delta the lag pulsed; driven off the run's speed it does not.
+  /** a drag whose scrollTop only reaches the frame on `1 in every skip` frames,
+      quantised to a device pixel, while the finger travels every frame */
+  function sparseDrag(d: Drive, speed: number, ms: number, skip: number): number[] {
+    const frames = Math.round(ms / FRAME);
+    const Ls: number[] = [];
+    let truePos = d.scrollTop;
+    let fingerY = THUMB;
+    for (let k = 0; k < frames; k++) {
+      d.now += FRAME;
+      truePos -= speed * FRAME;
+      fingerY += speed * FRAME; // the finger rides the content: touchmove every frame
+      d.f.anchor(fingerY);
+      if (k % skip !== skip - 1) d.scrollTop = Math.round(truePos * 3) / 3; // 3x device px
+      d.f.frame(d.now, d.scrollTop);
+      Ls.push(d.f.lag());
+    }
+    return Ls;
+  }
+
+  it("a slow drag delivered on three frames in four holds the lag steady, not pulsing", () => {
+    const d = grab();
+    const Ls = sparseDrag(d, 0.06, 800, 4); // 1 px a frame: the speed he calls slow
+    const settled = Ls.slice(20).map(Math.abs);
+    const ripple = Math.max(...settled) - Math.min(...settled);
+    const ideal = 0.06 * TAU; // 2.7 px
+    expect(Math.max(...settled)).toBeLessThan(ideal * 1.1);
+    expect(Math.min(...settled)).toBeGreaterThan(ideal * 0.9);
+    // the pulse was 1.06 px on a 2.7 px stretch, a 39% swing; the run's speed
+    // leaves under a tenth of a device pixel on the owner's 3x screen
+    expect(ripple).toBeLessThan(0.05);
+  });
+
+  it("the same at a fling's speed, where the pulse was bigger than the stretch itself", () => {
+    const d = grab();
+    const Ls = sparseDrag(d, 0.24, 600, 4); // 4 px a frame
+    const settled = Ls.slice(20).map(Math.abs);
+    const ripple = Math.max(...settled) - Math.min(...settled);
+    expect(ripple).toBeLessThan(0.2); // was 12.2 px against a 10.8 px steady stretch
+  });
+
+  it("a delivery gap is bridged, but a scroll pinned at the end of the thread is not", () => {
+    const d = grab();
+    sparseDrag(d, 0.06, 400, 4);
+    const moving = Math.abs(d.f.lag());
+    expect(moving).toBeGreaterThan(2);
+    // the finger keeps travelling but the thread has hit its end: scrollTop
+    // stops for good, and the stretch melts anyway within the window
+    let fingerY = THUMB + 400;
+    for (let k = 0; k < 12; k++) {
+      d.now += FRAME;
+      fingerY += 1;
+      d.f.anchor(fingerY);
+      d.f.frame(d.now, d.scrollTop);
+    }
+    expect(Math.abs(d.f.lag())).toBeLessThan(moving * 0.15);
+  });
+});
+
 describe("createSpringField — a fling: the lag tracks the decaying speed and is gone with it", () => {
   it("lift mid-drag coasts; through the coast the lag follows speed x tau; at the end there is nothing left to fall", () => {
     const d = grab();
@@ -750,9 +836,21 @@ describe("main.ts wiring — driven per frame from the scroll position, not from
 describe("main.ts wiring — compositor-only, geometry once per gesture", () => {
   it("the effect is applied as the translate longhand and cleared at rest", () => {
     const apply = src.slice(src.indexOf("function applySpring()"), src.indexOf("function springPump"));
-    expect(apply).toContain("el.style.translate = `0 ${dy.toFixed(2)}px`");
+    expect(apply).toContain("el.style.translate = px");
     expect(apply).toContain('el.style.removeProperty("translate")');
     expect(apply).not.toContain("style.transform"); // never the peek's property
+  });
+
+  it("a write whose value has not changed is skipped, and the value is still sub-pixel", () => {
+    const apply = src.slice(src.indexOf("function applySpring()"), src.indexOf("function springPump"));
+    expect(apply).toContain("`0 ${dy.toFixed(2)}px`"); // sub-pixel: never snapped to a device pixel
+    expect(apply).toContain("if (springWritten.get(i) === px) continue");
+    expect(apply).toContain("springWritten.delete(i)"); // a cleared row forgets its value
+    // the map is dropped wherever the row table is, so a fresh element at an old
+    // index is never skipped on the strength of the old element's value
+    const measure = src.slice(src.indexOf("function measureSpring()"), src.indexOf("function applySpring"));
+    expect(measure).toContain("springWritten = new Map()");
+    expect(src).toContain("springWritten = new Map<number, string>();");
   });
 
   it("the frame loop reads no layout; seats are read at the grab, and again only when content changed", () => {
