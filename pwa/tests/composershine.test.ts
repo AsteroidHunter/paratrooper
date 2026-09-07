@@ -113,6 +113,13 @@ describe("nothing the hold does can reach Safari's native text layer", () => {
   it("leaves the textarea unpositioned and uncomposited", () => {
     // attempt 2: position/z-index on the textarea to lift it above a veil.
     // It worked visually and cost double-tap word select and tap-to-caret.
+    // This is the RESTING rule, and the ban on it is absolute. The keyboard
+    // session's rules do carry a transform and a standing will-change (the
+    // text rides the pill's widening, and the caret's layer must not be torn
+    // down under it mid-rise); widen.test.ts holds those to exactly three
+    // rules and holds this one clean, and both engines were checked to place
+    // the caret, select a word and drag a range identically with the
+    // promotion on.
     expect(textarea).not.toMatch(
       /(?:^|;)\s*(?:position|z-index|transform|scale|translate|filter|backdrop-filter|opacity|isolation|will-change|contain|mix-blend-mode|perspective)\s*:/,
     );
@@ -341,7 +348,7 @@ describe("the gesture hook owns the glow and its origin, and forces no layout", 
     expect(main).not.toMatch(/textEl\.addEventListener\("(?:pointer|touch|mouse)/);
   });
 
-  it("ships as 0.3.129", () => {
-    expect(main).toMatch(/^const APP_VERSION = "0\.3\.129"; \/\/ \S/m);
+  it("ships as 0.3.131", () => {
+    expect(main).toMatch(/^const APP_VERSION = "0\.3\.131"; \/\/ \S/m);
   });
 });

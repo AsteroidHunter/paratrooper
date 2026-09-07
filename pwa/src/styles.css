@@ -1202,14 +1202,31 @@ html, body {
    .kb alike, the same keys as the lift, so the slide starts with the tap and
    lands with the keyboard on the one measured curve.
      This is the one deliberate exception to composershine.test.ts's rule that
-   the textarea is never composited: it lasts the 220ms of an edge and is
-   identity in every resting state (the .wide rule below returns it to none
-   in the same frame the layout takes over). The caret a transform can
-   misplace (WebKit freezes the reported rect while an accelerated transition
-   runs) is under the keyboard for the whole rise and gone for a blurred fall. */
+   the textarea is never composited: it lasts the keyboard session and is
+   identity in every resting state (the .wide rule below returns it to none in
+   the same frame the layout takes over, and the base rule above carries no
+   transform at all). The caret a transform can misplace (WebKit freezes the
+   reported rect while an accelerated transition runs) is under the keyboard
+   for the whole rise and gone for a blurred fall.
+     THE LAYER STANDS FOR THE WHOLE SESSION, which is what will-change buys and
+   the only reason it is here. On iOS the caret is not page paint: it is a
+   UIKit view attached to the enclosing compositing layer and placed from a
+   rect the page reported. This transform gives the box its own layer at the
+   focus tap, and 0.3.129 let that layer go on the frame the transition ended,
+   about 220ms in — right under the end of the keyboard's rise. The phone then
+   re-attached the caret from the rect it still held and drew it below the bar
+   for a frame or two before the next report put it back. The same teardown at
+   the same kind of landing is what .gate carries a standing will-change for
+   (the token card, further up this sheet), and the same family as 0.3.71's
+   growing shadow rect on the pill (.field's box-shadow note). So the promotion
+   is declared under every class the session wears — these two, .wide and .flip
+   — and never at rest, where a composited text box costs the engine's own
+   double-tap select and tap-to-caret. Nothing is built or torn down under the
+   caret between the focus tap and the blur. */
 #app.kb .compose textarea,
 #app.focusing .compose textarea {
   transform: translateX(calc(-1 * var(--widen)));
+  will-change: transform;
 }
 /* iOS skips its caret-reveal scroll when the freshly focused control sits at
    opacity 0 (the verified ios-chat/kiding mechanism): one 0.02s opacity blink
@@ -1306,15 +1323,26 @@ html, body {
 }
 
 /* THE LAYOUT, switched once and at rest. widen.ts puts .wide on the form only
-   after the shell has proven the keyboard (.kb) AND the face piece's own
-   transition has ended: the ＋ gives up its 34px and its gap for real, the
-   pill grows into them, and the text's RIGHT inset absorbs exactly what the
-   left edge gained, so the wrap width is the same number in both layouts and
-   the text never re-wraps. Every transform goes back to identity and the face
-   piece hides in the same style pass, with no transition on any of it: the
-   wide layout puts the pill's end, the text and the ＋ exactly where the
-   transforms had them, so the switch moves no pixel. Same specificity as the
-   keyboard-up rules above, so these must stay AFTER them in the sheet. */
+   after the shell has proven the keyboard (.kb), the face piece's own
+   transition has ended AND the lift has landed: the ＋ gives up its 34px and
+   its gap for real, the pill grows into them, and the text's RIGHT inset
+   absorbs exactly what the left edge gained, so the wrap width is the same
+   number in both layouts and the text never re-wraps. Every transform goes
+   back to identity and the face piece hides in the same style pass, with no
+   transition on any of it: the wide layout puts the pill's end, the text and
+   the ＋ exactly where the transforms had them, so the switch moves no pixel.
+   Same specificity as the keyboard-up rules above, so these must stay AFTER
+   them in the sheet.
+     The landing is the third fact and it belongs to the caret. This rule
+   changes the focused box's real geometry — its left edge, its width and its
+   right inset all move by the widen distance in one pass — and while a page
+   can make that a wash on screen, iOS places its caret from the box's LAYOUT,
+   so the one thing that must be true when it lands is that no ancestor
+   transform is still in flight. Waiting for the face piece alone was not that:
+   the bar's clock starts at the tap and the lift's is retargeted by the
+   viewport's report, so the switch could land 85ms early with the lift over
+   100px short of its seat, and the caret drew below the bar (0.3.129, from the
+   phone; measured frame by frame in both engines since). */
 #app .compose.wide .attach {
   width: 0;
   margin-right: -0.5rem; /* swallow the flex gap so the slot truly closes */
@@ -1326,6 +1354,7 @@ html, body {
 #app .compose.wide textarea {
   padding-right: calc(40px + var(--widen)); /* the ↑ column, plus what the left edge gained */
   transform: none;
+  will-change: transform; /* the layer stands: nothing is torn down under the caret */
   transition: none;
 }
 #app .compose.wide .cap {
@@ -1348,6 +1377,7 @@ html, body {
 }
 #app .compose.flip textarea {
   transform: translateX(calc(-1 * var(--widen)));
+  will-change: transform; /* still the session's layer: the close's own transition inherits it */
   transition: none;
 }
 #app .compose.flip .cap {

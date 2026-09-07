@@ -188,7 +188,11 @@ describe("the pad's wiring in main.ts: at the landing, same frame, announced", (
   });
 
   it("it is the lift's landing that calls it, never the keyboard edge", () => {
-    expect(src).toContain("watchLiftLanding((up, lift) => setLiftPad(up ? lift : 0));");
+    // one landing callback, shared with the bar's layout switch (widen.ts),
+    // which goes first so both land in the same style pass
+    expect(src).toContain("  setLiftPad(up ? lift : 0);\n});");
+    expect(src.match(/watchLiftLanding\(/g)).toHaveLength(1);
+    expect(src.match(/setLiftPad\(up \? lift : 0\)/g)).toHaveLength(1);
     const gate = src.slice(src.indexOf("watchKeyboard((up) => {"));
     expect(gate.slice(0, gate.indexOf("\n});"))).not.toContain("setLiftPad");
   });

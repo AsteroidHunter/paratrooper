@@ -183,7 +183,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.129"; // Messages' bubble tail under each run's last bubble, merged over the springy scroll and the compose pill's widening
+const APP_VERSION = "0.3.131"; // The caret stays in the box for the whole keyboard rise: the pill's layout switch waits for the lift to stop moving, and the text box keeps its layer across it
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -324,7 +324,14 @@ function setLiftPad(next: number): void {
   holdDiagRecord("lift-pad", { pad: Math.round(next), from: Math.round(st), to: Math.round(top) });
 }
 
-watchLiftLanding((up, lift) => setLiftPad(up ? lift : 0));
+watchLiftLanding((up, lift) => {
+  // first, and in this same style pass: the bar's layout switch may only land
+  // on a lift that has stopped moving (widen.ts). A layout change to the
+  // focused box under a running ancestor transform is the frame iOS re-places
+  // its caret from geometry the lift is not in, and it draws it below the bar.
+  widen.landed(up);
+  setLiftPad(up ? lift : 0);
+});
 // TEMP DIAGNOSTIC (kb-lift, shell.ts): the app's write counter, so a landing
 // record can say whether anything scrolled inside the keyboard's motion
 watchScrollWrites(scrollWriteCount);

@@ -12,14 +12,35 @@
 //      showed what changing that box on the focus frame costs: on that build
 //      every open put the keyboard up and iOS took it straight back to its
 //      accessory strip with the box still focused (plans/compose-expand carries
-//      the phone's trail). So the switch waits for two facts, in either order:
+//      the phone's trail). So the switch waits for three facts, in any order:
 //      the shell has PROVEN the keyboard (.kb, the viewport's report, about
-//      80ms after the tap) and the bar's own transition has ENDED (the face
-//      piece's transitionend, or the settle clock if that never fires). At that
-//      point the transforms have the pill, the text and the ＋ exactly where
-//      the wide layout puts them, so the switch moves no pixel. A keyboard that
-//      never proves itself never gets a switch: the transforms just return when
-//      the shell's signals lapse, which is the same picture as before.
+//      80ms after the tap), the bar's own transition has ENDED (the face
+//      piece's transitionend, or the settle clock if that never fires), and the
+//      lift has LANDED (shell.ts watchLiftLanding: the lift wrapper's own
+//      transitionend, or the shell's settle clock). At that point the
+//      transforms have the pill, the text and the ＋ exactly where the wide
+//      layout puts them, so the switch moves no pixel. A keyboard that never
+//      proves itself never gets a switch: the transforms just return when the
+//      shell's signals lapse, which is the same picture as before.
+//
+//      The landing is the fact 0.3.129 was missing, and the caret paid for it.
+//      The bar's own clock starts at the focus tap and is never retargeted; the
+//      LIFT's clock is retargeted by the viewport's report whenever the
+//      keyboard's height differs from the one this width last remembered, and
+//      starts at the report rather than the tap when nothing is remembered at
+//      all. In both of those the face piece's transitionend arrives about 85ms
+//      before the lift stops moving, so the old two-fact gate switched the
+//      focused box's real layout while an ancestor transform was still in
+//      flight, with the lift 77 to 176px short of its seat (measured frame by
+//      frame in both engines). iOS draws the caret from the focused box's
+//      layout geometry, not from the page's paint, and a layout change under a
+//      running ancestor transform is exactly the frame it re-places it from
+//      geometry the lift has not been applied to: the caret lands below the
+//      bar for a frame or two, right before the keyboard tops out. Waiting for
+//      the landing also subsumes "the keyboard's FINAL height has been
+//      reported": every late report re-aims the lift, and a re-aimed lift lands
+//      again, later. No clock of this module's stands in for it — a proof
+//      implies the shell armed a lift edge, and every armed edge lands.
 //   2. The close (flip). The keyboard-up resting state is the wide layout with
 //      no transforms, so a close cannot simply transition "back": the return
 //      has to START from the wide look drawn in the resting layout. At the
@@ -55,6 +76,7 @@ export interface WidenState {
   up: boolean;
   proven: boolean;
   ended: boolean;
+  landed: boolean;
   wide: boolean;
 }
 
@@ -62,6 +84,7 @@ export function createWiden(deps: WidenDeps) {
   let up = false; // the shell's keyboard signal: the tap's own .focusing OR .kb
   let proven = false; // the shell's .kb: the viewport reported a keyboard
   let ended = false; // the bar's own transition has finished, or the clock gave up
+  let landed = false; // the lift's transform has stopped moving (shell.ts's landing)
   let wide = false; // the layout as applied
   let callOff: (() => void) | null = null;
 
@@ -70,9 +93,9 @@ export function createWiden(deps: WidenDeps) {
     callOff = null;
   };
 
-  // the one rule: wide when, and only when, all three facts are in
+  // the one rule: wide when, and only when, all four facts are in
   const settle = (): void => {
-    if (up && proven && ended && !wide) {
+    if (up && proven && ended && landed && !wide) {
       wide = true;
       deps.setWide(true);
     }
@@ -86,6 +109,12 @@ export function createWiden(deps: WidenDeps) {
       dropClock();
       if (isUp) {
         ended = false;
+        landed = false;
+        // the backstop is the BAR's transition only. The landing has the
+        // shell's own clock behind it and must not be guessed at here: a
+        // report slower than this window (the trail's slowest genuine one was
+        // 319ms) re-aims the lift, and a clock that called the landing in
+        // would put the switch back inside the motion.
         callOff = deps.wait(WIDEN_SETTLE_MS, () => {
           callOff = null;
           ended = true;
@@ -111,16 +140,29 @@ export function createWiden(deps: WidenDeps) {
       ended = true;
       settle();
     },
+    /**
+     * The lift's landing (shell.ts watchLiftLanding), for the UP edge only: the
+     * lift wrapper's own transitionend, or the shell's settle clock behind it.
+     * The close's landing is not the rise's and switches nothing. A keyboard
+     * that changes height mid-session lands the lift again; the switch has
+     * already happened by then and this writes nothing.
+     */
+    landed(isUp: boolean): void {
+      if (!isUp) return;
+      landed = true;
+      settle();
+    },
     /** a fresh form (renderChat rebuilds the bar): nothing is wide, nothing is pending */
     reset(): void {
       dropClock();
       up = false;
       proven = false;
       ended = false;
+      landed = false;
       wide = false;
     },
     state(): WidenState {
-      return { up, proven, ended, wide };
+      return { up, proven, ended, landed, wide };
     },
   };
 }

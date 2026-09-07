@@ -189,6 +189,37 @@ describe("the rise is transform and opacity only, keyed off the shell's own clas
     // composershine.test.ts's ban on the resting rule still holds
     expect(sets(rule(".compose textarea"), "transform")).toBe(false);
   });
+
+  // THE OTHER CARET PIN. On iOS the caret is a UIKit view attached to the
+  // enclosing compositing layer, and the transform above gives the focused box
+  // its own layer at the focus tap. In 0.3.129 that layer was released again on
+  // the frame the transition ended, about 220ms in, right under the end of the
+  // keyboard's rise: the phone re-attached the caret from the rect it still
+  // held and drew it below the bar. The promotion is therefore declared under
+  // every class the keyboard session wears, so nothing is built or torn down
+  // under the caret between the focus tap and the blur. Same remedy as .gate's
+  // standing will-change (the token card) and the same family as 0.3.71's
+  // growing shadow rect on the pill.
+  it("the text box keeps ONE layer for the whole keyboard session, and none at rest", () => {
+    for (const sel of [UP_TEXT, WIDE_TEXT, FLIP_TEXT]) {
+      expect(decl(rule(sel), "will-change"), `${sel} drops the layer`).toBe("transform");
+    }
+    // every rule in this sheet that touches the textarea, and the only ones
+    // allowed to promote it are the session's three
+    const promoted = rules
+      .filter((r) => /textarea/.test(r.sel) && sets(r.body, "will-change"))
+      .map((r) => r.sel);
+    expect(promoted).toEqual([UP_TEXT, WIDE_TEXT, FLIP_TEXT]);
+    // at rest the box is the engine's own again: a composited text box costs
+    // double-tap select and tap-to-caret (composershine.test.ts's rule)
+    expect(sets(rule(".compose textarea"), "will-change")).toBe(false);
+    // and the promotion covers exactly the states the transform is declared in,
+    // plus .wide, where the transform is identity but the layer must stand
+    const transformed = rules
+      .filter((r) => /textarea/.test(r.sel) && sets(r.body, "transform"))
+      .map((r) => r.sel);
+    expect(transformed).toEqual(promoted);
+  });
 });
 
 describe("the wide layout: switched once, at rest, on the pixels the transforms already occupy", () => {
@@ -345,24 +376,58 @@ function harness() {
   };
 }
 
-describe("createWiden — the layout switch waits for the proof and the end, in either order", () => {
-  it("a good open: up at the tap, the report proves it, the motion ends, then and only then wide", () => {
+describe("createWiden — the layout switch waits for the proof, the end and the landing", () => {
+  it("a good open: up at the tap, the report proves it, the motion ends, the lift lands, then wide", () => {
     const h = harness();
     h.widen.keyboard(true);
     expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`]);
     h.widen.proven(true); // the viewport's report, about 80ms in
     expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`]); // proven alone switches nothing
     h.widen.ended(); // the face piece's transitionend at 220ms
+    expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`]); // and the bar's own end is not enough either
+    h.widen.landed(true); // the lift wrapper's transitionend: the transform has stopped
     expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`, "wide:true"]);
-    expect(h.widen.state()).toEqual({ up: true, proven: true, ended: true, wide: true });
+    expect(h.widen.state()).toEqual({ up: true, proven: true, ended: true, landed: true, wide: true });
   });
 
   it("a late report: the motion ends first, the proof arrives after, the switch waits for it", () => {
     const h = harness();
     h.widen.keyboard(true);
     h.widen.ended();
+    h.widen.landed(true);
     expect(h.log).not.toContain("wide:true");
     h.widen.proven(true); // the slowest genuine report in the trail was 319ms
+    expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`, "wide:true"]);
+  });
+
+  // THE CARET PIN. 0.3.129 switched on the proof and the face piece's end
+  // alone. The bar's clock starts at the focus tap and is never retargeted;
+  // the lift's is retargeted by the viewport's report whenever the keyboard's
+  // height differs from the remembered one, and starts at the report when
+  // nothing is remembered. In both, the face piece ends about 85ms before the
+  // lift stops, so the focused box's real layout changed under a running
+  // ancestor transform — measured in both engines at 77 to 176px of lift still
+  // to travel — and iOS drew its caret below the bar for a frame or two, right
+  // before the keyboard topped out.
+  it("a retargeted lift: the bar's motion ends first and the switch WAITS for the lift to stop", () => {
+    const h = harness();
+    h.widen.keyboard(true); // the focus tap
+    h.widen.proven(true); // the report at ~90ms, at a height the phone did not remember
+    h.widen.ended(); // the face piece's own end at ~220ms, on the tap's clock
+    expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`]); // NOT wide: the lift is still rising
+    h.widen.landed(true); // the retargeted lift, ~85ms later
+    expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`, "wide:true"]);
+  });
+
+  it("the close's landing is not the rise's: only an up landing counts", () => {
+    const h = harness();
+    h.widen.keyboard(true);
+    h.widen.proven(true);
+    h.widen.ended();
+    h.widen.landed(false); // a stale close landing arriving late
+    expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`]);
+    expect(h.widen.state().landed).toBe(false);
+    h.widen.landed(true);
     expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`, "wide:true"]);
   });
 
@@ -381,9 +446,28 @@ describe("createWiden — the layout switch waits for the proof and the end, in 
     const h = harness();
     h.widen.keyboard(true);
     h.widen.proven(true);
+    h.widen.landed(true);
     expect(h.armed()).toBe(true);
     h.tick();
     expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`, "wide:true"]);
+  });
+
+  it("and it backs the BAR only: no clock of this module's ever stands in for the landing", () => {
+    // a report slower than this window re-aims the lift and lands it later; a
+    // clock that called the landing in would put the switch back inside the
+    // motion, which is the whole bug. The shell has its own clock behind the
+    // landing (armLift's LIFT_SETTLE_MS + 20), and a proof implies an armed
+    // edge, so waiting here can never hang.
+    const h = harness();
+    h.widen.keyboard(true);
+    h.widen.proven(true);
+    h.tick(); // the settle window runs out: ended, but not landed
+    expect(h.widen.state()).toMatchObject({ ended: true, landed: false, wide: false });
+    expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`]);
+    const src = readFileSync(new URL("../src/widen.ts", import.meta.url), "utf8");
+    const clock = src.match(/deps\.wait\(WIDEN_SETTLE_MS, \(\) => \{([\s\S]*?)\}\);/)?.[1] ?? "";
+    expect(clock).toContain("ended = true;");
+    expect(clock).not.toContain("landed");
   });
 
   it("the switch happens once: a second end, a repeated proof, a re-landed lift write nothing", () => {
@@ -391,10 +475,26 @@ describe("createWiden — the layout switch waits for the proof and the end, in 
     h.widen.keyboard(true);
     h.widen.proven(true);
     h.widen.ended();
+    h.widen.landed(true);
     h.widen.ended();
     h.widen.proven(true);
+    h.widen.landed(true); // a keyboard that changed height mid-session lands again
     h.tick();
     expect(h.log.filter((l) => l === "wide:true")).toHaveLength(1);
+  });
+
+  it("the switch is ONE write, so no frame can carry half of it", () => {
+    // the ＋'s slot, the pill's growth and the text's inset all hang off the
+    // one class: a half-applied switch would move the focused box's left edge
+    // without the transform coming off it, which is a real jump under the caret
+    const h = harness();
+    h.widen.keyboard(true);
+    h.widen.proven(true);
+    h.widen.ended();
+    h.widen.landed(true);
+    expect(h.log.filter((l) => l.startsWith("wide:"))).toEqual(["wide:true"]);
+    const src = readFileSync(new URL("../src/widen.ts", import.meta.url), "utf8");
+    expect(src).toContain('setWide: (on) => lookup()?.classList.toggle(WIDE_CLASS, on),');
   });
 });
 
@@ -404,6 +504,7 @@ describe("createWiden — the close", () => {
     h.widen.keyboard(true);
     h.widen.proven(true);
     h.widen.ended();
+    h.widen.landed(true);
     h.widen.keyboard(false);
     expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`, "wide:true", "flip"]);
     expect(h.widen.state().wide).toBe(false);
@@ -429,13 +530,30 @@ describe("createWiden — the close", () => {
     h.widen.keyboard(true);
     h.widen.proven(true);
     h.widen.ended();
+    h.widen.landed(true);
     h.widen.keyboard(false); // flip
     h.widen.proven(false);
     h.widen.keyboard(true); // the quick re-tap while the bar is returning
     expect(h.log.at(-1)).toBe(`wait:${WIDEN_SETTLE_MS}`);
     h.widen.ended(); // the transition, turned round, reaches the wide look
+    h.widen.landed(true); // and the lift, turned round with it, stops
     expect(h.log.filter((l) => l === "wide:true")).toHaveLength(1); // still unproven: the first open's switch only
     h.widen.proven(true);
+    expect(h.log.filter((l) => l === "wide:true")).toHaveLength(2);
+  });
+
+  it("an up edge forgets the last rise's end AND its landing, so the re-tap waits for both again", () => {
+    const h = harness();
+    h.widen.keyboard(true);
+    h.widen.proven(true);
+    h.widen.ended();
+    h.widen.landed(true);
+    h.widen.keyboard(false);
+    h.widen.keyboard(true); // the re-tap
+    expect(h.widen.state()).toMatchObject({ ended: false, landed: false, wide: false });
+    h.widen.ended();
+    expect(h.log.filter((l) => l === "wide:true")).toHaveLength(1); // no landing yet
+    h.widen.landed(true);
     expect(h.log.filter((l) => l === "wide:true")).toHaveLength(2);
   });
 
@@ -444,6 +562,7 @@ describe("createWiden — the close", () => {
     h.widen.keyboard(true);
     h.widen.proven(true);
     h.widen.ended();
+    h.widen.landed(true);
     h.widen.proven(false); // the keyboard minimised under a held focus
     expect(h.widen.state().wide).toBe(true);
     expect(h.log).not.toContain("flip");
@@ -457,7 +576,7 @@ describe("createWiden — the close", () => {
     h.widen.proven(true);
     h.widen.reset();
     expect(h.cancelled()).toBe(1);
-    expect(h.widen.state()).toEqual({ up: false, proven: false, ended: false, wide: false });
+    expect(h.widen.state()).toEqual({ up: false, proven: false, ended: false, landed: false, wide: false });
     h.tick(); // a clock that was already called off fires nothing
     expect(h.log).toEqual([`wait:${WIDEN_SETTLE_MS}`]);
   });
@@ -553,7 +672,7 @@ describe("bindWiden — the face piece's own transitionend is the end of the mot
     const h = harness();
     h.widen.keyboard(true);
     bindWiden(form as unknown as HTMLElement, h.widen);
-    expect(h.widen.state()).toEqual({ up: false, proven: false, ended: false, wide: false });
+    expect(h.widen.state()).toEqual({ up: false, proven: false, ended: false, landed: false, wide: false });
     const fire = cap.listeners.get("transitionend")!;
     h.widen.keyboard(true);
     h.widen.proven(true);
@@ -561,8 +680,9 @@ describe("bindWiden — the face piece's own transitionend is the end of the mot
     expect(h.widen.state().ended).toBe(false);
     fire({ target: fakeEl("other"), propertyName: "transform" }); // a bubbled end from elsewhere
     expect(h.widen.state().ended).toBe(false);
+    h.widen.landed(true);
     fire({ target: cap, propertyName: "transform" });
-    expect(h.widen.state()).toEqual({ up: true, proven: true, ended: true, wide: true });
+    expect(h.widen.state()).toEqual({ up: true, proven: true, ended: true, landed: true, wide: true });
   });
 });
 
@@ -578,6 +698,21 @@ describe("wiring: one driver, fed by the shell's two edges, bound per render", (
 
   it("the keyboard edge reaches the driver first in the existing gate, so the close starts in the lift's frame", () => {
     expect(main).toMatch(/watchKeyboard\(\(up\) => \{\n\s*widen\.keyboard\(up\);/);
+  });
+
+  it("the lift's landing reaches the driver first too, in the same style pass as the thread's pad", () => {
+    // shell.ts hands out ONE landing callback, so the switch and the thread's
+    // reachability padding share it; the switch goes first, and both land in
+    // the one style pass this task ends with
+    expect(main).toMatch(
+      /watchLiftLanding\(\(up, lift\) => \{[\s\S]{0,400}?widen\.landed\(up\);\n\s*setLiftPad\(up \? lift : 0\);\n\}\);/,
+    );
+    expect(main.match(/widen\.landed\(/g)).toHaveLength(1);
+    // and the landing itself is the lift wrapper's own transitionend, with the
+    // shell's clock behind it — never a guess of the bar's
+    expect(shell).toContain('liftLanded("end");');
+    expect(shell).toMatch(/liftTimer = setTimeout\(\(\) => \{\n\s*liftTimer = null;\n\s*liftLanded\("clock"\);/);
+    expect(shell).toContain("onLiftLanding?.(appliedUp, Number.isFinite(y) ? Math.abs(y) : 0);");
   });
 
   it("the bar is bound per render, with the rest of the bar", () => {
