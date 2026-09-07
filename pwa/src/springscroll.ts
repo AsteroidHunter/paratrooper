@@ -34,8 +34,10 @@
 // half done 400 ms after the stop and crossed the seat with an overshoot near
 // 800 ms (the real return is 90% done in 105 ms), and a fling that froze the
 // full stretch through a one-to-two-second coast and dropped it in one fall at
-// the end (the real stretch is gone with the speed). The 50%-of-gap compression
-// cap was also tighter than the real transcript, which closes gaps to a third.
+// the end (the real stretch is gone with the speed). Its half-of-gap compression
+// cap was a shape the recording does not have: the leading side closes linearly
+// with speed (to 63% of rest at the speeds recorded, 3.3 px on the tightest
+// pairs) with nothing but touching to stop it, so the cap is now a 2 px floor.
 //
 // Kept from the earlier builds: one shared reference lag L (the lag of a row
 // exactly RESISTANCE_DIVISOR px from the finger; each row shows resistance x L,
