@@ -683,6 +683,18 @@ describe("main.ts wiring — held off through every motion the app owns", () => 
     }
   });
 
+  it("a finished sibling shift releases the hold-off: every animation drops out of the registry it reads", () => {
+    // the registry was only ever emptied at the start of the NEXT shift, so the
+    // receipt shift at boot on any thread with a sent message kept
+    // springBlocked() true for the life of the thread and the spring never
+    // armed (the message-tail finding)
+    const begin = src.slice(src.indexOf("function beginSiblingShift()"), src.indexOf("function localWrapper("));
+    expect(blocked).toContain("shiftAnims.length > 0");
+    expect(begin).toContain("shiftAnims.push(anim)");
+    expect(begin).toContain("anim.finished.then(() => dropShiftAnim(shiftAnims, anim), () => {})");
+    expect(src).toMatch(/import \{[^}]*dropShiftAnim[^}]*\} from "\.\/shift"/);
+  });
+
   it("the FLIP shift freezes the springs before it measures a single rect", () => {
     const shift = src.slice(
       src.indexOf("function beginSiblingShift()"),

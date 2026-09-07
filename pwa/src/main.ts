@@ -78,6 +78,7 @@ import {
 } from "./resume";
 import type { ResumePin } from "./resume";
 import {
+  dropShiftAnim,
   ENTER_RISE_PX,
   FLIGHT_EASE,
   FLIGHT_MS,
@@ -5479,7 +5480,9 @@ function beginSiblingShift(): { play(): void } {
   // the springy transcript is zeroed before a single rect is read: a row still
   // carrying a spring displacement would corrupt this FLIP's before/after delta,
   // and the shift's own transforms would fight it. It stays frozen for the whole
-  // beat because springBlocked() reads shiftAnims (springscroll.ts wiring).
+  // beat because springBlocked() reads shiftAnims (springscroll.ts wiring), and
+  // no longer: each animation leaves the registry when it finishes, so a
+  // receipt shift at boot cannot block the spring for the life of the thread.
   springFreeze();
   springDirty = true; // the insert about to happen re-lays the tail
   // eligibility is the pre-send view: pinned (or near) the bottom. A send from
@@ -5530,10 +5533,15 @@ function beginSiblingShift(): { play(): void } {
         const r = el.getBoundingClientRect();
         const delta = beforeTop - r.top;
         if (!shiftParticipates(r.top, r.bottom, delta, view.top, view.bottom)) continue;
-        shiftAnims.push(el.animate(
+        const anim = el.animate(
           [{ transform: `translateY(${delta}px)` }, { transform: "none" }],
           { duration: FLIGHT_MS, easing: FLIGHT_EASE },
-        ));
+        );
+        shiftAnims.push(anim);
+        // the shift's end releases the spring's hold-off: the animation drops
+        // out of the registry when it finishes (a cancelled one rejects and is
+        // already out of a replaced registry: nothing to do)
+        anim.finished.then(() => dropShiftAnim(shiftAnims, anim), () => {});
         if (delta > maxDelta) maxDelta = delta;
         rows++;
       }

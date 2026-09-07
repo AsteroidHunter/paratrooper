@@ -28,6 +28,7 @@ import {
   newbornEnter,
   shiftParticipates,
   stampRidesFlight,
+  dropShiftAnim,
 } from "../src/shift";
 
 describe("flight motion constants", () => {
@@ -441,5 +442,28 @@ describe("stamp-ride wiring: the stamp moves with its row, fading from zero", ()
   it("records the ride on the flight channel with its travel", () => {
     expect(fly).toContain('phase: "stamp-ride"');
     expect(fly).toMatch(/phase: "stamp-ride",\s*dx:.*dy:/s);
+  });
+});
+
+describe("dropShiftAnim — a finished shift leaves the registry the spring reads", () => {
+  it("drops the finished animation and keeps the rest", () => {
+    const a = {}, b = {}, c = {};
+    const registry = [a, b, c];
+    expect(dropShiftAnim(registry, b)).toBe(true);
+    expect(registry).toEqual([a, c]);
+  });
+
+  it("a cancelled animation from a replaced registry is simply not found", () => {
+    const stale = {};
+    const registry: object[] = [{}];
+    expect(dropShiftAnim(registry, stale)).toBe(false);
+    expect(registry.length).toBe(1);
+  });
+
+  it("empties the registry once every animation has finished", () => {
+    const anims = [{}, {}, {}];
+    const registry = [...anims];
+    for (const a of anims) dropShiftAnim(registry, a);
+    expect(registry.length).toBe(0); // springBlocked() reads exactly this length
   });
 });
