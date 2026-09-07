@@ -184,7 +184,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.138"; // Tapping into a box that already holds text shows its cursor with the rest: the caret is placed again when the bar's hold ends
+const APP_VERSION = "0.3.139"; // Every Python package and both container base images are pinned to the versions running today, so a rebuild lands on the same set instead of whatever is newest that morning
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

@@ -1,0 +1,54 @@
+# Exact versions the Paratrooper worker image runs today.
+#
+# Read on 2026-09-07 from the live worker service's own interpreter
+# (`python -m pip freeze` inside the running container, Python 3.12.14 on
+# Debian 13 trixie). Nothing here is an upgrade: every line is the version
+# already serving traffic.
+#
+# pyproject.toml keeps the intent ranges (the floors the code actually needs);
+# this file is what makes a rebuild land on the same set the range happened to
+# resolve to. Dockerfile.worker applies it with `pip install -c`. Transitive
+# packages are pinned here precisely because they cannot be pinned in
+# pyproject.toml without pretending they are direct dependencies.
+#
+# To bump on purpose, see PINNING.md. Do not hand-edit a single line: the file
+# is a reading of a container, and a lone edit makes it a guess.
+
+annotated-types==0.8.0
+anyio==4.15.1
+attrs==26.1.0
+certifi==2026.7.22
+cffi==2.1.1
+claude-agent-sdk==0.2.110
+click==8.5.0
+cryptography==50.0.1
+greenlet==3.5.5
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+httpx-sse==0.4.3
+idna==3.19
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+mcp==1.30.0
+numpy==2.5.3
+pillow==12.3.0
+playwright==1.62.0
+pycparser==3.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+pydantic_core==2.46.5
+pyee==13.0.1
+PyJWT==2.13.0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+redis==8.1.0
+referencing==0.37.0
+rpds-py==2026.6.3
+scipy==1.18.1
+sniffio==1.3.1
+sse-starlette==3.4.11
+starlette==1.6.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.52.4
