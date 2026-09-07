@@ -291,6 +291,18 @@ export interface SpringField {
   lift(): void;
   /** one animation frame: read the scroll position, advance the lag */
   frame(nowMs: number, scrollTop: number): void;
+  /**
+   * The scroll position moved by `dy` for a reason that is NOT scrolling: a page
+   * of older messages was inserted above the viewport and the app pinned the
+   * view by adding the inserted height to `scrollTop`, so the row under the
+   * finger did not move by a pixel. Left alone the next frame reads that write
+   * as one frame of scroll the size of the whole page — thousands of px — and
+   * the lag saturates at its ceiling. Carry the reference AND every reading in
+   * the speed window across the jump instead, so the frame after the pin
+   * measures the motion that really happened, which is none. The lag itself is
+   * untouched: a stretch already on screen keeps relaxing exactly as it was.
+   */
+  reseat(dy: number): void;
   /** index -> displacement px for the rows to move this frame */
   displacements(): Map<number, number>;
   /** frames still needed (any phase but idle): the pump keeps scheduling */
@@ -446,6 +458,12 @@ export function createSpringField(opts: {
     else phaseNow = "settling";
   }
 
+  function reseat(dy: number): void {
+    if (dy === 0 || !Number.isFinite(dy)) return;
+    if (lastScrollTop !== null) lastScrollTop += dy;
+    samples = samples.map((s) => ({ t: s.t, s: s.s + dy }));
+  }
+
   function displacements(): Map<number, number> {
     if (L === 0 || rows.length === 0) return new Map();
     const [lo, hi] = windowBounds(scrollNow, clientH, buffer);
@@ -506,6 +524,7 @@ export function createSpringField(opts: {
     anchor,
     lift,
     frame,
+    reseat,
     displacements,
     active,
     armed,

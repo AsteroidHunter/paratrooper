@@ -184,7 +184,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.139"; // Every Python package and both container base images are pinned to the versions running today, so a rebuild lands on the same set instead of whatever is newest that morning
+const APP_VERSION = "0.3.140"; // A page of older messages landing above the viewport no longer throws the transcript down, and the bounce after a hold at an end stretches the rows instead of running flat
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1092,6 +1092,7 @@ function drainOlder(): void {
   if (page) for (const m of page) applyEvent(m);
   suppressAnim = prevSuppress;
   t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
+  springReseat(t.scrollTop - prevScroll); // ... and the springs are told it was not a scroll
   scrollGhostWrite("drain", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
   if (dropSpin) {
     // the farewell happens at scrollTop~0 where the pin cannot compensate for
@@ -1881,6 +1882,25 @@ function springFreeze(): void {
   springField.freeze();
   endSpring.freeze(); // END-SPRING SEAM: the bounce is held at zero too
   applySpring();
+}
+
+// A pinned insert has just happened: `dy` px of content went in ABOVE the
+// viewport and the pin added exactly that to scrollTop, so the row the reader is
+// looking at has not moved. To the springs that write is indistinguishable from
+// scrolling the whole page's height in one frame — the lag saturates at its
+// 300 px ceiling and every row on screen is thrown down and then relaxes, which
+// is what the owner recorded at the spinner ("shifts the viewport down ... super
+// janky") and at the tail when a banked page lands there. So the reference is
+// carried across the jump rather than the jump being read as motion. The end
+// model gives up its band at the same time: with messages above it, that end is
+// not an end any more; its last value goes to the field so the hand-back is not
+// a step either. Nothing else is disturbed — a stretch already on screen keeps
+// relaxing, and no seat, gesture or transform is touched.
+function springReseat(dy: number): void {
+  if (!dy) return;
+  const band = endSpring.over();
+  endSpring.reseat(dy);
+  springField.reseat(dy - band);
 }
 
 // The scroll handler's one line. Blocked, freeze — the app's own ride is never
@@ -4199,6 +4219,7 @@ function applyReplay(m: ServerMsg): void {
   suppressAnim = !replayAnimates(isTail, loadingScreen.lifted(), pageVisible());
   applyEvent(m);
   if (!isTail) t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
+  if (!isTail) springReseat(t.scrollTop - prevScroll); // the same pin, the same rule
   scrollGhostWrite("replay", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
   suppressAnim = prevSuppress;
   pinInstant = prevInstant;

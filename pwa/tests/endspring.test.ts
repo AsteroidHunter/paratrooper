@@ -716,6 +716,55 @@ describe("main.ts seam — one line in the pump, and every hold-off kept", () =>
   });
 });
 
+// --- a page of older messages landing while the band is out ------------------
+describe("reseat — the end moved, so the band goes with it", () => {
+  it("gives up the band and stops the pin being read as a fling into the end", () => {
+    const m = createEndSpring();
+    let t = 0;
+    m.begin(true, 500);
+    m.frame((t += FRAME), 0, MAX, VH); // the baseline
+    m.frame((t += FRAME), 0, MAX, VH); // the marker fires: the pull starts here
+    m.finger(620);
+    const pulled = m.frame((t += FRAME), 0, MAX, VH);
+    expect(pulled).toBeLessThan(-30); // 120 px of finger past the top
+    // a page lands above: the pin adds its height to scrollTop
+    m.reseat(3460);
+    expect(m.over()).toBe(0);
+    expect(m.phase()).toBe("idle");
+    expect(m.active()).toBe(false);
+    // and the frame after the pin carries no speed into the far end
+    m.frame((t += FRAME), 3460, MAX, VH);
+    const after = m.frame((t += FRAME), 3460, MAX, VH);
+    expect(after).toBe(0);
+  });
+
+  it("the shifted reading means the pin itself cannot seed an impact", () => {
+    const m = createEndSpring();
+    let t = 0;
+    m.begin(false, null);
+    m.frame((t += FRAME), MAX - 4000, MAX, VH); // baseline, far from either end
+    m.reseat(4000); // the pin: the position moved, the thread did not
+    const landed = m.frame((t += FRAME), MAX, MAX, VH);
+    expect(landed).toBe(0); // no phantom bounce off a write
+    expect(m.phase()).toBe("idle");
+  });
+
+  it("zero and a non-finite shift are no-ops", () => {
+    const m = createEndSpring();
+    let t = 0;
+    m.begin(true, 500);
+    m.frame((t += FRAME), 0, MAX, VH);
+    m.frame((t += FRAME), 0, MAX, VH);
+    m.finger(620);
+    const pulled = m.frame((t += FRAME), 0, MAX, VH);
+    expect(pulled).toBeLessThan(-30); // there IS a band to leave alone
+    m.reseat(0);
+    m.reseat(Number.NaN);
+    expect(m.over()).toBeCloseTo(pulled, 6);
+    expect(m.phase()).toBe("pulling");
+  });
+});
+
 describe("main.ts seam — the lift asks about the field AFTER lifting it", () => {
   it("the re-arm is decided once the lift has had its say", () => {
     const lift = src.slice(src.indexOf("function liftSpring()"), src.indexOf("// --- scrolling: glide"));

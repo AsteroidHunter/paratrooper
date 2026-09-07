@@ -190,6 +190,17 @@ export interface EndSpringModel {
   frame(nowMs: number, scrollTop: number, maxScrollTop: number, viewportH: number): number;
   /** the modelled overscroll as it stands (the same number `frame` returned) */
   over(): number;
+  /**
+   * The scroll position moved by `dy` without the thread scrolling: a page of
+   * older messages went in above the viewport and the pin added its height to
+   * `scrollTop`. Two things follow. The speed reading must be carried across the
+   * jump, or the next arrival at an end would be seeded with a "fling" the size
+   * of the inserted page. And the band itself is dropped: the end it was holding
+   * has messages above it now and is not the end any more, so there is nothing
+   * left to spring back to. main.ts hands the band's last value to the field in
+   * the same breath, so the hand-back is not a step either.
+   */
+  reseat(dy: number): void;
   /** a pull or a bounce is live: the pump must keep asking for frames */
   active(): boolean;
   phase(): EndPhase;
@@ -404,6 +415,12 @@ export function createEndSpring(
     lift,
     frame,
     over: () => x * gain,
+    reseat: (dy: number) => {
+      if (dy === 0 || !Number.isFinite(dy)) return;
+      if (lastSt !== null) lastSt += dy;
+      lastSpeed = 0;
+      clearPull();
+    },
     // a finger resting on an end is `pulling` with nothing to show: the marker
     // is armed but there are no frames to ask for until it actually pulls
     active: () => ph === "bouncing" || x !== 0,

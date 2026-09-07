@@ -873,3 +873,103 @@ describe("main.ts wiring — compositor-only, geometry once per gesture", () => 
     expect(src).toContain("springField.reset();");
   });
 });
+
+// --- a page of older messages landing above the viewport ---------------------
+// The bug the owner recorded twice: at the spinner ("shifts the viewport down
+// ... super janky") and at the tail ("the messages above suddenly compress down
+// and then move up"). drainOlder inserts a page ABOVE the reader and pins the
+// view by adding the inserted height to scrollTop, so the row under his finger
+// does not move a pixel — but the field's next frame read that write as one
+// frame of scroll the size of the whole page.
+//
+// Measured on the built app (headless Chromium, a real 1200-message thread and
+// the real history paging): at the frame the page landed, scrollTop jumped
+// +3460 px and the reference lag went to +300.00 px — its ceiling — throwing
+// every visible row down and relaxing over the next 300 ms at exp(-dt/45).
+// Measured on the phone recording (ScreenRecording 09-07-2026 15-34-23, three
+// page landings at 3.30 / 6.17 / 9.27 s): the rows jumped down 107–220 device
+// px, by DIFFERENT amounts (a spread of 46–119 device px: a stretch, not a
+// scroll), and came back to within 1–5 device px with a per-frame ratio of
+// 0.68–0.70, which is exp(-16.7/45), this lag's own time constant.
+describe("reseat — a pinned insert is not a scroll", () => {
+  it("the frame after the pin reads no motion, however big the page was", () => {
+    const d = grab();
+    drag(d, 0.6, 200, -1); // reading up into history
+    const before = d.f.lag();
+    // the page lands: 3460 px of content above the viewport, the pin adds it to
+    // scrollTop, and the springs are told the row did not move
+    d.scrollTop += 3460;
+    d.f.reseat(3460);
+    d.now += FRAME;
+    d.f.frame(d.now, d.scrollTop);
+    // the lag simply carries on relaxing from where it was: no injection at all
+    expect(d.f.lag()).toBeCloseTo(relaxLag(before, 0, FRAME), 6);
+    expect(Math.abs(d.f.lag())).toBeLessThan(Math.abs(before));
+  });
+
+  it("without it the same pin saturates the lag at its ceiling", () => {
+    const d = grab();
+    drag(d, 0.6, 200, -1);
+    d.scrollTop += 3460;
+    d.now += FRAME;
+    d.f.frame(d.now, d.scrollTop);
+    expect(d.f.lag()).toBe(TUNING.STRETCH_CAP_PX); // +300: every row thrown down
+  });
+
+  it("carries the speed window too, so the next frames are not driven by the jump either", () => {
+    const d = grab();
+    drag(d, 0.6, 200, -1);
+    d.scrollTop += 2000;
+    d.f.reseat(2000);
+    for (let k = 0; k < 8; k++) {
+      d.now += FRAME;
+      d.f.frame(d.now, d.scrollTop);
+      expect(Math.abs(d.f.lag())).toBeLessThan(30); // the drag's own stretch, melting
+    }
+  });
+
+  it("a still thread stays exactly still across the pin", () => {
+    const d = grab();
+    for (let k = 0; k < 20; k++) {
+      d.now += FRAME;
+      d.f.frame(d.now, d.scrollTop);
+    }
+    d.scrollTop += 5000;
+    d.f.reseat(5000);
+    d.now += FRAME;
+    d.f.frame(d.now, d.scrollTop);
+    expect(d.f.lag()).toBe(0);
+    expect(d.f.displacements().size).toBe(0);
+  });
+
+  it("zero and a non-finite shift are no-ops", () => {
+    const d = grab();
+    drag(d, 0.6, 100, -1);
+    const L = d.f.lag();
+    d.f.reseat(0);
+    d.f.reseat(Number.NaN);
+    d.now += FRAME;
+    d.f.frame(d.now, d.scrollTop);
+    expect(d.f.lag()).toBeCloseTo(relaxLag(L, 0, FRAME), 6);
+  });
+});
+
+describe("main.ts wiring — the pinned inserts tell the springs", () => {
+  it("the older-page drain reseats the springs right after its pin", () => {
+    const drain = src.slice(src.indexOf("function drainOlder()"), src.indexOf("// the boundary gate"));
+    expect(drain).toContain("t.scrollTop = prevScroll + (t.scrollHeight - prevHeight)");
+    expect(drain).toContain("springReseat(t.scrollTop - prevScroll)");
+  });
+
+  it("the reconnect replay's identical pin does the same", () => {
+    const replay = src.slice(src.indexOf("function applyReplay("), src.indexOf("// A truly fresh open"));
+    expect(replay).toContain("if (!isTail) springReseat(t.scrollTop - prevScroll)");
+  });
+
+  it("the helper carries both references and hands the end model's band to the field", () => {
+    const fn = src.slice(src.indexOf("function springReseat("), src.indexOf("// The scroll handler's one line"));
+    expect(fn).toContain("const band = endSpring.over()");
+    expect(fn).toContain("endSpring.reseat(dy)");
+    expect(fn).toContain("springField.reseat(dy - band)");
+  });
+});
