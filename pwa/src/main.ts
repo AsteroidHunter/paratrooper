@@ -106,6 +106,7 @@ import {
   ownsFocus,
   watchFollowTail,
   watchKeyboard,
+  watchKeyboardProven,
   watchLiftLanding,
   watchScrollWrites,
 } from "./shell";
@@ -174,11 +175,12 @@ import { blankProbeEdge, blankProbeFollow, blankProbeSettle } from "./blankprobe
 // import and the calls named in that banner's list.
 import { scrollGhostLook, scrollGhostWrite, scrollWriteCount } from "./scrollghost";
 import type { GhostContext } from "./scrollghost";
+import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.123"; // The springy scroll, rebuilt to be seen: the gaps open by tens of pixels as the finger moves, hold through a fling, and a beat after the scroll stops the bubbles visibly fall back into their seats
+const APP_VERSION = "0.3.127"; // The compose pill widens with the keyboard's rise from the tap, transform-only until the keyboard is proven, and narrows in step with its fall
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -252,6 +254,14 @@ const replyHold = createReplyHold<ServerMsg>((m) => {
   replaySettle();
 });
 
+// The compose bar's widening (widen.ts owns the rule): the sheet moves the ＋,
+// the pill's face piece and the text from the focus tap on the keyboard's own
+// clock; this decides when the bar's REAL layout may change (only once the
+// shell has proven the keyboard and the motion has ended) and starts the close
+// from the wide look. Live lookup of the form, because renderChat rebuilds it.
+const widen = createWiden(composeWidenDeps(() => document.getElementById("compose")));
+watchKeyboardProven((proven) => widen.proven(proven));
+
 // jump-chevron visibility (downbtn.ts owns the state machine): it appears only
 // after 4s of scroll stillness while away from the bottom — never because new
 // content landed. The scroll handler feeds it, this one callback drives the
@@ -274,6 +284,7 @@ const downBtn = createDownButton((show) =>
 // the one thing iOS drops or mis-times (the header in shell.ts). The one scroll
 // the keyboard asks for lands when the lift lands (setLiftPad below).
 watchKeyboard((up) => {
+  widen.keyboard(up); // first: the bar's close has to start in this same frame
   downBtn.keyboard(up, followTail);
   // TEMP DIAGNOSTIC (scroll-ghost): the close's clock and the end of the range
   // as it stood at the edge, for the looks that follow (ghostCtx)
@@ -688,6 +699,7 @@ function renderChat(): void {
           <input id="files" type="file" accept="image/*" multiple
             class="filepick" tabindex="-1" aria-hidden="true" />
           <div class="field">
+            <div class="cap" aria-hidden="true"></div>
             <textarea id="text" rows="1" data-owned-focus
               placeholder="${PROMPTS[Math.floor(Math.random() * PROMPTS.length)]}"></textarea>
             <button type="submit" id="sendbtn" class="send">↑</button>
@@ -787,6 +799,10 @@ function renderChat(): void {
   // FORM, so the whole bar carries it, and here rather than at module level
   // because this render rebuilt both elements.
   bindComposeDismiss(document.getElementById("compose")!, textEl);
+  // the bar's widening (widen.ts): the face piece's own transitionend is the
+  // "motion ended" fact its layout switch waits on, bound per render like the
+  // rest of the bar
+  bindWiden(document.getElementById("compose")!, widen);
   // compose auto-grow lives in autosize() (module level, by the scroll
   // helpers): it resizes the box AND compensates the thread's scroll in the
   // same frame, so send() can route its bar collapse through the same path

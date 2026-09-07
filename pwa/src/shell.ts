@@ -871,6 +871,18 @@ export function watchKeyboard(cb: (up: boolean) => void): void {
   onKeyboard = cb;
 }
 
+// The PROVEN keyboard as its own edge: .kb as applied, which the OR'd signal
+// above cannot carry (that one is already up from the tap). The compose bar's
+// layout switch waits on it (widen.ts): the bar may only change the focused
+// box's real layout once the viewport has reported a keyboard, never inside
+// the presentation the tap started.
+let appliedProven = false;
+let onKeyboardProven: ((proven: boolean) => void) | null = null;
+
+export function watchKeyboardProven(cb: (proven: boolean) => void): void {
+  onKeyboardProven = cb;
+}
+
 // The lift wrapper (main.ts renders it around the thread, the drawer and the
 // compose bar, and re-binds it on every render since the render rebuilds it).
 // Its transitionend is the one exact signal that the keyboard's motion, as the
@@ -1181,6 +1193,11 @@ function applyShell(t: ShellTarget, settling: boolean): void {
   if (keyboard !== appliedKeyboard) {
     appliedKeyboard = keyboard;
     onKeyboard?.(keyboard);
+  }
+  // and the proof, after the classes it describes are on the element
+  if (t.kb !== appliedProven) {
+    appliedProven = t.kb;
+    onKeyboardProven?.(t.kb);
   }
 }
 

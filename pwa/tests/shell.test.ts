@@ -1099,11 +1099,14 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
     expect(bare).not.toMatch(/\.gliding|--glide\b/);
   });
 
-  it("one keyboard clock, written once: the only transition on the keyboard's path spells the token", () => {
+  it("one keyboard clock, written once: every transition on the keyboard's path spells the token", () => {
     const onToken = rules.filter((r) => transitionOf(r.body).includes("--kb-anim")).map((r) => r.sel);
-    // the chat's wrapper and the sign-in card, in source order; both spell the
-    // token rather than a duration of their own, so there is one clock to change
-    expect(onToken).toEqual([".lift", ".gate"]);
+    // in source order: the chat's wrapper, the sign-in card, and the three
+    // pieces of the compose bar's widening (the pill's face piece, the text's
+    // ride and the ＋'s shrink, widen.test.ts), which run WITH the keyboard on
+    // its own clock rather than on a shorter clock of their own. Every one
+    // spells the token rather than a duration, so there is one clock to change.
+    expect(onToken).toEqual([".lift", ".gate", ".cap", ".compose textarea", ".attach"]);
     expect(rule("#app")).toMatch(/--kb-anim: 0\.22s cubic-bezier\(0\.45, 0, 0\.55, 1\);/);
   });
 
@@ -1437,15 +1440,16 @@ describe("presentation: the plus's 44pt hit square", () => {
     expect(attachKb).toContain("pointer-events: none");
   });
 
-  it("the clip could go because the fade and the width move never overlap, either direction", () => {
-    // keyboard-DOWN (base rule): width moves first, opacity waits out the whole move
-    const down = attach.match(/width ([\d.]+)s ease, margin-right [\d.]+s ease, opacity ([\d.]+)s ease ([\d.]+)s/);
-    expect(down).not.toBeNull();
-    expect(Number(down![3])).toBeGreaterThanOrEqual(Number(down![1]));
-    // keyboard-UP (.kb rule): opacity fades first, width waits for it to land
-    const up = attachKb.match(/opacity ([\d.]+)s ease, width [\d.]+s ease ([\d.]+)s/);
-    expect(up).not.toBeNull();
-    expect(Number(up![2])).toBeGreaterThanOrEqual(Number(up![1]));
+  it("the clip could go because the box never narrows while the glyph is visible", () => {
+    // the keyboard-up ＋ shrinks and fades with a transform, on the keyboard's
+    // clock; its BOX keeps its 34px until widen.ts switches the layout at rest,
+    // with the ＋ already at opacity 0 (widen.test.ts holds the whole shape).
+    // 0.3.89 narrowed the box from the focus frame under a clip, and iOS took
+    // the keyboard straight back down on every open of that build.
+    expect(attachKb).toContain("opacity: 0");
+    expect(attachKb).toMatch(/transform: scale\(0\.\d+\)/);
+    expect(attachKb).not.toMatch(/\b(?:width|margin|padding|overflow|transition)\s*:/);
+    expect(attach).toMatch(/transition: transform var\(--kb-anim\), opacity var\(--kb-anim\), filter 0\.3s ease;/);
   });
 });
 

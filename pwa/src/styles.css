@@ -40,10 +40,17 @@
   /* The glass lighting stacks, v6 — iMessage-faithful edges: definition comes
      from the canonical hairline ring (no layout-affecting border, so the ＋
      centering math holds), with a white top catch over it and a 2px melt. */
-  --glass-stack:
+  /* The stack's three INSET members on their own. The compose bar's sliding
+     face piece (.cap below) has to wear the pill's lighting without the two
+     outer shadows, which on a piece that overlaps the pill would paint over
+     the pill's own face; it reads this and the stack keeps reading it too, so
+     there is still one place the lighting is written. */
+  --glass-inset:
     inset 0 1px 0 rgba(255, 255, 255, 0.9),
     inset 0 0 0 1px var(--hairline),
-    inset 0 0 2px rgba(255, 255, 255, 0.35),
+    inset 0 0 2px rgba(255, 255, 255, 0.35);
+  --glass-stack:
+    var(--glass-inset),
     0 1px 3px rgba(0, 0, 0, 0.07),
     0 8px 20px rgba(0, 0, 0, 0.06);
   --glass-stack-sm:
@@ -90,10 +97,12 @@
        has to draw the boundary, not outshine it. */
     --glass-rim: rgba(255, 255, 255, 0.3);
     --glass-edge: rgba(255, 255, 255, 0.14);
-    --glass-stack:
+    --glass-inset:
       inset 0 1px 0 rgba(255, 255, 255, 0.3),
       inset 0 0 0 1px var(--hairline),
-      inset 0 0 2px rgba(255, 255, 255, 0.1),
+      inset 0 0 2px rgba(255, 255, 255, 0.1);
+    --glass-stack:
+      var(--glass-inset),
       0 1px 3px rgba(0, 0, 0, 0.45),
       0 8px 20px rgba(0, 0, 0, 0.4);
     --glass-stack-sm:
@@ -894,6 +903,7 @@ html, body {
   gap: 0.5rem;
   align-items: flex-end;
   padding: 0.5rem 0.75rem var(--pad-b);
+  --widen: calc(34px + 0.5rem); /* the ＋ (.attach width) plus the gap above */
 }
 /* The one dial the hold light is drawn with, and the point it is drawn from.
    --glow-a HAS to be registered: an unregistered custom property transitions
@@ -926,6 +936,17 @@ html, body {
   syntax: "<length-percentage>";
   inherits: false;
   initial-value: 50%;
+}
+/* How far the pill widens leftward while the keyboard is up: the ＋'s 34px
+   box plus the bar's 0.5rem flex gap, the two things that leave. Registered
+   so a computed read answers in px rather than with the calc, and inherited
+   so the ＋, the text and the face piece all read the one figure. The ＋'s
+   width and the bar's gap are still written where they always were; a test
+   holds this sum to them. */
+@property --widen {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
 }
 @property --ty {
   syntax: "<length-percentage>";
@@ -991,6 +1012,11 @@ html, body {
   /* release: the light settles back over half a second. The opacity entry is
      the settling window's fade and is untouched. */
   transition: opacity 0.3s ease, --glow-a 0.5s ease;
+  /* the pill is its own stacking context (the backdrop filter already makes
+     it one; this says so on purpose), so the face piece below, at z-index -1,
+     paints above the pill's own face and under the text, and can never fall
+     through to the canvas */
+  isolation: isolate;
 }
 /* Hold: the light, and nothing else. One number goes to 1 and the white bloom
    in the background layer above comes up under the fingertip. No body tone
@@ -1002,6 +1028,55 @@ html, body {
 .field.glow {
   --glow-a: 1;
   transition: opacity 0.3s ease, --glow-a 0.25s ease-out;
+}
+/* THE FACE PIECE: the pill's left end drawn a second time, so the pill can
+   LOOK wider while the keyboard rises without its box, the text's box or the
+   ＋'s box changing size. 0.3.89 widened the real boxes from the focus frame
+   and on that build every open put the keyboard up and iOS took it straight
+   back to its accessory strip with the box still focused (the phone's trail,
+   plans/compose-expand); nothing about the focused box's layout may change
+   while iOS is still presenting the keyboard, so the rise is transform and
+   opacity only and the real layout switches once, at rest (.wide below).
+     The piece is a child of the pill, out of its flex flow like the height
+   twin (mirror.ts), at z-index -1: above the pill's own face and under the
+   text. It is the same face — the glass tint over an opaque canvas underlay,
+   which composites to exactly what the translucent pill composites to over
+   the flat canvas — with the same rim, the same inset lighting and the same
+   18px end, and NO outer shadow: an outer shadow paints outside the box, over
+   the pill's face. Its right end is a straight cut 18px inside the pill, past
+   the pill's own corner, with the last 3px clipped off so the ring, the rim
+   and the melt draw no edge there; the face on both sides of the cut is the
+   same colour, so the cut is invisible. At rest it sits wholly under the
+   pill's left end, translated right by the widen distance, and hidden. While
+   the keyboard rises (.kb/.focusing, the same keys the lift reads, so it
+   starts in the lift's own style pass) it slides left on the keyboard's own
+   clock until its rounded end is where the wide pill's end will be, sweeping
+   over the ＋ as it goes. The well shadow under those 42px is the pill's own
+   and arrives with the layout switch; a 6% shadow blurred over 33px does not
+   read as missing for a fifth of a second under a rising keyboard. */
+.cap {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(-1 * var(--widen));
+  width: calc(var(--widen) + 21px); /* to 18px inside the pill, plus the 3px cut */
+  z-index: -1;
+  border-radius: 18px 0 0 18px;
+  background-color: var(--bg);
+  background-image: linear-gradient(var(--glass-bg), var(--glass-bg));
+  box-shadow: inset 0 0 0 0.5px var(--glass-rim), var(--glass-inset);
+  clip-path: inset(0 3px 0 0);
+  transform: translateX(var(--widen));
+  visibility: hidden;
+  pointer-events: none;
+  /* visibility rides the same clock: hidden-to-visible is visible at once,
+     visible-to-hidden stays visible until the return has landed */
+  transition: transform var(--kb-anim), visibility var(--kb-anim);
+}
+#app.kb .compose .cap,
+#app.focusing .compose .cap {
+  transform: translateX(0);
+  visibility: visible;
 }
 .compose textarea {
   flex: 1;
@@ -1018,22 +1093,27 @@ html, body {
   font: inherit;
   font-size: 17px;
   outline: none; /* no browser focus ring — the keyboard IS the focus signal */
-  /* keyboard-down direction: same clock as the ＋ reclaiming its slot */
-  transition: padding-right 0.13s ease;
+  /* The text's ride, both directions, on the keyboard's own clock. Declared
+     here, at rest, because a transition is started from the after-change
+     style: the return from the keyboard-up look has to find this clock. The
+     padding is never transitioned: it changes once, in .wide below, at rest. */
+  transition: transform var(--kb-anim);
 }
-/* While the keyboard is up the pill widens leftward into the ＋'s slot and the
-   text rides WITH its left edge — one uniform slide, never a re-wrap. The
-   vacated space (34px ＋ + 0.5rem flex gap) is absorbed by the RIGHT inset,
-   where ragged line-ends live, so the wrap width is identical in both states
-   and nothing visibly changes but the glide. Same duration and delay as the
-   ＋'s width collapse, so the wrap width holds frame-by-frame. Keyed off
-   .focusing too (shell.ts, set synchronously on the focus tap): the widen
-   runs WHILE the keyboard rises instead of popping after .kb finally latches
-   on the proven shrink. */
+/* While the keyboard rises the text rides left with the pill's edge (the face
+   piece above), by the widen distance, as a TRANSFORM: the textarea's box,
+   its padding and its wrap width do not change by a pixel until .wide lands.
+   Keyed off .focusing (shell.ts, set synchronously on the focus tap) and
+   .kb alike, the same keys as the lift, so the slide starts with the tap and
+   lands with the keyboard on the one measured curve.
+     This is the one deliberate exception to composershine.test.ts's rule that
+   the textarea is never composited: it lasts the 220ms of an edge and is
+   identity in every resting state (the .wide rule below returns it to none
+   in the same frame the layout takes over). The caret a transform can
+   misplace (WebKit freezes the reported rect while an accelerated transition
+   runs) is under the keyboard for the whole rise and gone for a blurred fall. */
 #app.kb .compose textarea,
 #app.focusing .compose textarea {
-  padding-right: calc(74px + 0.5rem); /* 40px ↑ column + 34px ＋ + the gap */
-  transition: padding-right 0.13s ease 0.1s;
+  transform: translateX(calc(-1 * var(--widen)));
 }
 /* iOS skips its caret-reveal scroll when the freshly focused control sits at
    opacity 0 (the verified ios-chat/kiding mechanism): one 0.02s opacity blink
@@ -1083,16 +1163,18 @@ html, body {
      but the single-line pill (39px borderless) is 5px taller than the ＋ —
      half of that lifts the ＋ onto the pill's optical centerline */
   margin-bottom: 2.5px;
-  /* no overflow clip here: it would take the ::after hit square below with it
-     (clipped away, and rounded to this circle). The glyph still cannot paint
-     outside a mid-collapse box: this transition and the .kb one below both
-     sequence the opacity fade strictly apart from the width move, so the
-     glyph sits at opacity 0 whenever the box is between its resting widths. */
-  /* keyboard-DOWN direction: the editor hands the space back first, then the
-     ＋ fades in — the mirror of the keyboard-up choreography below. The filter
+  /* no overflow clip here, ever: it would take the ::after hit square below
+     with it (clipped away, and rounded to this circle), and 0.3.89's clip on
+     the keyboard-up ＋ is one of the three things that build changed on the
+     focus frame. The box never narrows while anything is visible in it: the
+     keyboard-up rule below shrinks and fades the ＋ with a transform, and the
+     real width goes to 0 only in .wide, at rest, with the ＋ already at
+     opacity 0. */
+  /* The ＋'s own motion, both directions, on the keyboard's clock: the shrink
+     and the fade. Declared at rest for the same reason the textarea's is. No
+     width, no margin: those are layout and change the pill's box. The filter
      entry is the settling window's RE-ENABLE fade (going off stays instant). */
-  transition: width 0.13s ease, margin-right 0.13s ease, opacity 0.1s ease 0.13s,
-    filter 0.3s ease;
+  transition: transform var(--kb-anim), opacity var(--kb-anim), filter 0.3s ease;
 }
 /* The ＋'s tap target, squared (his own proposal). border-radius clips the
    button's hit area to the circle, so the corners of its 34px box never
@@ -1111,23 +1193,71 @@ html, body {
 
 /* The ＋ and the keyboard never coexist. From the focus tap itself (.focusing,
    shell.ts's tap-synchronous signal) or while the keyboard is provably up
-   (.kb — the shell's baseline-tested signal) the ＋ fades out, THEN yields its
-   flex slot so the editor widens leftward into it, both inside the keyboard's
-   own rise — .focusing starts the choreography with the tap and .kb takes
-   over when the shrink proves out, so the bar expands while the keyboard
-   rises instead of popping after it lands; a keyboard-less focus lapses the
-   signal and the bar returns. When the keyboard leaves, the editor shrinks
-   back first and the ＋ fades in after. With no ＋ to tap while typing, a
-   picker can never present over a live keyboard — the teardown snatch has
-   nothing left to snatch. */
+   (.kb — the shell's baseline-tested signal) the ＋ shrinks and fades in
+   place while the pill's face piece slides over its spot and the text rides
+   with it: ONE motion, from the tap, on the keyboard's own clock and curve,
+   over when the keyboard's is. Transform and opacity only — its box keeps its
+   34px and its gap until .wide (below) takes them at rest, so nothing about
+   the focused textarea's layout moves while iOS is putting the keyboard up. A
+   keyboard-less focus lapses the signal and the ＋ comes back the same way.
+   With no ＋ to tap while typing, a picker can never present over a live
+   keyboard — the teardown snatch has nothing left to snatch. */
 #app.kb .compose .attach,
 #app.focusing .compose .attach {
   opacity: 0;
+  transform: scale(0.7);
+  pointer-events: none; /* mid-fade taps belong to the widening editor */
+}
+
+/* THE LAYOUT, switched once and at rest. widen.ts puts .wide on the form only
+   after the shell has proven the keyboard (.kb) AND the face piece's own
+   transition has ended: the ＋ gives up its 34px and its gap for real, the
+   pill grows into them, and the text's RIGHT inset absorbs exactly what the
+   left edge gained, so the wrap width is the same number in both layouts and
+   the text never re-wraps. Every transform goes back to identity and the face
+   piece hides in the same style pass, with no transition on any of it: the
+   wide layout puts the pill's end, the text and the ＋ exactly where the
+   transforms had them, so the switch moves no pixel. Same specificity as the
+   keyboard-up rules above, so these must stay AFTER them in the sheet. */
+#app .compose.wide .attach {
   width: 0;
   margin-right: -0.5rem; /* swallow the flex gap so the slot truly closes */
-  pointer-events: none; /* mid-fade taps belong to the widening editor */
-  /* keyboard-UP direction: fade first, then give up the width */
-  transition: opacity 0.1s ease, width 0.13s ease 0.1s, margin-right 0.13s ease 0.1s;
+  opacity: 0;
+  transform: none;
+  pointer-events: none;
+  transition: filter 0.3s ease; /* the settling fade only: nothing here moves */
+}
+#app .compose.wide textarea {
+  padding-right: calc(40px + var(--widen)); /* the ↑ column, plus what the left edge gained */
+  transform: none;
+  transition: none;
+}
+#app .compose.wide .cap {
+  transform: translateX(var(--widen));
+  visibility: hidden;
+  transition: none;
+}
+
+/* THE CLOSE'S FIRST FRAME (widen.ts flip). At the shell's down edge the form
+   goes from .wide to this in one style pass — the resting layout with the
+   keyboard-up transforms and no transition, which is the wide look drawn the
+   other way — is flushed, and then loses the class, so the base rules'
+   transitions carry every piece back to rest from the very frame the lift
+   leaves: the ＋ grows back and the pill narrows in step with the keyboard's
+   fall. On screen for no frame at all. */
+#app .compose.flip .attach {
+  opacity: 0;
+  transform: scale(0.7);
+  transition: none;
+}
+#app .compose.flip textarea {
+  transform: translateX(calc(-1 * var(--widen)));
+  transition: none;
+}
+#app .compose.flip .cap {
+  transform: translateX(0);
+  visibility: visible;
+  transition: none;
 }
 
 /* The picker session window (.settling, shell.ts): the ＋ greys and the whole
