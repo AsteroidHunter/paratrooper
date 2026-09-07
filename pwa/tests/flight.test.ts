@@ -102,7 +102,10 @@ describe("send morph (armFieldMorph) — the bar leaves the box", () => {
     expect(morph).not.toContain("across");
     // one eased fraction, straight into the seat, exactly as it shipped
     expect(morph).toContain("const p = flightEase(f);");
-    expect(morph).toMatch(/writeBox\(morphBox\(\s*bar,/);
+    // (the box is named before it is written, since the shell's tail is placed
+    // from the same numbers in the same frame; runs.test.ts holds that pin)
+    expect(morph).toMatch(/const box = morphBox\(\s*bar,/);
+    expect(morph).toContain("writeBox(box);");
     expect(morph).toContain("morphCorners(barRadius, corners, p)");
     // and the shared helper it leans on stays a plain per-axis interpolation
     const shift = readFileSync(

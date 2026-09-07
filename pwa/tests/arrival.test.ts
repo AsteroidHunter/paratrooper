@@ -241,9 +241,19 @@ describe("the stylesheet", () => {
     expect(sheet).toContain(".msg.anim { animation: pop-in");
   });
 
-  it("the morphing box is clipped and positioned, so nothing re-wraps or steps", () => {
-    expect(sheet).toContain(".msg.arriving { position: relative; overflow: hidden; }");
-    expect(sheet).toContain(".msg.arriving > .arrive-ink { display: block; }");
+  it("the text is clipped by its own layer and the box is positioned, so nothing re-wraps or steps", () => {
+    // the clip moved off the bubble and onto the ink's own layer (0.3.125):
+    // the bubble's tail hangs under its box, and an overflow clip on the
+    // bubble would have cut the tail off for the whole morph. The layer is
+    // sized to the box's inner area every frame (arrival.ts put), which clips
+    // the final layout exactly as the bubble's overflow used to.
+    expect(sheet).not.toMatch(/\.msg\.arriving \{[^}]*overflow/);
+    expect(sheet).toContain(".msg.arriving > .arrive-clip { display: block; overflow: hidden; }");
+    expect(sheet).toContain(".msg.arriving > .arrive-clip > .arrive-ink { display: block; }");
+    expect(sheet).toMatch(/^\.msg \{\s*\n\s*position: relative;/m); // every bubble is positioned now
+    expect(arrival).toContain("clip.style.width = `${Math.max(0, box.width - pad.left - pad.right)}px`;");
+    expect(arrival).toContain("clip.style.height = `${Math.max(0, box.height - pad.top - pad.bottom)}px`;");
+    expect(arrival).toContain("bubble.replaceChildren(clip, veil)");
   });
 
   it("the dots' inset is stated once and read by both boxes", () => {

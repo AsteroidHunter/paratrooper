@@ -161,9 +161,21 @@ export interface DotsSeat {
  * paint of the new seat is the DOTS' size and not the message's — a frame of
  * the finished box would be the pop this exists to remove.
  *
- * The text is laid out at the width it will END at, inside a layer the growing
- * box uncovers. That is what stops the words re-wrapping line by line as the
- * box widens: the wrap the reader finally reads is the only one ever drawn.
+ * The text is laid out at the width it will END at, inside a clip layer the
+ * growing box uncovers. That is what stops the words re-wrapping line by line
+ * as the box widens: the wrap the reader finally reads is the only one ever
+ * drawn. The clip is the layer's own, sized each frame to the box's inner
+ * area, rather than an overflow clip on the bubble: the bubble's tail hangs
+ * UNDER its box (styles.css .msg.tail::after) and a clip on the bubble would
+ * cut it off for the whole morph. Sizing the layer, not merely clipping its
+ * paint, also keeps the laid-out text from counting as the thread's
+ * scrollable overflow while it is wider and taller than the box.
+ *
+ * Two tails cross inside the box as well. The dots' bubble wore Messages'
+ * thought trail (two small circles under its corner; styles.css .typing) and
+ * the message wears the tail; the trail fades out on the dots' curve and the
+ * tail fades in on the text's, written here as --dots-alpha and --ink-alpha,
+ * so the two never both stand at full and the box is never tail-less.
  */
 export function runArrival(
   row: HTMLElement,
@@ -180,14 +192,22 @@ export function runArrival(
     height: rect.height,
     margin: parseFloat(getComputedStyle(row).marginTop) || 0,
   };
-  const inner =
-    to.width - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0);
+  const pad = {
+    left: parseFloat(style.paddingLeft) || 0,
+    right: parseFloat(style.paddingRight) || 0,
+    top: parseFloat(style.paddingTop) || 0,
+    bottom: parseFloat(style.paddingBottom) || 0,
+  };
+  const inner = to.width - pad.left - pad.right;
 
+  const clip = document.createElement("span");
+  clip.className = "arrive-clip";
   const ink = document.createElement("span");
   ink.className = "arrive-ink";
   ink.style.width = `${Math.max(0, inner)}px`;
   ink.style.opacity = "0";
   ink.textContent = text;
+  clip.appendChild(ink);
   const veil = document.createElement("span");
   veil.className = "arrive-dots";
   for (const lit of seat.lit) {
@@ -195,15 +215,21 @@ export function runArrival(
     dot.style.opacity = String(lit);
     veil.appendChild(dot);
   }
-  bubble.replaceChildren(ink, veil);
+  bubble.replaceChildren(clip, veil);
 
   const put = (e: number, f: number): void => {
     const box = arriveBox(from, to, e);
     bubble.style.width = `${box.width}px`;
     bubble.style.height = `${box.height}px`;
+    // the window onto the text: the box's own inner area, so nothing of the
+    // final layout shows past the growing box or counts as overflow
+    clip.style.width = `${Math.max(0, box.width - pad.left - pad.right)}px`;
+    clip.style.height = `${Math.max(0, box.height - pad.top - pad.bottom)}px`;
     row.style.marginTop = `${box.margin}px`;
     veil.style.opacity = String(dotsAlpha(f));
     ink.style.opacity = String(inkAlpha(f));
+    bubble.style.setProperty("--dots-alpha", String(dotsAlpha(f)));
+    bubble.style.setProperty("--ink-alpha", String(inkAlpha(f)));
   };
 
   let raf = 0;
@@ -219,6 +245,8 @@ export function runArrival(
     bubble.classList.remove("arriving");
     bubble.style.removeProperty("width");
     bubble.style.removeProperty("height");
+    bubble.style.removeProperty("--dots-alpha");
+    bubble.style.removeProperty("--ink-alpha");
     row.style.removeProperty("margin-top");
     // an emptied style attribute is still an attribute: a bubble handed back
     // with one is not the bubble renderAgentText would have left, and the fit
