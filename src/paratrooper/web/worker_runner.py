@@ -271,10 +271,10 @@ def main() -> None:
     # in every shell the agent opens. Both readers keep what they took, so the
     # queue client and the Spotify helper work exactly as before.
     take_spotify_credentials()
-    # The GitHub App, the same way: its two ids come out of the environment and
-    # its private key is read out of the mounted file and the file removed, all
-    # before any session exists. A missing value or an unreadable key stops the
-    # boot naming it; there is no personal token to fall back to any more.
+    # The GitHub App, the same way: its two ids and its private key all come out
+    # of the environment, before any session exists. A missing value, or a key
+    # that does not parse, stops the boot with a log line naming the variable;
+    # there is no personal token and no key file to fall back to any more.
     take_github_app()
     client = connect()  # takes the queue address, password and all, with it
     asyncio.run(Worker(JobQueue(client)).run())

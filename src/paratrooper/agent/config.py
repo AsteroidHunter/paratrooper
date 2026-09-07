@@ -7,16 +7,19 @@ Two kinds of configuration, deliberately separated:
   photos), ``pins_dir``, ``archive_dir``; plus the changelog path and the
   site-repo remote/default-branch/branch-prefix.
 * **Secrets** are **environment variables, never a config file** — the app
-  bearer token, the GitHub App's ids, ``CLAUDE_CODE_OAUTH_TOKEN`` /
+  bearer token, the GitHub App's ids and private key, ``CLAUDE_CODE_OAUTH_TOKEN`` /
   ``ANTHROPIC_API_KEY``, Spotify id/secret, VAPID keys. Read via
   :func:`require_env` / the typed accessors, which **hard-error loudly** when a
   required secret is missing (matching the no-silent-fallback posture for auth).
-  The one secret that is a file rather than a variable is the App's private key,
-  which the platform mounts and :func:`take_github_app` reads once and removes.
+  The App's private key is one of these: a variable like the rest since
+  2026-09-07, read once by :func:`take_github_app` and taken out of the
+  environment with the two ids. It was a mounted file until then; no path is
+  read any more and none is consulted as a fallback.
 """
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import logging
 import os
@@ -192,11 +195,18 @@ def app_token() -> str:
 # The names are the ones already set on the deploy and are read verbatim.
 
 GITHUB_APP_VARS = ("PARATROOPER_GITHUB_APP_ID", "PARATROOPER_GITHUB_APP_INSTALLATION_ID")
-# where the deploy mounts the key. The file name is the App's own, so the path
-# is fixed rather than configured; one explicit variable overrides it, for a
-# local run, and nothing is ever guessed from whether a file happens to exist.
-GITHUB_APP_KEY_FILE = "/etc/secrets/paratrooper-98cc-github-app.pem"
-GITHUB_APP_KEY_FILE_VAR = "PARATROOPER_GITHUB_APP_KEY_FILE"
+# The private key. It was a mounted secret file until 2026-09-07; the file was
+# deleted from the deploy and the key set as an environment variable, so it now
+# travels the same road as the two ids: the start-up wrapper hands it over in
+# its file and nothing here ever reads a path. A PEM does not fit the handoff
+# file's one NAME=value per line, so the wrapper base64-encodes it under the
+# second name below; unwrapped, which is local development, the first name holds
+# the PEM itself. Which of the two is read is decided by which one is set, and
+# there is no third road: the old file path is not consulted as a backup.
+GITHUB_APP_KEY_VAR = "PARATROOPER_GITHUB_APP_KEY_PEM"
+GITHUB_APP_KEY_HANDOFF_VAR = f"{GITHUB_APP_KEY_VAR}_B64"
+# everything about the App that must be out of os.environ before a session exists
+GITHUB_APP_SECRET_VARS = (*GITHUB_APP_VARS, GITHUB_APP_KEY_VAR, GITHUB_APP_KEY_HANDOFF_VAR)
 
 
 @dataclass(frozen=True)
@@ -211,47 +221,88 @@ class GitHubApp:
 _github_app: GitHubApp | None = None
 
 
-def _remove_key_file(path: Path) -> None:
-    """Empty the private key file and delete it.
+def normalise_private_key(raw: str) -> str:
+    """A PEM, whichever way the value was pasted.
 
-    The deny rules keep the agent's own tools out of ``/etc/secrets``, but the
-    site build runs repository code the agent edits and no deny rule reaches
-    inside that. Taking the file away closes that road for good.
+    Render's editor takes a real multi-line value, and that is the intended
+    form. But a key copied out of a terminal, a JSON blob or a shell variable
+    arrives with its line breaks written out as the two characters backslash and
+    n, and that paste is silently unusable: it looks right in the dashboard and
+    signs nothing. Both forms are accepted here and both end up as the same
+    text. Nothing else about the value is touched."""
+    text = raw.strip()
+    if "\\n" in text:
+        text = text.replace("\\r\\n", "\n").replace("\\n", "\n")
+    return text.replace("\r\n", "\n").strip() + "\n"
 
-    **A failed deletion warns and carries on** (Akash's decision, 2026-09-04):
-    the worker runs as an unprivileged account against a file the platform owns,
-    so it may not be permitted at all, and a permissions problem must not take
-    the worker offline. Emptying first means even a refused deletion leaves
-    nothing readable behind. The log line either way is the record of which it
-    was on this deploy."""
-    emptied = False
-    try:
-        path.write_text("")
-        emptied = True
-    except OSError as exc:
-        logger.warning("could not empty the GitHub App private key file %s: %s", path, exc)
-    try:
-        path.unlink()
-        logger.info("read the GitHub App private key and deleted %s", path)
-    except OSError as exc:
-        logger.warning(
-            "could not delete the GitHub App private key file %s: %s "
-            "(the key is in memory and the worker carries on; the file was%s emptied)",
-            path, exc, "" if emptied else " NOT",
+
+def _github_app_key() -> str:
+    """The App's private key as a PEM, from whichever name carries it, checked
+    against the parser that will have to sign with it.
+
+    The check is here rather than at the first signature because a key that does
+    not parse is a worker that fails every message with a JWT error, hours after
+    the deploy that broke it. Failing at the door names the variable instead."""
+    encoded = os.environ.get(GITHUB_APP_KEY_HANDOFF_VAR, "").strip()
+    if encoded:
+        try:
+            raw = base64.b64decode(encoded, validate=True).decode()
+        except (ValueError, UnicodeDecodeError) as exc:
+            logger.error(
+                "%s did not decode: the start-up wrapper writes the value of %s "
+                "base64-encoded and this is not that (%s)",
+                GITHUB_APP_KEY_HANDOFF_VAR, GITHUB_APP_KEY_VAR, exc,
+            )
+            raise ConfigError(
+                f"{GITHUB_APP_KEY_HANDOFF_VAR} is not base64: {exc}"
+            ) from exc
+    else:
+        raw = os.environ.get(GITHUB_APP_KEY_VAR, "")
+    if not raw.strip():
+        logger.error(
+            "%s is unset or empty: it carries the GitHub App's private key, which "
+            "is the only credential the worker has for GitHub",
+            GITHUB_APP_KEY_VAR,
         )
+        raise ConfigError(
+            f"required environment variable {GITHUB_APP_KEY_VAR} is unset or empty: "
+            "it carries the GitHub App's private key, which the worker signs its "
+            "token requests with"
+        )
+    pem = normalise_private_key(raw)
+    # imported here, not at the top: `cryptography` arrives with the agent
+    # extra's pyjwt[crypto] and the web service installs neither.
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    try:
+        load_pem_private_key(pem.encode(), password=None)
+    except Exception as exc:
+        logger.error(
+            "%s does not parse as a private key (%s). Paste the App's .pem in "
+            "full, BEGIN and END lines included, either across several lines or "
+            "with the line breaks written as backslash-n",
+            GITHUB_APP_KEY_VAR, exc,
+        )
+        raise ConfigError(
+            f"{GITHUB_APP_KEY_VAR} does not parse as a private key: {exc}"
+        ) from exc
+    return pem
 
 
 def take_github_app() -> GitHubApp:
     """The App's identity and private key, read once and held here.
 
-    Reads the two ids from the environment (the start-up wrapper puts them
-    there, so they are in no launch record) and the key from the mounted file,
-    then takes the ids out of the environment and removes the file. Every
-    missing piece raises :class:`ConfigError` naming it; nothing falls back to a
-    personal token, because from this item on there is not one.
+    All three arrive in the environment, put there by the start-up wrapper out
+    of its own file, so they are in no launch record; all three are taken back
+    out of the environment here, before any session exists, because the SDK
+    builds the CLI's environment from ``os.environ`` and can only add to it.
+    Every missing piece raises :class:`ConfigError` naming it, with a log line
+    saying the same thing in one sentence; nothing falls back to a personal
+    token, because from item 6 on there is not one, and nothing falls back to
+    the secret file the key used to arrive in, because it is gone.
 
     Nothing is consumed until all three are in hand, so a boot that fails on a
-    missing value leaves the environment and the file exactly as it found them.
+    missing value leaves the environment exactly as it found it.
     """
     global _github_app
     if _github_app is not None:
@@ -259,24 +310,18 @@ def take_github_app() -> GitHubApp:
     app_id, installation_id = (os.environ.get(name, "") for name in GITHUB_APP_VARS)
     for name, value in zip(GITHUB_APP_VARS, (app_id, installation_id), strict=True):
         if not value:
+            logger.error(
+                "%s is unset or empty: it names the GitHub App the worker pushes "
+                "and opens pull requests as", name,
+            )
             raise ConfigError(
                 f"required environment variable {name} is unset or empty: it names "
                 "the GitHub App the worker pushes and opens pull requests as"
             )
-    key_file = Path(os.environ.get(GITHUB_APP_KEY_FILE_VAR) or GITHUB_APP_KEY_FILE)
-    try:
-        private_key = key_file.read_text()
-    except OSError as exc:
-        raise ConfigError(
-            f"the GitHub App's private key could not be read from {key_file}: {exc} "
-            f"(set {GITHUB_APP_KEY_FILE_VAR} to point somewhere else)"
-        ) from exc
-    if not private_key.strip():
-        raise ConfigError(f"the GitHub App's private key file {key_file} is empty")
+    private_key = _github_app_key()
     _github_app = GitHubApp(app_id, installation_id, private_key)
-    for name in GITHUB_APP_VARS:
+    for name in GITHUB_APP_SECRET_VARS:
         os.environ.pop(name, None)
-    _remove_key_file(key_file)
     return _github_app
 
 

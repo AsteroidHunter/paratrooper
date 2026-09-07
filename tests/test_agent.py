@@ -7,6 +7,7 @@ hook, 3.2b) and ``configure_auth`` (no-fallback auth, 3.2).
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -1650,7 +1651,7 @@ def test_run_job_wires_live_update_channel(tmp_path, monkeypatch):
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j1", thread_id="t1", text="add the pin")
     result = asyncio.run(
@@ -1687,7 +1688,7 @@ def test_run_job_emits_pr_event_from_reported_pr(tmp_path, monkeypatch):
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j2", thread_id="t1", text="make it bigger")
     result = asyncio.run(
@@ -1724,7 +1725,7 @@ def test_run_job_gives_the_credential_to_the_tools_and_not_to_the_session(tmp_pa
     monkeypatch.setattr(worker_mod, "installation_token", lambda config: "ghs-minted")
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j3", thread_id="t1", text="push the change")
     result = asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path)))
@@ -1759,7 +1760,7 @@ def test_run_job_without_a_github_token_hands_the_tools_none(tmp_path, monkeypat
     monkeypatch.setattr(config_mod, "_github_app", None)
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j4", thread_id="t1", text="just chatting")
     result = asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path)))
@@ -1795,7 +1796,7 @@ def test_run_job_refreshes_the_checkout_before_the_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(worker_mod, "installation_token", lambda config: "ghs-minted")
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", lambda ctx: ({"name": "p"}, []))
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
     monkeypatch.setattr(worker_mod, "SiteRepo", _Repo)
 
     job = worker_mod.Job(job_id="j5", thread_id="t1", text="add the pin")
@@ -1831,7 +1832,7 @@ def test_run_job_hands_the_branch_word_to_both_the_prompt_and_the_guard(tmp_path
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     cfg = _tool_cfg(tmp_path)
     cfg.branch_prefix = "blimp"
@@ -1860,7 +1861,7 @@ def test_run_job_rejects_an_unusable_branch_word_before_starting(tmp_path, monke
             yield
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     cfg = _tool_cfg(tmp_path)
     cfg.branch_prefix = "para/trooper"
@@ -1895,7 +1896,7 @@ def test_run_job_sets_the_scrub_switch_either_way(tmp_path, monkeypatch, with_to
     )
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j8", thread_id="t1", text="add the pin")
     assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
@@ -1940,98 +1941,118 @@ def _rsa_pair():
 _PRIVATE_PEM, _PUBLIC_PEM = _rsa_pair()
 
 
-def _configure_app(monkeypatch, tmp_path, private_pem, *, name="paratrooper-98cc-github-app.pem"):
-    """Set the App up the way the deploy does: two ids in the environment (the
-    start-up wrapper puts them there) and the private key in a mounted file."""
+def _configure_app(monkeypatch, private_pem, *, handoff=True):
+    """Set the App up the way the deploy does: two ids and the private key in
+    the environment, all three put there by the start-up wrapper reading its
+    own file. ``handoff`` picks which of the key's two names carries it: the
+    wrapper's base64 one, or the plain PEM one an unwrapped local run reads."""
     import paratrooper.agent.config as config_mod
     import paratrooper.agent.github_app as app_mod
 
     monkeypatch.setattr(config_mod, "_github_app", None)
     monkeypatch.setattr(app_mod, "_held", None)
-    key_file = tmp_path / name
-    key_file.write_text(private_pem)
     monkeypatch.setenv("PARATROOPER_GITHUB_APP_ID", "12345")
     monkeypatch.setenv("PARATROOPER_GITHUB_APP_INSTALLATION_ID", "67890")
-    monkeypatch.setenv(config_mod.GITHUB_APP_KEY_FILE_VAR, str(key_file))
-    return key_file
+    monkeypatch.delenv(config_mod.GITHUB_APP_KEY_VAR, raising=False)
+    monkeypatch.delenv(config_mod.GITHUB_APP_KEY_HANDOFF_VAR, raising=False)
+    if handoff:
+        monkeypatch.setenv(
+            config_mod.GITHUB_APP_KEY_HANDOFF_VAR,
+            base64.b64encode(private_pem.encode()).decode(),
+        )
+    else:
+        monkeypatch.setenv(config_mod.GITHUB_APP_KEY_VAR, private_pem)
 
 
-def test_the_app_key_is_read_once_and_its_file_removed(monkeypatch, tmp_path):
-    """The key reaches memory and the file does not survive the read. The two
-    ids leave the environment with it, so nothing about the App is sitting in
-    what the SDK hands the CLI."""
-    from paratrooper.agent.config import GITHUB_APP_VARS, take_github_app
+def test_the_app_key_is_read_once_and_leaves_the_environment(monkeypatch):
+    """The key reaches memory and nothing about the App is left in os.environ,
+    which is the only lever there is: the SDK builds the CLI's environment from
+    it and can only add to it. Both of the key's names go, the wrapper's encoded
+    one and the plain one, so neither road survives into a session."""
+    import paratrooper.agent.config as config_mod
+    from paratrooper.agent.config import take_github_app
 
-    key_file = _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    _configure_app(monkeypatch, _PRIVATE_PEM)
     app = take_github_app()
 
     assert app.app_id == "12345" and app.installation_id == "67890"
     assert app.private_key == _PRIVATE_PEM
-    assert not key_file.exists()
-    for name in GITHUB_APP_VARS:
+    for name in config_mod.GITHUB_APP_SECRET_VARS:
         assert name not in os.environ, name
-    # read-once-and-keep: a second call answers from memory, with no file left
+    # read-once-and-keep: a second call answers from memory
     assert take_github_app() is app
 
 
-def test_a_missing_app_value_or_key_is_an_error_naming_it(monkeypatch, tmp_path):
-    """No fallback: the personal token is gone, so a half-configured worker has
-    to say which piece is missing rather than find another way in. Nothing is
-    consumed on the way to that error, so the failure is the same every time."""
+def test_the_app_key_is_taken_multiline_or_with_escaped_newlines(monkeypatch):
+    """Render's editor takes a real multi-line value, but a key pasted out of a
+    terminal or a JSON blob arrives with its line breaks written as backslash-n,
+    and that paste looks right in the dashboard and signs nothing. Both forms
+    are accepted, through the wrapper and unwrapped, and all four land on the
+    same PEM."""
+    from paratrooper.agent.config import take_github_app
+
+    escaped = _PRIVATE_PEM.strip().replace("\n", "\\n")
+    assert "\n" not in escaped  # one line, the way a bad paste arrives
+
+    for pasted in (_PRIVATE_PEM, escaped):
+        for handoff in (True, False):
+            _configure_app(monkeypatch, pasted, handoff=handoff)
+            assert take_github_app().private_key == _PRIVATE_PEM, (handoff, pasted[:20])
+
+
+def test_a_missing_app_value_or_key_is_an_error_naming_it(monkeypatch, caplog):
+    """No fallback: the personal token is gone and so is the secret file the key
+    used to arrive in, so a half-configured worker has to say which piece is
+    missing rather than find another way in. Nothing is consumed on the way to
+    that error, so the failure is the same every time."""
     import paratrooper.agent.config as config_mod
     from paratrooper.agent.config import ConfigError, take_github_app
 
-    for missing in config_mod.GITHUB_APP_VARS:
-        key_file = _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    for missing in config_mod.GITHUB_APP_SECRET_VARS[:3]:
+        _configure_app(monkeypatch, _PRIVATE_PEM, handoff=False)
         monkeypatch.delenv(missing, raising=False)
-        with pytest.raises(ConfigError) as err:
-            take_github_app()
+        caplog.clear()
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(ConfigError) as err:
+                take_github_app()
         assert missing in str(err.value)
-        assert key_file.exists(), "a failed boot must not consume the key"
+        # the log carries the same sentence: on Render this line is what is read
+        assert any(missing in r.getMessage() for r in caplog.records), missing
+        # nothing was taken on the way out, so the retry fails the same way
+        for name in config_mod.GITHUB_APP_SECRET_VARS[:3]:
+            if name != missing:
+                assert name in os.environ, name
 
-    _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
-    monkeypatch.setenv(config_mod.GITHUB_APP_KEY_FILE_VAR, str(tmp_path / "not-there.pem"))
-    with pytest.raises(ConfigError) as err:
+    _configure_app(monkeypatch, "   ", handoff=False)
+    with pytest.raises(ConfigError, match=config_mod.GITHUB_APP_KEY_VAR):
         take_github_app()
-    assert "not-there.pem" in str(err.value)
-    # the other ids are still in the environment: nothing was taken
-    for name in config_mod.GITHUB_APP_VARS:
-        assert name in os.environ, name
 
-    empty = _configure_app(monkeypatch, tmp_path, "")
-    with pytest.raises(ConfigError) as err:
+
+def test_a_key_that_does_not_parse_stops_the_boot_naming_the_variable(monkeypatch, caplog):
+    """A key that cannot sign is a worker that fails every message with a JWT
+    error hours after the deploy that broke it. It is checked at the door
+    instead, and the line names the variable to fix and never the key."""
+    import paratrooper.agent.config as config_mod
+    from paratrooper.agent.config import ConfigError, take_github_app
+
+    truncated = "\n".join(_PRIVATE_PEM.strip().splitlines()[:3]) + "\n"
+    _configure_app(monkeypatch, truncated, handoff=False)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(ConfigError, match=config_mod.GITHUB_APP_KEY_VAR):
+            take_github_app()
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("does not parse" in e for e in errors), errors
+    assert not any(_PRIVATE_PEM.splitlines()[1] in e for e in errors)  # never the key
+
+    # and a handoff value that is not base64 at all names the encoded one
+    _configure_app(monkeypatch, _PRIVATE_PEM)
+    monkeypatch.setenv(config_mod.GITHUB_APP_KEY_HANDOFF_VAR, "not base64 at all!!")
+    with pytest.raises(ConfigError, match=config_mod.GITHUB_APP_KEY_HANDOFF_VAR):
         take_github_app()
-    assert "empty" in str(err.value) and empty.exists()
 
 
-def test_a_refused_key_deletion_warns_and_the_worker_carries_on(monkeypatch, tmp_path, caplog):
-    """Akash's decision, 2026-09-04: the worker runs as an unprivileged account
-    against a file the platform owns, so the deletion may not be permitted at
-    all, and a permissions problem must not take the worker offline. This is the
-    rehearsal of the outcome the first boot on Render may hand back."""
-    from paratrooper.agent.config import take_github_app
-
-    locked = tmp_path / "locked"
-    locked.mkdir()
-    key_file = _configure_app(monkeypatch, locked, _PRIVATE_PEM)
-    key_file.chmod(0o444)
-    locked.chmod(0o555)  # no unlink, no rewrite
-    try:
-        with caplog.at_level(logging.WARNING):
-            app = take_github_app()
-    finally:
-        locked.chmod(0o755)
-        key_file.chmod(0o644)
-
-    assert app.private_key == _PRIVATE_PEM  # the boot went through
-    assert key_file.exists()  # and the file really did survive
-    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("could not delete" in w for w in warnings), warnings
-    assert any(str(key_file) in w for w in warnings), warnings
-    assert not any(_PRIVATE_PEM[:40] in w for w in warnings)  # never the key itself
-
-
-def test_the_app_jwt_carries_the_claims_github_checks(monkeypatch, tmp_path):
+def test_the_app_jwt_carries_the_claims_github_checks(monkeypatch):
     """GitHub rejects a JWT whose lifetime is over ten minutes or whose issue
     time is in its own future, and both are easy to get wrong against clock
     drift, so the claims are asserted rather than assumed."""
@@ -2040,7 +2061,7 @@ def test_the_app_jwt_carries_the_claims_github_checks(monkeypatch, tmp_path):
     from paratrooper.agent.config import take_github_app
     from paratrooper.agent.github_app import JWT_LIFETIME, build_jwt
 
-    _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    _configure_app(monkeypatch, _PRIVATE_PEM)
     token = build_jwt(take_github_app(), issued_at=1_000_000)
 
     claims = pyjwt.decode(token, _PUBLIC_PEM, algorithms=["RS256"],
@@ -2052,7 +2073,7 @@ def test_the_app_jwt_carries_the_claims_github_checks(monkeypatch, tmp_path):
     assert pyjwt.get_unverified_header(token)["alg"] == "RS256"
 
 
-def test_minting_asks_the_installation_and_narrows_to_the_repository(monkeypatch, tmp_path):
+def test_minting_asks_the_installation_and_narrows_to_the_repository(monkeypatch):
     """The request shape, in full: the installation's own endpoint, the JWT as
     the bearer, and the token narrowed to the one repository the site lives in
     rather than everything the App is installed on."""
@@ -2061,7 +2082,7 @@ def test_minting_asks_the_installation_and_narrows_to_the_repository(monkeypatch
     from paratrooper.agent.config import take_github_app
     from paratrooper.agent.github_app import mint_installation_token
 
-    _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    _configure_app(monkeypatch, _PRIVATE_PEM)
     seen: list = []
 
     def handler(request):
@@ -2090,7 +2111,7 @@ def test_the_minted_token_is_reused_until_ten_minutes_are_left(monkeypatch, tmp_
     a failed turn, and ten minutes is longer than any turn has taken."""
     from paratrooper.agent.github_app import REFRESH_MARGIN, installation_token
 
-    _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    _configure_app(monkeypatch, _PRIVATE_PEM)
     cfg = _tool_cfg(tmp_path)
     cfg.remote = "https://github.com/AsteroidHunter/webpage.git"
     expiry = datetime(2026, 9, 5, 23, 0, tzinfo=UTC)
@@ -2119,7 +2140,7 @@ def test_a_refused_mint_is_an_error_and_nothing_else_is_tried(monkeypatch, tmp_p
     from paratrooper.agent.config import ConfigError
     from paratrooper.agent.github_app import GitHubAppError, installation_token
 
-    _configure_app(monkeypatch, tmp_path, _PRIVATE_PEM)
+    _configure_app(monkeypatch, _PRIVATE_PEM)
     cfg = _tool_cfg(tmp_path)
     cfg.remote = "https://github.com/AsteroidHunter/webpage.git"
 
@@ -2164,7 +2185,7 @@ def _fresh_secret_state(monkeypatch):
     return config_mod, queue_mod
 
 
-def test_worker_boot_takes_the_worker_only_secrets_out_of_the_environment(monkeypatch, tmp_path):
+def test_worker_boot_takes_the_worker_only_secrets_out_of_the_environment(monkeypatch):
     """The Spotify pair and the queue address must be gone from os.environ by
     the time the worker starts consuming, because the SDK builds the CLI's
     environment from os.environ and can only add to it. Gone from there, still
@@ -2176,7 +2197,7 @@ def test_worker_boot_takes_the_worker_only_secrets_out_of_the_environment(monkey
     monkeypatch.setenv("PARATROOPER_REDIS_URL", "redis://:other@localhost:6399/1")
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "spot-id")
     monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "spot-secret")
-    key_file = _configure_app(monkeypatch, Path(str(tmp_path)), _PRIVATE_PEM)
+    _configure_app(monkeypatch, _PRIVATE_PEM)
 
     built: list = []
 
@@ -2195,12 +2216,12 @@ def test_worker_boot_takes_the_worker_only_secrets_out_of_the_environment(monkey
     # the loser of the two queue names goes too, since it carries a password all
     # the same
     assert built, "the worker was never constructed"
-    # the App's two ids leave the environment the same way, and its private key
-    # is in memory with its file gone: the site build runs repository code the
-    # agent edits, and no deny rule reaches inside that
-    for name in config_mod.GITHUB_APP_VARS:
+    # the App's two ids and its private key leave the environment the same way:
+    # the site build runs repository code the agent edits, and no deny rule
+    # reaches inside that
+    for name in config_mod.GITHUB_APP_SECRET_VARS:
         assert name not in os.environ, name
-    assert not key_file.exists()
+    assert config_mod.take_github_app().private_key == _PRIVATE_PEM
     assert config_mod.take_github_app().app_id == "12345"
     assert config_mod.spotify_credentials() == ("spot-id", "spot-secret")
     kwargs = queue_mod.connect().connection_pool.connection_kwargs
@@ -2236,6 +2257,7 @@ def test_the_wrapper_handoff_is_read_once_and_deleted(tmp_path, monkeypatch):
     file itself must not outlive the read."""
     import paratrooper.agent.config as config_mod
 
+    encoded = base64.b64encode(_PRIVATE_PEM.encode()).decode()
     handoff = tmp_path / "paratrooper-secrets"
     handoff.write_text(
         "SPOTIFY_CLIENT_ID=spot-id\n"
@@ -2245,9 +2267,12 @@ def test_the_wrapper_handoff_is_read_once_and_deleted(tmp_path, monkeypatch):
         "\n"
         "# a comment and a blank line are skipped\n"
         "PARATROOPER_GITHUB_APP_ID=12345\n"
+        # the App's key rides across base64-encoded, which is what lets a PEM
+        # through a format that is one line per value; its padding is '=' too
+        f"{config_mod.GITHUB_APP_KEY_HANDOFF_VAR}={encoded}\n"
     )
     for name in ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "REDIS_URL",
-                 "PARATROOPER_GITHUB_APP_ID"):
+                 "PARATROOPER_GITHUB_APP_ID", config_mod.GITHUB_APP_KEY_HANDOFF_VAR):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(config_mod.SECRETS_FILE_VAR, str(handoff))
 
@@ -2256,6 +2281,7 @@ def test_the_wrapper_handoff_is_read_once_and_deleted(tmp_path, monkeypatch):
     assert values["SPOTIFY_CLIENT_ID"] == "spot-id"
     assert values["REDIS_URL"] == "redis://:pass@host:6379/0?client_name=paratrooper"
     assert values["PARATROOPER_GITHUB_APP_ID"] == "12345"
+    assert values[config_mod.GITHUB_APP_KEY_HANDOFF_VAR] == encoded
     assert os.environ["SPOTIFY_CLIENT_SECRET"] == "spot-secret"
     assert not handoff.exists()
 
@@ -2305,11 +2331,71 @@ def test_worker_image_hands_the_secrets_over_through_the_wrapper():
     assert script.startswith("#!/bin/sh")
     assert "exec python -m paratrooper.web.worker_runner" in script
     for name in ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "REDIS_URL",
-                 "PARATROOPER_GITHUB_APP_ID", "PARATROOPER_GITHUB_APP_INSTALLATION_ID"):
+                 "PARATROOPER_GITHUB_APP_ID", "PARATROOPER_GITHUB_APP_INSTALLATION_ID",
+                 "PARATROOPER_GITHUB_APP_KEY_PEM"):
         assert name in script, name
     assert 'unset "$name"' in script  # written, then dropped, then exec
+    assert "unset PARATROOPER_GITHUB_APP_KEY_PEM" in script  # the key too
     # the Claude credential stays: the CLI authenticates with it
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in script
+
+
+def _run_wrapper(tmp_path, extra_env):
+    """Run the real start-up wrapper with a stub in place of the worker, and
+    hand back the file it wrote. The stub is what makes this runnable: the
+    script ends in `exec python -m ...`, so the last thing it does is replace
+    itself, and only the PATH decides with what."""
+    root = Path(__file__).resolve().parents[1]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "python"
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    handoff = tmp_path / "paratrooper-secrets"
+    subprocess.run(
+        ["sh", str(root / "docker" / "worker-entrypoint.sh")],
+        env={
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "PARATROOPER_SECRETS_FILE": str(handoff),
+            **extra_env,
+        },
+        check=True,
+    )
+    return handoff
+
+
+@pytest.mark.parametrize("escaped", [False, True])
+def test_the_wrapper_carries_the_app_key_across_as_a_pem(tmp_path, monkeypatch, escaped):
+    """The key's whole road, run for real: the wrapper encodes whatever Render
+    holds, the handoff file takes it as one line, and the worker's reader hands
+    back a PEM. Both pastes Render allows are carried, several real lines and
+    one line with the breaks written as backslash-n, because the second looks
+    right in the dashboard and would otherwise sign nothing."""
+    import paratrooper.agent.config as config_mod
+
+    pasted = _PRIVATE_PEM.strip().replace("\n", "\\n") if escaped else _PRIVATE_PEM
+    handoff = _run_wrapper(tmp_path, {
+        "PARATROOPER_GITHUB_APP_ID": "12345",
+        "PARATROOPER_GITHUB_APP_INSTALLATION_ID": "67890",
+        "PARATROOPER_GITHUB_APP_KEY_PEM": pasted,
+    })
+
+    written = handoff.read_text()
+    assert len(written.splitlines()) == 3  # a multi-line PEM did not break the format
+    assert "BEGIN" not in written  # it is encoded, not pasted in
+    assert f"{config_mod.GITHUB_APP_KEY_HANDOFF_VAR}=" in written
+
+    _fresh_secret_state(monkeypatch)
+    for name in config_mod.GITHUB_APP_SECRET_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(config_mod.SECRETS_FILE_VAR, str(handoff))
+    config_mod.load_worker_secrets()
+    app = config_mod.take_github_app()
+
+    assert app.private_key == _PRIVATE_PEM
+    assert (app.app_id, app.installation_id) == ("12345", "67890")
+    for name in config_mod.GITHUB_APP_SECRET_VARS:
+        assert name not in os.environ, name
 
 
 @pytest.mark.parametrize("with_token", [True, False])
@@ -2335,7 +2421,7 @@ def test_run_job_env_carries_no_worker_only_secret(tmp_path, monkeypatch, with_t
     )
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j9", thread_id="t1", text="add the pin")
     assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
@@ -2367,7 +2453,7 @@ def test_run_job_closes_the_secret_files_to_the_file_tools(tmp_path, monkeypatch
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j7", thread_id="t1", text="read the pin file")
     assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
@@ -2385,6 +2471,199 @@ def test_run_job_closes_the_secret_files_to_the_file_tools(tmp_path, monkeypatch
     for matcher in matchers[1:]:
         deny = _call_file_hook(matcher.hooks[0], matcher.matcher, realistic[matcher.matcher])
         assert deny["hookSpecificOutput"]["permissionDecision"] == "deny", matcher.matcher
+
+
+# --- the session's control stream, and who answers the CLI -------------------
+#
+# Everything the hardening added to the session — the four PreToolUse guards,
+# the in-process tool server, the permission mode — is carried by ONE channel:
+# the CLI asks back down its own stdin and the session answers. The turn that
+# reported "my shell is down" is what a session that cannot answer looks like:
+# the CLI raises "Stream closed" on the hook callbacks (so the fence silently
+# stops running) and refuses every tool call it has to ask about with "Tool
+# permission request failed". These pin both halves: the stream stays open for
+# the whole turn, and there is something on this end to answer with.
+
+
+def _stream_tools():
+    """A session's tool list in the shape run_job builds it: the in-process
+    tools plus the built-ins."""
+    import paratrooper.agent.worker as worker_mod
+
+    return ["mcp__paratrooper__place_pin", *worker_mod.BUILTIN_TOOLS]
+
+
+def test_the_permission_gate_answers_only_from_the_sessions_own_list():
+    """The gate is the session's own allowed_tools list read back as an answer.
+    A name on it runs, a name off it is refused with a reason. There is no
+    branch that says yes to something unnamed: the scrub switch forces the
+    asking mode, and 'answer the question' must never turn into 'approve the
+    request'."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    import paratrooper.agent.worker as worker_mod
+
+    gate = worker_mod.make_tool_gate(_stream_tools())
+
+    for name in _stream_tools():
+        allowed = asyncio.run(gate(name, {}, None))
+        assert isinstance(allowed, PermissionResultAllow), name
+
+    for stranger in ("WebFetch", "WebSearch", "Task", "mcp__elsewhere__push", "NotebookEdit"):
+        deny = asyncio.run(gate(stranger, {}, None))
+        assert isinstance(deny, PermissionResultDeny), stranger
+        assert stranger in deny.message  # the agent is told what was refused
+
+
+def test_run_job_hands_the_session_a_way_to_answer_a_permission_question(tmp_path, monkeypatch):
+    """The scrub switch resets the permission mode to `default`, which is the
+    mode that ASKS, and the CLI asks over the control stream. Without a callback
+    the SDK answers that question with an error and the CLI turns the error into
+    a denial, which is every shell and file command failing in a row. So the
+    session must carry one, and it must be the same list it declares."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {}
+
+    def fake_build_tool_server(ctx):
+        return {"name": "paratrooper"}, ["mcp__paratrooper__place_pin"]
+
+    async def fake_query(*, prompt, options):
+        captured["options"] = options
+        if False:
+            yield
+
+    monkeypatch.setattr(worker_mod, "installation_token", _no_app_configured)
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
+
+    job = worker_mod.Job(job_id="j10", thread_id="t1", text="add the pin")
+    assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
+
+    options = captured["options"]
+    gate = options.can_use_tool
+    assert gate is not None, "nothing would answer the CLI's permission questions"
+    # what it answers is exactly what the session declared, nothing wider
+    assert options.allowed_tools == ["mcp__paratrooper__place_pin"] + worker_mod.BUILTIN_TOOLS
+    for named in options.allowed_tools:
+        assert isinstance(asyncio.run(gate(named, {}, None)), PermissionResultAllow), named
+    assert isinstance(asyncio.run(gate("WebFetch", {"url": "x"}, None)), PermissionResultDeny)
+
+
+class _ScriptedCLI:
+    """A stand-in for the Claude Code CLI that speaks its half of the control
+    protocol: it answers `initialize`, then — the way the real CLI does before
+    it runs a Bash command — asks this session for the PreToolUse decision, and
+    only reports the turn's result once it has the answer.
+
+    It records whether its input stream was still open at the moment it asked.
+    That is the whole bug: the one-shot ``query()`` path closes the session's
+    stdin at the first result, and the CLI's own `sendRequest` then throws
+    "Stream closed" instead of asking, so the guard never runs and the tool call
+    is refused."""
+
+    def __init__(self):
+        import anyio
+
+        self.to_sdk, self._rx = anyio.create_memory_object_stream(64)
+        self.input_ended = False
+        self.open_when_asked: bool | None = None
+        self.hook_answer: dict | None = None
+        self.closed = False
+
+    async def connect(self) -> None:
+        return None
+
+    def is_ready(self) -> bool:
+        return not self.closed
+
+    async def end_input(self) -> None:
+        self.input_ended = True
+
+    async def close(self) -> None:
+        self.closed = True
+        self.input_ended = True
+        self.to_sdk.close()
+
+    async def write(self, data: str) -> None:
+        for line in data.splitlines():
+            if not line.strip():
+                continue
+            msg = json.loads(line)
+            if msg.get("type") == "control_request":
+                # the session's initialize handshake
+                await self.to_sdk.send({
+                    "type": "control_response",
+                    "response": {"subtype": "success", "request_id": msg["request_id"],
+                                 "response": {}},
+                })
+            elif msg.get("type") == "control_response":
+                # our own hook question, answered
+                self.hook_answer = msg["response"].get("response")
+                await self.to_sdk.send({
+                    "type": "result", "subtype": "success", "duration_ms": 1,
+                    "duration_api_ms": 1, "is_error": False, "num_turns": 1,
+                    "session_id": "s", "result": "done", "total_cost_usd": 0.0,
+                })
+            elif msg.get("type") == "user":
+                await self.to_sdk.send({
+                    "type": "assistant", "session_id": "s", "parent_tool_use_id": None,
+                    "message": {"role": "assistant", "model": "m",
+                                "content": [{"type": "text", "text": "working"}]},
+                })
+                self.open_when_asked = not self.input_ended
+                await self.to_sdk.send({
+                    "type": "control_request", "request_id": "cli_1",
+                    "request": {"subtype": "hook_callback", "callback_id": "hook_0",
+                                "tool_use_id": "toolu_1",
+                                "input": {"tool_name": "Bash",
+                                          "tool_input": {"command": "git push origin main"}}},
+                })
+
+    async def _iter(self):
+        async for msg in self._rx:
+            yield msg
+
+    def read_messages(self):
+        return self._iter()
+
+
+def test_the_turn_runs_on_a_control_stream_that_stays_open(monkeypatch):
+    """Drive a real session against a stand-in CLI. The guard's decision has to
+    reach the CLI while the turn is running — a refusal that never arrives is a
+    fence that is not there — and the stream is closed only on the way out."""
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
+
+    import paratrooper.agent.worker as worker_mod
+    from paratrooper.agent.hooks import make_main_guard_hook
+
+    cli = _ScriptedCLI()
+    monkeypatch.setattr(
+        worker_mod, "ClaudeSDKClient",
+        lambda options: ClaudeSDKClient(options=options, transport=cli),
+    )
+
+    guard = make_main_guard_hook("main", branch_prefix="paratrooper")
+    options = ClaudeAgentOptions(
+        allowed_tools=["Bash"],
+        can_use_tool=worker_mod.make_tool_gate(["Bash"]),
+        hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[guard])]},
+    )
+
+    async def drive():
+        return [m async for m in worker_mod.run_session(prompt="add a song", options=options)]
+
+    messages = asyncio.run(drive())
+
+    assert cli.open_when_asked is True, "the session's stdin was closed mid-turn"
+    assert cli.hook_answer is not None, "the guard's decision never reached the CLI"
+    decision = cli.hook_answer["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"  # `git push` is fenced, as ever
+    assert any(type(m).__name__ == "ResultMessage" for m in messages)
+    assert cli.input_ended and cli.closed  # and the stream is closed on the way out
 
 
 # --- the worker image's shape (checklist 3.1) --------------------------------
