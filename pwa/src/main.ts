@@ -12,6 +12,7 @@ import { caretCountsAsComposing } from "./caret";
 import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
 import type { Glide } from "./downbtn";
+import { createEndSpring } from "./endspring";
 import { ackFrame, enrichFrame } from "./enrich";
 import {
   SHOT_BEND,
@@ -183,7 +184,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.134"; // The springy scroll follows the speed of the last fifty milliseconds of readings that moved, so a frame the phone skips no longer pulses every bubble
+const APP_VERSION = "0.3.135"; // The bubbles stretch through the rubber band bounce at both ends of the thread, on a spring of our own seeded from the finger or the impact speed
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -994,6 +995,9 @@ function renderChat(): void {
   if (springRaf) cancelAnimationFrame(springRaf);
   springRaf = 0;
   springField.reset();
+  endSpring.reset(); // END-SPRING SEAM: the old thread's ends are gone too
+  springTouchY = null;
+  springMaxScroll = 0;
   springEls = [];
   springApplied = new Set<number>();
   springWritten = new Map<number, string>();
@@ -1742,6 +1746,16 @@ function fitBubblesNow(root: ParentNode | null): void {
 // zero through every motion the app owns, so the flight's FLIP shift always
 // measures clean seats and no pin, ride or lift is ever fought.
 const springField = createSpringField();
+// --- END-SPRING SEAM (endspring.ts owns the physics) -------------------------
+// iOS Safari never puts an INNER scroller's overscroll into scrollTop, so at the
+// two ends the field sees no motion and the rows ride the rubber band rigidly.
+// The end model supplies that missing motion: the marker is scrollTop reaching 0
+// or its maximum, the pull follows the finger's extra travel through Apple's
+// rubber-band curve, the release and a fling's impact run the critically damped
+// spring measured off the Messages recording, and the number it hands back is
+// simply ADDED to the position the field reads. Zero everywhere else, so the
+// normal path is untouched and the hand-back is a no-op rather than a step.
+const endSpring = createEndSpring();
 let springEls: HTMLElement[] = []; // the rows the last measure read, index-aligned
 let springApplied = new Set<number>(); // indices carrying a live translate now
 // what each of those rows was last WRITTEN, so an unchanged device pixel is not
@@ -1751,6 +1765,8 @@ let springApplied = new Set<number>(); // indices carrying a live translate now
 let springWritten = new Map<number, string>();
 let springThreadTop = 0; // thread's screen-Y, cached at measure (stable per gesture)
 let springClientH = 0; // thread clientHeight, cached at measure
+let springMaxScroll = 0; // scrollHeight - clientHeight, cached at measure (the END marker)
+let springTouchY: number | null = null; // where the finger last was (the anchor a bounce keeps)
 let springRaf = 0; // the frame pump; 0 = not scheduled
 let springDirty = true; // the row table is stale (content changed): re-measure next frame
 
@@ -1785,6 +1801,11 @@ function measureSpring(): void {
   springWritten = new Map(); // new elements at these indices: nothing is known-written
   springThreadTop = t.getBoundingClientRect().top;
   springClientH = t.clientHeight;
+  // END-SPRING SEAM: the end marker's limit, read HERE and not per frame, so the
+  // pump still makes exactly one scroll read a frame and no layout read at all
+  // (a row carrying a downward translate inflates scrollHeight; this is taken
+  // before any of them exist, alongside the seats it must agree with).
+  springMaxScroll = Math.max(t.scrollHeight - t.clientHeight, 0);
   springField.measure(springEls.map((el) => ({ top: el.offsetTop, height: el.offsetHeight })));
   springDirty = false;
 }
@@ -1838,9 +1859,14 @@ function springPump(): void {
     const t = document.getElementById("thread");
     if (!t) return;
     if (springDirty) measureSpring();
-    springField.frame(now, t.scrollTop);
+    // END-SPRING SEAM: the modelled overscroll (0 unless the thread is sitting on
+    // an end) is added to the position, so a bounce reaches the field as
+    // ordinary scrolling and stretches the rows through it with the same lag,
+    // the same tau and the anchor still where the finger lifted.
+    const st = t.scrollTop + endSpring.frame(now, t.scrollTop, springMaxScroll, springClientH);
+    springField.frame(now, st);
     applySpring();
-    if (springField.active()) springRaf = requestAnimationFrame(step);
+    if (springField.active() || endSpring.active()) springRaf = requestAnimationFrame(step);
   };
   springRaf = requestAnimationFrame(step);
 }
@@ -1853,6 +1879,7 @@ function springFreeze(): void {
   if (springRaf) cancelAnimationFrame(springRaf);
   springRaf = 0;
   springField.freeze();
+  endSpring.freeze(); // END-SPRING SEAM: the bounce is held at zero too
   applySpring();
 }
 
@@ -1876,20 +1903,31 @@ function armSpring(touchY: number | null, fingerDown: boolean): void {
   if (springBlocked()) return;
   if (springDirty || !springField.armed()) measureSpring();
   springField.begin(springClientH, springThreadTop, touchY, fingerDown);
+  endSpring.begin(fingerDown, touchY); // END-SPRING SEAM
+  if (touchY !== null) springTouchY = touchY;
   springPump();
 }
 
 // The finger moved: the field re-centres on it, and a parked pump wakes.
 function springFinger(touchY: number): void {
   springField.anchor(touchY);
+  endSpring.finger(touchY); // END-SPRING SEAM: the pull is this finger's travel
+  springTouchY = touchY;
   if (springField.armed()) springPump();
 }
 
 // The finger left the glass: momentum, if any, is still the gesture; the field
 // drops the arm itself once the scroll has stopped and the rows are home.
 function liftSpring(): void {
+  endSpring.lift(); // END-SPRING SEAM: a pull past the end becomes its bounce
+  // A finger that pulled past the end and then held still lets the lag melt, so
+  // the field is idle and lift() would disarm it — and the bounce that is about
+  // to run would move the rows with nothing watching. Re-open the gesture on the
+  // finger's last position (which is the anchor the bounce keeps) so the rows
+  // stretch through it. Costs one geometry read, once, only in that case.
+  if (endSpring.active() && !springField.armed()) armSpring(springTouchY, false);
   springField.lift();
-  if (springField.armed()) springPump();
+  if (springField.armed() || endSpring.active()) springPump();
 }
 
 // --- scrolling: glide when following the tail, chevron when reading history ----
