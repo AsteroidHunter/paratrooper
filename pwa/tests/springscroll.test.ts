@@ -714,8 +714,11 @@ describe("main.ts wiring — driven per frame from the scroll position, not from
   it("the pump reads scrollTop each frame and hands it to the field", () => {
     const pump = src.slice(src.indexOf("function springPump()"), src.indexOf("function springFreeze"));
     expect(pump).toContain("requestAnimationFrame(step)");
-    expect(pump).toContain("springField.frame(now, t.scrollTop)");
-    expect(pump).toContain("if (springField.active()) springRaf = requestAnimationFrame(step)");
+    // the position the field reads is scrollTop plus the end model's overscroll,
+    // which is exactly zero away from the two ends (endspring.test.ts owns it)
+    expect(pump).toContain("const st = t.scrollTop + endSpring.frame(now, t.scrollTop");
+    expect(pump).toContain("springField.frame(now, st)");
+    expect(pump).toContain("springRaf = requestAnimationFrame(step)");
   });
 
   it("the scroll event is a wake-up only: it drives nothing and writes no scroll", () => {
