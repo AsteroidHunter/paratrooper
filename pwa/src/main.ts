@@ -178,7 +178,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.123"; // The springy scroll, rebuilt to be seen: the gaps open by tens of pixels as the finger moves, hold through a fling, and a beat after the scroll stops the bubbles visibly fall back into their seats
+const APP_VERSION = "0.3.124"; // The springy scroll, third build, measured off a screen recording of Messages: a 45 ms first-order lag over 500 px from the finger, the return from the very next frame with no beat and no overshoot, the stretch melting with a fling's speed
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -951,7 +951,7 @@ function renderChat(): void {
     thread.classList.remove("dragging");
     thread.style.setProperty("--peek", "0px");
     threadTouching = false;
-    liftSpring(); // the springs ride the momentum and settle when it stops
+    liftSpring(); // the lag rides the momentum, melting with its speed, from where the finger lifted
     // a release with no glide (a still hold) fires no scroll/scrollend —
     // check shortly after; the lastScrollAt gate skips real glides. NO special
     // at-top fast path: a release at the top starts the rubber-band snap-back,
@@ -1698,20 +1698,21 @@ function fitBubblesNow(root: ParentNode | null): void {
 }
 
 // --- springy transcript (springscroll.ts owns the physics) --------------------
-// The bubbles lag the scroll by their distance from the finger and, a beat after
-// the scroll stops, fall back into their seats — the effect Messages has carried
-// since iOS 7 (WWDC 2013 session 217; Ash Furrow's ASHSpringyCollectionView).
-// The pure field takes row geometry, the scroll position each frame and the
-// finger's screen-Y, and hands back a per-row displacement. This wiring reads
-// the geometry once per gesture (never per frame); reads scrollTop once per
-// animation frame while a gesture, its momentum or its settle is live — the
-// scroll event is only a wake-up, because under a finger iOS delivers it late
-// and sparsely and the first build, which injected on each event, stepped;
-// writes each displacement as the compositor-only `translate` longhand (kept
-// off the peek's `transform`, styles.css); and — the load-bearing part — holds
-// the whole effect frozen at zero through every motion the app owns, so the
-// flight's FLIP shift always measures clean seats and no pin, ride or lift is
-// ever fought.
+// The bubbles trail the scroll by their distance from the finger and, from the
+// very next frame after the scroll stops, ease back into their seats over a
+// tenth of a second — the effect Messages has carried since iOS 7, this time
+// measured off the owner's screen recording of Messages itself (the numbers are
+// in springscroll.ts and the wiki agent notes). The pure field takes row
+// geometry, the scroll position each frame and the finger's screen-Y, and hands
+// back a per-row displacement. This wiring reads the geometry once per gesture
+// (never per frame); reads scrollTop once per animation frame while a gesture,
+// its momentum or its return is live — the scroll event is only a wake-up,
+// because under a finger iOS delivers it late and sparsely and the first build,
+// which injected on each event, stepped; writes each displacement as the
+// compositor-only `translate` longhand (kept off the peek's `transform`,
+// styles.css); and — the load-bearing part — holds the whole effect frozen at
+// zero through every motion the app owns, so the flight's FLIP shift always
+// measures clean seats and no pin, ride or lift is ever fought.
 const springField = createSpringField();
 let springEls: HTMLElement[] = []; // the rows the last measure read, index-aligned
 let springApplied = new Set<number>(); // indices carrying a live translate now
@@ -1774,7 +1775,7 @@ function applySpring(): void {
 }
 
 // The pump: one rAF chain, alive exactly while the field wants frames (a drag,
-// its momentum, the beat, the settle). Each frame reads scrollTop — the one
+// its momentum, the return). Each frame reads scrollTop — the one
 // read, no layout — drives the field, writes the translates, and ends itself
 // the moment the field is idle, so a settled thread schedules no frames.
 function springPump(): void {

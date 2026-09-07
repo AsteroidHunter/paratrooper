@@ -1,147 +1,121 @@
-// Pins for the springy transcript, second build (springscroll.ts): the bubbles
-// lag the scroll by tens of pixels at an ordinary drag, the lag holds through a
-// fling, and a beat after the scroll stops they fall back over a perceptible
-// settle with a hint of overshoot; rows never overlap (a gap-derived guard);
-// the sign matches the owner's description; the whole effect is held at zero
-// while the app owns a motion. The pure field is unit-tested directly; the
-// main.ts wiring is source-pinned like flight.test.ts / shift.test.ts, because
-// main.ts boots a real shell at import and cannot load under node.
+// Pins for the springy transcript, third build (springscroll.ts): the numbers
+// measured off the owner's screen recording of Messages itself (the wiki agent
+// notes hold the tables). Each bubble trails the scroll by a first-order lag
+// with a ~45 ms time constant, scaled by its distance from the finger over
+// 500 px; a steady drag holds speed x tau x resistance of stretch; the return
+// starts on the next frame after the stop, is 90% done in ~105 ms and never
+// overshoots; a paused finger lets the stretch melt; a fling's lag tracks the
+// decaying speed and is gone with it; rows never overlap (a 2 px floor); the
+// effect is held at zero while the app owns a motion. The pure field is
+// unit-tested directly; the main.ts wiring is source-pinned like
+// flight.test.ts / shift.test.ts, because main.ts boots a real shell at import
+// and cannot load under node.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   LAG_PER_SPEED_MS,
-  SPRING_OMEGA,
   TUNING,
   atRest,
   createSpringField,
   profileFor,
-  relax,
+  relaxLag,
   resistanceFor,
   windowBounds,
 } from "../src/springscroll";
-import type { SpringField, SpringRow, SpringState } from "../src/springscroll";
+import type { SpringField, SpringRow } from "../src/springscroll";
 
 const src = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const FRAME = 1000 / 60;
+const TAU = TUNING.LAG_TAU_MS;
 
-describe("the tunables — Furrow's spring, in one place", () => {
-  it("is the iOS 7 spring: 1 Hz, damping 0.8, resistance distance/1500 clamped to 1", () => {
-    expect(TUNING.FREQUENCY_HZ).toBe(1.0);
-    expect(TUNING.DAMPING_RATIO).toBe(0.8);
-    expect(TUNING.RESISTANCE_DIVISOR).toBe(1500);
+describe("the tunables — measured off the Messages recording, in one place", () => {
+  it("is the measured lag: 500 px per unit of resistance, a 45 ms time constant, resistance clamped to 1", () => {
+    expect(TUNING.RESISTANCE_DIVISOR).toBe(500); // fitted 430–500 CSS px
+    expect(TUNING.LAG_TAU_MS).toBe(45); // measured 36–47 ms
     expect(TUNING.RESISTANCE_MAX).toBe(1);
   });
 
-  it("holds a beat between the stop and the fall, in the fraction-of-a-second band", () => {
-    const hold = TUNING.STOP_QUIET_MS + TUNING.RELEASE_BEAT_MS;
-    expect(hold).toBeGreaterThanOrEqual(100);
-    expect(hold).toBeLessThanOrEqual(250);
+  it("the steady lag per unit of scroll speed is the time constant itself (a first-order lag, not a spring)", () => {
+    expect(LAG_PER_SPEED_MS).toBe(TUNING.LAG_TAU_MS);
+    expect(LAG_PER_SPEED_MS).toBeGreaterThan(30);
+    expect(LAG_PER_SPEED_MS).toBeLessThan(60);
   });
 
-  it("the overlap guard is a fraction of each pair's own gap, and the stretch ceiling is high", () => {
-    expect(TUNING.GAP_CLOSE_MAX).toBeGreaterThan(0);
-    expect(TUNING.GAP_CLOSE_MAX).toBeLessThan(1);
-    expect(TUNING.STRETCH_CAP_PX).toBeGreaterThanOrEqual(200); // v1's 10px is what killed it
+  it("the overlap guard is a small absolute floor, the ceiling is a sanity bound, and the window is wider than the ceiling", () => {
+    expect(TUNING.GAP_MIN_PX).toBeGreaterThan(0);
+    expect(TUNING.GAP_MIN_PX).toBeLessThanOrEqual(4); // under the tightest real gap (a continuation, 4px)
+    expect(TUNING.STRETCH_CAP_PX).toBeGreaterThanOrEqual(200); // a finger never reaches it: 6.7 px/ms
+    expect(TUNING.PARTICIPATION_BUFFER_PX).toBeGreaterThan(TUNING.STRETCH_CAP_PX); // entry and exit happen off screen
   });
 
-  it("the steady lag per unit of scroll speed is 2*zeta/omega (about a quarter second)", () => {
-    expect(SPRING_OMEGA).toBeCloseTo((2 * Math.PI) / 1000, 9);
-    expect(LAG_PER_SPEED_MS).toBeCloseTo((2 * 0.8) / SPRING_OMEGA, 9);
-    expect(LAG_PER_SPEED_MS).toBeGreaterThan(200);
-    expect(LAG_PER_SPEED_MS).toBeLessThan(300);
+  it("carries no beat, no hold and no spring: the second build's knobs are gone", () => {
+    const t = TUNING as Record<string, unknown>;
+    for (const gone of ["STOP_QUIET_MS", "RELEASE_BEAT_MS", "FREQUENCY_HZ", "DAMPING_RATIO", "GAP_CLOSE_MAX"]) {
+      expect(t[gone]).toBeUndefined();
+    }
   });
 });
 
-describe("resistanceFor — grows with distance from the finger, never past 1", () => {
-  it("is zero under the finger and grows with distance", () => {
+describe("resistanceFor — linear in the distance from the finger, saturating at 1", () => {
+  it("is zero under the finger and grows linearly with distance", () => {
     expect(resistanceFor(0)).toBe(0);
-    expect(resistanceFor(200)).toBeGreaterThan(resistanceFor(50));
-    expect(resistanceFor(400)).toBeGreaterThan(resistanceFor(200));
-    expect(resistanceFor(300)).toBeCloseTo(0.2, 9); // 300/1500
+    expect(resistanceFor(100)).toBeCloseTo(0.2, 9);
+    expect(resistanceFor(300)).toBeCloseTo(0.6, 9);
+    expect(resistanceFor(450)).toBeCloseTo(0.9, 9);
   });
 
-  it("is symmetric above and below the finger", () => {
+  it("is symmetric above and below the finger (the measured V)", () => {
     expect(resistanceFor(-300)).toBe(resistanceFor(300));
   });
 
-  it("clamps at 1: a row never lags by more than the scroll itself", () => {
+  it("saturates: rows beyond the divisor trail alike, so two far rows keep their gap", () => {
+    expect(resistanceFor(500)).toBe(1);
+    expect(resistanceFor(900)).toBe(1);
     expect(resistanceFor(1e9)).toBe(1);
   });
 });
 
-describe("relax — the settle: slow, visible, a hint of overshoot", () => {
-  it("is underdamped: swings through rest once by a small fraction, then settles", () => {
-    let s: SpringState = { d: 100, v: 0 };
-    let minD = 100;
-    let t = 0;
-    while (t < 3000) {
-      s = relax(s, FRAME);
-      t += FRAME;
-      minD = Math.min(minD, s.d);
+describe("relaxLag — the first-order lag, exact for any frame length", () => {
+  it("a steady drag settles at exactly speed x tau", () => {
+    let L = 0;
+    for (let k = 0; k < 60; k++) L = relaxLag(L, 0.5 * FRAME, FRAME); // 0.5 px/ms for a second
+    expect(L).toBeCloseTo(0.5 * TAU, 6);
+    let fast = 0;
+    for (let k = 0; k < 60; k++) fast = relaxLag(fast, 2.0 * FRAME, FRAME);
+    expect(fast).toBeCloseTo(2.0 * TAU, 6); // proportional to speed, no cap short of the ceiling
+  });
+
+  it("does not depend on the frame rate: one 33 ms frame lands where two 17 ms frames do", () => {
+    const one = relaxLag(30, 2 * 0.7 * FRAME, 2 * FRAME);
+    const two = relaxLag(relaxLag(30, 0.7 * FRAME, FRAME), 0.7 * FRAME, FRAME);
+    expect(one).toBeCloseTo(two, 9);
+  });
+
+  it("after a stop it decays as exp(-t/tau): a third gone by the next frame, 63% at tau, 90% at 2.3 tau, never through zero", () => {
+    const first = relaxLag(100, 0, FRAME);
+    expect(100 - first).toBeCloseTo(100 * (1 - Math.exp(-FRAME / TAU)), 6);
+    expect(100 - first).toBeGreaterThan(25); // the recording: 34–36% gone one frame after the stop
+    expect(100 - first).toBeLessThan(40);
+    expect(relaxLag(100, 0, TAU)).toBeCloseTo(100 * Math.exp(-1), 6);
+    expect(relaxLag(100, 0, TAU * Math.log(10))).toBeCloseTo(10, 6);
+    let L = 100;
+    for (let k = 0; k < 120; k++) {
+      L = relaxLag(L, 0, FRAME);
+      expect(L).toBeGreaterThan(0); // no overshoot, ever
     }
-    expect(minD).toBeLessThan(0); // it does cross: a settle, not a critical creep
-    expect(-minD).toBeLessThan(2); // by under 2% — a hint, never a bounce
-    expect(-minD).toBeCloseTo(100 * Math.exp((-0.8 * Math.PI) / Math.sqrt(1 - 0.64)), 0);
-    expect(Math.abs(s.d)).toBeLessThan(0.25);
+    expect(L).toBeLessThan(0.25);
   });
 
-  it("takes a perceptible time from rest: half back near 200ms, 90% near 450ms, through the seat near 660ms", () => {
-    let s: SpringState = { d: 100, v: 0 };
-    let t = 0;
-    let t50: number | null = null;
-    let t90: number | null = null;
-    let cross: number | null = null;
-    while (t < 2000 && cross === null) {
-      s = relax(s, FRAME);
-      t += FRAME;
-      if (t50 === null && s.d <= 50) t50 = t;
-      if (t90 === null && s.d <= 10) t90 = t;
-      if (s.d <= 0) cross = t;
-    }
-    expect(t50).toBeGreaterThan(150);
-    expect(t50).toBeLessThan(300);
-    expect(t90).toBeGreaterThan(350);
-    expect(t90).toBeLessThan(550);
-    expect(cross).toBeGreaterThan(600);
-    expect(cross).toBeLessThan(750);
-  });
-
-  it("starts slowly from rest (the quadratic start that reads as the beat's tail)", () => {
-    const s = relax({ d: 100, v: 0 }, 50);
-    expect(100 - s.d).toBeLessThan(5); // under 5% moved in the first 50ms
-  });
-
-  it("is the exact closed form: a long frame lands where many short ones do", () => {
-    let a: SpringState = { d: 40, v: -0.1 };
-    for (let i = 0; i < 4; i++) a = relax(a, 12);
-    const b = relax({ d: 40, v: -0.1 }, 48);
-    expect(a.d).toBeCloseTo(b.d, 6);
-    expect(a.v).toBeCloseTo(b.v, 6);
-  });
-
-  it("clamps a stalled frame's dt and does nothing on a non-positive one", () => {
-    const s: SpringState = { d: 5, v: 1 };
-    expect(relax(s, 0)).toBe(s);
-    expect(relax(s, -10)).toBe(s);
-    expect(relax(s, 100000).d).toBeCloseTo(relax(s, TUNING.DT_MAX_MS).d, 9);
-  });
-
-  it("at damping 1 it is the critical form and never crosses rest", () => {
-    let s: SpringState = { d: 100, v: 0 };
-    for (let i = 0; i < 300; i++) {
-      s = relax(s, FRAME, SPRING_OMEGA, 1);
-      expect(s.d).toBeGreaterThanOrEqual(0);
-    }
+  it("a non-positive dt injects the delta whole (no time has passed to relax over)", () => {
+    expect(relaxLag(10, 5, 0)).toBe(15);
   });
 });
 
 describe("atRest — home is sub-visible", () => {
-  it("is true only under both thresholds", () => {
-    expect(atRest({ d: 0, v: 0 })).toBe(true);
-    expect(atRest({ d: TUNING.REST_EPS_PX / 2, v: TUNING.REST_EPS_V / 2 })).toBe(true);
-    expect(atRest({ d: 1, v: 0 })).toBe(false);
-    expect(atRest({ d: 0, v: 1 })).toBe(false);
-    expect(TUNING.REST_EPS_PX).toBeLessThanOrEqual(0.5); // under the DOM's own rounding
+  it("is true only under a quarter pixel", () => {
+    expect(atRest(0.2)).toBe(true);
+    expect(atRest(-0.2)).toBe(true);
+    expect(atRest(0.3)).toBe(false);
   });
 });
 
@@ -155,7 +129,9 @@ describe("windowBounds — only near the viewport", () => {
 
 // --- a synthetic thread ------------------------------------------------------------
 // 40px bubbles; gaps alternate 4px (a continuation) and 12px (a sender change),
-// the two real gaps of styles.css. Viewport 700px, the thumb 75% down it.
+// the two real gaps of styles.css. Viewport 700px, the thumb 75% down it: the
+// row at the top of the viewport is ~505px from the thumb, past the divisor,
+// so it carries the reference lag whole.
 function makeThread(n = 80): SpringRow[] {
   const rows: SpringRow[] = [];
   let top = 0;
@@ -206,13 +182,13 @@ function drag(d: Drive, speed: number, ms: number, dir: -1 | 1): void {
 }
 
 /** the scroll is still: run frames, returning the per-frame top-row lag */
-function stillFrames(d: Drive, ms: number, topRow: number): number[] {
+function stillFrames(d: Drive, ms: number, row: number): number[] {
   const out: number[] = [];
   const frames = Math.round(ms / FRAME);
   for (let k = 0; k < frames; k++) {
     d.now += FRAME;
     d.f.frame(d.now, d.scrollTop);
-    out.push(d.f.displacements().get(topRow) ?? 0);
+    out.push(d.f.displacements().get(row) ?? 0);
   }
   return out;
 }
@@ -251,47 +227,79 @@ describe("createSpringField — zero at rest", () => {
   });
 });
 
-describe("createSpringField — the stretch builds with speed and distance, by tens of pixels", () => {
-  it("an ordinary drag lags the top row by tens of pixels, a faster one by more", () => {
+describe("createSpringField — the stretch is speed x tau x resistance, there within a few frames", () => {
+  it("a steady drag lags the top row by speed x tau: 22.5px at 0.5 px/ms, 45px at 1 px/ms", () => {
     const slow = grab();
     drag(slow, 0.5, 300, -1);
     const fast = grab();
     drag(fast, 1.0, 300, -1);
     const topSlow = Math.abs(slow.f.displacements().get(topRowAt(slow.rows, slow.scrollTop)) ?? 0);
     const topFast = Math.abs(fast.f.displacements().get(topRowAt(fast.rows, fast.scrollTop)) ?? 0);
-    expect(topSlow).toBeGreaterThan(25); // v1 capped this at 10
-    expect(topFast).toBeGreaterThan(50);
-    expect(topFast).toBeGreaterThan(topSlow * 1.5);
+    expect(topSlow).toBeCloseTo(0.5 * TAU, 0); // 300ms of drag: 99.9% of steady
+    expect(topFast).toBeCloseTo(1.0 * TAU, 0);
+    expect(topFast / topSlow).toBeCloseTo(2, 2); // proportional to speed
   });
 
-  it("the stretch builds over the drag rather than appearing at once", () => {
+  it("the stretch is there within a few frames, not built over a fraction of a second", () => {
     const d = grab();
     const lags: number[] = [];
-    for (let k = 0; k < 18; k++) {
+    for (let k = 0; k < 12; k++) {
       drag(d, 0.5, FRAME, -1);
       lags.push(Math.abs(d.f.lag()));
     }
     for (let k = 1; k < lags.length; k++) expect(lags[k]).toBeGreaterThan(lags[k - 1]);
-    expect(lags[5]).toBeLessThan(lags[17] * 0.75); // a third of the way in, well under the end
+    // 100ms in (6 frames): 89% of steady; the second build was near a third
+    expect(lags[5]).toBeGreaterThan(0.5 * TAU * 0.85);
+    expect(lags[11]).toBeGreaterThan(0.5 * TAU * 0.98);
   });
 
-  it("farther-from-finger rows lag more, so the gaps open, and near rows keep up", () => {
+  it("the profile is a V on the finger: each row trails by distance/500 of the reference lag, saturating beyond 500", () => {
     const d = grab();
-    drag(d, 0.5, 300, -1);
+    drag(d, 1.0, 300, -1);
+    const L = d.f.lag();
     const disp = d.f.displacements();
     const anchorContent = d.scrollTop + THUMB;
-    const above = [...disp.entries()]
-      .filter(([i]) => d.rows[i].top + d.rows[i].height / 2 < anchorContent)
-      .sort((a, b) => d.rows[a[0]].top - d.rows[b[0]].top); // top of screen first
-    expect(above.length).toBeGreaterThan(5);
-    for (let k = 1; k < above.length; k++) {
-      expect(Math.abs(above[k][1])).toBeLessThanOrEqual(Math.abs(above[k - 1][1]) + 1e-9);
+    let sawSaturated = 0;
+    for (const [i, dy] of disp) {
+      const dist = Math.abs(d.rows[i].top + d.rows[i].height / 2 - anchorContent);
+      if (d.rows[i].top + d.rows[i].height / 2 < anchorContent) {
+        // the stretching side (above the finger, scrolling toward older): the pure profile
+        expect(dy).toBeCloseTo(resistanceFor(dist) * L, 6);
+        if (dist >= TUNING.RESISTANCE_DIVISOR) sawSaturated++;
+      }
     }
-    // the widest gap, at the top, opened by several px; the row under the thumb hardly moved
-    const opened = Math.abs(above[0][1]) - Math.abs(above[1][1]);
-    expect(opened).toBeGreaterThan(2);
-    const nearest = above[above.length - 1];
-    expect(Math.abs(nearest[1])).toBeLessThan(5);
+    expect(sawSaturated).toBeGreaterThan(0);
+    // two saturated rows keep their gap; two rows inside the divisor open by spacing x L / 500
+    const above = [...disp.keys()]
+      .filter((i) => d.rows[i].top + d.rows[i].height / 2 < anchorContent)
+      .sort((a, b) => a - b);
+    const change = (i: number) => (disp.get(i + 1) ?? 0) - (disp.get(i) ?? 0);
+    const far = above.filter((i) => Math.abs(d.rows[i + 1].top + 20 - anchorContent) >= TUNING.RESISTANCE_DIVISOR);
+    for (const i of far) expect(change(i)).toBeCloseTo(0, 6);
+    const near = above.filter(
+      (i) => d.rows[i + 1].top + 20 < anchorContent && Math.abs(d.rows[i].top + 20 - anchorContent) < TUNING.RESISTANCE_DIVISOR - 60,
+    ); // both rows above the finger and inside the divisor: no fold, no saturation
+    expect(near.length).toBeGreaterThan(3);
+    for (const i of near) {
+      const spacing = d.rows[i + 1].top + 20 - (d.rows[i].top + 20);
+      expect(change(i)).toBeCloseTo((spacing * Math.abs(L)) / TUNING.RESISTANCE_DIVISOR, 6); // opening
+    }
+  });
+
+  it("the gaps open by a few px each and the far rows by tens: the recording's 0.09 ms/px at 1 px/ms", () => {
+    const d = grab();
+    drag(d, 1.0, 300, -1);
+    const disp = d.f.displacements();
+    const anchorContent = d.scrollTop + THUMB;
+    let widest = 0;
+    for (let i = 0; i < d.rows.length - 1; i++) {
+      if (!disp.has(i) || !disp.has(i + 1)) continue;
+      if (d.rows[i + 1].top + 20 > anchorContent) continue;
+      widest = Math.max(widest, (disp.get(i + 1) ?? 0) - (disp.get(i) ?? 0));
+    }
+    // a 52px spacing (40 + a 12px sender gap) opens by 52 x 45 / 500 = 4.7px
+    expect(widest).toBeCloseTo((52 * TAU) / 500, 1);
+    expect(Math.abs(disp.get(topRowAt(d.rows, d.scrollTop)) ?? 0)).toBeCloseTo(TAU, 0); // the top row, 45px
   });
 
   it("only rows near the viewport participate; far rows are exactly zero", () => {
@@ -305,145 +313,148 @@ describe("createSpringField — the stretch builds with speed and distance, by t
       if (!inWindow) expect(disp.has(i)).toBe(false);
     }
     expect(disp.size).toBeGreaterThan(10);
-    expect(disp.size).toBeLessThanOrEqual(28); // bounded by the window, not the thread
+    expect(disp.size).toBeLessThanOrEqual(36); // bounded by the window, not the thread
   });
 
-  it("the stretch ceiling: a long hard drag stops at STRETCH_CAP_PX of reference lag", () => {
+  it("the ceiling: only a 6.7 px/ms fling reaches STRETCH_CAP_PX of reference lag", () => {
     const d = grab();
-    drag(d, 3.0, 800, -1);
-    expect(Math.abs(d.f.lag())).toBeLessThanOrEqual(TUNING.STRETCH_CAP_PX + 1e-9);
-    // each frame clamps and then relaxes by one frame's pull, so the displayed
-    // ceiling sits a few percent under the cap
-    expect(Math.abs(d.f.lag())).toBeGreaterThan(TUNING.STRETCH_CAP_PX * 0.9);
+    drag(d, 8.0, 400, -1);
+    expect(Math.abs(d.f.lag())).toBeCloseTo(TUNING.STRETCH_CAP_PX, 6);
     expect(maxAbs(d.f.displacements())).toBeLessThanOrEqual(TUNING.STRETCH_CAP_PX + 1e-9);
+    const finger = grab();
+    drag(finger, 3.0, 400, -1); // the hardest real finger drag in the recording
+    expect(Math.abs(finger.f.lag())).toBeLessThan(TUNING.STRETCH_CAP_PX * 0.5);
   });
 });
 
-describe("createSpringField — the sign, against the owner's description", () => {
-  it("after scrolling toward older messages the rows sit above their seats and fall DOWN", () => {
+describe("createSpringField — the sign, against the recording", () => {
+  it("after scrolling toward older messages the rows sit above their seats and come DOWN", () => {
     const d = grab();
     drag(d, 0.5, 300, -1); // scrollTop falls: toward older
     const top = topRowAt(d.rows, d.scrollTop);
     const atStop = d.f.displacements().get(top) ?? 0;
     expect(atStop).toBeLessThan(-20); // negative translate: above its seat
-    const trail = stillFrames(d, 700, top);
+    const trail = stillFrames(d, 200, top);
     expect(trail[trail.length - 1]).toBeGreaterThan(atStop); // moving down toward 0
-    expect(Math.abs(trail[trail.length - 1])).toBeLessThan(Math.abs(atStop) * 0.2);
+    expect(Math.abs(trail[trail.length - 1])).toBeLessThan(Math.abs(atStop) * 0.02);
   });
 
-  it("after scrolling toward newer messages the rows sit below their seats and spring UP", () => {
+  it("after scrolling toward newer messages the rows sit below their seats and come UP", () => {
     const d = grab();
     drag(d, 0.5, 300, 1);
     const disp = d.f.displacements();
-    // every displaced row is below its seat (positive translate)
-    for (const dy of disp.values()) expect(dy).toBeGreaterThan(0);
+    for (const dy of disp.values()) expect(dy).toBeGreaterThan(0); // every displaced row below its seat
     const bottom = [...disp.keys()].sort((a, b) => b - a)[0];
     const atStop = disp.get(bottom)!;
-    const trail = stillFrames(d, 700, bottom);
+    const trail = stillFrames(d, 200, bottom);
     expect(trail[trail.length - 1]).toBeLessThan(atStop); // moving up toward 0
   });
 });
 
-describe("createSpringField — a beat, then a visible fall", () => {
-  it("after the finger stops, nothing moves for the hold, then the rows fall", () => {
+describe("createSpringField — the return: from the next frame, 90% in a tenth of a second, no overshoot", () => {
+  it("nothing waits: a third of the displacement is gone one frame after the stop", () => {
     const d = grab();
     drag(d, 0.5, 300, -1);
     const top = topRowAt(d.rows, d.scrollTop);
     const atStop = d.f.displacements().get(top)!;
-    const hold = TUNING.STOP_QUIET_MS + TUNING.RELEASE_BEAT_MS;
-    const trail = stillFrames(d, 1200, top);
-    // the hold: identical displacement frame after frame
-    const heldFrames = Math.floor(hold / FRAME);
-    for (let k = 0; k < heldFrames; k++) expect(trail[k]).toBeCloseTo(atStop, 6);
-    // the first pixel of return arrives after the hold and within a third of a second
-    const firstPx = trail.findIndex((v) => Math.abs(atStop - v) >= 1);
-    const firstPxMs = (firstPx + 1) * FRAME;
-    expect(firstPxMs).toBeGreaterThan(hold);
-    expect(firstPxMs).toBeLessThan(300);
-    // the settle shape after the stop: half back near 400ms, 90% by 700ms
-    const closed = (v: number) => Math.abs(atStop - v) / Math.abs(atStop);
-    const t50 = (trail.findIndex((v) => closed(v) >= 0.5) + 1) * FRAME;
-    const t90 = (trail.findIndex((v) => closed(v) >= 0.9) + 1) * FRAME;
-    expect(t50).toBeGreaterThan(300);
-    expect(t50).toBeLessThan(500);
-    expect(t90).toBeGreaterThan(550);
-    expect(t90).toBeLessThan(800);
-    // and it moves visibly: the fastest frame is over a pixel
+    const trail = stillFrames(d, 400, top);
+    const gone = (v: number) => Math.abs(atStop - v) / Math.abs(atStop);
+    expect(gone(trail[0])).toBeGreaterThan(0.25); // the recording: 0.34–0.36
+    expect(gone(trail[0])).toBeLessThan(0.40);
+    // 63% at tau (frame 3 at 50ms), 90% by 2.3 tau (frame 7 at 117ms)
+    expect(gone(trail[2])).toBeGreaterThan(0.6);
+    expect(gone(trail[6])).toBeGreaterThan(0.9);
+    // and visibly: the fastest frame moves several px on a 22px stretch
     let peak = 0;
     for (let k = 1; k < trail.length; k++) peak = Math.max(peak, Math.abs(trail[k] - trail[k - 1]));
-    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeGreaterThan(3);
   });
 
-  it("the fall passes the seat by a small overshoot and comes to exact rest with no residue", () => {
+  it("never passes the seat, comes to exact rest with no residue, and the frames stop within 400ms", () => {
     const d = grab();
     drag(d, 1.0, 300, -1);
     const top = topRowAt(d.rows, d.scrollTop);
     const atStop = d.f.displacements().get(top)!;
-    let overshoot = 0;
     let frames = 0;
     while (d.f.active() && frames < 300) {
       d.now += FRAME;
       d.f.frame(d.now, d.scrollTop);
       const v = d.f.displacements().get(top) ?? 0;
-      if (Math.sign(v) === -Math.sign(atStop)) overshoot = Math.max(overshoot, Math.abs(v));
+      expect(Math.sign(v) === -Math.sign(atStop)).toBe(false); // no overshoot, ever
       frames++;
     }
-    expect(overshoot).toBeGreaterThan(0); // a hint
-    expect(overshoot).toBeLessThan(Math.abs(atStop) * 0.03); // never a bounce
     expect(d.f.active()).toBe(false);
     expect(d.f.lag()).toBe(0);
     expect(d.f.displacements().size).toBe(0);
-    expect(frames * FRAME).toBeLessThan(2000); // frames stop once everything is home
+    expect(frames * FRAME).toBeLessThan(400);
   });
 
-  it("frames stop at rest: a stray frame after the settle touches nothing", () => {
+  it("frames stop at rest: a stray frame after the return touches nothing", () => {
     const d = grab();
     drag(d, 0.5, 200, -1);
-    stillFrames(d, 2500, 0);
+    stillFrames(d, 600, 0);
     expect(d.f.active()).toBe(false);
     d.f.frame(d.now + FRAME, d.scrollTop);
     expect(d.f.displacements().size).toBe(0);
   });
 
-  it("a finger that pauses mid-drag holds the stretch (no creep) and moving again keeps driving", () => {
+  it("a finger that pauses mid-drag lets the stretch melt (no hold), and moving again rebuilds it", () => {
     const d = grab();
     drag(d, 0.5, 200, -1);
-    const before = d.f.lag();
-    stillFrames(d, FRAME * 2, 0); // two still frames: under the quiet window
-    expect(d.f.lag()).toBe(before);
-    expect(d.f.phase()).toBe("driving");
+    const before = Math.abs(d.f.lag());
+    stillFrames(d, 100, 0); // the finger holds still on the glass
+    expect(d.f.phase()).toBe("settling");
+    expect(d.f.armed()).toBe(true); // the finger is still down
+    expect(Math.abs(d.f.lag())).toBeLessThan(before * 0.15); // 89% melted in 100ms
     drag(d, 0.5, 100, -1);
-    expect(Math.abs(d.f.lag())).toBeGreaterThan(Math.abs(before));
+    expect(d.f.phase()).toBe("driving");
+    expect(Math.abs(d.f.lag())).toBeGreaterThan(before * 0.85); // back at the steady stretch
   });
 });
 
-describe("createSpringField — a fling: the lag rides the momentum and falls when it stops", () => {
-  it("lift mid-drag coasts; the coast changes nothing; the stop brings the beat and the fall", () => {
+describe("createSpringField — a fling: the lag tracks the decaying speed and is gone with it", () => {
+  it("lift mid-drag coasts; through the coast the lag follows speed x tau; at the end there is nothing left to fall", () => {
     const d = grab();
     drag(d, 2.0, 150, -1);
-    const atLift = d.f.lag();
     d.f.lift();
     expect(d.f.phase()).toBe("coasting");
     expect(d.f.armed()).toBe(true);
     // iOS-style deceleration: v *= 0.998 per ms, until it is a crawl
     let v = 2.0;
+    let ms = 0;
     while (v > 0.05) {
       d.now += FRAME;
+      ms += FRAME;
       d.scrollTop -= v * FRAME;
       d.f.frame(d.now, d.scrollTop);
-      expect(d.f.lag()).toBe(atLift); // held, exactly
+      if (ms > 100) {
+        // the lag rides a little above speed x tau while the speed falls (it remembers the faster frames)
+        expect(Math.abs(d.f.lag())).toBeGreaterThan(v * TAU * 0.95);
+        expect(Math.abs(d.f.lag())).toBeLessThan(v * TAU * 1.15);
+      }
       v *= Math.pow(0.998, FRAME);
     }
+    expect(ms).toBeGreaterThan(1500); // the coast itself lasts well over a second
     const top = topRowAt(d.rows, d.scrollTop);
-    const atStop = d.f.displacements().get(top)!;
-    expect(Math.abs(atStop)).toBeGreaterThan(60); // the fall is from the fling's full stretch
-    const trail = stillFrames(d, 1000, top);
-    const hold = TUNING.STOP_QUIET_MS + TUNING.RELEASE_BEAT_MS;
-    for (let k = 0; k < Math.floor(hold / FRAME); k++) expect(trail[k]).toBeCloseTo(atStop, 6);
-    expect(Math.abs(trail[trail.length - 1])).toBeLessThan(Math.abs(atStop) * 0.05);
-    stillFrames(d, 1500, top);
+    const atStop = Math.abs(d.f.displacements().get(top) ?? 0);
+    expect(atStop).toBeLessThan(5); // the recording: a few px left when a coast ends
+    stillFrames(d, 400, top);
     expect(d.f.active()).toBe(false);
     expect(d.f.armed()).toBe(false); // nothing left: the gesture is over
+  });
+
+  it("a caught fling: the content stops dead under the finger and the full stretch returns from that frame", () => {
+    const d = grab();
+    drag(d, 2.0, 150, -1);
+    d.f.lift();
+    drag(d, 1.8, 100, -1); // coasting
+    d.f.begin(CLIENT_H, THREAD_TOP, THUMB, true); // the catch
+    const top = topRowAt(d.rows, d.scrollTop);
+    const held = Math.abs(d.f.displacements().get(top) ?? 0);
+    expect(held).toBeGreaterThan(70); // 1.8 px/ms x 45 = 81px at the top of the viewport
+    const trail = stillFrames(d, 200, top);
+    expect(Math.abs(trail[0])).toBeLessThan(held * 0.75); // moving on the very next frame
+    expect(Math.abs(trail[trail.length - 1])).toBeLessThan(held * 0.02);
   });
 
   it("a lift with nothing stretched drops the gesture at once", () => {
@@ -464,31 +475,32 @@ describe("createSpringField — a fling: the lag rides the momentum and falls wh
     expect(d.f.lag()).toBe(held);
     expect(d.f.phase()).toBe("driving");
     d.f.frame(d.now + FRAME, d.scrollTop); // a live gesture keeps its baseline: no jump
-    expect(d.f.lag()).toBe(held);
+    expect(Math.abs(d.f.lag())).toBeLessThan(Math.abs(held)); // a still frame: it melts, no step
+    expect(Math.abs(d.f.lag())).toBeGreaterThan(Math.abs(held) * 0.6);
   });
 
-  it("a grab mid-settle keeps the fall in progress until the finger moves", () => {
+  it("a grab mid-return keeps the return going until the finger moves", () => {
     const d = grab();
     drag(d, 1.0, 200, -1);
-    stillFrames(d, 400, 0); // stopped, beat done, settling
+    stillFrames(d, 50, 0); // stopped, returning
     expect(d.f.phase()).toBe("settling");
     const mid = d.f.lag();
     d.f.begin(CLIENT_H, THREAD_TOP, THUMB, true);
     expect(d.f.phase()).toBe("settling");
     expect(d.f.lag()).toBe(mid);
-    stillFrames(d, 100, 0);
-    expect(Math.abs(d.f.lag())).toBeLessThan(Math.abs(mid)); // still falling
+    stillFrames(d, 50, 0);
+    expect(Math.abs(d.f.lag())).toBeLessThan(Math.abs(mid)); // still returning
     drag(d, 0.5, 50, -1);
     expect(d.f.phase()).toBe("driving");
   });
 });
 
 describe("createSpringField — rows never overlap", () => {
-  // Every pair inside the participation window keeps at least (1 - GAP_CLOSE_MAX)
-  // of its rest gap, and every row on screen keeps document order. (At the
-  // window's far edge the last participating row carries its lag while the row
-  // beyond carries none; that pair sits beyond the buffer, which is wider than
-  // any displacement toward it, so no row on screen can ever meet one.)
+  // Every pair inside the participation window keeps at least the floor (or
+  // its own rest gap if that is smaller), and every row on screen keeps
+  // document order. (At the window's far edge the last participating row
+  // carries its lag while the row beyond carries none; that pair sits beyond
+  // the buffer, which is wider than any lag, so no row on screen ever meets one.)
   const check = (d: Drive) => {
     const { rows, scrollTop } = d;
     const disp = d.f.displacements();
@@ -498,18 +510,20 @@ describe("createSpringField — rows never overlap", () => {
       const top = rows[i].top + (disp.get(i) ?? 0);
       return top + rows[i].height > scrollTop && top < scrollTop + CLIENT_H;
     };
+    let tightest = Infinity;
     for (let i = 0; i < rows.length - 1; i++) {
       const a = rows[i].top + (disp.get(i) ?? 0);
       const b = rows[i + 1].top + (disp.get(i + 1) ?? 0);
       if (onScreen(i) || onScreen(i + 1)) expect(b).toBeGreaterThan(a); // document order kept
       if (!inWindow(i) || !inWindow(i + 1)) continue;
       const gap = b - (a + rows[i].height);
-      // the guard: no pair closes by more than GAP_CLOSE_MAX of its own rest gap
-      expect(gap).toBeGreaterThanOrEqual(gapBetween(rows, i) * (1 - TUNING.GAP_CLOSE_MAX) - 1e-6);
+      expect(gap).toBeGreaterThanOrEqual(Math.min(gapBetween(rows, i), TUNING.GAP_MIN_PX) - 1e-6);
+      tightest = Math.min(tightest, gap);
     }
+    return tightest;
   };
 
-  it("through a hard fling and its settle, both directions, every frame", () => {
+  it("through a hard fling and its return, both directions, every frame", () => {
     for (const dir of [-1, 1] as const) {
       const d = grab();
       for (let k = 0; k < 12; k++) {
@@ -535,9 +549,9 @@ describe("createSpringField — rows never overlap", () => {
     }
   });
 
-  it("the compressing side does close up — visibly, but only to the guard", () => {
+  it("the compressing side closes up to the floor and no further: the guard binds on a hard drag", () => {
     const d = grab();
-    drag(d, 1.0, 300, 1); // toward newer: the rows above the thumb bunch
+    drag(d, 3.0, 300, 1); // toward newer: the rows above the thumb bunch (135px of reference lag)
     const disp = d.f.displacements();
     let closedSome = false;
     for (let i = 0; i < d.rows.length - 1; i++) {
@@ -546,7 +560,28 @@ describe("createSpringField — rows never overlap", () => {
       if (change < -1) closedSome = true;
     }
     expect(closedSome).toBe(true);
-    check(d);
+    expect(check(d)).toBeCloseTo(TUNING.GAP_MIN_PX, 6); // the tightest pair sits exactly on the floor
+  });
+
+  it("an ordinary drag closes the gaps ahead of the finger by a fraction, well clear of the floor", () => {
+    const d = grab();
+    drag(d, 0.5, 300, 1);
+    // the 12px sender gaps just above the thumb close by ~spacing x 22.5 / 500 = 2.3px
+    expect(check(d)).toBeGreaterThan(TUNING.GAP_MIN_PX);
+    const disp = d.f.displacements();
+    const anchorContent = d.scrollTop + THUMB;
+    const closes: number[] = [];
+    for (let i = 0; i < d.rows.length - 1; i++) {
+      if (!disp.has(i) || !disp.has(i + 1)) continue;
+      if (d.rows[i + 1].top + 20 > anchorContent) continue;
+      if (Math.abs(d.rows[i].top + 20 - anchorContent) > 300) continue;
+      closes.push((disp.get(i) ?? 0) - (disp.get(i + 1) ?? 0));
+    }
+    expect(closes.length).toBeGreaterThan(3);
+    for (const c of closes) {
+      expect(c).toBeGreaterThan(1.5);
+      expect(c).toBeLessThan(5);
+    }
   });
 });
 
@@ -558,12 +593,22 @@ describe("profileFor — the guard, on its own", () => {
       { top: 40, height: 40 }, // touching seats
       { top: 84, height: 40 },
     ];
-    const p = profileFor(tight, 0, 2, 200, 300); // finger far below: everything compresses upward...
-    // rows above the finger with D > 0 close toward it; the touching pair may not close
+    const p = profileFor(tight, 0, 2, 200, 300); // finger far below, L > 0: the rows above close toward it
     expect((p.get(1) ?? 0) - (p.get(0) ?? 0)).toBeGreaterThanOrEqual(-1e-9);
   });
 
-  it("the stretching side is the pure resistance profile, uncapped by the guard", () => {
+  it("a pair closes down to the floor exactly, never past it", () => {
+    const pair: SpringRow[] = [
+      { top: 0, height: 40 },
+      { top: 52, height: 40 }, // a 12px sender gap
+      { top: 104, height: 40 },
+    ];
+    const p = profileFor(pair, 0, 2, 124, 300); // finger at the bottom row, a huge L
+    const gap = pair[1].top + (p.get(1) ?? 0) - (pair[0].top + (p.get(0) ?? 0) + 40);
+    expect(gap).toBeCloseTo(TUNING.GAP_MIN_PX, 9);
+  });
+
+  it("the stretching side is the pure resistance profile, untouched by the guard", () => {
     const anchor = rows[15].top + 20;
     const p = profileFor(rows, 0, 19, anchor, -200);
     for (let i = 0; i < 15; i++) {
@@ -572,7 +617,7 @@ describe("profileFor — the guard, on its own", () => {
     }
   });
 
-  it("returns nothing for D = 0 and nothing outside lo..hi", () => {
+  it("returns nothing for L = 0 and nothing outside lo..hi", () => {
     expect(profileFor(rows, 0, 19, 500, 0).size).toBe(0);
     const p = profileFor(rows, 5, 9, 500, -100);
     for (const i of p.keys()) {
@@ -596,7 +641,7 @@ describe("createSpringField — freeze is the hold-off, measure never snaps", ()
     expect(d.f.lag()).toBe(0);
   });
 
-  it("a re-measure mid-settle with the same seats changes nothing", () => {
+  it("a re-measure mid-return with the same seats changes nothing", () => {
     const d = grab();
     drag(d, 0.5, 300, -1);
     const before = [...d.f.displacements().entries()];

@@ -1,102 +1,90 @@
-// Springy transcript, second build — the bubbles lag the scroll by their
-// distance from the finger, the gaps open while the finger moves, and a beat
-// after the scroll stops the rows visibly fall back into their seats. The effect
-// Messages has carried since iOS 7 (WWDC 2013 session 217 "Exploring Scroll
-// Views": one UIAttachmentBehavior per visible cell, the cell's centre shifted
-// by the scroll delta scaled by a "scroll resistance" that grows with the
-// cell's distance from the touch; Ash Furrow's ASHSpringyCollectionView is the
-// open derivation: length 0, damping 0.8, frequency 1 Hz, resistance =
-// distance/1500, the shift clamped to the delta, springs only near the visible
-// rect).
+// Springy transcript, third build — measured from Messages itself, not from a
+// description. The owner recorded his iPhone Messages transcript being dragged,
+// flung, stopped and caught (62 s, 3500 frames, 1125x2436 at 3x); the bubbles
+// were tracked frame by frame and a lag model fitted to every gesture (the
+// numbers are in the wiki agent notes). What the transcript actually does:
 //
-// Why the first build was invisible (the numbers are in the wiki agent notes):
-// it capped every row at 10px, so at any real finger speed all far rows sat on
-// the cap and the field flattened into a uniform 9px block shift — the widest
-// gap opened 4px at a crawl and ONE pixel at a fling — and its critically
-// damped 1.4 Hz spring returned that 9px at 0.7px per frame, over before the
-// eye registered a fall. This build keeps what was right there (compositor-only
-// `translate`, seats read once per gesture, only near-viewport rows, the
-// hold-off through every app-owned motion) and rebuilds the physics:
+//   - Each bubble trails the scroll by a fraction of the scroll's motion that
+//     grows linearly with its distance from the finger: resistance =
+//     distance / RESISTANCE_DIVISOR, capped at 1. The profile is a symmetric V
+//     with its vertex on the finger, so gaps open on the trailing side and
+//     close on the leading side (a 102 px timestamp gap closed to 64 in the
+//     recording). Beyond the divisor the lag saturates: two far rows keep their
+//     gap. Fitted divisor 430–500 CSS px (1300–1500 device px); 500 here.
+//   - The trailing is a FIRST-ORDER lag, not a spring: one time constant of
+//     about 45 ms (steady-state stretch 47 ms x speed, return 36–45 ms). Under a
+//     steady drag the stretch is speed x tau x resistance — at 1 px/ms a row
+//     400 px from the finger sits 36 px behind — and it is there within a few
+//     frames of the finger starting to move.
+//   - When the content stops, the return starts on the very next frame (a third
+//     of the displacement is gone one frame after the stop), is 63% done at
+//     45 ms, 90% at 105 ms, and never overshoots. No beat, no hold: a finger
+//     that pauses on the glass lets the stretch melt the same way.
+//   - A fling holds nothing: through the coast the lag tracks the decaying
+//     speed (measured x ≈ speed x tau x resistance frame after frame), so by
+//     the time the coast ends the lag is a few px and there is nothing left to
+//     fall. The anchor stays where the finger lifted.
+//   - Bubbles only translate (heights unchanged to the pixel while moving).
+//   - The same profile carries through the rubber-band bounce at the ends of
+//     the thread; an inner scroller in iOS Safari does not expose that
+//     overscroll in scrollTop, so the bounce is the one part not replicated.
 //
-//   - ONE spring, not one per row. Every row's springs are identical and driven
-//     in proportion, so their responses are proportional: the field holds a
-//     single reference lag D (the lag of a row exactly RESISTANCE_DIVISOR px
-//     from the finger) and each row shows resistance * D. Capping or relaxing D
-//     moves the whole profile in proportion, so the near-to-far gradient — the
-//     opening gaps — is never flattened, which is exactly what the per-row cap
-//     did. Furrow's per-cell springs are the same linear system; this is the
-//     closed form of it.
-//   - Driven per animation frame from the scroll position, not from scroll
-//     events: each frame injects the frame's scroll delta into D and relaxes it
-//     on the spring, so a steady drag holds a speed-proportional lag
-//     (2*zeta*speed/omega at resistance 1) and the stretch builds with finger
-//     speed and with distance from the finger.
-//   - Underdamped, Furrow's 0.8 at 1 Hz: a slow, visible settle with a hint
-//     (1.5%) of overshoot, never a snap.
-//   - A beat. When the scroll position stops changing (the finger stopped on
-//     the glass, or momentum ran out) the springs hold for a moment and then let
-//     go from rest, so the fall reads as "a beat, then the rows drop back".
-//   - Rows never overlap, by geometry: on the compressing side (the rows ahead of
-//     the finger's motion, which close up as the far ones lag) each pair may
-//     close at most GAP_CLOSE_MAX of its own rest gap. The bound is derived from
-//     the seats the gesture measured, so a tight continuation pair keeps its
-//     room while a stamp gap can bunch further. The stretching side (behind the
-//     finger) only ever opens, so it needs no overlap bound — only a plain
-//     ceiling on D so a hard fling stops growing the stretch.
+// Why the second build (0.3.123) read as wrong against this: a 1 Hz spring with
+// a ~200 ms build, a 150 ms frozen beat after the stop, a return that was only
+// half done 400 ms after the stop and crossed the seat with an overshoot near
+// 800 ms (the real return is 90% done in 105 ms), and a fling that froze the
+// full stretch through a one-to-two-second coast and dropped it in one fall at
+// the end (the real stretch is gone with the speed). The 50%-of-gap compression
+// cap was also tighter than the real transcript, which closes gaps to a third.
 //
-// Sign, checked against the owner's description: after scrolling toward older
-// messages (scrollTop falling) D is negative, the rows sit above their seats and
-// fall DOWN into place; after scrolling toward newer, they sit below and spring
-// UP. Pure and DOM-free: geometry, a scroll position and an anchor in, a
+// Kept from the earlier builds: one shared reference lag L (the lag of a row
+// exactly RESISTANCE_DIVISOR px from the finger; each row shows resistance x L,
+// so the near-to-far gradient is exact and a row entering the window takes its
+// place in the profile with no kink), the translate longhand written by main.ts
+// (never the peek's transform), seats read once per gesture, participation
+// only near the viewport, a compress guard walked outward from the finger so
+// rows can never overlap, and the hold-off through every motion the app owns.
+//
+// Sign: scrollTop rising (toward newer, content moving up the screen) leaves
+// L positive and the rows displaced DOWN behind the motion; falling (toward
+// older) leaves them displaced UP. Both return toward the seat from the next
+// frame. Pure and DOM-free: geometry, a scroll position and an anchor in, a
 // per-row displacement map out. main.ts owns the reads, the writes and the rAF.
 
 // ---- every tunable, in one place ---------------------------------------------
 export const TUNING = {
-  /** px of distance from the finger per unit of resistance (Furrow: 1500). The
-      amplitude knob: smaller = the far rows lag more for the same drag. */
-  RESISTANCE_DIVISOR: 1500,
-  /** resistance never exceeds 1: a row never lags by more than the scroll
-      itself, so it can never move the wrong way on screen (Furrow's clamp). */
+  /** CSS px of distance from the finger per unit of resistance. Measured
+      430–500 on the phone (1300–1500 device px at 3x). The amplitude knob:
+      smaller = the far rows trail more for the same drag. */
+  RESISTANCE_DIVISOR: 500,
+  /** resistance never exceeds 1: a row never trails by more than the scroll
+      itself, and rows further than the divisor from the finger trail alike. */
   RESISTANCE_MAX: 1,
-  /** the spring's undamped natural frequency (Furrow/WWDC: 1 Hz) */
-  FREQUENCY_HZ: 1.0,
-  /** damping ratio (Furrow: 0.8; 1 is critical). 0.8 settles with a 1.5%
-      overshoot — a settle, not a snap and not a bounce. */
-  DAMPING_RATIO: 0.8,
-  /** the scroll position must sit still this long before the springs count as
-      released (a slow finger can skip a frame or two; this is longer) */
-  STOP_QUIET_MS: 50,
-  /** then the rows hold their stretch this long before letting go — the beat */
-  RELEASE_BEAT_MS: 100,
-  /** the fraction of any pair's rest gap that may close on the compressing
-      side. 0.5: a 4px continuation gap keeps 2px, a 12px sender gap keeps 6px.
-      Rows can never touch, whatever the drag. */
-  GAP_CLOSE_MAX: 0.5,
-  /** ceiling on the reference lag D, px: a hard fling stops stretching here.
-      Not an overlap bound (the stretching side cannot overlap) — the steady
-      lag a 1.2 px/ms drag would reach, so ordinary drags never touch it and
-      only a fling does. */
+  /** the lag's time constant, ms. Measured 36–47 ms. It sets both the steady
+      stretch (speed x tau x resistance) and the return (63% gone at tau, 90%
+      at 2.3 tau). The speed knob: larger = a longer, softer return AND a
+      bigger stretch for the same drag. */
+  LAG_TAU_MS: 45,
+  /** the compress guard: no pair on the closing side ever comes closer than
+      this many px (a pair whose rest gap is already smaller keeps its rest
+      gap). The recording never closed a gap below 3.3 px or below 63% of
+      rest; this floor only prevents overlap, it does not shape the effect. */
+  GAP_MIN_PX: 2,
+  /** ceiling on the reference lag L, px: a 6.7 px/ms fling would reach it;
+      a finger never does. Only a sanity bound. */
   STRETCH_CAP_PX: 300,
   /** rows with any part within this many px of the viewport participate. A
-      row entering the field takes its lag beyond this band, and a row leaving
-      it drops its (guard-bounded, tens of px) compression there, so the band is
-      wider than any compression the guard can allow: both happen off screen. */
-  PARTICIPATION_BUFFER_PX: 200,
-  /** a stalled tab's frame can hand back a huge dt; clamp it */
-  DT_MAX_MS: 48,
-  /** home: under this lag and this slow, everything clears. A quarter pixel —
-      under the DOM's own half-pixel rounding, so the clear is never seen, and
-      it ends the sub-pixel tail of the settle instead of pumping it for a
-      second more. */
+      row entering the window takes resistance x L at once, so the band must
+      exceed the largest lag a row can carry (the ceiling): both the entry and
+      the exit happen off screen. */
+  PARTICIPATION_BUFFER_PX: 400,
+  /** home: under this reference lag everything clears (a quarter pixel, under
+      the DOM's own rounding, so the clear is never seen). */
   REST_EPS_PX: 0.25,
-  REST_EPS_V: 0.01, // px/ms
 } as const;
 
-/** omega = 2*pi*f, per millisecond (the whole app clocks in ms) */
-export const SPRING_OMEGA = (2 * Math.PI * TUNING.FREQUENCY_HZ) / 1000;
-
-/** the steady lag of the reference row per px/ms of scroll speed: 2*zeta/omega */
-export const LAG_PER_SPEED_MS = (2 * TUNING.DAMPING_RATIO) / SPRING_OMEGA;
+/** the steady lag of the reference row per px/ms of scroll speed: tau itself */
+export const LAG_PER_SPEED_MS = TUNING.LAG_TAU_MS;
 
 /** clamp helper (kept local; the app has no shared one) */
 function clamp(v: number, lo: number, hi: number): number {
@@ -104,8 +92,9 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 /**
- * The scroll resistance for a row at `distance` px from the finger: grows with
- * distance, saturates at RESISTANCE_MAX. (Furrow: `(|dx|+|dy|)/1500`, clamped.)
+ * The scroll resistance for a row at `distance` px from the finger: grows
+ * linearly with distance, saturates at RESISTANCE_MAX. Measured linear (a
+ * power of 0.75 or 1.25 fits the recording worse than 1).
  */
 export function resistanceFor(
   distance: number,
@@ -115,46 +104,22 @@ export function resistanceFor(
   return clamp(Math.abs(distance) / divisor, 0, max);
 }
 
-export interface SpringState {
-  d: number; // displacement from seat, px
-  v: number; // velocity, px/ms
-}
-
 /**
- * Relax one spring toward rest over `dt` ms: the exact solution of
- * x'' + 2*zeta*omega*x' + omega^2*x = 0. Underdamped (zeta < 1, the shipped
- * 0.8) it swings through rest once by a small fraction and settles; at zeta = 1
- * it is the critical form. Closed form, so a long frame cannot blow it up.
+ * Advance the reference lag over one frame: the scroll moved `dS` px in `dt`
+ * ms. The exact solution of L' = v - L/tau for a constant v = dS/dt over the
+ * frame, so the result does not depend on the frame rate: a 33 ms frame lands
+ * where two 16.7 ms frames do, a steady drag settles at exactly speed x tau,
+ * and after a stop L decays as exp(-t/tau) with no overshoot.
  */
-export function relax(
-  state: SpringState,
-  dt: number,
-  omega: number = SPRING_OMEGA,
-  zeta: number = TUNING.DAMPING_RATIO,
-): SpringState {
-  if (dt <= 0) return state;
-  const t = Math.min(dt, TUNING.DT_MAX_MS);
-  const { d, v } = state;
-  if (zeta < 1) {
-    const wd = omega * Math.sqrt(1 - zeta * zeta);
-    const e = Math.exp(-zeta * omega * t);
-    const c = Math.cos(wd * t);
-    const s = Math.sin(wd * t);
-    const b = (v + zeta * omega * d) / wd;
-    return {
-      d: e * (d * c + b * s),
-      v: e * (v * c - ((omega * omega * d + zeta * omega * v) / wd) * s),
-    };
-  }
-  // critical damping (zeta >= 1 is treated as 1): x(t) = (d + (v + omega d) t) e^(-omega t)
-  const e = Math.exp(-omega * t);
-  const base = v + omega * d;
-  return { d: (d + base * t) * e, v: (v - omega * base * t) * e };
+export function relaxLag(L: number, dS: number, dt: number, tau: number = TUNING.LAG_TAU_MS): number {
+  if (dt <= 0) return L + dS;
+  const e = Math.exp(-dt / tau);
+  return L * e + dS * (tau / dt) * (1 - e);
 }
 
-/** home: under the rest thresholds, so the wiring may clear the transforms */
-export function atRest(state: SpringState): boolean {
-  return Math.abs(state.d) < TUNING.REST_EPS_PX && Math.abs(state.v) < TUNING.REST_EPS_V;
+/** home: under the rest threshold, so the wiring may clear the transforms */
+export function atRest(L: number): boolean {
+  return Math.abs(L) < TUNING.REST_EPS_PX;
 }
 
 /** one row's geometry, in the scroller's own content space (offsetTop/height) */
@@ -166,9 +131,7 @@ export interface SpringRow {
 /**
  * The participation window in content space: the visible band [scrollTop,
  * scrollTop + clientHeight] widened by the buffer each way. A row takes part if
- * any of its box lies inside, so a row leaves the window only once it is wholly
- * beyond the buffer — and the stretching side moves rows away from the viewport,
- * so a row dropping its lag at the window's edge is never on screen when it does.
+ * any of its box lies inside.
  */
 export function windowBounds(
   scrollTop: number,
@@ -179,28 +142,32 @@ export function windowBounds(
 }
 
 /**
- * The row profile for a reference lag D: each row lags by resistance * D, then
- * the compress guard walks outward from the row under the finger and lets no
- * pair close by more than GAP_CLOSE_MAX of its rest gap. Pure; exported so the
- * guard is unit-testable on its own. `lo..hi` is the inclusive index range of
- * the participating rows, `anchorY` the finger in content space.
+ * The row profile for a reference lag L: each row trails by resistance x L,
+ * then the compress guard walks outward from the row under the finger and lets
+ * no pair on the closing side come nearer than GAP_MIN_PX (or its own rest gap
+ * if that is smaller). The opening side is the pure profile. Pure; exported so
+ * the guard is unit-testable on its own. `lo..hi` is the inclusive index range
+ * of the participating rows, `anchorY` the finger in content space.
  */
 export function profileFor(
   rows: readonly SpringRow[],
   lo: number,
   hi: number,
   anchorY: number,
-  D: number,
+  L: number,
   divisor: number = TUNING.RESISTANCE_DIVISOR,
   resistanceMax: number = TUNING.RESISTANCE_MAX,
-  closeMax: number = TUNING.GAP_CLOSE_MAX,
+  gapMin: number = TUNING.GAP_MIN_PX,
 ): Map<number, number> {
   const out = new Map<number, number>();
-  if (D === 0 || lo > hi) return out;
+  if (L === 0 || lo > hi) return out;
   const raw = (i: number): number =>
-    resistanceFor(rows[i].top + rows[i].height / 2 - anchorY, divisor, resistanceMax) * D;
-  const gapBelow = (i: number): number =>
-    Math.max(0, rows[i + 1].top - (rows[i].top + rows[i].height)); // rest gap between i and i+1
+    resistanceFor(rows[i].top + rows[i].height / 2 - anchorY, divisor, resistanceMax) * L;
+  // how far the pair (i, i+1) may close: down to the floor, never past its rest gap
+  const room = (i: number): number => {
+    const gap = rows[i + 1].top - (rows[i].top + rows[i].height);
+    return Math.max(0, gap - gapMin);
+  };
   // the split: the first participating row whose centre is at or past the finger
   let split = hi;
   for (let i = lo; i <= hi; i++) {
@@ -215,15 +182,15 @@ export function profileFor(
   const snap = (v: number): number => (Math.abs(v) < 0.01 ? 0 : v);
   const d = new Array<number>(hi - lo + 1);
   d[split - lo] = snap(raw(split));
-  // upward: the row above may come no closer to the row below it than closeMax of their gap
+  // upward: the row above may come no closer to the row below it than the floor
   for (let i = split - 1; i >= lo; i--) {
     const below = d[i + 1 - lo];
-    d[i - lo] = snap(Math.min(raw(i), below + gapBelow(i) * closeMax));
+    d[i - lo] = snap(Math.min(raw(i), below + room(i)));
   }
   // downward: the row below may come no closer to the row above it
   for (let i = split + 1; i <= hi; i++) {
     const above = d[i - 1 - lo];
-    d[i - lo] = snap(Math.max(raw(i), above - gapBelow(i - 1) * closeMax));
+    d[i - lo] = snap(Math.max(raw(i), above - room(i - 1)));
   }
   for (let i = lo; i <= hi; i++) {
     const dy = d[i - lo];
@@ -232,11 +199,11 @@ export function profileFor(
   return out;
 }
 
-export type SpringPhase = "idle" | "driving" | "coasting" | "beat" | "settling";
+export type SpringPhase = "idle" | "driving" | "coasting" | "settling";
 
 export interface SpringField {
-  /** (re)build the row table: once per gesture and on a layout change. The
-      spring itself is row-independent, so a re-measure mid-settle never snaps. */
+  /** (re)build the row table: once per gesture and on a layout change. The lag
+      itself is row-independent, so a re-measure mid-settle never snaps. */
   measure(rows: readonly SpringRow[]): void;
   /** a gesture begins: the finger's screen-Y (null = the viewport centre, for a
       wheel or a pointer), the viewport, and the thread's screen top; the next
@@ -244,19 +211,19 @@ export interface SpringField {
   begin(clientHeight: number, threadTop: number, anchorScreenY: number | null, held: boolean): void;
   /** the finger moved: the field re-centres on it */
   anchor(screenY: number): void;
-  /** the finger left the glass; momentum, if any, is still the gesture */
+  /** the finger left the glass; momentum, if any, is still the gesture. The
+      anchor stays where the finger lifted. */
   lift(): void;
-  /** one animation frame: read the scroll position, drive and relax the spring,
-      detect the stop, run the beat, settle. */
+  /** one animation frame: read the scroll position, advance the lag */
   frame(nowMs: number, scrollTop: number): void;
   /** index -> displacement px for the rows to move this frame */
   displacements(): Map<number, number>;
   /** frames still needed (any phase but idle): the pump keeps scheduling */
   active(): boolean;
-  /** a gesture (or its momentum, or its settle) is live */
+  /** a gesture (or its momentum, or its return) is live */
   armed(): boolean;
   phase(): SpringPhase;
-  /** the reference lag D, px (the lag of a row RESISTANCE_DIVISOR px from the finger) */
+  /** the reference lag L, px (the lag of a row RESISTANCE_DIVISOR px from the finger) */
   lag(): number;
   /** zero everything now and drop the gesture (the hold-off: an app motion is starting) */
   freeze(): void;
@@ -265,29 +232,22 @@ export interface SpringField {
 }
 
 export function createSpringField(opts: {
-  omega?: number;
-  zeta?: number;
+  tau?: number;
   divisor?: number;
   resistanceMax?: number;
   stretchCap?: number;
-  closeMax?: number;
+  gapMin?: number;
   buffer?: number;
-  stopQuietMs?: number;
-  releaseBeatMs?: number;
 } = {}): SpringField {
-  const omega = opts.omega ?? SPRING_OMEGA;
-  const zeta = opts.zeta ?? TUNING.DAMPING_RATIO;
+  const tau = opts.tau ?? TUNING.LAG_TAU_MS;
   const divisor = opts.divisor ?? TUNING.RESISTANCE_DIVISOR;
   const resistanceMax = opts.resistanceMax ?? TUNING.RESISTANCE_MAX;
   const stretchCap = opts.stretchCap ?? TUNING.STRETCH_CAP_PX;
-  const closeMax = opts.closeMax ?? TUNING.GAP_CLOSE_MAX;
+  const gapMin = opts.gapMin ?? TUNING.GAP_MIN_PX;
   const buffer = opts.buffer ?? TUNING.PARTICIPATION_BUFFER_PX;
-  const stopQuietMs = opts.stopQuietMs ?? TUNING.STOP_QUIET_MS;
-  const releaseBeatMs = opts.releaseBeatMs ?? TUNING.RELEASE_BEAT_MS;
 
   let rows: readonly SpringRow[] = [];
-  let D = 0; // the reference lag, px
-  let V = 0; // its velocity, px/ms
+  let L = 0; // the reference lag, px
   let phaseNow: SpringPhase = "idle";
   let isArmed = false;
   let held = false;
@@ -297,8 +257,6 @@ export function createSpringField(opts: {
   let scrollNow = 0;
   let lastScrollTop: number | null = null;
   let lastFrameMs: number | null = null;
-  let stillSince: number | null = null;
-  let beatSince = 0;
 
   function measure(next: readonly SpringRow[]): void {
     rows = next;
@@ -318,10 +276,8 @@ export function createSpringField(opts: {
       lastFrameMs = null;
     }
     isArmed = true;
-    stillSince = null;
-    // a fresh gesture or a grab of a coasting thread drives; a grab mid-beat or
-    // mid-settle keeps that phase (the fall in progress continues) until the
-    // finger actually moves the scroll, which flips it to driving
+    // a fresh gesture or a grab of a coasting thread drives; a grab mid-return
+    // keeps returning until the finger actually moves the scroll
     if (phaseNow === "idle" || phaseNow === "coasting") phaseNow = "driving";
   }
 
@@ -331,17 +287,15 @@ export function createSpringField(opts: {
 
   function lift(): void {
     held = false;
-    if (phaseNow === "idle") isArmed = false; // a still hold: nothing to settle
+    if (phaseNow === "idle") isArmed = false; // a still hold: nothing to return
     // the finger is gone mid-drag: the thread coasts on its own momentum and
-    // the rows ride it with their stretch held, to fall when it stops
+    // the lag keeps tracking the speed, from the anchor where the finger lifted
     else if (phaseNow === "driving") phaseNow = "coasting";
   }
 
   function settle(): void {
-    D = 0;
-    V = 0;
+    L = 0;
     phaseNow = "idle";
-    stillSince = null;
     if (!held) isArmed = false;
   }
 
@@ -353,51 +307,20 @@ export function createSpringField(opts: {
       lastScrollTop = scrollTop;
       return; // a clock and position reading only
     }
-    const dt = Math.min(Math.max(nowMs - lastFrameMs, 0), TUNING.DT_MAX_MS);
+    const dt = Math.max(nowMs - lastFrameMs, 0);
     lastFrameMs = nowMs;
     const delta = scrollTop - lastScrollTop;
     lastScrollTop = scrollTop;
-    if (delta !== 0) {
-      stillSince = null;
-      if (phaseNow === "coasting") {
-        // momentum: the rows ride the coast with the stretch they had at the
-        // lift — no injection, no relax — and fall when it stops
-        return;
-      }
-      // the scroll moved under a finger (or a wheel): inject the frame's delta
-      // (a row at resistance r lags by r*delta of it) and keep driving
-      phaseNow = "driving";
-      D = clamp(D + delta, -stretchCap, stretchCap);
-    } else if (phaseNow === "driving" || phaseNow === "coasting") {
-      // still. The spring's pull is dropped so nothing creeps: a finger that
-      // pauses holds the stretch where it is, and after STOP_QUIET_MS the scroll
-      // counts as stopped — the beat, then the release from rest
-      if (D === 0) {
-        settle(); // nothing stretched: a still hold or a lift with nothing to drop
-        return;
-      }
-      if (stillSince === null) stillSince = nowMs;
-      V = 0;
-      if (nowMs - stillSince >= stopQuietMs) {
-        phaseNow = "beat";
-        beatSince = nowMs;
-      }
-      return;
-    }
-    if (phaseNow === "beat") {
-      if (nowMs - beatSince >= releaseBeatMs) phaseNow = "settling";
-      else return; // held: nothing moves
-    }
-    if (dt > 0) {
-      const next = relax({ d: D, v: V }, dt, omega, zeta);
-      D = clamp(next.d, -stretchCap, stretchCap);
-      V = next.v;
-    }
-    if (atRest({ d: D, v: V })) settle();
+    // the frame's motion goes in and the lag relaxes over the frame, exactly:
+    // a moving scroll holds L near speed x tau, a still one lets it melt
+    L = clamp(relaxLag(L, delta, dt, tau), -stretchCap, stretchCap);
+    if (delta !== 0) phaseNow = held ? "driving" : "coasting";
+    else if (atRest(L)) settle();
+    else phaseNow = "settling";
   }
 
   function displacements(): Map<number, number> {
-    if (D === 0 || rows.length === 0) return new Map();
+    if (L === 0 || rows.length === 0) return new Map();
     const [lo, hi] = windowBounds(scrollNow, clientH, buffer);
     // the participating span: rows with any part inside the window (rows are in
     // document order, so this is one contiguous run)
@@ -413,7 +336,7 @@ export function createSpringField(opts: {
     if (first < 0) return new Map();
     const anchorY =
       anchorScreenY === null ? scrollNow + clientH / 2 : scrollNow + (anchorScreenY - threadTop);
-    return profileFor(rows, first, last, anchorY, D, divisor, resistanceMax, closeMax);
+    return profileFor(rows, first, last, anchorY, L, divisor, resistanceMax, gapMin);
   }
 
   function active(): boolean {
@@ -429,16 +352,14 @@ export function createSpringField(opts: {
   }
 
   function lag(): number {
-    return D;
+    return L;
   }
 
   function freeze(): void {
-    D = 0;
-    V = 0;
+    L = 0;
     phaseNow = "idle";
     isArmed = false;
     held = false;
-    stillSince = null;
     lastScrollTop = null;
     lastFrameMs = null;
   }
