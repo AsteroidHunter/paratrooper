@@ -10,6 +10,14 @@ requires-python = ">=3.12"
 license = { file = "LICENSE.md" }
 authors = [{ name = "Akash Satpathy" }]
 
+# The ranges below are the intent: the oldest version of each package whose
+# behaviour the code relies on. They are deliberately NOT the pin. What each
+# image actually installs is fixed by constraints-web.txt and
+# constraints-agent.txt, each a verbatim reading of the matching live service,
+# applied by the matching Dockerfile with `pip install -c`. A constraints file
+# is the only place a transitive package can be pinned without being declared a
+# direct dependency, which it is not. PINNING.md says how to bump either side.
+#
 # Base deps shared by every entry point. The placement engine is the only
 # truly universal piece (the web service validates proposals too), so it lives
 # in the base set. Service-specific deps go in the extras below so the web and

@@ -525,6 +525,116 @@ def test_worker_image_no_longer_carries_the_github_cli():
     assert "rm -rf /var/lib/apt/lists/*" in dockerfile  # the layer still cleans up
 
 
+# --- the pins hold their shape (PINNING.md) ----------------------------------
+#
+# Ranges in pyproject.toml, exact versions in the constraints files, digests on
+# the base images. Each of those is one edit away from quietly reverting to
+# "whatever was newest on the day of the rebuild", and that reversion is silent
+# everywhere except here: the image still builds, the tests still pass, and the
+# versions have simply moved. So the shape gets asserted rather than trusted.
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+# the [dev] extra never enters an image, so nothing pins it
+PINNED_EXTRAS = {"agent": "constraints-agent.txt", "web": "constraints-web.txt"}
+
+
+def _requirement_name(spec: str) -> str:
+    """The bare distribution name out of a requirement string, normalized the
+    way the packaging spec compares names (case-folded, runs of `-_.` to `-`)."""
+    found = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", spec.strip())
+    assert found, spec
+    return re.sub(r"[-_.]+", "-", found.group(0)).lower()
+
+
+def _constraint_versions(filename: str) -> dict[str, str]:
+    """The `name==version` lines of a constraints file, names normalized."""
+    pins: dict[str, str] = {}
+    for line in (REPO_ROOT / filename).read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name, sep, version = line.partition("==")
+        assert sep and version, f"{filename}: not an exact pin: {line}"
+        pins[_requirement_name(name)] = version
+    return pins
+
+
+def _project_dependencies() -> tuple[list[str], dict[str, list[str]]]:
+    import tomllib
+
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    project = data["project"]
+    return project["dependencies"], project["optional-dependencies"]
+
+
+def test_every_dependency_an_image_installs_is_pinned_exactly():
+    """A range says what the code needs; it does not say what gets installed.
+    Every package either image resolves, the declared ones here and the
+    transitive ones the freeze carries, has to have exactly one version named
+    in that image's constraints file, or a rebuild is free to pick another."""
+    base, extras = _project_dependencies()
+    for extra, filename in PINNED_EXTRAS.items():
+        pins = _constraint_versions(filename)
+        for spec in base + extras[extra]:
+            name = _requirement_name(spec)
+            assert name in pins, f"{name} is declared for [{extra}] but unpinned in {filename}"
+
+
+def test_the_two_extras_keep_their_own_pin_sets():
+    """One shared list would let the web image's resolution reach a version
+    chosen for the worker's tree. The files are separate so each image's pins
+    are a reading of that image, and the packages that are genuinely only one
+    service's stay only one service's."""
+    web = _constraint_versions("constraints-web.txt")
+    agent = _constraint_versions("constraints-agent.txt")
+    assert "playwright" not in web and "claude-agent-sdk" not in web
+    assert "fastapi" not in agent and "pywebpush" not in agent
+    # where they do overlap they must agree, or the shared base deps would mean
+    # two different numpys depending on which image you asked
+    for name in set(web) & set(agent):
+        assert web[name] == agent[name], f"{name}: web {web[name]} vs agent {agent[name]}"
+
+
+def test_the_sdk_pin_lives_in_pyproject_not_only_the_constraints():
+    """The SDK is the one version whose reason is worth reading beside it, so it
+    stays an `==` in pyproject.toml as well as a line in the constraints."""
+    _, extras = _project_dependencies()
+    assert "claude-agent-sdk==0.2.110" in extras["agent"]
+    assert _constraint_versions("constraints-agent.txt")["claude-agent-sdk"] == "0.2.110"
+
+
+def test_both_images_pin_their_base_by_digest():
+    """A tag is a moving pointer. `python:3.12-slim` meant one image the day the
+    service last deployed and means another after the next upstream rebuild, so
+    the tag alone makes the floor of both images a function of the date."""
+    for name in ("Dockerfile.web", "Dockerfile.worker"):
+        for line in (REPO_ROOT / name).read_text().splitlines():
+            if not line.startswith("FROM "):
+                continue
+            assert re.search(r"@sha256:[0-9a-f]{64}", line), f"{name}: undigested base: {line}"
+
+
+def test_both_images_install_under_their_constraints():
+    """The constraints files only bind if the build passes them. Dropping the
+    `-c` leaves the pins sitting in the repo doing nothing, which looks exactly
+    like being pinned right up until the versions move."""
+    for name, filename in (("Dockerfile.web", "constraints-web.txt"),
+                           ("Dockerfile.worker", "constraints-agent.txt")):
+        dockerfile = (REPO_ROOT / name).read_text()
+        assert re.search(rf"pip install[^\n]*-c {re.escape(filename)}", dockerfile), name
+        assert filename in dockerfile.split("RUN pip install")[0], f"{name}: {filename} not copied"
+
+
+def test_the_phone_app_builds_from_its_lock_file():
+    """`npm ci` fails when the lock and the manifest disagree; `npm install`
+    quietly rewrites the lock and moves on. The lock is the phone app's pin, so
+    the build has to be the command that refuses to drift from it."""
+    dockerfile = (REPO_ROOT / "Dockerfile.web").read_text()
+    assert "npm ci" in dockerfile
+    assert not re.search(r"RUN npm install\b", dockerfile)
+    assert (REPO_ROOT / "pwa" / "package-lock.json").exists()
+
+
 # --- the configured branch word ([site] branch_prefix) ------------------------
 
 def test_git_violation_fences_the_configured_prefix():

@@ -2,7 +2,9 @@
 # Sized for Chromium (~1-2GB RAM at runtime). The Claude Agent SDK bundles its
 # own native CLI, so no Node is needed here.
 
-FROM python:3.12-slim
+# python:3.12-slim as it stood on 2026-09-07 (Python 3.12.14, Debian 13
+# trixie), the same interpreter the live worker reports. See PINNING.md.
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
@@ -25,6 +27,13 @@ ENV PYTHONUNBUFFERED=1
 # the platform permits, so it works as the non-root user below. socat is NOT
 # needed with it: the CLI only spawns socat to bridge a restricted network, and
 # the scrub leaves the network alone.
+# Node stays on major 22, which is what the running worker reports (v22.23.2).
+# The major is pinned; the rest is not, and honestly so: `setup_22.x` is fetched
+# from nodesource at build time and installs whatever 22.x their apt suite holds
+# that day, so the patch level can move under a rebuild. Pinning it the rest of
+# the way means dropping the script and installing a named nodejs version from
+# a keyring and apt source written into the image by hand. That is a change of
+# install route, so it is a deliberate follow-up, not part of this pass.
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl bubblewrap \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get update \
@@ -34,10 +43,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 # The license file rides with it: the package metadata names the license by
 # file rather than by code, since the license has no short code of the kind
 # SPDX publishes, so the build cannot produce metadata without it.
-COPY pyproject.toml LICENSE.md ./
+COPY pyproject.toml LICENSE.md constraints-agent.txt ./
 COPY src ./src
 COPY config ./config
-RUN pip install --no-cache-dir -e ".[agent]"
+# The ranges in pyproject.toml say what the code needs; constraints-agent.txt
+# says which version of each the running worker actually holds, transitive
+# packages included. The SDK's own pin stays in pyproject.toml, where the
+# reason for it is written down.
+RUN pip install --no-cache-dir -c constraints-agent.txt -e ".[agent]"
 
 # Chromium + its OS dependencies for screenshot_board. It runs with its own
 # sandbox on: a probe on the running worker found unprivileged user namespaces
