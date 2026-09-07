@@ -715,3 +715,18 @@ describe("main.ts seam — one line in the pump, and every hold-off kept", () =>
     expect(endsrc).not.toMatch(/scrollTop\s*=/);
   });
 });
+
+describe("main.ts seam — the lift asks about the field AFTER lifting it", () => {
+  it("the re-arm is decided once the lift has had its say", () => {
+    const lift = src.slice(src.indexOf("function liftSpring()"), src.indexOf("// --- scrolling: glide"));
+    const lifted = lift.indexOf("springField.lift()");
+    const rearm = lift.indexOf("if (endSpring.active() && !springField.armed()) armSpring(springTouchY, false)");
+    expect(lifted).toBeGreaterThan(-1);
+    expect(rearm).toBeGreaterThan(-1);
+    // asked first it could never be true: a finger on the glass is always armed,
+    // so the whole release bounce was drawn flat (measured on the built app: the
+    // modelled overscroll swinging 397.65 px back to zero over 600 ms with the
+    // reference lag at 0.00 and no row translated)
+    expect(rearm).toBeGreaterThan(lifted);
+  });
+});

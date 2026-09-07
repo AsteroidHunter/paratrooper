@@ -1920,13 +1920,17 @@ function springFinger(touchY: number): void {
 // drops the arm itself once the scroll has stopped and the rows are home.
 function liftSpring(): void {
   endSpring.lift(); // END-SPRING SEAM: a pull past the end becomes its bounce
+  springField.lift();
   // A finger that pulled past the end and then held still lets the lag melt, so
-  // the field is idle and lift() would disarm it — and the bounce that is about
-  // to run would move the rows with nothing watching. Re-open the gesture on the
+  // the field is idle and lift() disarms it — and the bounce that is about to
+  // run would move the rows with nothing watching. Re-open the gesture on the
   // finger's last position (which is the anchor the bounce keeps) so the rows
   // stretch through it. Costs one geometry read, once, only in that case.
+  // AFTER lift(), not before: a finger on the glass is always armed, so asking
+  // first could never be true and the whole bounce was drawn flat — measured on
+  // the built app, the modelled overscroll swinging 397.65 px back to zero over
+  // 600 ms with the reference lag at 0.00 and not one row translated.
   if (endSpring.active() && !springField.armed()) armSpring(springTouchY, false);
-  springField.lift();
   if (springField.armed() || endSpring.active()) springPump();
 }
 
