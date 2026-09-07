@@ -184,7 +184,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.135"; // The bubbles stretch through the rubber band bounce at both ends of the thread, on a spring of our own seeded from the finger or the impact speed
+const APP_VERSION = "0.3.138"; // Tapping into a box that already holds text shows its cursor with the rest: the caret is placed again when the bar's hold ends
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
