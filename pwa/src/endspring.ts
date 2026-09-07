@@ -222,6 +222,7 @@ export function createEndSpring(
   let vx = 0; // its velocity, px/ms
   let side = 0; // -1 past the top, +1 past the bottom, 0 = not at an end
   let originY: number | null = null; // the finger where the marker fired
+  let grabbed = false; // a finger landed on a live bounce: re-seat the origin
   let lastMs: number | null = null;
   let lastSt: number | null = null;
   let lastSpeed = 0; // px/ms, measured on the last frame that ended AWAY from an end
@@ -232,6 +233,7 @@ export function createEndSpring(
     vx = 0;
     side = 0;
     originY = null;
+    grabbed = false;
   }
 
   function begin(fingerDown: boolean, screenY: number | null): void {
@@ -245,12 +247,16 @@ export function createEndSpring(
       lastSpeed = 0;
     }
     armedNow = true;
-    // a finger landing mid-bounce takes the band over from where it stands: the
-    // pull re-measures from this finger, the spring's momentum is dropped
+    // A finger landing mid-bounce takes the band over WHERE IT STANDS. The
+    // spring's momentum is dropped and the pull takes over, but the overscroll
+    // itself is kept and the origin re-seated so that this finger position
+    // already produces it (`grabbed`, done in frame() where the scroller's
+    // height is known): dropping it here instead would hand the lag the whole
+    // remaining bounce as one frame's delta, and the rows would lurch.
     if (fingerDown && ph === "bouncing") {
-      ph = "idle";
       vx = 0;
       originY = null;
+      grabbed = true;
     }
   }
 
@@ -312,11 +318,22 @@ export function createEndSpring(
       // finger was when the marker fired, so a drag that arrives at the end at
       // speed starts its pull from zero rather than from wherever it began.
       if (ph !== "pulling" || side !== endSide || originY === null) {
+        // the band was already stretched when this finger landed: seat the
+        // origin so this very position reproduces it, and nothing jumps
+        const back =
+          grabbed && side === endSide && x !== 0 && fingerY !== null
+            ? rubberTravel(Math.abs(x), dim, rubberC)
+            : Infinity;
         ph = "pulling";
         side = endSide;
-        originY = fingerY;
-        x = 0;
         vx = 0;
+        if (Number.isFinite(back) && fingerY !== null) {
+          originY = fingerY + endSide * back;
+        } else {
+          originY = fingerY;
+          x = 0;
+        }
+        grabbed = false;
       }
       if (originY === null || fingerY === null) return 0; // a wheel: no finger to pull with
       // past the TOP the finger travels DOWN the screen, past the BOTTOM it

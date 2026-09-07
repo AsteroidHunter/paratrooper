@@ -400,7 +400,7 @@ describe("the release — the measured spring, ending at exactly zero", () => {
     expect(Math.min(...over)).toBeGreaterThanOrEqual(0);
   });
 
-  it("a finger landing mid-bounce takes the band over from where it stands", () => {
+  it("a finger landing mid-bounce keeps the band where it stands, with no jump", () => {
     const m = createEndSpring();
     let t = 0;
     m.begin(true, 400);
@@ -408,14 +408,41 @@ describe("the release — the measured spring, ending at exactly zero", () => {
     m.frame((t += FRAME), MAX, MAX, VH);
     m.finger(200);
     m.frame((t += FRAME), MAX, MAX, VH);
+    m.frame((t += FRAME), MAX, MAX, VH);
     m.lift();
     for (let i = 0; i < 6; i++) m.frame((t += FRAME), MAX, MAX, VH);
     expect(m.phase()).toBe("bouncing");
+    const mid = m.over();
+    expect(mid).toBeGreaterThan(10);
     m.begin(true, 500); // the finger is back
     m.finger(500);
     const held = m.frame((t += FRAME), MAX, MAX, VH);
     expect(m.phase()).toBe("pulling");
-    expect(held).toBe(0); // re-measured from this finger, no jump
+    // the whole point: the overscroll is UNCHANGED, so the lag is handed no step
+    expect(held).toBeCloseTo(mid, 6);
+    // and this finger now owns it: moving further out grows it from here
+    m.finger(460);
+    expect(m.frame((t += FRAME), MAX, MAX, VH)).toBeGreaterThan(held);
+    // while coming back well inside the origin lets it go slack
+    m.finger(900);
+    expect(m.frame((t += FRAME), MAX, MAX, VH)).toBe(0);
+  });
+
+  it("a finger landing mid-bounce at the top keeps it too", () => {
+    const m = createEndSpring();
+    let t = 0;
+    m.begin(false, null);
+    m.frame((t += FRAME), 300, MAX, VH);
+    m.frame((t += FRAME), 300 - 2 * FRAME, MAX, VH); // 2 px/ms toward the top
+    m.frame((t += FRAME), 0, MAX, VH);
+    for (let i = 0; i < 4; i++) m.frame((t += FRAME), 0, MAX, VH);
+    const mid = m.over();
+    expect(mid).toBeLessThan(-10);
+    m.begin(true, 400);
+    m.finger(400);
+    expect(m.frame((t += FRAME), 0, MAX, VH)).toBeCloseTo(mid, 6);
+    m.finger(440); // further past the top
+    expect(m.frame((t += FRAME), 0, MAX, VH)).toBeLessThan(mid);
   });
 });
 
