@@ -74,6 +74,22 @@
 //      focus, its keyboard and its typing, characters typed during the rise
 //      land as they always did, and a tap that placed a caret (tapcaret.ts)
 //      still placed it.
+//        And the release re-places that caret. This is the one thing 0.3.135
+//      was missing, and it cost the tap into a box that already held text: on
+//      that path, and only that path, the app writes the selection ITSELF
+//      (shell.ts focusComposerTap -> setCaret -> setSelectionRange), about a
+//      millisecond after this hold lands, so the last selection the engine is
+//      handed for the whole session is one made while the caret was
+//      transparent. Taking the colour back off the box afterwards did not
+//      reach the caret the engine had already issued from it: the box carried
+//      the right offset — typed characters landed exactly where the finger
+//      had — with nothing drawn, until a second tap made the engine place a
+//      caret of its own. So the release restores the colour, flushes it, and
+//      writes the selection back exactly where it already is. Nothing moves;
+//      the engine simply issues the caret again, this time from a box whose
+//      caret has a colour. Measured, both engines: the empty box never writes
+//      a selection at all, the box with text writes one at +1.1ms under the
+//      hold, and that is the whole difference between the two paths.
 //
 // Same shape as the shell's other decisions: a pure core with injected
 // effects (unit-tested on a plain clock), and one binder that hangs it on the
@@ -88,6 +104,13 @@ export interface WidenDeps {
   flip(): void;
   /** paint the caret transparent, or give it back. A colour: no layout, ever. */
   setCaretHidden(on: boolean): void;
+  /**
+   * Write the box's selection back exactly where it already is, so the engine
+   * issues its caret again from the colour the box now has. Only ever called
+   * with the colour already restored and flushed, and only on the release: the
+   * other ways out of a rise end with no caret to re-place.
+   */
+  reassertCaret(): void;
   /** a clock: run `fn` after `ms`, and hand back the way to call it off */
   wait(ms: number, fn: () => void): () => void;
   /** the next animation frame, and the way to call it off */
@@ -163,6 +186,11 @@ export function createWiden(deps: WidenDeps) {
         caretOff = deps.wait(WIDEN_CARET_MS, () => {
           caretOff = null;
           setHidden(false);
+          // and in the same step, never on a clock of its own: the colour is
+          // back, so the caret the engine was handed under the hold is
+          // re-issued from it. On a box the app never wrote a selection into
+          // this is the same two numbers written again and nothing happens.
+          deps.reassertCaret();
         });
       });
     }
@@ -302,6 +330,22 @@ export function composeWidenDeps(
       form.classList.remove(FLIP_CLASS);
     },
     setCaretHidden: (on) => lookup()?.classList.toggle(NOCARET_CLASS, on),
+    reassertCaret: () => {
+      const box = lookup()?.querySelector<HTMLTextAreaElement>("textarea");
+      // not a guard against timing: an unfocused box has no caret to issue,
+      // and a selection write into one would mean nothing
+      if (!box || box.ownerDocument.activeElement !== box) return;
+      const { selectionStart: from, selectionEnd: to, selectionDirection: way } = box;
+      if (from === null || to === null) return;
+      // one computed read on the box, which is the same flush the close's
+      // invert uses: it settles the class removal above into the engine's
+      // style before the selection write below, so the caret is issued from
+      // this frame's colour rather than the hold's
+      flush(box);
+      // the same two numbers and the same direction: the selection does not
+      // move, the engine just draws it again
+      box.setSelectionRange(from, to, way ?? undefined);
+    },
     wait: (ms, fn) => {
       const id = setTimeout(fn, ms);
       return () => clearTimeout(id);

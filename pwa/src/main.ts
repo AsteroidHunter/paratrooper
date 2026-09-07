@@ -184,7 +184,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.136"; // The worker takes the GitHub App private key from an environment variable handed over by the start-up wrapper, not from a mounted secret file
+const APP_VERSION = "0.3.138"; // Tapping into a box that already holds text shows its cursor with the rest: the caret is placed again when the bar's hold ends
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

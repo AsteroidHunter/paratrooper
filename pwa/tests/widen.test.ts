@@ -398,6 +398,7 @@ function harness() {
     setWide: (on) => log.push(`wide:${on}`),
     flip: () => log.push("flip"),
     setCaretHidden: (on) => caret.push(on ? "hide" : "show"),
+    reassertCaret: () => caret.push("reassert"),
     wait: (ms, fn) => {
       if (ms === WIDEN_CARET_MS) {
         caret.push(`beat:${ms}`);
@@ -693,8 +694,72 @@ describe("createWiden — the caret is not drawn from a rect the page knows is s
     expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`]);
     expect(h.widen.state().hidden).toBe(true); // the phone has not caught up yet
     h.tickBeat();
-    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`, "show"]);
+    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`, "show", "reassert"]);
     expect(h.widen.state().hidden).toBe(false);
+  });
+
+  // THE 0.3.135 LEFTOVER, and the one path it cost. On a tap into a box that
+  // already holds text the app writes the selection itself (shell.ts
+  // focusComposerTap -> setCaret), about a millisecond after the hold lands, so
+  // the last selection the engine is handed for the whole session is one made
+  // with the caret transparent. Taking the colour off afterwards did not reach
+  // the caret already issued from it: the right offset, nothing drawn, until a
+  // second tap made the engine place a caret of its own. Every fact of the
+  // release rule arrives on that path exactly as it does on the empty one —
+  // measured in both engines, five box shapes, mouse and touch — so nothing
+  // about the rule's order was wrong. What was missing was telling the engine
+  // to draw the caret again once the colour was back.
+  it("the release re-places the caret, in the same step as the colour and after it", () => {
+    const h = harness();
+    h.widen.keyboard(true);
+    h.widen.proven(true);
+    h.widen.ended();
+    h.widen.landed(true);
+    h.nextFrame();
+    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`]);
+    h.tickBeat();
+    // the colour first, then the write: a caret issued from the hold's colour
+    // would be the bug again
+    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`, "show", "reassert"]);
+  });
+
+  it("no other way out re-places it: those end with no caret to draw", () => {
+    const endings: [string, (h: ReturnType<typeof harness>) => void][] = [
+      ["the down edge from wide", (h) => {
+        h.widen.proven(true);
+        h.widen.ended();
+        h.widen.landed(true);
+        h.widen.keyboard(false);
+      }],
+      ["the down edge mid-rise", (h) => h.widen.keyboard(false)],
+      ["the lapse with no proof", (h) => {
+        h.widen.ended();
+        h.tick();
+      }],
+      ["a blur", (h) => h.widen.blurred()],
+      ["a rebuilt form", (h) => h.widen.reset()],
+    ];
+    for (const [name, end] of endings) {
+      const h = harness();
+      h.widen.keyboard(true);
+      end(h);
+      expect(h.caret.at(-1), `${name}: the last write is not a show`).toBe("show");
+      expect(h.caret, `${name}: re-placed a caret there is no reason to draw`).not.toContain(
+        "reassert",
+      );
+    }
+  });
+
+  it("the tap that needs it writes its selection UNDER the hold, which is why", () => {
+    // the two halves of the story, pinned together so neither can drift: the
+    // shell places the caret straight after the focus, and the focus is what
+    // takes the hold
+    const apply = shell.match(/export function focusComposerTap\([\s\S]*?\n\}/)?.[0] ?? "";
+    expect(apply).toMatch(/target\.focus\(\{ preventScroll: true \}\);[\s\S]{0,300}target\.setCaret\(at\);/);
+    expect(shell).toContain("setCaret: (at) => t.setSelectionRange(at, at),");
+    // and the hold is taken from the shell's up edge, which the focus fires
+    const src = readFileSync(new URL("../src/widen.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/if \(isUp\) \{[\s\S]{0,400}setHidden\(true\);/);
   });
 
   it("the beat is the phone's own catch-up, measured once for the card and read here", () => {
@@ -714,7 +779,7 @@ describe("createWiden — the caret is not drawn from a rect the page knows is s
     h.widen.landed(true);
     h.release();
     h.widen.keyboard(false);
-    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`, "show"]); // already back
+    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`, "show", "reassert"]); // already back
     expect(h.log.at(-1)).toBe("flip");
     // and from a close taken DURING the hold, the show comes before the flip
     const g = harness();
@@ -760,7 +825,7 @@ describe("createWiden — the caret is not drawn from a rect the page knows is s
     expect(h.caret).toEqual(["hide"]);
     h.widen.landed(true);
     h.release();
-    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`, "show"]);
+    expect(h.caret).toEqual(["hide", "frame", `beat:${WIDEN_CARET_MS}`, "show", "reassert"]);
   });
 
   it("a blur gives it back at once and calls the pending release off", () => {
@@ -826,7 +891,12 @@ describe("createWiden — the caret is not drawn from a rect the page knows is s
       expect(h.widen.state().hidden, `${name}: the hold never started`).toBe(true);
       end(h);
       expect(h.widen.state().hidden, `${name}: the caret was left hidden`).toBe(false);
-      expect(h.caret.at(-1), `${name}: the last write is not a show`).toBe("show");
+      expect(h.caret, `${name}: the caret was never given back`).toContain("show");
+      // the switch's release adds one more act, the re-place; every other
+      // ending stops at the show
+      expect(h.caret.at(-1), `${name}: wrote something after giving the caret back`).toBe(
+        name === "the switch and its release" ? "reassert" : "show",
+      );
     }
   });
 
@@ -901,6 +971,39 @@ describe("composeWidenDeps — the effects on the live form", () => {
     const deps = composeWidenDeps(() => null, () => {});
     expect(() => deps.setCaretHidden(true)).not.toThrow();
     expect(() => deps.setCaretHidden(false)).not.toThrow();
+    expect(() => deps.reassertCaret()).not.toThrow();
+  });
+
+  it("the re-place is the same selection written back, flushed first, and only on a focused box", () => {
+    const calls: unknown[][] = [];
+    const flushed: string[] = [];
+    const box = {
+      selectionStart: 6,
+      selectionEnd: 6,
+      selectionDirection: "forward",
+      setSelectionRange: (...a: unknown[]) => calls.push(a),
+      ownerDocument: { activeElement: null as unknown },
+    };
+    box.ownerDocument.activeElement = box;
+    const form = { querySelector: (sel: string) => (sel === "textarea" ? box : null) };
+    const deps = composeWidenDeps(
+      () => form as unknown as HTMLElement,
+      (el) => flushed.push(el === (box as unknown as HTMLElement) ? "box" : "other"),
+    );
+
+    deps.reassertCaret();
+    // the same two numbers and the same direction: nothing about the selection
+    // moves, the engine simply issues the caret again
+    expect(calls).toEqual([[6, 6, "forward"]]);
+    // and the class removal is settled into the engine's style BEFORE the
+    // write, or the caret would be issued from the hold's colour again
+    expect(flushed).toEqual(["box"]);
+
+    // an unfocused box has no caret to issue and is left alone
+    box.ownerDocument.activeElement = null;
+    deps.reassertCaret();
+    expect(calls).toHaveLength(1);
+    expect(flushed).toHaveLength(1);
   });
 
   it("the frame is the engine's own, and it can be called off", () => {
