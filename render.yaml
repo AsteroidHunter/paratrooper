@@ -82,14 +82,19 @@ services:
       # The worker authenticates to GitHub as the paratrooper-98cc App: it signs
       # a JWT with the App's private key and trades it for an installation token
       # that lives an hour. That replaces the personal access token that used to
-      # sit here, which never expired. Three values, all set by hand: these two
-      # ids, and the private key, which is a secret FILE at
-      # /etc/secrets/paratrooper-98cc-github-app.pem — a Blueprint cannot declare
-      # a secret file, so it is added in the dashboard. The worker reads the key
-      # once at boot and removes the file.
+      # sit here, which never expired. Three values, all set by hand: two ids and
+      # the private key. The key was a secret file at
+      # /etc/secrets/paratrooper-98cc-github-app.pem until 2026-09-07; that file
+      # is deleted and the key is the variable below, so all three now ride the
+      # same road. Paste the App's .pem in full, BEGIN and END lines included,
+      # either across several lines or with the line breaks written as
+      # backslash-n; the worker accepts both and checks the key parses at boot.
+      # The start-up wrapper takes all three out of the worker's launch record.
       - key: PARATROOPER_GITHUB_APP_ID
         sync: false
       - key: PARATROOPER_GITHUB_APP_INSTALLATION_ID
+        sync: false
+      - key: PARATROOPER_GITHUB_APP_KEY_PEM
         sync: false
       - key: PARATROOPER_REMOTE
         sync: false

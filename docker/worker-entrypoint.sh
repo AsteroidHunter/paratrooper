@@ -24,8 +24,7 @@ SECRETS_FILE="${PARATROOPER_SECRETS_FILE:-/dev/shm/paratrooper-secrets}"
 chmod 0600 "$SECRETS_FILE"
 
 # One NAME=value per line, values single-line by construction (an address, two
-# ids, two keys). The App's private key is not here: it arrives as its own
-# mounted file and is read straight from there.
+# ids, two keys).
 for name in \
     SPOTIFY_CLIENT_ID \
     SPOTIFY_CLIENT_SECRET \
@@ -40,6 +39,22 @@ do
     unset "$name"
 done
 unset value
+
+# The App's private key travels the same road as the two ids above, and for the
+# same reason, but it is a PEM: several lines, where the format above is one
+# NAME=value per line. So it goes across base64-encoded, under its own name, and
+# the worker decodes it. Encoding rather than changing the format is deliberate:
+# every other value, and every reader and test of this file, stays exactly as it
+# was, and one line can hold a key of any shape, including a key pasted with the
+# line breaks written out as backslash-n, which the worker straightens back into
+# a PEM. The value reaches base64 on stdin, so it is in no command line;
+# base64 wraps its output at 76 columns, which `tr` takes back out.
+if [ -n "${PARATROOPER_GITHUB_APP_KEY_PEM:-}" ]; then
+    encoded="$(printf '%s' "$PARATROOPER_GITHUB_APP_KEY_PEM" | base64 | tr -d '\n')"
+    printf '%s=%s\n' PARATROOPER_GITHUB_APP_KEY_PEM_B64 "$encoded" >> "$SECRETS_FILE"
+    unset encoded
+fi
+unset PARATROOPER_GITHUB_APP_KEY_PEM
 
 # the path is not a secret, and the worker reads it to know the wrapper ran;
 # without it the worker reads the environment directly, which is local dev

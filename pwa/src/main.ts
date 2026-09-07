@@ -178,7 +178,7 @@ import type { GhostContext } from "./scrollghost";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.130"; // The worker keeps its control pipe to the Claude tool open for the whole turn and answers permission questions from its declared tool list
+const APP_VERSION = "0.3.136"; // The worker takes the GitHub App private key from an environment variable handed over by the start-up wrapper, not from a mounted secret file
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
