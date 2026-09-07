@@ -1,6 +1,8 @@
 /* iMessage light mode, per the canonical recreations:
    sent = #007AFF w/ white text, received = #E9E9EB w/ near-black text,
-   18px bubbles with a 4px corner on the sender side, white canvas. */
+   18px bubbles rounded on every corner with Messages' tail hung under the
+   run's last one (the bubbles block below; runs.ts holds the measurements),
+   white canvas. */
 :root {
   --bg: #ffffff;
   --bar: rgba(249, 249, 249, 0.94);
@@ -666,6 +668,10 @@ html, body {
   display: flex;
   margin-top: 10px; /* between senders; runs tighten via .cont */
 }
+/* Measured on the owner's Messages thread (runs.ts): 4px between two bubbles
+   of one run, 13 to 15px between runs. With the thread's own 2px gap these two
+   margins give 4px and 12px. The run's last bubble hangs its tail 6px into the
+   12px, which is what the tail has there in Messages too (6.7px measured). */
 .row.cont { margin-top: 2px; }
 .row.user { justify-content: flex-end; }
 .row.system { justify-content: center; }
@@ -690,29 +696,75 @@ html, body {
 }
 .stamp b { font-weight: 600; }
 
-/* --- bubbles (iMessage geometry; rows own alignment and spacing) --- */
+/* --- bubbles (iMessage geometry; rows own alignment and spacing) ---
+   Measured on the owner's own Messages thread (the screen recording of
+   2026-09-06, read frame by frame at 3x; runs.ts holds every number and where
+   it came from): every bubble is fully rounded on all four corners, text and
+   photo alike, radius 18px. Nothing is squared, on any bubble, in any run.
+   The run's last bubble carries the tail as a hook hung UNDER its rounded
+   corner (.msg.tail::after below); every earlier bubble in a run is the plain
+   round box. The squared 4px corner this app used to wear as a stand-in, and
+   the extra squaring of a continuation's top corner, are gone: Messages has
+   neither. */
 .msg {
+  position: relative; /* the tail is the bubble's own box, hung off its corner */
   max-width: 75%;
   padding: 10px 16px;
   font-size: 17px;
   word-wrap: break-word;
   white-space: pre-wrap;
+  border-radius: 18px;
 }
 .msg.user {
+  --fill: var(--accent); /* the tail's paint: the same token as the fill below */
+  --tail-mask: var(--tail-user);
+  --tail-x: right;
   background: var(--accent);
   color: var(--sent-text);
-  border-radius: 18px 18px 4px 18px;
 }
 .msg.agent {
+  --fill: var(--received);
+  --tail-mask: var(--tail-agent);
+  --tail-x: left;
   background: var(--received);
   color: var(--received-text);
-  border-radius: 18px 18px 18px 4px;
 }
 
-/* clustering: continuations sit tight and square off the sender-side top corner,
-   so only the run's last bubble reads as having the tail */
-.row.cont .msg.user { border-radius: 18px 4px 4px 18px; }
-.row.cont .msg.agent { border-radius: 4px 18px 18px 4px; }
+/* --- the tail: Messages' hook under the run's last bubble ------------------
+   decorate() (main.ts) puts .tail on exactly one bubble per run, the last,
+   derived from the ordered rows every time it runs (runs.ts is the rule), so
+   the bubble above a new message loses its tail in the same frame the new
+   bubble gets its own. The hook is a pseudo-element of the bubble itself: it
+   flies, pops, morphs, scales and translates with the bubble as one object
+   and cannot detach from it. It is a MASK over the bubble's own fill, never
+   the page colour painted over a squared corner, so it is right over any
+   background, in either scheme and under any transform. The box spans the
+   bubble's width and hangs 7px under it; the mask, a 24x25 data URI holding
+   the measured path (runs.ts TAIL_PATH, one copy per side; runs.test.ts pins
+   the two spellings to each other), cuts the hook out at the sender's end and
+   leaves the rest of the box empty. The path's fill overlaps the bubble's own
+   rounded corner from the inside, so the two paints share no antialiased seam
+   and every visible edge is drawn by exactly one of them.
+   The two masks themselves, --tail-user and --tail-agent, are NOT spelled
+   here: main.ts writes them onto <html> at boot from runs.ts (installTailMasks),
+   so the path has one home, and the served stylesheet carries no url function at all
+   (firstpaint.test.ts: the page fetches nothing before its first paint, and
+   that rule is a plain check on the bytes). Inherited by every bubble and by
+   the send flight's shell (.morphtail, further down). */
+/* :not(:has(img.waiting)): a photo whose pixels are still missing wears the
+   waiting ring on this same pseudo-element (further down), and it wins */
+.msg.tail:not(:has(img.waiting))::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -7px;
+  height: 25px;
+  background: var(--fill);
+  pointer-events: none;
+  -webkit-mask: var(--tail-mask) var(--tail-x) 0 / 24px 25px no-repeat;
+  mask: var(--tail-mask) var(--tail-x) 0 / 24px 25px no-repeat;
+}
 
 /* live bubbles pop from their sender corner; replay renders static */
 .msg.anim { animation: pop-in 0.2s ease-out; }
@@ -730,12 +782,15 @@ html, body {
    .arriving is on that box only while it grows, and it is what the box wears
    INSTEAD of .anim — the pop was the separate second entrance this replaces.
    arrival.ts owns the beat, the crossfade and the reasoning; this is the
-   shape. Clipped, because the text is laid out at the width it will end at and
-   the growing box uncovers it rather than re-wrapping it line by line, and
-   positioned, because the dots have to stay exactly where the dots' own
-   padding had them until they have faded out. */
-.msg.arriving { position: relative; overflow: hidden; }
-.msg.arriving > .arrive-ink { display: block; }
+   shape. The text is laid out at the width it will end at, inside a clip
+   layer the growing box uncovers rather than re-wrapping it line by line;
+   the clip is that layer's own (arrival.ts sizes it to the box's inner area
+   every frame), NOT an overflow clip on the bubble, because the bubble's tail
+   hangs under the bubble's box and an overflow clip there would cut it off
+   for the whole morph. The dots are positioned, so they stay exactly where
+   the dots' own padding had them until they have faded out. */
+.msg.arriving > .arrive-clip { display: block; overflow: hidden; }
+.msg.arriving > .arrive-clip > .arrive-ink { display: block; }
 .msg.arriving > .arrive-dots {
   position: absolute;
   left: var(--dots-pad-x);
@@ -743,6 +798,13 @@ html, body {
   display: flex;
   gap: 5px;
 }
+/* The crossfade of the two tails. The dots' bubble wore the thought trail
+   (.typing::before, further down), which the same box keeps through the morph
+   and fades out with the dots; the message tail fades in with the text.
+   arrival.ts writes both alphas each frame, on the dots' and the text's own
+   curves, so at no frame do the trail and the tail both stand at full. */
+.msg.arriving::before { opacity: var(--dots-alpha, 1); }
+.msg.arriving.tail::after { opacity: var(--ink-alpha, 1); }
 /* The only link the thread ever draws is the PR row's, and it takes the sent
    bubble's own fill — one accent in the thread, in either appearance, rather
    than the link and the bubble sitting a hue apart. --accent is the token
@@ -751,7 +813,7 @@ html, body {
 .msg.agent a { color: var(--accent); }
 .msg.user a { color: #fff; text-decoration: underline; }
 
-.msg.error { background: var(--error-bg); color: var(--error-text); }
+.msg.error { --fill: var(--error-bg); background: var(--error-bg); color: var(--error-text); }
 
 .msg.shot { padding: 0; background: none; }
 /* height:auto + the width/height attributes = the box's aspect ratio is
@@ -763,7 +825,22 @@ html, body {
    (photolazy.ts), the whole reason a history of photos drew as one repeated
    landscape strip. main.ts writes the real ratio inline next to the attributes,
    declared, and a declared ratio has no `auto` to step aside with. */
-.msg.shot img { max-width: 100%; height: auto; border-radius: 14px; display: block; cursor: zoom-in; }
+.msg.shot img { max-width: 100%; height: auto; border-radius: 18px; display: block; cursor: zoom-in; }
+/* The photo's corner is the text bubble's, 18px: Messages' photos measured
+   the same radius as its text bubbles (runs.ts), and the tail below assumes
+   that circle. Photos carry the tail under the same rule as text; of two sent
+   photos in a row only the second has it. Messages cuts a photo's tail out of
+   the photo itself, and so does this: main.ts writes the photo's url into
+   --shot on the bubble (shotFill) and the hook shows the picture's own bottom
+   edge carried down into it. The picture is scaled to the bubble's width, so
+   the hook's pixels sit where the photo's do, and its bottom row is stretched
+   down through the hook (the height: the last fraction of a percent of the
+   picture, drawn 25px tall), so the join at the bubble's bottom edge is
+   continuous rather than a cut. Until the url is on the bubble the hook wears
+   the received grey, the same face the waiting placeholder wears. */
+.msg.shot.tail:not(:has(img.waiting))::after {
+  background: var(--shot, var(--received)) 50% 100% / 100% 20000% no-repeat;
+}
 
 /* the photo that has not arrived yet (main.ts + photolazy.ts put .waiting on it
    from the frame its row is built until its first pixels paint, whether it is
@@ -793,7 +870,7 @@ html, body {
   background-color: var(--received);
   background-image: var(--blur, none);
   background-size: 100% 100%; /* the square decode fills the reserved box exactly */
-  border-radius: 14px; /* the photo's own corner, so nothing changes shape on arrival */
+  border-radius: 18px; /* the photo's own corner, so nothing changes shape on arrival */
 }
 .msg.shot:has(img.waiting)::after {
   content: "";
@@ -875,11 +952,30 @@ html, body {
 .typing {
   align-self: flex-start;
   background: var(--received);
-  border-radius: 18px 18px 18px 4px;
+  border-radius: 18px; /* a pill: Messages' indicator has no squared corner */
   padding: var(--dots-pad-y) var(--dots-pad-x);
   display: flex;
   gap: 5px;
   margin-top: 6px;
+}
+/* Messages' typing indicator carries no message tail. It is a thought bubble:
+   a trail of two small circles under its bottom-left corner, the larger one
+   tucked under the corner and the smaller one below and left of it. The owner's
+   recording shows no typing indicator, so this is drawn from Messages as it has
+   looked since iOS 7, sized to this bubble (9px and 5px circles), not measured.
+   The same box stays on the bubble the dots become (.msg.arriving above) and
+   fades out there with the dots while the message tail fades in. */
+.typing::before, .msg.arriving::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  bottom: -12px; /* the small circle's foot, inside the thread's own 12px bottom padding */
+  width: 24px;
+  height: 24px;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 11px 11.5px, var(--received) 4.5px, transparent 5.2px),
+    radial-gradient(circle at 4px 20px, var(--received) 2.5px, transparent 3.2px);
 }
 .typing span, .arrive-dots span {
   width: 8px;
@@ -1345,6 +1441,32 @@ html, body {
 .morph-face-under { background: var(--bg); }
 .morph-face-bar { background: var(--glass-bg); box-shadow: var(--glass-stack); }
 .morph-face-accent { background: var(--accent); opacity: 0; }
+/* The shell's tail. The shell clips at its own box (the outgoing text), so
+   the hook that hangs UNDER the box is this second fixed element, placed by
+   the same frame from the same numbers (armFieldMorph, main.ts) on the shell's
+   bottom-right corner and put BEFORE the shell, so the shell covers the part
+   of the hook's fill that lies inside the box. Its face is the shell's three
+   sheets masked to the hook, and the whole hook fades in on the accent's own
+   curve: the bar's pill leaves with no tail and the bubble has its by the time
+   it lands, where the real bubble's own tail takes over pixel for pixel. Only
+   a send whose bubble carries the tail gets one. */
+.morphtail {
+  position: fixed;
+  z-index: 7;
+  width: 24px;
+  height: 25px;
+  opacity: 0; /* invisible until the flight's first frame writes it up */
+  pointer-events: none;
+  -webkit-mask: var(--tail-user) 0 0 / 24px 25px no-repeat;
+  mask: var(--tail-user) 0 0 / 24px 25px no-repeat;
+}
+.morphtail > div { position: absolute; inset: 0; }
+.morphtail > .morph-face-bar { box-shadow: none; } /* no rim: the hook has no edge of its own to light */
+/* the accent face is opaque here and the WHOLE hook fades on the accent's
+   curve (main.ts writes its opacity), so the hook's colour is the accent over
+   the page at the shell's own mix at every frame; fading the face inside a
+   fading hook squared the alpha and drew the hook a shade lighter mid-flight */
+.morphtail > .morph-face-accent { opacity: 1; }
 .morph-text-bar {
   color: var(--text);
   font-size: 17px;
@@ -1657,7 +1779,11 @@ html, body {
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
-  padding: 1px 4px 0;
+  /* The label sits under the newest sent bubble, which is the last of its run
+     and carries the tail: the hook reaches 6px under the bubble, so the text
+     starts 7px down (plus the thread's 2px gap) rather than running through
+     the hook's tip. Messages' own label starts 12px under its bubble. */
+  padding: 7px 4px 0;
 }
 /* the Delivered -> Read flip: a two-phase opacity fade on the inner .rc layer.
    main.ts fades it fully out, swaps the text only once it is invisible (on the
@@ -1698,7 +1824,7 @@ html, body {
 .sendfail {
   align-self: flex-end;
   margin-right: 26px;
-  padding: 1px 4px 0;
+  padding: 7px 4px 0; /* the receipt's clearance: the failed bubble is the run's last and wears the tail */
   color: #ff3b30;
   font-size: 11px;
   font-weight: 600;

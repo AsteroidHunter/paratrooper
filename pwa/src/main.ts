@@ -77,6 +77,8 @@ import {
   settleVerdict,
 } from "./resume";
 import type { ResumePin } from "./resume";
+import { TAIL_EDGE_Y, TAIL_W, installTailMasks, markRuns } from "./runs";
+import type { RunRow } from "./runs";
 import {
   dropShiftAnim,
   ENTER_RISE_PX,
@@ -181,7 +183,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.128"; // The springy scroll's third build, measured off Messages, merged over the compose pill's widening
+const APP_VERSION = "0.3.129"; // Messages' bubble tail under each run's last bubble, merged over the springy scroll and the compose pill's widening
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -363,6 +365,7 @@ interface ServerMsg {
 
 const app = document.getElementById("app")!;
 initShell(app); // keyboard/focus/picker state converges through shell.ts
+installTailMasks(document.documentElement); // the bubble tail's two masks, read by styles.css (runs.ts)
 
 // editor hold-brighten: while a finger rests on the pill, a soft white light
 // comes up under the fingertip and fades back on release (styles.css .field /
@@ -2450,11 +2453,11 @@ function autosize(typed = false): void {
 // --- rendering ---------------------------------------------------------------
 
 // iMessage clustering: consecutive same-sender bubbles inside RUN_GAP_MS form a
-// run — continuations tighten spacing and the sender-side top corner. System
-// lines break runs. Runs and gap stamps are DERIVED from the ordered store by
-// decorate() — no mutable tracking, so pagination and out-of-order inserts
-// need no save/restore dance.
-const RUN_GAP_MS = 60_000;
+// run — continuations sit tight, and the run's LAST bubble carries the tail
+// (runs.ts holds the rule and the measured shape; styles.css draws it). System
+// lines and gap stamps break runs. Runs, tails and gap stamps are DERIVED from
+// the ordered store by decorate() — no mutable tracking, so pagination and
+// out-of-order inserts need no save/restore dance.
 const STAMP_GAP_MS = 60 * 60_000;
 
 function fmtTime(ms: number): string {
@@ -2605,9 +2608,29 @@ function rowEl(wrapper: HTMLElement, role: string, cls: string, at: number): HTM
   return div;
 }
 
+// A photo's tail is cut from the photo (styles.css .msg.shot.tail::after reads
+// --shot). The url goes on the bubble from the two places a photo's pixels can
+// be: the fold below, for a photo already drawn when it is seated (a send's
+// picked photo loads in the tray, a re-seated row keeps its pixels), and one
+// capturing load listener on the thread (watchPhotos) for a photo whose pixels
+// land after it is seated, parked history photos included. Only a tailed
+// photo is written, so a screenshot's data url is never copied onto every row.
+function shotFill(bubble: HTMLElement): void {
+  const img = bubble.querySelector("img");
+  const src = img ? img.currentSrc || img.src : "";
+  const want = src ? `url("${src.replace(/["\\]/g, "\\$&")}")` : "";
+  if (bubble.style.getPropertyValue("--shot") === want) return;
+  if (want) bubble.style.setProperty("--shot", want);
+  else bubble.style.removeProperty("--shot");
+}
+
 // decorate(): one pure fold over the rendered wrappers in DOM order — sets
-// run-continuation classes and owns the gap stamps. Same result no matter what
-// order events arrived in.
+// run-continuation classes, puts the tail on each run's last bubble, and owns
+// the gap stamps. Same result no matter what order events arrived in. The run
+// rule itself is runs.ts (markRuns); this reads the rows off the DOM in order,
+// hands them over, and writes the answer back. A new bubble joining a run
+// takes the tail off the bubble above it in this same synchronous pass, before
+// the frame paints, so no frame ever shows two tails on one run or none.
 function decorate(): void {
   // TEMP DIAGNOSTIC (scroll-jank): the fold walks EVERY wrapper and applyEvent
   // runs it once per applied frame, so a history page pays it twenty-five
@@ -2615,9 +2638,8 @@ function decorate(): void {
   // of these names the pass itself as the weight. TO REMOVE with the
   // scrolljank.ts block: this stamp pair.
   const jankT0 = performance.now();
-  let prevSide: string | null = null;
-  let prevAt = 0;
   let lastStampAt = 0;
+  const seats: { row: HTMLElement; read: RunRow }[] = [];
   for (const w of eventWrappers()) {
     const rows = Array.from(w.querySelectorAll<HTMLElement>(":scope > .row"));
     if (!rows.length) {
@@ -2628,7 +2650,8 @@ function decorate(): void {
     const role = w.dataset.role ?? "agent";
     // gap stamp: shown when >1h since the previous stamp, owned by the wrapper
     let stamp = w.querySelector<HTMLElement>(":scope > .stamp");
-    if (at - lastStampAt > STAMP_GAP_MS) {
+    const stamped = at - lastStampAt > STAMP_GAP_MS;
+    if (stamped) {
       const born = stamp === null;
       if (!stamp) {
         stamp = document.createElement("div");
@@ -2656,14 +2679,20 @@ function decorate(): void {
     } else {
       stamp?.remove();
     }
-    for (const row of rows) {
-      const cont =
-        (role === "user" || role === "agent") && role === prevSide && at - prevAt < RUN_GAP_MS;
-      row.classList.toggle("cont", cont);
-      prevSide = role === "system" ? null : role;
-      prevAt = at;
-    }
+    // the stamp stands above the wrapper's FIRST row only; a wrapper's later
+    // rows (a photo's caption under it) follow the first as one sender's run
+    rows.forEach((row, i) => seats.push({ row, read: { role, at, stamped: stamped && i === 0 } }));
   }
+  const marks = markRuns(seats.map((s) => s.read));
+  seats.forEach(({ row }, i) => {
+    row.classList.toggle("cont", marks[i].cont);
+    // the tail is the BUBBLE's, not the row's: it flies, pops, morphs and
+    // re-seats as part of that one element (styles.css .msg.tail::after)
+    const bubble = row.firstElementChild;
+    if (!(bubble instanceof HTMLElement) || !bubble.classList.contains("msg")) return;
+    bubble.classList.toggle("tail", marks[i].tail);
+    if (marks[i].tail && bubble.classList.contains("shot")) shotFill(bubble);
+  });
   springDirty = true; // rows may have moved seats, runs, or stamps: re-measure next drag
   jankSpan("decorate", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
 }
@@ -2855,6 +2884,19 @@ const photoQueue = createPhotoQueue<HTMLImageElement>(
 function watchPhotos(thread: HTMLElement): void {
   photoObserver?.disconnect(); // the old shell's photos died with its DOM
   photoQueue.reset();
+  // a photo's pixels landing after its row was seated: the tail's fill is the
+  // other thing they decide (shotFill). One listener for every photo in the
+  // thread, capturing because load does not bubble. Bound once per shell, and
+  // the old shell's listener died with its element.
+  thread.addEventListener(
+    "load",
+    (e) => {
+      if (!(e.target instanceof HTMLImageElement)) return;
+      const bubble = e.target.closest<HTMLElement>(".msg.shot.tail");
+      if (bubble) shotFill(bubble);
+    },
+    true,
+  );
   if (!("IntersectionObserver" in window)) return; // every photo loads eagerly instead
   const margin = nearMargin(thread.clientHeight || window.innerHeight);
   photoObserver = new IntersectionObserver(
@@ -4690,11 +4732,14 @@ function armFieldMorph(textEl: HTMLTextAreaElement): FieldMorph | null {
   });
   let raf = 0;
   let up = false;
+  let tail: HTMLDivElement | null = null; // the shell's hook, from launch to settle
   const settle = (msg: HTMLElement, phase: string): void => {
     // hand the seat back to the real bubble, byte-clean: the flight was pure
     // presentation, so the landed thread must carry no trace of it
     msg.style.removeProperty("opacity");
     if (!msg.getAttribute("style")) msg.removeAttribute("style");
+    tail?.remove(); // the real bubble's own tail is under it, pixel for pixel
+    tail = null;
     shell.remove();
     holdDiagRecord("flight", { phase });
     flightSettled();
@@ -4715,6 +4760,25 @@ function armFieldMorph(textEl: HTMLTextAreaElement): FieldMorph | null {
       // exactly as the real bubble did — the landing swap is pixel-identical
       bubbleText.style.width = `${seat0.width}px`;
       bubbleText.textContent = msg.textContent;
+      // The tail rides the shell as a second fixed box (styles.css .morphtail):
+      // the shell clips at its own box and the hook hangs under it. Placed by
+      // this same frame from the box just written, BEFORE the shell in the
+      // document so the shell covers the hook's fill inside the box. Only when
+      // the seated bubble carries the tail, which decorate() has already
+      // decided: a fresh send does unless an unsent bubble stands below it.
+      tail = msg.classList.contains("tail") ? tailShell() : null;
+      // the hook on a box's bottom-right corner, its top where the corner
+      // circle begins, at the given alpha. Written at launch for the box the
+      // shell is standing in (the bar's), so no frame can catch the hook
+      // unplaced, and then every frame from the box just written.
+      const placeTail = (box: MorphBox, alpha: number): void => {
+        if (!tail) return;
+        tail.style.left = `${box.left + box.width - TAIL_W}px`;
+        tail.style.top = `${box.top + box.height - TAIL_EDGE_Y}px`;
+        tail.style.opacity = String(alpha);
+      };
+      placeTail(bar, 0);
+      if (tail) shell.before(tail);
       msg.style.opacity = "0"; // the shell IS the bubble until it lands
       flightsUp++;
       holdDiagRecord("flight", {
@@ -4734,16 +4798,22 @@ function armFieldMorph(textEl: HTMLTextAreaElement): FieldMorph | null {
         // seat as it IS, not as it was at launch — the tracking the old FLIP
         // translate got for free by riding the element itself
         const seat = msg.getBoundingClientRect();
-        writeBox(morphBox(
+        const box = morphBox(
           bar,
           { left: seat.left, top: seat.top, width: seat.width, height: seat.height },
           p,
-        ));
+        );
+        writeBox(box);
         shell.style.borderRadius =
           morphCorners(barRadius, corners, p).map((c) => `${c.toFixed(1)}px`).join(" ");
         accent.style.opacity = String(accentAlpha(f));
         barText.style.opacity = String(barTextAlpha(f));
         bubbleText.style.opacity = String(bubbleTextAlpha(f));
+        // the hook rides the box just written, fading in as ONE piece on the
+        // accent's own curve: its accent face is opaque (styles.css .morphtail),
+        // so at every alpha the hook is the accent over the page at exactly
+        // the shell's own mix
+        placeTail(box, accentAlpha(f));
         if (f < 1) {
           raf = requestAnimationFrame(step);
         } else {
@@ -4756,6 +4826,18 @@ function armFieldMorph(textEl: HTMLTextAreaElement): FieldMorph | null {
       raf = requestAnimationFrame(step);
     },
   };
+}
+
+/** the flying shell's tail: the shell's three face sheets, masked to the hook (styles.css .morphtail) */
+function tailShell(): HTMLDivElement {
+  const el = document.createElement("div");
+  el.className = "morphtail";
+  for (const cls of ["morph-face-under", "morph-face-bar", "morph-face-accent"]) {
+    const face = document.createElement("div");
+    face.className = cls;
+    el.appendChild(face);
+  }
+  return el;
 }
 
 // --- the photo send morph: the picked squares leave the strip -----------------
