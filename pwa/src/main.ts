@@ -78,6 +78,7 @@ import {
 } from "./resume";
 import type { ResumePin } from "./resume";
 import {
+  dropShiftAnim,
   ENTER_RISE_PX,
   FLIGHT_EASE,
   FLIGHT_MS,
@@ -180,7 +181,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.127"; // The compose pill widens with the keyboard's rise from the tap, transform-only until the keyboard is proven, and narrows in step with its fall
+const APP_VERSION = "0.3.128"; // The springy scroll's third build, measured off Messages, merged over the compose pill's widening
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -967,7 +968,7 @@ function renderChat(): void {
     thread.classList.remove("dragging");
     thread.style.setProperty("--peek", "0px");
     threadTouching = false;
-    liftSpring(); // the springs ride the momentum and settle when it stops
+    liftSpring(); // the lag rides the momentum, melting with its speed, from where the finger lifted
     // a release with no glide (a still hold) fires no scroll/scrollend —
     // check shortly after; the lastScrollAt gate skips real glides. NO special
     // at-top fast path: a release at the top starts the rubber-band snap-back,
@@ -1714,20 +1715,21 @@ function fitBubblesNow(root: ParentNode | null): void {
 }
 
 // --- springy transcript (springscroll.ts owns the physics) --------------------
-// The bubbles lag the scroll by their distance from the finger and, a beat after
-// the scroll stops, fall back into their seats — the effect Messages has carried
-// since iOS 7 (WWDC 2013 session 217; Ash Furrow's ASHSpringyCollectionView).
-// The pure field takes row geometry, the scroll position each frame and the
-// finger's screen-Y, and hands back a per-row displacement. This wiring reads
-// the geometry once per gesture (never per frame); reads scrollTop once per
-// animation frame while a gesture, its momentum or its settle is live — the
-// scroll event is only a wake-up, because under a finger iOS delivers it late
-// and sparsely and the first build, which injected on each event, stepped;
-// writes each displacement as the compositor-only `translate` longhand (kept
-// off the peek's `transform`, styles.css); and — the load-bearing part — holds
-// the whole effect frozen at zero through every motion the app owns, so the
-// flight's FLIP shift always measures clean seats and no pin, ride or lift is
-// ever fought.
+// The bubbles trail the scroll by their distance from the finger and, from the
+// very next frame after the scroll stops, ease back into their seats over a
+// tenth of a second — the effect Messages has carried since iOS 7, this time
+// measured off the owner's screen recording of Messages itself (the numbers are
+// in springscroll.ts and the wiki agent notes). The pure field takes row
+// geometry, the scroll position each frame and the finger's screen-Y, and hands
+// back a per-row displacement. This wiring reads the geometry once per gesture
+// (never per frame); reads scrollTop once per animation frame while a gesture,
+// its momentum or its return is live — the scroll event is only a wake-up,
+// because under a finger iOS delivers it late and sparsely and the first build,
+// which injected on each event, stepped; writes each displacement as the
+// compositor-only `translate` longhand (kept off the peek's `transform`,
+// styles.css); and — the load-bearing part — holds the whole effect frozen at
+// zero through every motion the app owns, so the flight's FLIP shift always
+// measures clean seats and no pin, ride or lift is ever fought.
 const springField = createSpringField();
 let springEls: HTMLElement[] = []; // the rows the last measure read, index-aligned
 let springApplied = new Set<number>(); // indices carrying a live translate now
@@ -1790,7 +1792,7 @@ function applySpring(): void {
 }
 
 // The pump: one rAF chain, alive exactly while the field wants frames (a drag,
-// its momentum, the beat, the settle). Each frame reads scrollTop — the one
+// its momentum, the return). Each frame reads scrollTop — the one
 // read, no layout — drives the field, writes the translates, and ends itself
 // the moment the field is idle, so a settled thread schedules no frames.
 function springPump(): void {
@@ -5494,7 +5496,9 @@ function beginSiblingShift(): { play(): void } {
   // the springy transcript is zeroed before a single rect is read: a row still
   // carrying a spring displacement would corrupt this FLIP's before/after delta,
   // and the shift's own transforms would fight it. It stays frozen for the whole
-  // beat because springBlocked() reads shiftAnims (springscroll.ts wiring).
+  // beat because springBlocked() reads shiftAnims (springscroll.ts wiring), and
+  // no longer: each animation leaves the registry when it finishes, so a
+  // receipt shift at boot cannot block the spring for the life of the thread.
   springFreeze();
   springDirty = true; // the insert about to happen re-lays the tail
   // eligibility is the pre-send view: pinned (or near) the bottom. A send from
@@ -5545,10 +5549,15 @@ function beginSiblingShift(): { play(): void } {
         const r = el.getBoundingClientRect();
         const delta = beforeTop - r.top;
         if (!shiftParticipates(r.top, r.bottom, delta, view.top, view.bottom)) continue;
-        shiftAnims.push(el.animate(
+        const anim = el.animate(
           [{ transform: `translateY(${delta}px)` }, { transform: "none" }],
           { duration: FLIGHT_MS, easing: FLIGHT_EASE },
-        ));
+        );
+        shiftAnims.push(anim);
+        // the shift's end releases the spring's hold-off: the animation drops
+        // out of the registry when it finishes (a cancelled one rejects and is
+        // already out of a replaced registry: nothing to do)
+        anim.finished.then(() => dropShiftAnim(shiftAnims, anim), () => {});
         if (delta > maxDelta) maxDelta = delta;
         rows++;
       }

@@ -162,3 +162,18 @@ export function stampRidesFlight(
 ): boolean {
   return !seenAtMeasure && isStamp && overNewbornShotRow;
 }
+
+// The sibling-shift registry is what the springy transcript's hold-off reads
+// (springBlocked() in main.ts: any animation still listed keeps the spring at
+// zero). The registry used to be emptied only at the start of the NEXT shift,
+// so the receipt shift at boot on any thread with a sent message kept the
+// spring blocked for the life of the thread (the message-tail finding). Each
+// animation now drops itself out when it finishes; a cancelled one belongs to
+// a registry already replaced, so it is simply not found. Returns whether the
+// registry changed.
+export function dropShiftAnim<T>(registry: T[], done: T): boolean {
+  const i = registry.indexOf(done);
+  if (i < 0) return false;
+  registry.splice(i, 1);
+  return true;
+}
