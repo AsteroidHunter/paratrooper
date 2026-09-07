@@ -1650,7 +1650,7 @@ def test_run_job_wires_live_update_channel(tmp_path, monkeypatch):
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j1", thread_id="t1", text="add the pin")
     result = asyncio.run(
@@ -1687,7 +1687,7 @@ def test_run_job_emits_pr_event_from_reported_pr(tmp_path, monkeypatch):
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j2", thread_id="t1", text="make it bigger")
     result = asyncio.run(
@@ -1724,7 +1724,7 @@ def test_run_job_gives_the_credential_to_the_tools_and_not_to_the_session(tmp_pa
     monkeypatch.setattr(worker_mod, "installation_token", lambda config: "ghs-minted")
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j3", thread_id="t1", text="push the change")
     result = asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path)))
@@ -1759,7 +1759,7 @@ def test_run_job_without_a_github_token_hands_the_tools_none(tmp_path, monkeypat
     monkeypatch.setattr(config_mod, "_github_app", None)
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j4", thread_id="t1", text="just chatting")
     result = asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path)))
@@ -1795,7 +1795,7 @@ def test_run_job_refreshes_the_checkout_before_the_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(worker_mod, "installation_token", lambda config: "ghs-minted")
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", lambda ctx: ({"name": "p"}, []))
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
     monkeypatch.setattr(worker_mod, "SiteRepo", _Repo)
 
     job = worker_mod.Job(job_id="j5", thread_id="t1", text="add the pin")
@@ -1831,7 +1831,7 @@ def test_run_job_hands_the_branch_word_to_both_the_prompt_and_the_guard(tmp_path
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     cfg = _tool_cfg(tmp_path)
     cfg.branch_prefix = "blimp"
@@ -1860,7 +1860,7 @@ def test_run_job_rejects_an_unusable_branch_word_before_starting(tmp_path, monke
             yield
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     cfg = _tool_cfg(tmp_path)
     cfg.branch_prefix = "para/trooper"
@@ -1895,7 +1895,7 @@ def test_run_job_sets_the_scrub_switch_either_way(tmp_path, monkeypatch, with_to
     )
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j8", thread_id="t1", text="add the pin")
     assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
@@ -2335,7 +2335,7 @@ def test_run_job_env_carries_no_worker_only_secret(tmp_path, monkeypatch, with_t
     )
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j9", thread_id="t1", text="add the pin")
     assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
@@ -2367,7 +2367,7 @@ def test_run_job_closes_the_secret_files_to_the_file_tools(tmp_path, monkeypatch
 
     monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
     monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
-    monkeypatch.setattr(worker_mod, "query", fake_query)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
 
     job = worker_mod.Job(job_id="j7", thread_id="t1", text="read the pin file")
     assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
@@ -2385,6 +2385,199 @@ def test_run_job_closes_the_secret_files_to_the_file_tools(tmp_path, monkeypatch
     for matcher in matchers[1:]:
         deny = _call_file_hook(matcher.hooks[0], matcher.matcher, realistic[matcher.matcher])
         assert deny["hookSpecificOutput"]["permissionDecision"] == "deny", matcher.matcher
+
+
+# --- the session's control stream, and who answers the CLI -------------------
+#
+# Everything the hardening added to the session — the four PreToolUse guards,
+# the in-process tool server, the permission mode — is carried by ONE channel:
+# the CLI asks back down its own stdin and the session answers. The turn that
+# reported "my shell is down" is what a session that cannot answer looks like:
+# the CLI raises "Stream closed" on the hook callbacks (so the fence silently
+# stops running) and refuses every tool call it has to ask about with "Tool
+# permission request failed". These pin both halves: the stream stays open for
+# the whole turn, and there is something on this end to answer with.
+
+
+def _stream_tools():
+    """A session's tool list in the shape run_job builds it: the in-process
+    tools plus the built-ins."""
+    import paratrooper.agent.worker as worker_mod
+
+    return ["mcp__paratrooper__place_pin", *worker_mod.BUILTIN_TOOLS]
+
+
+def test_the_permission_gate_answers_only_from_the_sessions_own_list():
+    """The gate is the session's own allowed_tools list read back as an answer.
+    A name on it runs, a name off it is refused with a reason. There is no
+    branch that says yes to something unnamed: the scrub switch forces the
+    asking mode, and 'answer the question' must never turn into 'approve the
+    request'."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    import paratrooper.agent.worker as worker_mod
+
+    gate = worker_mod.make_tool_gate(_stream_tools())
+
+    for name in _stream_tools():
+        allowed = asyncio.run(gate(name, {}, None))
+        assert isinstance(allowed, PermissionResultAllow), name
+
+    for stranger in ("WebFetch", "WebSearch", "Task", "mcp__elsewhere__push", "NotebookEdit"):
+        deny = asyncio.run(gate(stranger, {}, None))
+        assert isinstance(deny, PermissionResultDeny), stranger
+        assert stranger in deny.message  # the agent is told what was refused
+
+
+def test_run_job_hands_the_session_a_way_to_answer_a_permission_question(tmp_path, monkeypatch):
+    """The scrub switch resets the permission mode to `default`, which is the
+    mode that ASKS, and the CLI asks over the control stream. Without a callback
+    the SDK answers that question with an error and the CLI turns the error into
+    a denial, which is every shell and file command failing in a row. So the
+    session must carry one, and it must be the same list it declares."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {}
+
+    def fake_build_tool_server(ctx):
+        return {"name": "paratrooper"}, ["mcp__paratrooper__place_pin"]
+
+    async def fake_query(*, prompt, options):
+        captured["options"] = options
+        if False:
+            yield
+
+    monkeypatch.setattr(worker_mod, "installation_token", _no_app_configured)
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "build_tool_server", fake_build_tool_server)
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
+
+    job = worker_mod.Job(job_id="j10", thread_id="t1", text="add the pin")
+    assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
+
+    options = captured["options"]
+    gate = options.can_use_tool
+    assert gate is not None, "nothing would answer the CLI's permission questions"
+    # what it answers is exactly what the session declared, nothing wider
+    assert options.allowed_tools == ["mcp__paratrooper__place_pin"] + worker_mod.BUILTIN_TOOLS
+    for named in options.allowed_tools:
+        assert isinstance(asyncio.run(gate(named, {}, None)), PermissionResultAllow), named
+    assert isinstance(asyncio.run(gate("WebFetch", {"url": "x"}, None)), PermissionResultDeny)
+
+
+class _ScriptedCLI:
+    """A stand-in for the Claude Code CLI that speaks its half of the control
+    protocol: it answers `initialize`, then — the way the real CLI does before
+    it runs a Bash command — asks this session for the PreToolUse decision, and
+    only reports the turn's result once it has the answer.
+
+    It records whether its input stream was still open at the moment it asked.
+    That is the whole bug: the one-shot ``query()`` path closes the session's
+    stdin at the first result, and the CLI's own `sendRequest` then throws
+    "Stream closed" instead of asking, so the guard never runs and the tool call
+    is refused."""
+
+    def __init__(self):
+        import anyio
+
+        self.to_sdk, self._rx = anyio.create_memory_object_stream(64)
+        self.input_ended = False
+        self.open_when_asked: bool | None = None
+        self.hook_answer: dict | None = None
+        self.closed = False
+
+    async def connect(self) -> None:
+        return None
+
+    def is_ready(self) -> bool:
+        return not self.closed
+
+    async def end_input(self) -> None:
+        self.input_ended = True
+
+    async def close(self) -> None:
+        self.closed = True
+        self.input_ended = True
+        self.to_sdk.close()
+
+    async def write(self, data: str) -> None:
+        for line in data.splitlines():
+            if not line.strip():
+                continue
+            msg = json.loads(line)
+            if msg.get("type") == "control_request":
+                # the session's initialize handshake
+                await self.to_sdk.send({
+                    "type": "control_response",
+                    "response": {"subtype": "success", "request_id": msg["request_id"],
+                                 "response": {}},
+                })
+            elif msg.get("type") == "control_response":
+                # our own hook question, answered
+                self.hook_answer = msg["response"].get("response")
+                await self.to_sdk.send({
+                    "type": "result", "subtype": "success", "duration_ms": 1,
+                    "duration_api_ms": 1, "is_error": False, "num_turns": 1,
+                    "session_id": "s", "result": "done", "total_cost_usd": 0.0,
+                })
+            elif msg.get("type") == "user":
+                await self.to_sdk.send({
+                    "type": "assistant", "session_id": "s", "parent_tool_use_id": None,
+                    "message": {"role": "assistant", "model": "m",
+                                "content": [{"type": "text", "text": "working"}]},
+                })
+                self.open_when_asked = not self.input_ended
+                await self.to_sdk.send({
+                    "type": "control_request", "request_id": "cli_1",
+                    "request": {"subtype": "hook_callback", "callback_id": "hook_0",
+                                "tool_use_id": "toolu_1",
+                                "input": {"tool_name": "Bash",
+                                          "tool_input": {"command": "git push origin main"}}},
+                })
+
+    async def _iter(self):
+        async for msg in self._rx:
+            yield msg
+
+    def read_messages(self):
+        return self._iter()
+
+
+def test_the_turn_runs_on_a_control_stream_that_stays_open(monkeypatch):
+    """Drive a real session against a stand-in CLI. The guard's decision has to
+    reach the CLI while the turn is running — a refusal that never arrives is a
+    fence that is not there — and the stream is closed only on the way out."""
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
+
+    import paratrooper.agent.worker as worker_mod
+    from paratrooper.agent.hooks import make_main_guard_hook
+
+    cli = _ScriptedCLI()
+    monkeypatch.setattr(
+        worker_mod, "ClaudeSDKClient",
+        lambda options: ClaudeSDKClient(options=options, transport=cli),
+    )
+
+    guard = make_main_guard_hook("main", branch_prefix="paratrooper")
+    options = ClaudeAgentOptions(
+        allowed_tools=["Bash"],
+        can_use_tool=worker_mod.make_tool_gate(["Bash"]),
+        hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[guard])]},
+    )
+
+    async def drive():
+        return [m async for m in worker_mod.run_session(prompt="add a song", options=options)]
+
+    messages = asyncio.run(drive())
+
+    assert cli.open_when_asked is True, "the session's stdin was closed mid-turn"
+    assert cli.hook_answer is not None, "the guard's decision never reached the CLI"
+    decision = cli.hook_answer["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"  # `git push` is fenced, as ever
+    assert any(type(m).__name__ == "ResultMessage" for m in messages)
+    assert cli.input_ended and cli.closed  # and the stream is closed on the way out
 
 
 # --- the worker image's shape (checklist 3.1) --------------------------------

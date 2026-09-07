@@ -3,7 +3,7 @@
 Ties Phase 3 together. Per request: lock in auth (subscription/api, no fallback),
 refresh the checkout from the remote, build the in-process tool server + the
 custom system prompt (with the hot memory digest) + the main-guard PreToolUse
-hook, then drive a headless ``query()`` session. The agent does its own local git
+hook, then drive a headless streaming session. The agent does its own local git
 through Bash (branch off origin/main or continue an open PR's branch; the hook
 fences main/merges); everything that reaches GitHub is a worker-owned tool, with
 the credential held here and kept out of the session's environment. Progress
@@ -11,6 +11,18 @@ the credential held here and kept out of the session's environment. Progress
 relay it over the socket; the final result + artifacts are returned.
 
 One session per request, started fresh — matching the task-based session model.
+
+**Why a streaming client and not the one-shot ``query()``.** Everything this
+session guards runs over one channel: the CLI asks *back* down its own stdin for
+every PreToolUse hook decision, every in-process tool call and every permission
+question. ``query()`` with a string prompt closes that channel the moment the
+first result arrives (``wait_for_result_and_end_input`` in the SDK), and the CLI
+then answers its own questions with ``Error("Stream closed")``: hook callbacks
+are skipped, so the branch fence and the secret-file refusals quietly stop
+running, and any tool call the CLI's rules do not settle is refused with "Tool
+permission request failed", which is a turn in which nothing the agent touches
+works. :func:`run_session` uses ``ClaudeSDKClient``, which holds stdin open for
+the life of the turn and closes it on the way out.
 """
 
 from __future__ import annotations
@@ -24,10 +36,12 @@ import anyio
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    ClaudeSDKClient,
     HookMatcher,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ResultMessage,
     StreamEvent,
-    query,
 )
 
 from .auth import configure_auth
@@ -61,6 +75,55 @@ DENIED_READS = ["Read(//proc/**)", "Read(//etc/secrets/**)"]
 SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
 
 EventCallback = Callable[[dict], Awaitable[None] | None]
+
+
+def make_tool_gate(session_tools: list[str]):
+    """Answer the CLI's permission questions from the session's own tool list.
+
+    The scrub switch resets the permission mode to ``default``, which is the
+    mode that *asks*: any tool call the CLI's own rules do not settle becomes a
+    question put to this session over the control stream. A session that cannot
+    answer is not a stricter session, it is a broken one — the CLI turns an
+    unanswered question into "Tool permission request failed", so the agent's
+    shell and file tools fail one after another and it reports that it has no
+    shell.
+
+    This answers from :data:`session_tools`, the very list the session declares
+    in ``allowed_tools``, so the set of tools the agent may run is exactly what
+    that list says: a name on it runs, a name off it is refused. **It never
+    approves by default** — there is no branch here that says yes to something
+    unnamed, which is the whole reason the answer is derived from the list
+    rather than from the question. The hooks still run first and a hook's deny
+    still wins, and ``disallowed_tools`` is refused by the CLI before anything
+    is asked, so neither fence depends on this."""
+    names = {name.split("(", 1)[0] for name in session_tools}
+
+    async def gate(tool_name: str, tool_input: dict, context: object):
+        if tool_name in names:
+            return PermissionResultAllow()
+        return PermissionResultDeny(
+            message=(
+                f"{tool_name} is not one of this session's tools. Paratrooper's "
+                "agent has the pinboard tools, the shell and the file tools, and "
+                "nothing else; there is no way to widen that from inside a turn."
+            )
+        )
+
+    return gate
+
+
+async def run_session(*, prompt: str, options: ClaudeAgentOptions):
+    """Drive one turn and yield the messages it produces.
+
+    A streaming client rather than ``query()``: the control stream carries the
+    hook decisions, the in-process tool calls and the permission answers, and it
+    has to stay open for as long as the turn is running (see the module
+    docstring). ``receive_response()`` ends at the turn's result, and leaving the
+    context closes stdin and the CLI with it."""
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query(prompt)
+        async for message in client.receive_response():
+            yield message
 
 
 @dataclass
@@ -222,6 +285,11 @@ async def run_job(
     # line: one Read of /proc/1/environ would hand over the whole environment
     file_guard = make_file_guard_hook()
 
+    # the one list of what this session may run: it is declared to the CLI as
+    # allow rules AND is the answer the permission gate gives, so there is a
+    # single place that says what the agent has
+    session_tools = tool_names + BUILTIN_TOOLS
+
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=build_system_prompt(
@@ -232,11 +300,17 @@ async def run_job(
         # merged over the inherited worker env by the SDK transport
         env=session_env,
         mcp_servers={SERVER_NAME: server},
-        allowed_tools=tool_names + BUILTIN_TOOLS,
+        allowed_tools=session_tools,
         disallowed_tools=DENIED_READS,
         # headless least-privilege: listed tools run, unlisted are denied without
-        # prompting; the main-guard hook denies dangerous Bash (deny beats this mode)
+        # prompting; the main-guard hook denies dangerous Bash (deny beats this mode).
+        # The scrub switch overrides this to `default` on its own, which is why the
+        # gate below has to exist: the mode this asks for is the behaviour the gate
+        # then has to produce by hand.
         permission_mode="dontAsk",
+        # who answers when the CLI asks. Same list as allowed_tools above, so the
+        # answer cannot widen what the session declared.
+        can_use_tool=make_tool_gate(session_tools),
         hooks={
             "PreToolUse": [
                 HookMatcher(matcher="Bash", hooks=[guard]),
@@ -256,7 +330,7 @@ async def run_job(
     result_text = ""
     typing_announced = False
     try:
-        async for message in query(prompt=_build_prompt(job), options=options):
+        async for message in run_session(prompt=_build_prompt(job), options=options):
             if isinstance(message, StreamEvent):
                 if not typing_announced and _is_text_delta(message.event):
                     typing_announced = True  # once per composition
