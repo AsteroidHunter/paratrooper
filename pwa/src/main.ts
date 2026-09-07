@@ -183,7 +183,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.131"; // The caret stays in the box for the whole keyboard rise: the pill's layout switch waits for the lift to stop moving, and the text box keeps its layer across it
+const APP_VERSION = "0.3.134"; // The springy scroll follows the speed of the last fifty milliseconds of readings that moved, so a frame the phone skips no longer pulses every bubble
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -996,6 +996,7 @@ function renderChat(): void {
   springField.reset();
   springEls = [];
   springApplied = new Set<number>();
+  springWritten = new Map<number, string>();
   springDirty = true;
   replyHold.reset(); // parked frames die with the old shell; replay re-delivers
   oldestSeq = 0;
@@ -1743,6 +1744,11 @@ function fitBubblesNow(root: ParentNode | null): void {
 const springField = createSpringField();
 let springEls: HTMLElement[] = []; // the rows the last measure read, index-aligned
 let springApplied = new Set<number>(); // indices carrying a live translate now
+// what each of those rows was last WRITTEN, so an unchanged device pixel is not
+// written again. Keyed by index, so it is dropped whenever the row table is
+// (measureSpring, the thread swap): a fresh element carries no inline translate
+// and must never be skipped on the strength of the old one's value.
+let springWritten = new Map<number, string>();
 let springThreadTop = 0; // thread's screen-Y, cached at measure (stable per gesture)
 let springClientH = 0; // thread clientHeight, cached at measure
 let springRaf = 0; // the frame pump; 0 = not scheduled
@@ -1776,6 +1782,7 @@ function measureSpring(): void {
   const t = document.getElementById("thread");
   if (!t) return;
   springEls = laidOutRows(t) as HTMLElement[];
+  springWritten = new Map(); // new elements at these indices: nothing is known-written
   springThreadTop = t.getBoundingClientRect().top;
   springClientH = t.clientHeight;
   springField.measure(springEls.map((el) => ({ top: el.offsetTop, height: el.offsetHeight })));
@@ -1785,14 +1792,29 @@ function measureSpring(): void {
 // Write the current displacements as `translate`, and clear the transform off
 // any row that has just reached rest — so a settled thread carries no inline
 // translate at all (the zero-at-rest invariant, visible in the DOM).
+//
+// A row whose translate would not change is not written again. The value is
+// still the full sub-pixel one — snapping it to a whole device pixel was tried
+// and dropped, because at a slow scroll it quantises the row's motion into
+// device-pixel steps the engine would otherwise anti-alias smoothly, and the
+// harness measured that as WORSE than the sub-pixel write it replaced. Skipping
+// the unchanged write costs nothing and is worth having on its own: with the
+// lag steady (springscroll.ts, VELOCITY_WINDOW_MS) most rows hold their value
+// for several frames, so a slow scroll writes about one row a frame where it
+// used to write every participating row on every frame.
 function applySpring(): void {
   const disp = springField.displacements();
   for (const [i, dy] of disp) {
     const el = springEls[i];
-    if (el) el.style.translate = `0 ${dy.toFixed(2)}px`;
+    if (!el) continue;
+    const px = `0 ${dy.toFixed(2)}px`;
+    if (springWritten.get(i) === px) continue; // unchanged: no write, no paint
+    springWritten.set(i, px);
+    el.style.translate = px;
   }
   for (const i of springApplied) {
     if (disp.has(i)) continue;
+    springWritten.delete(i);
     const el = springEls[i];
     if (!el) continue;
     el.style.removeProperty("translate");

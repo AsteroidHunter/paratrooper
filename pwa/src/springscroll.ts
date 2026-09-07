@@ -47,6 +47,22 @@
 // only near the viewport, a compress guard walked outward from the finger so
 // rows can never overlap, and the hold-off through every motion the app owns.
 //
+// Changed after the owner reported jitter on slow scrolls on the live build
+// (0.3.131) and his own scroll-jank records were read (gestures 2 to 5 of
+// 2026-09-07): the frames were all there — 59.3 to 59.9 a second, at most one
+// two-frame hitch in a 19.6 s gesture — but scroll events, and with them the
+// scrollTop a frame is allowed to read, arrived at only 31 to 39 a second while
+// the thread moved. So on about one frame in four the position had not changed
+// and the lag, driven by that frame's delta, dipped 31%, then overshot on the
+// frame the delta landed double. The rows were placed off a pulsing lag while
+// the compositor scrolled underneath them smoothly, which is the shimmer.
+// The lag is now driven by the speed of the last 50 ms of readings that MOVED
+// (VELOCITY_WINDOW_MS), held across a delivery gap and dropped to zero once the
+// position has stood still longer than a gap could last (VELOCITY_HOLD_MS).
+// Every number the recording pinned is untouched: relaxLag is the same solution
+// and a steady speed still settles at speed x tau, because the drive was always
+// dS/dt and only the estimate of dS/dt changed.
+//
 // Sign: scrollTop rising (toward newer, content moving up the screen) leaves
 // L positive and the rows displaced DOWN behind the motion; falling (toward
 // older) leaves them displaced UP. Both return toward the seat from the next
@@ -83,6 +99,23 @@ export const TUNING = {
   /** home: under this reference lag everything clears (a quarter pixel, under
       the DOM's own rounding, so the clear is never seen). */
   REST_EPS_PX: 0.25,
+  /** how far back the drive speed is measured, ms. One frame's scrollTop delta
+      is not a speed on the phone. Measured on the owner's own device (the
+      scroll-jank records of 2026-09-07, gestures 2 to 5): animation frames
+      arrive at 59.3 to 59.9 a second, but scroll events, and with them the
+      scrollTop the main thread is allowed to see, arrive at only 31 to 39 a
+      second while the thread is moving — about three frames in four — and the
+      position handed over is quantised to whole device pixels. A per-frame
+      delta therefore alternates between nothing and a double step, and since
+      one frame's delta enters the lag at 84% of its weight, the lag pulses
+      with it. Over 50 ms the same motion reads as one steady speed. */
+  VELOCITY_WINDOW_MS: 50,
+  /** how long a still scrollTop may be read as a delivery gap rather than a
+      stop while nothing else says the scroll is moving: just over one frame at
+      60 Hz. It is the bound for momentum and for a wheel, where there is no
+      finger to ask. Under a finger the finger answers instead (see below), so
+      a hold on the glass still melts from the very next frame. */
+  VELOCITY_HOLD_MS: 28,
 } as const;
 
 /** the steady lag of the reference row per px/ms of scroll speed: tau itself */
@@ -122,6 +155,46 @@ export function relaxLag(L: number, dS: number, dt: number, tau: number = TUNING
 /** home: under the rest threshold, so the wiring may clear the transforms */
 export function atRest(L: number): boolean {
   return Math.abs(L) < TUNING.REST_EPS_PX;
+}
+
+/** one reading of the scroll position: the frame it was taken on and where it
+    was. Only readings that MOVED are kept; a frame that repeats the last
+    position said nothing about the speed. */
+export interface ScrollSample {
+  t: number;
+  s: number;
+}
+
+/**
+ * The speed to drive the lag with, px/ms, from a trailing run of readings that
+ * moved (oldest first, newest last) and the current frame's clock.
+ *
+ * Two rules, and both of them exist because the phone does not hand the main
+ * thread a fresh scroll position every frame:
+ *
+ *   - the slope is taken across the whole run, not across the last frame, so
+ *     the same motion delivered in a lump reads as the steady speed it was;
+ *     the run is windowed by the caller, which is what bounds the smoothing.
+ *   - a run whose newest reading is older than `holdMs` is a stop, not a gap:
+ *     the speed is zero and the lag decays from that frame. Under the hold the
+ *     last speed stands, so a single frame with no fresh position — the common
+ *     case, one frame in four — neither dips the lag nor moves the rows.
+ *
+ * Fewer than two readings is not a speed: zero, and the next moved reading
+ * gives the first real one.
+ */
+export function speedOver(
+  samples: readonly ScrollSample[],
+  now: number,
+  holdMs: number = TUNING.VELOCITY_HOLD_MS,
+): number {
+  const n = samples.length;
+  if (n < 2) return 0;
+  const last = samples[n - 1];
+  if (now - last.t > holdMs) return 0;
+  const dt = last.t - samples[0].t;
+  if (dt <= 0) return 0;
+  return (last.s - samples[0].s) / dt;
 }
 
 /** one row's geometry, in the scroller's own content space (offsetTop/height) */
@@ -240,6 +313,8 @@ export function createSpringField(opts: {
   stretchCap?: number;
   gapMin?: number;
   buffer?: number;
+  velocityWindow?: number;
+  velocityHold?: number;
 } = {}): SpringField {
   const tau = opts.tau ?? TUNING.LAG_TAU_MS;
   const divisor = opts.divisor ?? TUNING.RESISTANCE_DIVISOR;
@@ -247,6 +322,8 @@ export function createSpringField(opts: {
   const stretchCap = opts.stretchCap ?? TUNING.STRETCH_CAP_PX;
   const gapMin = opts.gapMin ?? TUNING.GAP_MIN_PX;
   const buffer = opts.buffer ?? TUNING.PARTICIPATION_BUFFER_PX;
+  const velWindow = opts.velocityWindow ?? TUNING.VELOCITY_WINDOW_MS;
+  const velHold = opts.velocityHold ?? TUNING.VELOCITY_HOLD_MS;
 
   let rows: readonly SpringRow[] = [];
   let L = 0; // the reference lag, px
@@ -259,6 +336,12 @@ export function createSpringField(opts: {
   let scrollNow = 0;
   let lastScrollTop: number | null = null;
   let lastFrameMs: number | null = null;
+  // the trailing run of readings that MOVED, oldest first, windowed to
+  // velWindow. Never longer than a handful of entries: at 60 Hz a 50 ms window
+  // holds three or four.
+  let samples: ScrollSample[] = [];
+  let lastAnchorSeen: number | null = null; // the anchor as of the previous frame
+  let anchorMovedAt = -Infinity; // the last frame on which the finger's screen-Y changed
 
   function measure(next: readonly SpringRow[]): void {
     rows = next;
@@ -276,8 +359,15 @@ export function createSpringField(opts: {
       // been reading the position all along
       lastScrollTop = null;
       lastFrameMs = null;
+      samples = [];
     }
     isArmed = true;
+    // the finger LANDING somewhere is not the finger travelling: a catch moves
+    // the anchor across the screen in one step, and reading that as travel
+    // would bridge the speed of the coast the catch just killed. Only a
+    // touchmove, frame to frame, counts (see the budget in frame()).
+    lastAnchorSeen = anchorY;
+    anchorMovedAt = -Infinity;
     // a fresh gesture or a grab of a coasting thread drives; a grab mid-return
     // keeps returning until the finger actually moves the scroll
     if (phaseNow === "idle" || phaseNow === "coasting") phaseNow = "driving";
@@ -304,19 +394,54 @@ export function createSpringField(opts: {
   function frame(nowMs: number, scrollTop: number): void {
     scrollNow = scrollTop;
     if (!isArmed) return;
+    // did the finger move since the previous frame? The wiring re-anchors on
+    // every touchmove, and touchmove is NOT gated by the compositor's scroll
+    // sync: it arrives every frame while a finger drags. So it is the one
+    // honest answer to the question a still scrollTop cannot settle.
+    if (anchorScreenY !== lastAnchorSeen) {
+      if (lastAnchorSeen !== null) anchorMovedAt = nowMs;
+      lastAnchorSeen = anchorScreenY;
+    }
     if (lastFrameMs === null || lastScrollTop === null) {
       lastFrameMs = nowMs;
       lastScrollTop = scrollTop;
+      samples = [{ t: nowMs, s: scrollTop }];
       return; // a clock and position reading only
     }
+    const prevFrameMs = lastFrameMs;
     const dt = Math.max(nowMs - lastFrameMs, 0);
     lastFrameMs = nowMs;
     const delta = scrollTop - lastScrollTop;
     lastScrollTop = scrollTop;
-    // the frame's motion goes in and the lag relaxes over the frame, exactly:
-    // a moving scroll holds L near speed x tau, a still one lets it melt
-    L = clamp(relaxLag(L, delta, dt, tau), -stretchCap, stretchCap);
-    if (delta !== 0) phaseNow = held ? "driving" : "coasting";
+    // How long a scrollTop that has not moved may still be read as a delivery
+    // gap. Under a finger the finger decides: a finger that moved on THIS frame
+    // is a scroll still moving, so the gap is bridged (out to velWindow, which
+    // also ends the bridge if the scroll is pinned at an end of the thread while
+    // the finger keeps pulling); the first frame the finger does not move is a
+    // stop, budget zero, and the stretch melts from that very frame exactly as
+    // the recording does. Nothing is granted a grace period here, which is why
+    // the return keeps its measured shape: touchmove arrives every frame while a
+    // finger drags, so "moved this frame" is a live signal, not a stale one.
+    // With no finger — momentum, a wheel — the clock decides instead.
+    const fingerTravelling = held && anchorMovedAt > prevFrameMs;
+    const budget = held ? (fingerTravelling ? velWindow : 0) : velHold;
+    if (delta !== 0) {
+      // a fresh position: it joins the run, and the run keeps only the window
+      samples.push({ t: nowMs, s: scrollTop });
+      while (samples.length > 2 && nowMs - samples[0].t > velWindow) samples.shift();
+    } else if (samples.length > 0 && nowMs - samples[samples.length - 1].t > budget) {
+      // the scroll really has stopped: the run is spent, and a single reading
+      // restamped each still frame keeps the restart's first speed honest
+      samples = [{ t: nowMs, s: scrollTop }];
+    }
+    // the speed the run carries goes in and the lag relaxes over the frame,
+    // exactly: a moving scroll holds L near speed x tau, a stopped one lets it
+    // melt. Driving on the RUN's speed rather than this frame's delta is what
+    // keeps a frame with no fresh position from dipping the lag — the pulse the
+    // owner saw as jitter on slow scrolls (see VELOCITY_WINDOW_MS).
+    const v = speedOver(samples, nowMs, budget);
+    L = clamp(relaxLag(L, v * dt, dt, tau), -stretchCap, stretchCap);
+    if (v !== 0) phaseNow = held ? "driving" : "coasting";
     else if (atRest(L)) settle();
     else phaseNow = "settling";
   }
@@ -364,6 +489,9 @@ export function createSpringField(opts: {
     held = false;
     lastScrollTop = null;
     lastFrameMs = null;
+    samples = [];
+    lastAnchorSeen = null;
+    anchorMovedAt = -Infinity;
   }
 
   function reset(): void {
