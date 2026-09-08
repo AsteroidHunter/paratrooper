@@ -498,6 +498,114 @@ describe("createSpringField — the phone delivers scrollTop on three frames in 
   });
 });
 
+describe("createSpringField — a catch keeps the vertex it had", () => {
+  // Measured off the owner's Messages recording, on every cleanly tracked
+  // caught coast (t = 2.077, 6.265, 27.948 and 51.823 s): the stretch melts in
+  // place on the ordinary return curve, the bubble sitting at the vertex does
+  // not move by a pixel through the whole return, and the worst single-frame
+  // move anywhere is 3 to 4.3 CSS px on stretches of 11 and 27 CSS px. Nothing
+  // jumps, and no bubble's displacement ever grows.
+
+  /** a fast drag, a lift, a coast, then a finger landing at `catchY` */
+  function coastThenCatch(catchY: number): { d: Drive; before: Map<number, number> } {
+    const d = grab();
+    drag(d, 2.0, 150, -1);
+    d.f.lift();
+    drag(d, 1.8, 100, -1); // the thread coasts
+    const before = new Map(d.f.displacements());
+    d.f.begin(CLIENT_H, THREAD_TOP, catchY, true);
+    d.now += FRAME;
+    d.f.frame(d.now, d.scrollTop); // the catch killed the momentum: no new motion
+    return { d, before };
+  }
+
+  function worstMove(before: Map<number, number>, after: Map<number, number>): number {
+    let worst = 0;
+    for (const i of new Set([...before.keys(), ...after.keys()])) {
+      worst = Math.max(worst, Math.abs((after.get(i) ?? 0) - (before.get(i) ?? 0)));
+    }
+    return worst;
+  }
+
+  it("catching far from where the finger lifted moves the rows no more than catching on the spot", () => {
+    const near = coastThenCatch(THUMB); // the finger lands where the last one left
+    const far = coastThenCatch(150); // and 375 px up the screen from it
+    const nearWorst = worstMove(near.before, near.d.f.displacements());
+    const farWorst = worstMove(far.before, far.d.f.displacements());
+    expect(nearWorst).toBeGreaterThan(15); // the return's own first frame, ~31% of the stretch
+    // the vertex is what makes these differ, and it must not move: before this
+    // was 70 px against 25 px, 45 px of it purely the anchor teleporting
+    expect(farWorst).toBeCloseTo(nearWorst, 6);
+  });
+
+  it("no row's displacement grows on the catch frame: the profile only melts", () => {
+    const { d, before } = coastThenCatch(150);
+    const after = d.f.displacements();
+    for (const [i, dy] of before) {
+      expect(Math.abs(after.get(i) ?? 0)).toBeLessThanOrEqual(Math.abs(dy) + 1e-9);
+    }
+    expect(before.size).toBeGreaterThan(4);
+  });
+
+  it("the row at the old vertex stays put through the whole return, as it does in the recording", () => {
+    const { d } = coastThenCatch(150);
+    // the row under the OLD finger carries almost nothing, and catching
+    // elsewhere must not give it any more: in the recording the bubble at the
+    // vertex moved 0 px across the whole return while a far one moved 27
+    const seatRow = topRowAt(d.rows, d.scrollTop + (THUMB - THREAD_TOP));
+    const farRow = topRowAt(d.rows, d.scrollTop);
+    const atCatch = Math.abs(d.f.displacements().get(seatRow) ?? 0);
+    const farAtCatch = Math.abs(d.f.displacements().get(farRow) ?? 0);
+    expect(atCatch).toBeLessThan(0.03 * farAtCatch); // 1.2 px against 78: it sits at the vertex
+    let prev = atCatch;
+    for (let k = 0; k < 12; k++) {
+      d.now += FRAME;
+      d.f.frame(d.now, d.scrollTop);
+      const now = Math.abs(d.f.displacements().get(seatRow) ?? 0);
+      expect(now).toBeLessThanOrEqual(prev + 1e-9); // only ever melts, never gains
+      prev = now;
+    }
+    expect(prev).toBeLessThan(0.25);
+  });
+
+  it("the new finger takes the vertex the moment its own drag moves the scroll", () => {
+    const { d } = coastThenCatch(150);
+    expect(Math.abs(d.f.lag())).toBeGreaterThan(20); // still melting
+    const parked = d.f.displacements();
+    d.now += FRAME;
+    d.f.anchor(150);
+    d.scrollTop -= 1.0 * FRAME; // the caught finger drags on
+    d.f.frame(d.now, d.scrollTop);
+    const adopted = d.f.displacements();
+    // the vertex has moved to the new finger, so the profile is a different
+    // shape now: the row nearest the NEW anchor carries the least
+    const newVertexRow = topRowAt(d.rows, d.scrollTop + (150 - THREAD_TOP));
+    expect(Math.abs(adopted.get(newVertexRow) ?? 0)).toBeLessThan(
+      Math.abs(parked.get(newVertexRow) ?? 0),
+    );
+    expect(d.f.phase()).toBe("driving");
+  });
+
+  it("a grab of a settled thread takes its anchor at once: there is nothing to protect", () => {
+    const d = grab();
+    drag(d, 0.5, 200, -1);
+    stillFrames(d, 400, 0); // home
+    expect(d.f.lag()).toBe(0);
+    d.f.begin(CLIENT_H, THREAD_TOP, 150, true);
+    d.now += FRAME;
+    d.f.frame(d.now, d.scrollTop);
+    d.now += FRAME;
+    d.scrollTop -= 1.0 * FRAME;
+    d.f.frame(d.now, d.scrollTop);
+    // the fresh gesture's stretch is centred on the new finger from its first frame
+    const atNew = topRowAt(d.rows, d.scrollTop + (150 - THREAD_TOP));
+    const far = topRowAt(d.rows, d.scrollTop);
+    expect(Math.abs(d.f.displacements().get(atNew) ?? 0)).toBeLessThan(
+      Math.abs(d.f.displacements().get(far) ?? 0),
+    );
+  });
+});
+
 describe("createSpringField — a fling: the lag tracks the decaying speed and is gone with it", () => {
   it("lift mid-drag coasts; through the coast the lag follows speed x tau; at the end there is nothing left to fall", () => {
     const d = grab();

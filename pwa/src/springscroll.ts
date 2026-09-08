@@ -63,6 +63,25 @@
 // and a steady speed still settles at speed x tau, because the drive was always
 // dS/dt and only the estimate of dS/dt changed.
 //
+// Changed again after the owner reported that braking a fast scroll by touching
+// the screen threw the bubbles around: the anchor was taken by the new finger
+// the instant it landed, so the whole V re-centred in one frame while the lag
+// was still at a fling's value, and every row moved at once — 70 px on the
+// worst row, 45 px of it purely the vertex moving, some rows up and some down.
+// The recording says the opposite. On all four cleanly tracked caught coasts
+// (t = 2.077, 6.265, 27.948 and 51.823 s; the fifth, at 17.530 s, is a seat
+// bookkeeping jump in the tracker, not motion on screen), the stretch melts in
+// place on the ORDINARY return curve, exp(-t/tau) frame for frame; the bubble
+// sitting at the vertex does not move by a pixel through the whole return
+// (0 px over 200 ms while a far bubble travelled 27); nothing jumps (worst
+// single-frame move 3 to 4.3 CSS px on stretches of 11 and 27 CSS px); and no
+// bubble's displacement ever grows. So a catch is not a special case at all: it
+// is the ordinary return, and the only thing to fix was the vertex teleporting.
+// A finger landing on a stretched thread now parks its anchor and the old
+// vertex stands, until the scroll moves again under that finger (a new drag,
+// whose stretch is the new finger's) or the lag reaches rest (nothing left to
+// place). Both are the spring's own state, so no timer and no new dynamics.
+//
 // Sign: scrollTop rising (toward newer, content moving up the screen) leaves
 // L positive and the rows displaced DOWN behind the motion; falling (toward
 // older) leaves them displaced UP. Both return toward the seat from the next
@@ -354,6 +373,11 @@ export function createSpringField(opts: {
   let samples: ScrollSample[] = [];
   let lastAnchorSeen: number | null = null; // the anchor as of the previous frame
   let anchorMovedAt = -Infinity; // the last frame on which the finger's screen-Y changed
+  // a finger that has landed on a stretched thread but has not been given the
+  // profile's vertex yet, and whether one is waiting (null is a real anchor
+  // value, the viewport centre, so the flag carries the state, not the value)
+  let pendingAnchorY: number | null = null;
+  let vertexParked = false;
 
   function measure(next: readonly SpringRow[]): void {
     rows = next;
@@ -362,7 +386,25 @@ export function createSpringField(opts: {
   function begin(ch: number, top: number, anchorY: number | null, fingerDown: boolean): void {
     clientH = ch;
     threadTop = top;
-    anchorScreenY = anchorY;
+    // A finger landing on a thread that still carries stretch does NOT take the
+    // profile's vertex. Measured off the owner's Messages recording, on all four
+    // cleanly tracked caught coasts: the stretch melts in place on the ordinary
+    // return curve, the bubble sitting at the vertex does not move by a pixel
+    // through the whole return, and nothing jumps (worst single-frame move 3 to
+    // 4.3 CSS px, on stretches of 11 and 27 CSS px). Moving the vertex would
+    // move every row at once, because each row's share is its distance from the
+    // vertex. So the new touch point waits, and the vertex it would replace
+    // stands until the scroll moves again (a new drag, whose stretch does belong
+    // to the new finger) or the lag reaches rest (nothing left to place, so the
+    // swap cannot be seen). Both are the spring's own state; neither is a timer.
+    if (isArmed && !atRest(L)) {
+      pendingAnchorY = anchorY;
+      vertexParked = true;
+    } else {
+      anchorScreenY = anchorY;
+      pendingAnchorY = null;
+      vertexParked = false;
+    }
     held = fingerDown;
     if (!isArmed) {
       // a fresh gesture: the next frame is a baseline, so no delta from before
@@ -378,7 +420,7 @@ export function createSpringField(opts: {
     // the anchor across the screen in one step, and reading that as travel
     // would bridge the speed of the coast the catch just killed. Only a
     // touchmove, frame to frame, counts (see the budget in frame()).
-    lastAnchorSeen = anchorY;
+    lastAnchorSeen = anchorScreenY;
     anchorMovedAt = -Infinity;
     // a fresh gesture or a grab of a coasting thread drives; a grab mid-return
     // keeps returning until the finger actually moves the scroll
@@ -386,7 +428,11 @@ export function createSpringField(opts: {
   }
 
   function anchor(screenY: number): void {
-    anchorScreenY = screenY;
+    // while the vertex is parked the finger may travel all it likes: what it
+    // updates is the anchor waiting to be adopted, not the one in use, so the
+    // melting profile keeps the shape it had when the finger landed
+    if (vertexParked) pendingAnchorY = screenY;
+    else anchorScreenY = screenY;
   }
 
   function lift(): void {
@@ -456,6 +502,15 @@ export function createSpringField(opts: {
     if (v !== 0) phaseNow = held ? "driving" : "coasting";
     else if (atRest(L)) settle();
     else phaseNow = "settling";
+    // the parked vertex is adopted the moment the scroll moves under the new
+    // finger (that motion is a new drag and its stretch is the new finger's), or
+    // once the lag is home and no row is placed off the vertex at all
+    if (vertexParked && (delta !== 0 || atRest(L))) {
+      anchorScreenY = pendingAnchorY;
+      pendingAnchorY = null;
+      vertexParked = false;
+      lastAnchorSeen = anchorScreenY; // the adoption itself is not finger travel
+    }
   }
 
   function reseat(dy: number): void {
@@ -510,6 +565,8 @@ export function createSpringField(opts: {
     samples = [];
     lastAnchorSeen = null;
     anchorMovedAt = -Infinity;
+    pendingAnchorY = null;
+    vertexParked = false;
   }
 
   function reset(): void {

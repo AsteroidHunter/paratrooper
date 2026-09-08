@@ -184,7 +184,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.140"; // A page of older messages landing above the viewport no longer throws the transcript down, and the bounce after a hold at an end stretches the rows instead of running flat
+const APP_VERSION = "0.3.141"; // Braking a fast scroll with a touch no longer throws the bubbles about: the stretch melts around the vertex it already had, and the new finger takes that vertex only when its own drag moves the thread
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
