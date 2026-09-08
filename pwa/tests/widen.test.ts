@@ -85,9 +85,13 @@ const entries = (body: string): string[] => {
   return out;
 };
 
-const UP_ATTACH = "#app.kb .compose .attach,\n#app.focusing .compose .attach";
-const UP_TEXT = "#app.kb .compose textarea,\n#app.focusing .compose textarea";
-const UP_CAP = "#app.kb .compose .cap,\n#app.focusing .compose .cap";
+// The rise is keyed off .kb alone: it lands on the frame the viewport reports
+// the keyboard, which is the frame the lift leaves on, so the bar's pieces and
+// the bar itself move as one. 0.3.127 to 0.3.143 keyed them off the focus tap
+// (.focusing) as well, because the lift did.
+const UP_ATTACH = "#app.kb .compose .attach";
+const UP_TEXT = "#app.kb .compose textarea";
+const UP_CAP = "#app.kb .compose .cap";
 const WIDE_ATTACH = "#app .compose.wide .attach";
 const WIDE_TEXT = "#app .compose.wide textarea";
 const WIDE_CAP = "#app .compose.wide .cap";
@@ -195,12 +199,12 @@ describe("the rise is transform and opacity only, keyed off the shell's own clas
 
   // THE OTHER CARET PIN. On iOS the caret is a UIKit view attached to the
   // enclosing compositing layer, and the transform above gives the focused box
-  // its own layer at the focus tap. In 0.3.129 that layer was released again on
+  // its own layer at the viewport's report. In 0.3.129 that layer was released again on
   // the frame the transition ended, about 220ms in, right under the end of the
   // keyboard's rise: the phone re-attached the caret from the rect it still
   // held and drew it below the bar. The promotion is therefore declared under
-  // every class the keyboard session wears, so nothing is built or torn down
-  // under the caret between the focus tap and the blur. Same remedy as .gate's
+  // every class the keyboard session wears, and the whole build sits inside the
+  // caret hold this module takes at the tap. Same remedy as .gate's
   // standing will-change (the token card) and the same family as 0.3.71's
   // growing shadow rect on the pill.
   it("the text box keeps ONE layer for the whole keyboard session, and none at rest", () => {
@@ -1125,7 +1129,7 @@ describe("wiring: one driver, fed by the shell's two edges, bound per render", (
     // shell's clock behind it — never a guess of the bar's
     expect(shell).toContain('liftLanded("end");');
     expect(shell).toMatch(/liftTimer = setTimeout\(\(\) => \{\n\s*liftTimer = null;\n\s*liftLanded\("clock"\);/);
-    expect(shell).toContain("onLiftLanding?.(appliedUp, Number.isFinite(y) ? Math.abs(y) : 0);");
+    expect(shell).toContain("onLiftLanding?.(appliedKb, Number.isFinite(y) ? Math.abs(y) : 0);");
   });
 
   it("the bar is bound per render, with the rest of the bar", () => {
@@ -1143,7 +1147,7 @@ describe("wiring: one driver, fed by the shell's two edges, bound per render", (
     expect(shell).toContain("export function watchKeyboardProven(cb: (proven: boolean) => void): void {");
   });
 
-  it("no JavaScript joins the tap path: the rise is the sheet's, keyed off .focusing and .kb", () => {
+  it("no JavaScript joins the rise: it is the sheet's, keyed off .kb, the same class as the lift", () => {
     // the driver never touches a class on the up edge; it only arms its clock
     const src = readFileSync(new URL("../src/widen.ts", import.meta.url), "utf8");
     const up = src.match(/if \(isUp\) \{([\s\S]*?)return;\n\s*\}/)?.[1] ?? "";

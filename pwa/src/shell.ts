@@ -46,9 +46,8 @@
 //   up or down, so there is nothing for the phone to drop or hand back, and the
 //   close's transition starts at the focus loss, the moment the app learns of
 //   it, 6 to 13ms before the viewport reports (device trail 2026-09-01), and
-//   the open's starts at the focus tap, aimed at the height the keyboard last
-//   reported, with the report retargeting it (the early start; liftAim and
-//   EARLY_LIFT_MAX_MS below own the rule). One
+//   the open's starts at the viewport's report, which is the frame the keyboard
+//   itself starts sliding (the note above KB_ANIM_MS owns the rule). One
 //   rule serves all three modes: an explicit baseline height keeps the shell
 //   full-size when innerHeight shrinks, so the lifted bar lands at the bottom
 //   of the visible area in overlay, window-shrink and shrink-and-pan alike.
@@ -420,63 +419,42 @@ export function focusingActive(
 export const KB_ANIM_MS = 220;
 export const LIFT_SETTLE_MS = KB_ANIM_MS + 200;
 
-// The early start. The viewport reports the keyboard's height about 80ms after
-// the focus tap (178 opens in the device trail: median 80ms, nine in ten under
-// 151ms, the slowest genuine one 319ms), and until it does the page has no
-// number to lift by, so an open that waits for the report starts a beat behind
-// the keyboard and finishes a beat behind it. The lift therefore leaves with
-// the focus itself, aimed at the inset the keyboard LAST reported for this
-// screen width (remembered for the session and kept in localStorage for the
-// first open after a launch), and the report that follows retargets the
-// running transition if the height differs, or changes nothing if it agrees.
-// A focus the keyboard never answers (a hardware keyboard, a focus that never
-// raised one) must not leave the lift standing: the early aim lapses on this
-// bound, two of the keyboard's own animations, the time by which every report
-// in the trail had arrived, and the next reconcile sends the lift home. The
-// close is untouched: it still starts at the focus loss.
-export const EARLY_LIFT_MAX_MS = 2 * KB_ANIM_MS;
+// WHEN the lift leaves, and why it is the report and not the tap. The keyboard
+// does not begin to move at the focus tap: WebKit reads the presentation's end
+// frame in _keyboardWillShow and schedules the visible-rect update from there,
+// and VisualViewport::update then fires ONE resize carrying the final geometry
+// (LayoutTests/fast/visual-viewport/ios/resize-event-for-keyboard.html pins the
+// count at one), so in a home-screen web app that resize lands on the frame the
+// keyboard STARTS sliding. It arrives about 81ms after the tap on an ordinary
+// open and about 133ms on a cold launch or after a long background (the app's
+// own kb-lift trail, 2026-09-08).
+//   0.3.117 to 0.3.143 started the transition at the tap instead, aimed at the
+// height the keyboard last reported, so the motion had already spent that lead
+// before the keyboard moved at all and landed KB_ANIM_MS minus the lead after
+// the slide began: 149ms in on an ordinary open, which looks fine, and 94ms in
+// on a cold one, where the bar parked at the top of the keyboard's path with a
+// white band under it while the keyboard climbed for another 170ms. The user's
+// screen recording matches the trail frame for frame.
+//   So the lift leaves WITH the report and runs the whole KB_ANIM_MS from that
+// frame toward the height the report carries. Between the tap and the report
+// nothing moves, which is exactly what the keyboard does; a focus the keyboard
+// never answers moves nothing at all and needs no lapse clock to undo. A LATER
+// report with a different height (WebKit bug 295918 can deliver a corrected
+// second resize, and an accessory bar changes the height mid-session) does not
+// finish on the first report's clock: retimeLift pins the transform where the
+// engine holds it, flushes, and lets the fresh KB_ANIM_MS run from there.
+//   The close is untouched: it still starts at the focus loss.
 export const INSET_KEY = "paratrooper:kb-inset";
 
-export function earlyLiftActive(
-  editorFocused: boolean,
-  kb: boolean,
-  sinceFocusMs: number,
-  remembered: number,
-): boolean {
-  return remembered > 0 && editorFocused && !kb && sinceFocusMs < EARLY_LIFT_MAX_MS;
-}
-
-// The lift's one aim, from the world as reconcile read it: the measured inset
-// while the keyboard is proven, the remembered one through the early window,
-// and rest otherwise. `up` is the edge the settle window is armed on, so an
-// early start and its report are one run, and `early` names the aim's source
-// on the arm record.
-export interface LiftAim {
-  up: boolean;
-  early: boolean;
-  inset: number;
-}
-
-export function liftAim(
-  t: ShellTarget,
-  baseline: number,
-  editorFocused: boolean,
-  sinceFocusMs: number,
-  remembered: number,
-): LiftAim {
-  const early = earlyLiftActive(editorFocused, t.kb, sinceFocusMs, remembered);
-  return {
-    up: t.kb || early,
-    early,
-    inset: t.kb ? liftInset(t, baseline) : early ? remembered : 0,
-  };
-}
-
-// The remembered inset's storage form. The value is only good for the screen
-// width it was measured on (a rotation has its own keyboard height), and only
-// a real keyboard's worth is worth remembering (the same threshold "is there a
-// keyboard" applies), so anything else recalls as nothing and the open waits
-// for the report as it always did.
+// The remembered inset's storage form: the height the keyboard last reported
+// for this screen width, kept for the session and in storage across launches.
+// The lift no longer aims at it (the report is the aim now), so it drives no
+// pixel; what it does is let the kb-lift trail say what the phone WOULD have
+// been aimed at, which is how the next batch of records tells a report that
+// agreed with the last one from a report that changed height. The value is only
+// good for the width it was measured on (a rotation has its own keyboard
+// height), and only a real keyboard's worth is worth keeping (the same
+// threshold "is there a keyboard" applies), so anything else recalls as nothing.
 export function storeInset(width: number, inset: number): string {
   return JSON.stringify({ w: width, inset });
 }
@@ -622,7 +600,7 @@ export function createPickerLifecycle(
 // focus that raised it — so this decides WHEN to blur and nothing else. The
 // keyboard then plays its own dismissal, and the ORDINARY close follows: the
 // lift's transition leaves at the focus loss on the keyboard's clock and curve
-// (liftAim above), and the bar rides down with it. Nothing here animates
+// (liftInset above), and the bar rides down with it. Nothing here animates
 // anything, and the finger does not carry the keyboard: a page is given no
 // frames of it.
 //
@@ -720,9 +698,9 @@ export function createDismissSwipe() {
 // transition event has had a frame), and this core says when "in flight" is.
 //
 // In flight is from the card's transform transition starting to a beat after
-// its LAST ending. A re-aim (the viewport's report disagreeing with the early
-// aim, or a keyboard that changed height while up) cancels the running
-// transition and starts another, so a cancel is not a landing on its own: the
+// its LAST ending. A re-timing (a second report correcting the height, or a
+// keyboard that changed height while up) cancels the running transition and
+// starts another, so a cancel is not a landing on its own: the
 // beat runs, and at its end the card is asked whether a transform transition
 // is still running — the engine's own answer, so the release does not depend on
 // the order the cancel and the new run arrived in. The beat is the measured
@@ -730,8 +708,8 @@ export function createDismissSwipe() {
 // landing, 50ms. A blur releases at once: an unfocused box draws no caret, so
 // there is nothing to hold, and the hold must not sit on the box waiting for
 // an end that a rebuilt card may never fire. And a lift that never transitions
-// at all — a remembered inset of zero on a screen the keyboard never answers —
-// never enters flight here, so nothing here can hide the caret for good.
+// at all (a focus on a screen the keyboard never answers) never enters flight
+// here, so nothing here can hide the caret for good.
 export const GATE_INFLIGHT_CLASS = "inflight";
 export const CARET_CATCHUP_MS = 50;
 
@@ -835,7 +813,8 @@ let shoveClears = 0;
 let focusStartAt = -Infinity;
 // the focusing class as applied, so its edges record to the trail once each
 let appliedFocusing = false;
-// the .kb class as applied; its edges (and only they) open the settle window
+// the .kb class as applied, which is the viewport's report: its edges (and only
+// they) arm the lift and open the settle window
 let appliedKb = false;
 // the lift's settle window: the numeric box stays applied until this deadline,
 // which the landing closes early and the clock closes at the latest
@@ -851,12 +830,9 @@ let onLiftLanding: ((up: boolean, lift: number) => void) | null = null;
 // keyboard's own animation
 let readScrollWrites: (() => number) | null = null;
 let liftWritesAtEdge = 0;
-// the lift's aim as applied: up through an early start and its report alike,
-// so the two are one run of the settle window (liftAim owns the rule)
-let appliedUp = false;
-let liftArmAt = 0; // when the current run was armed, so a report can say its lead
-// the keyboard's inset as the viewport last reported it for this screen width,
-// the early start's aim; 0 = nothing remembered, so the open waits for the report
+let liftArmAt = 0; // when the current run was armed, so a re-timing can say how far in it landed
+// the keyboard's inset as the viewport last reported it for this screen width;
+// the trail's yardstick for a report, and no longer anything the lift aims at
 let rememberedInset = 0;
 // "the keyboard is on its way up or already up", as applied: the focus tap's
 // own signal ORed with the proven keyboard, so the up edge lands with the tap
@@ -980,7 +956,7 @@ function readWorld(): World {
 // (styles.css #app.lifting), and the lift's own transitionend or, failing that,
 // this clock closes it through liftLanded, which re-converges through the one
 // writer. A stale or duplicate fire lands an already-landed edge, harmlessly.
-function armLift(edge: "open" | "close", inset: number, early: boolean): void {
+function armLift(edge: "open" | "close", inset: number): void {
   liftUntil = performance.now() + LIFT_SETTLE_MS;
   liftArmAt = performance.now();
   liftRun += 1;
@@ -992,12 +968,15 @@ function armLift(edge: "open" | "close", inset: number, early: boolean): void {
   }, LIFT_SETTLE_MS + 20);
   // TEMP DIAGNOSTIC (kb-lift, block at the bottom): the moment the transition
   // is armed and the inset it is armed with (0 on a close: the lift goes home);
-  // an open says whether it left with the focus or with the report, a close
-  // names the curve the engine is playing it on; the landing is its own record
-  // on the same channel
+  // an open carries the lead, how long after the focus tap the report that
+  // armed it arrived, which is the whole number this design turns on; a close
+  // names the curve the engine is playing it on. The landing is its own record
+  // on the same channel.
   holdDiagRecord(
     "kb-lift",
-    edge === "open" ? { edge, via: "arm", inset, early } : { edge, via: "arm", inset, curve: liftCurve() },
+    edge === "open"
+      ? { edge, via: "arm", inset, lead: px(performance.now() - focusStartAt) }
+      : { edge, via: "arm", inset, curve: liftCurve() },
   );
 }
 
@@ -1033,25 +1012,53 @@ function liftCurve(): string {
   return `${s.transitionDuration} ${s.transitionTimingFunction}`;
 }
 
-// The open's report: the viewport's first keyboard height, against the aim the
-// early start left with. Equal, and the transition simply runs on; different,
-// and the --kb-inset write in applyShell retargets it from wherever it is.
-// Either way the report is what the next open starts from.
-function reportedInset(early: boolean, reported: number): void {
+// The open's report: the viewport's first keyboard height for this session, and
+// the frame the lift leaves on. It is also what the next open's report is read
+// against, so the trail can say whether the phone's keyboard keeps one height.
+function reportedInset(reported: number): void {
   const remembered = rememberedInset;
-  // TEMP DIAGNOSTIC (kb-lift, block at the bottom): whether this open left
-  // early, what it aimed at, what the phone then said, and whether the two
-  // disagreed, which is the one thing that makes the early start visible
+  // TEMP DIAGNOSTIC (kb-lift, block at the bottom): the height the last report
+  // left behind, the height this one carries, and whether the two agree; the
+  // arm record on the same frame carries the lead from the tap
   holdDiagRecord("kb-lift", {
     edge: "open",
     via: "report",
-    early,
     remembered,
     reported,
-    retarget: early && reported !== remembered,
-    lead: early ? px(performance.now() - liftArmAt) : -1,
+    agreed: reported === remembered,
   });
   rememberInset(reported);
+}
+
+// The re-timing, and the only way a running lift is ever redirected. A second
+// report during the motion (WebKit bug 295918's corrected resize) or a keyboard
+// that changes height while it is up would otherwise leave the transition
+// finishing on the FIRST report's clock, short of the new target and early. So
+// the transform is read where the engine holds it right now (the same computed
+// matrix the landing reads), written back inline with no transition, flushed so
+// that position becomes the before-change style, and released. The --kb-inset
+// write that follows in applyShell then starts a fresh KB_ANIM_MS from exactly
+// where the bar stands to exactly where the keyboard now says it is going. No
+// clock of ours, no second element: one flush, then the sheet's own transition.
+function retimeLift(inset: number): void {
+  if (!liftEl) return;
+  const y = matrixY(getComputedStyle(liftEl).transform);
+  if (!Number.isFinite(y)) return;
+  liftEl.style.transition = "none";
+  liftEl.style.transform = `translateY(${y}px)`;
+  void liftEl.offsetHeight; // the flush IS the pin
+  liftEl.style.transition = "";
+  liftEl.style.transform = "";
+  // TEMP DIAGNOSTIC (kb-lift, block at the bottom): how far into the run the
+  // second report landed, where the bar stood when it did, and what it is now
+  // aimed at, so a trail says whether the flake ever reaches this phone
+  holdDiagRecord("kb-lift", {
+    edge: "open",
+    via: "retime",
+    ms: px(performance.now() - liftArmAt),
+    from: px(y),
+    inset,
+  });
 }
 
 // The lift has landed: the transform's transition ended (bindLift), or the
@@ -1059,7 +1066,8 @@ function reportedInset(early: boolean, reported: number): void {
 // so the next reconcile drops the box to the pin after a close, and both hand
 // main.ts the landing for the thread's reachability padding, once per edge —
 // or once more mid-session when the keyboard itself changed height (an
-// accessory bar), which re-aims the lift and lands it again at a new value.
+// accessory bar) or a second report corrected it, either of which re-times the
+// lift (retimeLift) and lands it again at a new value.
 function liftLanded(via: "end" | "clock"): void {
   // the translate as the engine holds it now: negative while lifted, 0 at rest
   const y = liftEl ? matrixY(getComputedStyle(liftEl).transform) : NaN;
@@ -1071,13 +1079,13 @@ function liftLanded(via: "end" | "clock"): void {
     // and whether any scroll write of the app's landed inside the motion, which
     // is the one thing the lift exists to make impossible
     holdDiagRecord("kb-lift", {
-      edge: appliedUp ? "open" : "close",
+      edge: appliedKb ? "open" : "close",
       via,
       ms: px(edgeAge()),
       lift: px(y),
       writes: readScrollWrites ? readScrollWrites() - liftWritesAtEdge : -1,
     });
-    onLiftLanding?.(appliedUp, Number.isFinite(y) ? Math.abs(y) : 0);
+    onLiftLanding?.(appliedKb, Number.isFinite(y) ? Math.abs(y) : 0);
   }
   // The window closes here for an open, and for a close whose viewport already
   // reads whole and unpanned. A close the phone has not finished reporting
@@ -1092,40 +1100,45 @@ function liftLanded(via: "end" | "clock"): void {
 
 // THE one writer of shell presentation: four mode classes, the lift's inset
 // and the measured box. styles.css owns what they mean (.kb derives the lift
-// from --kb-inset and vanishes the ＋; .focusing runs that same bar choreography
-// from the focus tap itself; .kb/.lifting size the shell from
+// from --kb-inset, vanishes the ＋ and widens the pill, all on the one clock,
+// from the viewport's report; .kb/.lifting size the shell from
 // --shell-top/--shell-h; .settling greys the bar for the whole picker
-// session). Every vv event lands here, so the box's top is always the freshest
-// number iOS has published — no latch, nothing to retract — and the box's
-// height is the baseline, which no vv event moves.
+// session). .focusing is the tap-to-report window itself: no motion is keyed
+// off it any more, and it stays as the DOM's name for the beat between the
+// finger and the keyboard, the one the kb-focusing trail counts. Every vv event
+// lands here, so the box's top is always the freshest number iOS has published,
+// with no latch and nothing to retract, and the box's height is the baseline,
+// which no vv event moves.
 function applyShell(t: ShellTarget, settling: boolean): void {
   if (!appEl) return;
+  // the keyboard as this function last left it, so the edge below and the
+  // re-timing further down both read the same "before".
   // TEMP DIAGNOSTIC (kb-edge, block at the bottom): this call is the edge, so
   // the box written further down is the edge's own target rather than a
   // mid-session resize
-  const atEdge = t.kb !== appliedKb;
+  const wasKb = appliedKb;
+  const atEdge = t.kb !== wasKb;
   const editorFocused = isEditable(document.activeElement);
   const sinceFocus = performance.now() - focusStartAt;
   const focusing = focusingActive(editorFocused, t.kb, sinceFocus);
-  // the lift's aim: the measured inset once the keyboard is proven, the
-  // remembered one from the focus tap until then (the early start), rest
-  // otherwise (liftAim owns the rule)
-  const { up, early, inset } = liftAim(t, baseline, editorFocused, sinceFocus, rememberedInset);
+  // the lift's one aim: the height the viewport is reporting while the keyboard
+  // is proven, rest otherwise. Nothing else moves it, and nothing moves it
+  // before the report.
+  const inset = liftInset(t, baseline);
   // TEMP DIAGNOSTIC (kb-fall, block at the bottom): the last frame with the
   // keyboard still up, sampled on the close edge and BEFORE the class toggle
   // below starts the lift home — after it, the frame the motion is measured
   // against is gone
-  if (!t.kb && appliedKb) fallEdge();
-  if (t.kb && !appliedKb) riseEdge(); // TEMP DIAGNOSTIC (kb-rise): the same, mirrored
-  if (t.kb !== appliedKb) {
+  if (!t.kb && wasKb) fallEdge();
+  if (t.kb && !wasKb) riseEdge(); // TEMP DIAGNOSTIC (kb-rise): the same, mirrored
+  if (atEdge) {
     appliedKb = t.kb;
-    // the report, read against the aim the lift already holds: an early start
-    // and its proof are one run, and the inset write below retargets it
-    if (t.kb) reportedInset(appliedUp, inset);
-  }
-  if (up !== appliedUp) {
-    appliedUp = up;
-    armLift(up ? "open" : "close", inset, early);
+    // The report IS the start. On the open edge this is the frame the keyboard
+    // began to slide, so the transition is armed here and the inset write below
+    // sends it the whole KB_ANIM_MS to the height the report just carried; on
+    // the close edge it is the focus loss, exactly as before.
+    if (t.kb) reportedInset(inset);
+    armLift(t.kb ? "open" : "close", inset);
   }
   const lifting = performance.now() < liftUntil;
   if (focusing !== appliedFocusing) {
@@ -1137,21 +1150,26 @@ function applyShell(t: ShellTarget, settling: boolean): void {
     });
   }
   appEl.classList.toggle("kb", t.kb);
-  appEl.classList.toggle("kbearly", early);
   appEl.classList.toggle("settling", settling);
   appEl.classList.toggle("lifting", lifting);
   appEl.classList.toggle("focusing", focusing);
 
   // The lift's driver, written in the same style recalculation as the class
   // that reads it, so the transition is armed by the very write that moves the
-  // value. A shove clear hands this function the applied numbers and so writes
-  // nothing here; a keyboard that changed height mid-session (an accessory
-  // bar) re-aims the lift, and the transition retargets from wherever it is.
+  // value: on the open edge the class and the height land together and the
+  // motion leaves from rest. A shove clear hands this function the applied
+  // numbers and so writes nothing here.
   if (inset !== appliedInset) {
+    // A height that changes while the keyboard is ALREADY up is a second report
+    // (WebKit bug 295918's correction) or a keyboard that grew an accessory
+    // bar. Either way the run in flight must not finish on the first report's
+    // clock: retimeLift pins the transform where it stands and the write below
+    // sends a fresh KB_ANIM_MS from there.
+    if (t.kb && wasKb) retimeLift(inset);
     appliedInset = inset;
     appEl.style.setProperty("--kb-inset", `${inset}px`);
-    // a keyboard that changed height while up is what the next open starts
-    // from too (the edge's own height the report already remembered)
+    // a keyboard that changed height while up is what the next open is read
+    // against too (the edge's own height the report already remembered)
     if (t.kb && !atEdge) rememberInset(inset);
   }
 
@@ -1589,17 +1607,15 @@ function composerTapListener(e: MouseEvent): void {
 
 export function initShell(el: HTMLElement): void {
   appEl = el;
-  recallRemembered(); // the early start's aim, from the last launch
+  recallRemembered(); // the height the last launch's keyboard reported, for the trail
   document.addEventListener("focusin", (e) => {
     if (isEditable(e.target)) {
       focusStartAt = performance.now();
       // a hardware keyboard produces no vv shrink, so the focusing window's
       // lapse must arrive by clock; stale or duplicate fires reconcile an
-      // already-converged state, harmlessly
+      // already-converged state, harmlessly. The lift itself needs no such
+      // clock: a focus the keyboard never answers never started one.
       setTimeout(reconcile, FOCUSING_MAX_MS + 20);
-      // and the early start's lapse by the same clock: a focus the keyboard
-      // never answered sends the lift home at the bound (liftAim)
-      setTimeout(reconcile, EARLY_LIFT_MAX_MS + 20);
     }
     reconcile();
   });
@@ -1929,12 +1945,22 @@ export function currentFileInput(): HTMLInputElement | null {
 // forces at most the one style/layout the glide's animated top/height was
 // going to need on that frame anyway.
 //
-//   kb-lift     : the lift's arm and landing, one record each per edge. The
-//                 arm carries the inset the transition was armed with (0 on a
-//                 close) and lands on the same frame as the edge record; the
-//                 landing carries how the window closed (the transform's own
-//                 transitionend, or the settle clock), how long after the edge,
-//                 how far the wrapper stands lifted by the engine's own
+//   kb-lift     : the lift's arm and landing, one record each per edge, plus
+//                 the report's own and any re-timing's. The arm carries the
+//                 inset the transition was armed with (0 on a close) and lands
+//                 on the same frame as the edge record; on an open it also
+//                 carries `lead`, how long after the focus tap the viewport's
+//                 report arrived, which is the number the whole start rule
+//                 turns on (81ms warm, 133ms cold in the trail this was built
+//                 from). The report record beside it says what height the last
+//                 one left behind and whether this one agrees. A `retime`
+//                 record is a SECOND report inside a run: how far into the
+//                 motion it landed, where the transform stood when it did, and
+//                 the height it is now aimed at, so a trail says outright
+//                 whether WebKit's corrected resize ever reaches this phone.
+//                 The landing carries how the window closed (the transform's
+//                 own transitionend, or the settle clock), how long after the
+//                 edge, how far the wrapper stands lifted by the engine's own
 //                 computed transform, and how many scroll writes the app made
 //                 between the two — the number that has to read 0 for the
 //                 design to be doing what it claims. The frames above carry
@@ -2423,10 +2449,9 @@ function edgeStart(kind: "open" | "close"): void {
     // target and on a close is what it is coming home from (the viewport is
     // still publishing it: closeMark's vvStale above says so)
     inset: Math.round(keyboardInset(baseline, vv?.height ?? baseline)),
-    // how much of the keyboard's rise had already happened: styles.css starts
-    // the ＋ collapse and the pill widen from the focus tap (.focusing) and the
-    // shell's own glide only from this edge, so this is how far apart the two
-    // halves of the raise were started
+    // how long the finger waited for the phone: the gap between the focus tap
+    // and this edge, which on an open is the viewport's report and so the
+    // frame the whole raise (lift, ＋ collapse and pill widen alike) leaves on
     foc: Number.isFinite(focusStartAt) ? Math.round(edgeT0 - focusStartAt) : -1,
     boxTop: null,
     boxH: null,

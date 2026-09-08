@@ -1,9 +1,10 @@
 // The compose bar's widening: WHEN the bar's real layout may change, and how
 // the close starts from the wide look. The motion itself is the stylesheet's
 // (styles.css .cap, the keyboard-up rules on the ＋ and the textarea): from the
-// focus tap the ＋ shrinks and fades, the pill's face piece slides left and the
-// text rides with it, all transform and opacity on the keyboard's own clock,
-// keyed off the same .focusing/.kb classes the lift reads. This module only
+// viewport's report the ＋ shrinks and fades, the pill's face piece slides left
+// and the text rides with it, all transform and opacity on the keyboard's own
+// clock, keyed off the same .kb class the lift reads, so the bar's pieces and
+// the bar itself leave on one frame and land on one frame. This module only
 // decides two things:
 //
 //   1. The layout switch (.wide on the form). The wide layout is real: the ＋'s
@@ -24,16 +25,18 @@
 //      shell's signals lapse, which is the same picture as before.
 //
 //      The landing is the fact 0.3.129 was missing, and the caret paid for it.
-//      The bar's own clock starts at the focus tap and is never retargeted; the
-//      LIFT's clock is retargeted by the viewport's report whenever the
-//      keyboard's height differs from the one this width last remembered, and
-//      starts at the report rather than the tap when nothing is remembered at
-//      all. In both of those the face piece's transitionend arrives about 85ms
-//      before the lift stops moving, so the old two-fact gate switched the
-//      focused box's real layout while an ancestor transform was still in
-//      flight, with the lift 77 to 176px short of its seat (measured frame by
-//      frame in both engines). iOS draws the caret from the focused box's
-//      layout geometry, not from the page's paint, and a layout change under a
+//      Both clocks now start on the same frame, the viewport's report, so in
+//      the ordinary open the face piece's transitionend and the lift's landing
+//      arrive together and either may be last. They can still come apart: a
+//      SECOND report inside the run re-times the lift and only the lift
+//      (shell.ts retimeLift), so its landing moves later while the bar's own
+//      clock runs on. That is the same shape as the case this gate was built
+//      for, when the bar's transitionend arrived about 85ms before the lift
+//      stopped and the old two-fact gate switched the focused box's real layout
+//      while an ancestor transform was still in flight, with the lift 77 to
+//      176px short of its seat (measured frame by frame in both engines). iOS
+//      draws the caret from the focused box's layout geometry, not from the
+//      page's paint, and a layout change under a
 //      running ancestor transform is exactly the frame it re-places it from
 //      geometry the lift has not been applied to: the caret lands below the
 //      bar for a frame or two, right before the keyboard tops out. Waiting for

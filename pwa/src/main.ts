@@ -184,7 +184,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.143"; // A message that failed to send keeps its place: the next message lands under it rather than flying over it, Try Again resends in place with its own time, and Delivered sits under whichever bubble is last on screen
+const APP_VERSION = "0.3.144"; // The compose bar and the thread now start rising when the phone reports the keyboard rather than at the tap, so they climb with it and land with it on every open, cold launch included, and a corrected report re-times the motion from wherever it stands
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -259,8 +259,9 @@ const replyHold = createReplyHold<ServerMsg>((m) => {
 });
 
 // The compose bar's widening (widen.ts owns the rule): the sheet moves the ＋,
-// the pill's face piece and the text from the focus tap on the keyboard's own
-// clock; this decides when the bar's REAL layout may change (only once the
+// the pill's face piece and the text from the viewport's report on the
+// keyboard's own clock, the same frame the lift leaves on; this decides when
+// the bar's REAL layout may change (only once the
 // shell has proven the keyboard and the motion has ended) and starts the close
 // from the wide look. Live lookup of the form, because renderChat rebuilds it.
 const widen = createWiden(composeWidenDeps(() => document.getElementById("compose")));

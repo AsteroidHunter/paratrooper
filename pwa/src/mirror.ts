@@ -32,9 +32,9 @@
 //
 //   1. The twin is a real <textarea> inside .field next to the live one, so
 //      every rule that styles the live box selects the twin too: the base
-//      .compose textarea rule, and the #app.kb / #app.focusing padding widen
-//      that runs while the keyboard is up. Nothing is restated here, so
-//      nothing can drift when the CSS changes.
+//      .compose textarea rule, and the #app.kb padding widen that runs while
+//      the keyboard is up. Nothing is restated here, so nothing can drift when
+//      the CSS changes.
 //   2. On top of that, the properties that decide where a line breaks are
 //      copied off the LIVE element's own getComputedStyle before every
 //      measurement (MIRROR_PROPS below). That picks up whatever the shared

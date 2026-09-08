@@ -204,12 +204,13 @@ html, body {
    pill sits --kb-gap above the keyboard exactly as it did when the clearance
    collapsed, and the clearance itself is behind the keyboard. Every term is a
    CSS length the engine resolves; the shell writes only --kb-inset.
-   .kbearly is the same lift started early: from the focus tap, aimed at the
-   inset the keyboard last reported (shell.ts liftAim), until the viewport's own
-   report proves the keyboard and .kb takes over, retargeting the transition
-   mid-flight if the height differs and touching nothing if it agrees. */
-#app.kb,
-#app.kbearly {
+   This class IS the start. It lands with the viewport's report, which is the
+   frame the keyboard itself begins to slide, and --kb-inset lands in the same
+   style pass, so the transition below leaves from rest and runs its whole
+   0.22s alongside the keyboard's own. Nothing is keyed off the focus tap any
+   more: between the finger and the report the keyboard has not moved, so
+   neither does the page (shell.ts, the note above KB_ANIM_MS). */
+#app.kb {
   --kb-lift: calc(var(--pad-b) - var(--kb-gap) - var(--kb-inset));
 }
 /* The shell box while the keyboard is up, and through the close's own settle
@@ -273,10 +274,10 @@ html, body {
    distance is a CONSTRUCTION, not a measurement: a box centred in a height H is
    centred in the strip H - inset once it rises by inset/2, so the lift is half
    the inset the shell already writes and this sheet stays free of device
-   pixels. It is keyed off the same two classes as --kb-lift, so it leaves with
-   the focus tap aimed at the remembered height (.kbearly), is retargeted by the
-   viewport's report (.kb), and comes home at the focus loss — one measured
-   curve for the whole app.
+   pixels. It is keyed off the same class as --kb-lift, so it leaves with the
+   viewport's report (.kb), re-times with the wrapper if a second report
+   corrects the height, and comes home at the focus loss: one measured curve
+   for the whole app.
    The cap is the card's own centring, written in the card's own height: a
    percentage in a translate is a share of the border box, so
    var(--shell-h)/2 - 50% is exactly the auto top margin, the whole distance
@@ -325,8 +326,7 @@ html, body {
      not visible. Same reason .lift keeps its layer between edges. */
   will-change: transform;
 }
-#app.kb .gate,
-#app.kbearly .gate {
+#app.kb .gate {
   transform: translateY(calc(-1 * clamp(0px, var(--kb-inset) / 2, var(--shell-h, 100vh) / 2 - 50%)));
 }
 /* The one sentence, spaced as a caption for the box rather than a paragraph of
@@ -1144,8 +1144,8 @@ html, body {
    and the melt draw no edge there; the face on both sides of the cut is the
    same colour, so the cut is invisible. At rest it sits wholly under the
    pill's left end, translated right by the widen distance, and hidden. While
-   the keyboard rises (.kb/.focusing, the same keys the lift reads, so it
-   starts in the lift's own style pass) it slides left on the keyboard's own
+   the keyboard rises (.kb, the same key the lift reads, so it starts in the
+   lift's own style pass, from the viewport's report) it slides left on its own
    clock until its rounded end is where the wide pill's end will be, sweeping
    over the ＋ as it goes. The well shadow under those 42px is the pill's own
    and arrives with the layout switch; a 6% shadow blurred over 33px does not
@@ -1169,8 +1169,7 @@ html, body {
      visible-to-hidden stays visible until the return has landed */
   transition: transform var(--kb-anim), visibility var(--kb-anim);
 }
-#app.kb .compose .cap,
-#app.focusing .compose .cap {
+#app.kb .compose .cap {
   transform: translateX(0);
   visibility: visible;
 }
@@ -1198,9 +1197,12 @@ html, body {
 /* While the keyboard rises the text rides left with the pill's edge (the face
    piece above), by the widen distance, as a TRANSFORM: the textarea's box,
    its padding and its wrap width do not change by a pixel until .wide lands.
-   Keyed off .focusing (shell.ts, set synchronously on the focus tap) and
-   .kb alike, the same keys as the lift, so the slide starts with the tap and
-   lands with the keyboard on the one measured curve.
+   Keyed off .kb, the same key as the lift, so the slide starts on the frame
+   the viewport reports the keyboard and lands with it on the one measured
+   curve. 0.3.127 to 0.3.143 keyed this off the focus tap as well (.focusing),
+   because the lift did; with the lift now leaving at the report, a tap-time
+   slide would widen the pill in place and only then lift the bar, which is two
+   motions where the keyboard makes one.
      This is the one deliberate exception to composershine.test.ts's rule that
    the textarea is never composited: it lasts the keyboard session and is
    identity in every resting state (the .wide rule below returns it to none in
@@ -1212,19 +1214,21 @@ html, body {
    the only reason it is here. On iOS the caret is not page paint: it is a
    UIKit view attached to the enclosing compositing layer and placed from a
    rect the page reported. This transform gives the box its own layer at the
-   focus tap, and 0.3.129 let that layer go on the frame the transition ended,
-   about 220ms in — right under the end of the keyboard's rise. The phone then
+   viewport's report, and 0.3.129 let that layer go on the frame the transition
+   ended, about 220ms in — right under the end of the keyboard's rise. The phone then
    re-attached the caret from the rect it still held and drew it below the bar
    for a frame or two before the next report put it back. The same teardown at
    the same kind of landing is what .gate carries a standing will-change for
    (the token card, further up this sheet), and the same family as 0.3.71's
    growing shadow rect on the pill (.field's box-shadow note). So the promotion
-   is declared under every class the session wears — these two, .wide and .flip
-   — and never at rest, where a composited text box costs the engine's own
-   double-tap select and tap-to-caret. Nothing is built or torn down under the
-   caret between the focus tap and the blur. */
-#app.kb .compose textarea,
-#app.focusing .compose textarea {
+   is declared under every class the session wears (.kb, .wide and .flip) and
+   never at rest, where a composited text box costs the engine's own
+   double-tap select and tap-to-caret. The layer is built on the report's frame
+   rather than the tap's now, and nothing is built or torn down under a caret
+   the user can see: widen.ts paints the caret transparent from the tap and
+   gives it back only after the layout switch has landed, so the whole of that
+   build sits inside the hold. */
+#app.kb .compose textarea {
   transform: translateX(calc(-1 * var(--widen)));
   will-change: transform;
 }
@@ -1304,19 +1308,18 @@ html, body {
   inset: -5px;
 }
 
-/* The ＋ and the keyboard never coexist. From the focus tap itself (.focusing,
-   shell.ts's tap-synchronous signal) or while the keyboard is provably up
-   (.kb — the shell's baseline-tested signal) the ＋ shrinks and fades in
+/* The ＋ and the keyboard never coexist. While the keyboard is provably up
+   (.kb, the shell's baseline-tested signal, which lands on the frame the
+   viewport reports the keyboard) the ＋ shrinks and fades in
    place while the pill's face piece slides over its spot and the text rides
-   with it: ONE motion, from the tap, on the keyboard's own clock and curve,
+   with it: ONE motion, from the report, on the keyboard's own clock and curve,
    over when the keyboard's is. Transform and opacity only — its box keeps its
    34px and its gap until .wide (below) takes them at rest, so nothing about
    the focused textarea's layout moves while iOS is putting the keyboard up. A
-   keyboard-less focus lapses the signal and the ＋ comes back the same way.
+   keyboard-less focus never turns the class on and the ＋ never leaves.
    With no ＋ to tap while typing, a picker can never present over a live
    keyboard — the teardown snatch has nothing left to snatch. */
-#app.kb .compose .attach,
-#app.focusing .compose .attach {
+#app.kb .compose .attach {
   opacity: 0;
   transform: scale(0.7);
   pointer-events: none; /* mid-fade taps belong to the widening editor */

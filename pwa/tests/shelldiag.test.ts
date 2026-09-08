@@ -388,15 +388,17 @@ describe("wiring: read-only, and each read on the right side of the writes", () 
 
   it("both pre-edge frames are sampled before .kb is toggled, not after", () => {
     expect(shell).toMatch(
-      /if \(!t\.kb && appliedKb\) fallEdge\(\);[\s\S]{0,900}appEl\.classList\.toggle\("kb", t\.kb\);/,
+      /if \(!t\.kb && wasKb\) fallEdge\(\);[\s\S]{0,1100}appEl\.classList\.toggle\("kb", t\.kb\);/,
     );
     expect(shell).toMatch(
-      /if \(t\.kb && !appliedKb\) riseEdge\(\);[\s\S]{0,900}appEl\.classList\.toggle\("kb", t\.kb\);/,
+      /if \(t\.kb && !wasKb\) riseEdge\(\);[\s\S]{0,1100}appEl\.classList\.toggle\("kb", t\.kb\);/,
     );
     // and it is the frame the rest are measured against: ms 0, clock started
     // here. The window is a proximity pin on one function's body, not a byte
     // budget: it holds the head build between the two, and the head grew when
-    // the close learned to name its cause, and again when it learned the inset.
+    // the close learned to name its cause, again when it learned the inset, and
+    // again when the report became the arm and the whole start rule moved into
+    // that one branch.
     expect(shell).toMatch(/edgeT0 = performance\.now\(\);[\s\S]{0,2600}edgeSample\(0, undefined\);/);
   });
 
@@ -655,7 +657,7 @@ describe("wiring: the box records sit at the writes, and change none of them", (
 
   it("the edge flag is read before the toggle that would erase it", () => {
     expect(shell).toMatch(
-      /const atEdge = t\.kb !== appliedKb;[\s\S]{0,1000}if \(t\.kb !== appliedKb\) \{\n\s*appliedKb = t\.kb;/,
+      /const wasKb = appliedKb;\n\s*const atEdge = t\.kb !== wasKb;[\s\S]{0,1000}if \(atEdge\) \{\n\s*appliedKb = t\.kb;/,
     );
   });
 
@@ -673,6 +675,12 @@ describe("wiring: the box records sit at the writes, and change none of them", (
     expect(apply.length).toBeGreaterThan(0);
     expect(apply).not.toContain("offsetHeight");
     expect(shell).not.toMatch(/edgeSeeded|edgeHead\.seed/);
+    // the shell forces layout in exactly two places, and neither is the box:
+    // the close-time heal, and the re-timing's pin, which needs the flush to
+    // make the transform's current position the before-change style
+    expect(shell.match(/offsetHeight/g)).toHaveLength(2);
+    expect(shell).toMatch(/void liftEl\.offsetHeight; \/\/ the flush IS the pin/);
+    expect(shell).toMatch(/void appEl\.offsetHeight; \/\/ the forced reflow IS the heal/);
   });
 
   it("the pin record reads the box that was there, not the nulls that replace it", () => {
@@ -682,18 +690,24 @@ describe("wiring: the box records sit at the writes, and change none of them", (
     expect(shell).toMatch(/appEl\.style\.removeProperty\("--shell-h"\);[\s\S]{0,500}recordShellPin\(wasTop, wasH\);/);
   });
 
-  it("the lift's records sit at the arm and the landing, and read the engine's own translate", () => {
-    // the arm names the aim's source on an open and the engine's own curve on a close
+  it("the lift's records sit at the arm, the report, the re-timing and the landing", () => {
+    // the arm carries the lead from the focus tap on an open, which is the
+    // number the start rule turns on, and the engine's own curve on a close
     expect(shell).toMatch(
-      /holdDiagRecord\(\n\s*"kb-lift",\n\s*edge === "open" \? \{ edge, via: "arm", inset, early \} : \{ edge, via: "arm", inset, curve: liftCurve\(\) \},\n\s*\);/,
+      /holdDiagRecord\(\n\s*"kb-lift",\n\s*edge === "open"\n\s*\? \{ edge, via: "arm", inset, lead: px\(performance\.now\(\) - focusStartAt\) \}\n\s*: \{ edge, via: "arm", inset, curve: liftCurve\(\) \},\n\s*\);/,
     );
     expect(shell).toMatch(/return `\$\{s\.transitionDuration\} \$\{s\.transitionTimingFunction\}`;/);
-    // the report: what the early start aimed at against what the phone said
+    // the report: the height the last one left behind against the one this one carries
     expect(shell).toMatch(
-      /holdDiagRecord\("kb-lift", \{\n\s*edge: "open",\n\s*via: "report",\n\s*early,\n\s*remembered,\n\s*reported,\n\s*retarget: early && reported !== remembered,\n\s*lead: early \? px\(performance\.now\(\) - liftArmAt\) : -1,\n\s*\}\);/,
+      /holdDiagRecord\("kb-lift", \{\n\s*edge: "open",\n\s*via: "report",\n\s*remembered,\n\s*reported,\n\s*agreed: reported === remembered,\n\s*\}\);/,
+    );
+    // and a second report inside a run leaves its own mark, with where the
+    // transform stood when it landed
+    expect(shell).toMatch(
+      /holdDiagRecord\("kb-lift", \{\n\s*edge: "open",\n\s*via: "retime",\n\s*ms: px\(performance\.now\(\) - liftArmAt\),\n\s*from: px\(y\),\n\s*inset,\n\s*\}\);/,
     );
     expect(shell).toMatch(
-      /holdDiagRecord\("kb-lift", \{\n\s*edge: appliedUp \? "open" : "close",\n\s*via,\n\s*ms: px\(edgeAge\(\)\),\n\s*lift: px\(y\),\n\s*writes: readScrollWrites \? readScrollWrites\(\) - liftWritesAtEdge : -1,\n\s*\}\);/,
+      /holdDiagRecord\("kb-lift", \{\n\s*edge: appliedKb \? "open" : "close",\n\s*via,\n\s*ms: px\(edgeAge\(\)\),\n\s*lift: px\(y\),\n\s*writes: readScrollWrites \? readScrollWrites\(\) - liftWritesAtEdge : -1,\n\s*\}\);/,
     );
     // the landing's number is the computed transform, parsed by the engine's
     // own matrix, never the inset re-derived by hand
