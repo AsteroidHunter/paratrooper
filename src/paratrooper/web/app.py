@@ -32,7 +32,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import (
@@ -160,6 +160,37 @@ def install_service_logging() -> None:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# a compose time this far ahead of the service's own clock is a wrong device
+# clock, not a message from the future, and honouring it would pin that bubble
+# to the bottom of the thread until real time caught up
+_COMPOSE_SKEW_LIMIT = timedelta(minutes=5)
+
+
+def _compose_ts(sent_at: str | None) -> str:
+    """The time a user message is stored and ordered by: the phone's own compose
+    time when it sent one that makes sense, else this service's clock.
+
+    Normalised to UTC and re-emitted through ``isoformat`` so every row in the
+    column has the one shape, which is what lets the ordering be a plain TEXT
+    comparison. Only the FUTURE is clamped: a compose time older than rows
+    already stored is the whole point of the field (that is a retry, and it is
+    how the message keeps its slot), while one in the future could only push a
+    bubble below messages written after it and never let go.
+    """
+    now = datetime.now(UTC)
+    if not sent_at:
+        return now.isoformat()
+    try:
+        stamped = datetime.fromisoformat(sent_at)
+    except ValueError:
+        return now.isoformat()
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=UTC)
+    if stamped > now + _COMPOSE_SKEW_LIMIT:
+        return now.isoformat()
+    return stamped.astimezone(UTC).isoformat()
 
 
 def _to_event(thread_id: str, result: ResultMessage) -> ThreadEvent:
@@ -836,9 +867,12 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                     state, req.thread_id,
                     {"thread_id": req.thread_id, "kind": "retract", "retract_seq": rseq},
                 )
+        # the phone's compose time, not this service's clock: the thread is
+        # ordered by it, so a retry (same sent_at, brand new row) comes back
+        # where the message was written instead of at the end (sendorder.ts)
         msg = ThreadEvent(
             thread_id=req.thread_id, role="user", payload=req.text,
-            attachments=req.attachments, ts=_now(),
+            attachments=req.attachments, ts=_compose_ts(req.sent_at),
         )
         seq = await asyncio.to_thread(state.store.add_message, msg)
         status = await state.coordinator.handle_message(req.thread_id, req.text, req.attachments)

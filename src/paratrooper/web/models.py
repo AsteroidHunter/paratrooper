@@ -98,12 +98,20 @@ class SendRequest(BaseModel):
     """PWA -> web: a chat message (text + optional already-uploaded attachments).
     ``retract_seqs`` are agent replies the client held unseen when this send
     outran them — the server deletes those rows (the take-back) before the
-    message is handled, so the rerun answers everything with one reply."""
+    message is handled, so the rerun answers everything with one reply.
+
+    ``sent_at`` is the COMPOSE time: the instant the phone drew the bubble, sent
+    as ISO-8601 and stored as the message's own ``ts``. The thread is ordered by
+    that time on both sides, so a message whose send failed keeps its slot and
+    later messages land below it, and a Try Again — which repeats this request
+    with the same ``sent_at`` — resends in place instead of jumping to the end.
+    Optional: a client too old to send one gets the server clock, as before."""
 
     thread_id: str
     text: str = ""
     attachments: list[str] = Field(default_factory=list)
     retract_seqs: list[int] = Field(default_factory=list)
+    sent_at: str | None = None
 
 
 class PublishRequest(BaseModel):

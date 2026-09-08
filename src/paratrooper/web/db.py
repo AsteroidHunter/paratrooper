@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS messages (
     ts          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, seq);
+-- the thread is DRAWN in compose order (ts), not write order (seq): a retried
+-- message is written last and dated where it was composed. seq is the tiebreak
+-- and the write watermark; both indexes earn their keep.
+CREATE INDEX IF NOT EXISTS idx_messages_order ON messages(thread_id, ts, seq);
 
 CREATE TABLE IF NOT EXISTS push_subscriptions (
     endpoint     TEXT PRIMARY KEY,
@@ -237,10 +241,16 @@ class ThreadStore:
 
     def messages(self, thread_id: str, *, since_seq: int = 0) -> list[tuple[int, ThreadEvent]]:
         """All events in a thread after ``since_seq`` (for reconnect catch-up),
-        oldest-first, paired with their sequence numbers."""
+        in draw order, paired with their sequence numbers.
+
+        WHICH rows is a question about what the client has already seen, and
+        that is the write watermark, ``seq``. The ORDER they come back in is
+        the order they are drawn in, which is compose time. The two differ
+        only for a retried message, whose row is written last and dated
+        where it was composed."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM messages WHERE thread_id=? AND seq>? ORDER BY seq",
+                "SELECT * FROM messages WHERE thread_id=? AND seq>? ORDER BY ts, seq",
                 (thread_id, since_seq),
             ).fetchall()
         return [(r["seq"], _event(r)) for r in rows]
@@ -249,25 +259,31 @@ class ThreadStore:
         self, thread_id: str, *, before_seq: int | None = None, limit: int = 50
     ) -> list[tuple[int, ThreadEvent]]:
         """The ``limit`` events immediately before ``before_seq`` (or the
-        newest when None), oldest-first with seqs — the recent-first initial
-        window and each pull-down-for-older page."""
+        newest when None), in draw order with seqs — the recent-first initial
+        window and each pull-down-for-older page.
+
+        The window is cut by ``seq`` and sorted by ``ts``. Cutting by seq is
+        what makes a page a page: it is the column the client's cursor is,
+        it never repeats a value, and the newest window is always the rows
+        most recently written. Sorting by ts is what makes the page match the
+        screen, since that is the order the client draws its own rows in."""
         if before_seq is None:
             sql = ("SELECT * FROM (SELECT * FROM messages WHERE thread_id=? "
-                   "ORDER BY seq DESC LIMIT ?) ORDER BY seq")
+                   "ORDER BY seq DESC LIMIT ?) ORDER BY ts, seq")
             params: tuple = (thread_id, limit)
         else:
             sql = ("SELECT * FROM (SELECT * FROM messages WHERE thread_id=? AND seq<? "
-                   "ORDER BY seq DESC LIMIT ?) ORDER BY seq")
+                   "ORDER BY seq DESC LIMIT ?) ORDER BY ts, seq")
             params = (thread_id, before_seq, limit)
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [(r["seq"], _event(r)) for r in rows]
 
     def recent(self, thread_id: str, *, n: int = 10) -> list[ThreadEvent]:
-        """The last ``n`` events (oldest-first) — used as job context."""
+        """The last ``n`` events, in the order the thread reads — job context."""
         return self._rows(
             "SELECT * FROM (SELECT * FROM messages WHERE thread_id=? ORDER BY seq DESC LIMIT ?) "
-            "ORDER BY seq",
+            "ORDER BY ts, seq",
             (thread_id, n),
         )
 

@@ -116,8 +116,8 @@ import {
 } from "./shell";
 import { bootBlankGap, installLoadingScreen, installStartupImage, watchQuiet } from "./splash";
 import { createSpringField } from "./springscroll";
-import { seatBefore } from "./tailorder";
-import type { Standing } from "./tailorder";
+import { seatBefore } from "./sendorder";
+import type { Standing } from "./sendorder";
 import { afterSocketClose, createTokenGate } from "./tokengate";
 import type { Fetcher, TokenGate } from "./tokengate";
 import {
@@ -184,7 +184,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.142"; // The agent has its shell back on the worker: the sandbox its commands run in needs socat as well as bubblewrap, and the image now carries both
+const APP_VERSION = "0.3.143"; // A message that failed to send keeps its place: the next message lands under it rather than flying over it, Try Again resends in place with its own time, and Delivered sits under whichever bubble is last on screen
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -1025,8 +1025,9 @@ function renderChat(): void {
   threadWidthObserver?.observe(thread);
   lastThreadWidth = 0; // a fresh shell has measured nothing yet
   watchPhotos(thread); // history photos load off THIS thread box's proximity
-  // rebuild any failed sends persisted from a prior session; async and marked
-  // .restored so the server replay (kicked off right after) stays above them
+  // rebuild any failed sends persisted from a prior session; async, and each
+  // one seated by its own compose time, so the server replay (kicked off right
+  // after) interleaves with them exactly as a reload draws it
   void restoreOutbox();
 }
 
@@ -2587,17 +2588,24 @@ function wrapperFor(seq: number): HTMLElement | null {
   return threadEl().querySelector<HTMLElement>(`.evt[data-seq="${seq}"]`);
 }
 
-// --- thread order: accepted rows by number, then the unsent ones -------------
-// tailorder.ts holds the rule and why it exists. The three below read the two
-// facts off the wrappers and apply it to the DOM: a wrapper carries the
+// --- thread order: every row by the moment it was composed -------------------
+// sendorder.ts holds the rule and why it exists. The three below read the facts
+// off the wrappers and apply it to the DOM: a wrapper carries its compose time
+// in data-ts from the frame it is made, a creation ordinal in data-ord, the
 // server's number in data-seq from the moment its send is accepted, and the
-// .failed class for as long as it has not been.
+// .failed class for as long as it has not been. Only the first three place it;
+// the mark is read so a reload's shape can be stated, never to move a row.
+
+/** hands out data-ord: the creation ordinal that makes the sort total */
+let rowOrd = 0;
 
 /** every event wrapper paired with the standing its place is decided on */
 function threadStandings(): (Standing & { el: HTMLElement })[] {
   return eventWrappers().map((el) => ({
     el,
+    at: Number(el.dataset.ts) || 0,
     seq: el.dataset.seq ? Number(el.dataset.seq) : null,
+    ord: Number(el.dataset.ord) || 0,
     failed: el.classList.contains("failed"),
   }));
 }
@@ -2643,27 +2651,24 @@ function seatRow(w: HTMLElement): boolean {
   if (ref) t.insertBefore(w, ref);
   else {
     t.appendChild(w);
-    // an accepted row is newest content, so the dots follow it; an unsent one
-    // is the tail band, which the dots stay above (dots.ts)
-    if (!w.classList.contains("failed")) moveTypingAfter(t, w);
+    // the row landing at the end is the newest content there is, whatever its
+    // mark, and the dots say the agent is typing now, so they follow it (dots.ts)
+    moveTypingAfter(t, w);
   }
   return true;
 }
 
 /**
- * The tail rule on a user send: every still-unsent bubble drops below the one
- * just seated. Walked in the order they stand in and appended in that order,
- * so their own arrangement carries over intact, and past the dots as well,
- * which leaves the typing indicator under the newest content and above the
- * failures exactly where it already sits.
+ * Put a freshly built wrapper where its compose time says it belongs. The
+ * ordinary send is the tail (nothing is composed after now) and pays one
+ * append; a restored outbox row lands back in the slot it was written in.
  */
-function sinkFailed(): void {
+function seatNew(w: HTMLElement): void {
   const t = threadEl();
-  for (const w of t.querySelectorAll<HTMLElement>(".evt.failed")) {
-    if (t.lastElementChild === w) continue;
-    stillEntrance(w);
-    t.appendChild(w);
-  }
+  const rows = threadStandings();
+  const ref = seatBefore(rows, rows.length - 1)?.el ?? null;
+  if (ref) t.insertBefore(w, ref);
+  else moveTypingAfter(t, w);
 }
 
 // The dots' own div, offered to the next bubble rowEl builds and taken by at
@@ -2822,28 +2827,20 @@ function applyEvent(m: ServerMsg): void {
   const wrapper = document.createElement("div");
   wrapper.className = "evt";
   wrapper.dataset.seq = String(seq);
-  renderInto(wrapper, m);
+  wrapper.dataset.ord = String(++rowOrd);
+  renderInto(wrapper, m); // writes data-ts: the compose time this row is placed by
   const morphing = takeDotsOffer();
   if (endsDots && !morphing) hideTyping(); // nothing grew into them: the old removal
-  // insert in seq order among keyed wrappers; a tail seq lands at the absolute
-  // end so in-flight optimistic (unkeyed) bubbles keep their place above it
-  const next = eventWrappers().find((w) => w.dataset.seq && Number(w.dataset.seq) > seq);
-  if (next) threadEl().insertBefore(wrapper, next);
-  else {
-    // unsent bubbles sit at the very tail, this session's failures and a prior
-    // session's restored ones alike; a keyed frame that would append past them
-    // slots in just above, so replayed history and live events never land
-    // beneath a message the server never took (tailorder.ts). The marker was
-    // .evt.restored, which covered only the restored half and let a live
-    // reply land under a fresh failure.
-    const unsent = threadEl().querySelector<HTMLElement>(".evt.failed");
-    if (unsent) threadEl().insertBefore(wrapper, unsent);
-    else threadEl().appendChild(wrapper);
-    // live dots stay below the newest content: a user frame landing during
-    // them (agent replies removed them above) moves them back behind it,
-    // same frame, a plain structural reorder (dots.ts)
-    moveTypingAfter(threadEl(), wrapper);
-  }
+  // one rule for every frame, live or replayed: the row goes where its own
+  // clock puts it (sendorder.ts). A reply stamped after a failed send lands
+  // BELOW that failure, which is where a reload rebuilds it and what Messages
+  // shows. There is no unsent band to slot above any more; the .evt.failed
+  // lookup that used to stand here was the tail rule's last hold on this path.
+  // live dots stay below the newest content: a user frame landing during them
+  // (agent replies removed them above) moves them back behind it, same frame,
+  // a plain structural reorder, which seatNew does when the row lands last.
+  threadEl().appendChild(wrapper);
+  seatNew(wrapper);
   decorate();
   // the newborn bubble ends at its longest line rather than at the 75% cap —
   // queued, so a history page's whole batch is one pass, and drained in the
@@ -3952,7 +3949,7 @@ function showTyping(): void {
   el.innerHTML = "<span></span><span></span><span></span>";
   const t = document.getElementById("thread");
   if (t) {
-    placeTyping(t, el); // after the newest content, above restored failures (dots.ts)
+    placeTyping(t, el); // the end of the thread: nothing sorts under the dots (dots.ts)
     if (followTail) scrollToBottom();
   }
 }
@@ -4695,17 +4692,17 @@ function flightSettled(): void {
 }
 
 // --- the send's landing: the seat and the clock the answer settles ----------
-// On a first attempt both are already true. The bubble was appended at the
-// tail a moment ago, its number is the newest there is, and the answer's clock
-// is the same second as the one the row was drawn with, so nothing below moves
-// and no beat opens. On a RETRY they can differ: the server stored the re-sent
-// message as a brand new one, numbered after everything sent since the
-// failure, so the bubble belongs at the end of the accepted band rather than
-// where the failure left it, and its time is the retry's rather than the
-// failed attempt's. In the common retry, with nothing sent in between, the end
-// of the accepted band is the seat it is already on and the bubble does not
-// move at all: the red mark and the Not Delivered line leave, and the receipt
-// arrives underneath without the bubble travelling.
+// Under strict compose order both are already true on EVERY attempt, first or
+// retried. The bubble is dated when the tap happened and the server stores that
+// same date (the ``sent_at`` this send carried), so the answer's clock is the
+// row's own clock and the seat the answer implies is the seat it is standing
+// on. A retry therefore resends IN PLACE: the red mark and the Not Delivered
+// line leave, the bubble does not travel a pixel, and the receipt goes wherever
+// the newest sent message is, which may well be a bubble further down.
+// The two paths below are kept as the guard rather than deleted. An old server
+// that ignores ``sent_at`` answers with its own clock, and the row is re-timed
+// and re-seated by it exactly as it used to be — which is also what makes the
+// landing safe if a device clock is wound while a send is out.
 //
 // A flight in the air parks the whole landing on the gate the receipt already
 // uses. Opening a shift here would cancel the flight's own glide, so
@@ -5745,15 +5742,20 @@ function beginSiblingShift(): { play(): void } {
 
 // client-local bubbles (optimistic sends, network-failure notices) live in
 // unkeyed .evt wrappers at the tail — outside the store unless ACKed into it
-function localWrapper(role: string): HTMLElement {
+// `at` is the row's compose time and the only thing that places it: the send
+// path leaves it at now, which is the tail, and a restored outbox row hands in
+// the time it was originally written so it comes back in its own slot rather
+// than at the end (sendorder.ts).
+function localWrapper(role: string, at: number = Date.now()): HTMLElement {
   const wrapper = document.createElement("div");
   wrapper.className = "evt";
-  wrapper.dataset.ts = String(Date.now());
+  wrapper.dataset.ts = String(at);
+  wrapper.dataset.ord = String(++rowOrd);
   wrapper.dataset.role = role;
   threadEl().appendChild(wrapper);
   // a send during visible dots must stack under the previous message with the
   // dots below it, not land beneath them — same-frame reorder (dots.ts)
-  moveTypingAfter(threadEl(), wrapper);
+  seatNew(wrapper);
   return wrapper;
 }
 
@@ -5966,13 +5968,11 @@ async function send(): Promise<void> {
   // the pop-in animation would fight its transform.
   const prevSuppress = suppressAnim;
   suppressAnim = true;
+  // the new bubble is composed now, so it belongs at the end and nothing else
+  // moves: a still-failed bubble keeps the slot it was written in and this one
+  // lands BELOW it (sendorder.ts). The re-seat that used to run here, and the
+  // beat the sibling shift glided it on, are both gone with the tail rule.
   const w = localWrapper("user");
-  // the tail rule (tailorder.ts): a bubble that never got out belongs below
-  // everything sent after it, so any still-failed one drops under this send.
-  // Between the measure above and the pin below, so the drop is one of the
-  // moves the sibling shift glides on the flight's own beat rather than a
-  // reorder of its own; and before decorate, which folds in DOM order.
-  sinkFailed();
   for (const img of shots) {
     const div = rowEl(w, "user", "shot", Date.now());
     const nat = naturalSize(img);
@@ -6097,6 +6097,13 @@ async function transmit(
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({
         thread_id: THREAD_ID, text, attachments: keys, retract_seqs: retractSeqs,
+        // the compose time, straight off the bubble that has been standing in
+        // the thread since the tap. The server stores it as this message's own
+        // ts, so a Try Again — which reaches this line again with the same
+        // wrapper and the same data-ts — resends IN PLACE: the row it writes
+        // is numbered after everything, and dated where the message was
+        // written, which is where it already sits (sendorder.ts).
+        sent_at: new Date(Number(w.dataset.ts) || Date.now()).toISOString(),
       }),
     });
   } catch {
@@ -6104,9 +6111,7 @@ async function transmit(
   }
   if (!resp.ok) return markFailed(w, text, files);
   // the server accepted this send: drop any durable failed-copy for this wrapper
-  // and release its tail-pinning marker (it is a real keyed bubble now)
   if (w.dataset.outboxId) void outboxDelete(w.dataset.outboxId);
-  w.classList.remove("restored");
   // the ACK is the finished frame, the same one history returns for this seq
   // (enrich.ts holds the guard that says so), with status riding beside it
   const ack = (await resp.json()) as ServerMsg & { status?: string };
@@ -6216,9 +6221,10 @@ function markFailed(w: HTMLElement, text: string, files: File[]): void {
   // original timestamp instead of drifting forward on each re-persist
   persistFailed(id, Number(w.dataset.ts) || Date.now(), text, files);
   w.classList.add("failed");
-  // the tail rule again: a frame the server sent while this send was out has
-  // landed below the bubble, and an unsent bubble belongs under all of it
-  seatRow(w);
+  // NOTHING MOVES. A failure is news about a message, not a new place for it:
+  // the row keeps the slot its compose time gave it, and a frame the server
+  // sent while this send was out is already seated under it by its own clock
+  // (sendorder.ts). The re-seat that stood here was the tail rule's.
   if (w.querySelector(".sendfail-badge")) return; // already marked (re-failure)
   // badge on the last bubble's row, absolutely positioned in the column the
   // .failed row padding frees — no flex children, so bubble geometry holds.
@@ -6272,11 +6278,15 @@ function deleteFailed(w: HTMLElement): void {
 
 // --- durable outbox restore: a prior session's failed sends -------------------
 // On boot (and re-login) the persisted failed sends are read back and rebuilt as
-// failed bubbles at the tail, reusing the optimistic-bubble body and the same
-// markFailed treatment. Marked .restored so applyEvent keeps replayed history
-// and live frames above them; Try Again and Delete then behave exactly as for a
-// live failed send, and Try Again reuses the same transmit path (seq/ACK
-// adoption included) so a restored retry cannot double-send.
+// failed bubbles, reusing the optimistic-bubble body and the same markFailed
+// treatment. Each one is seated by the time it was WRITTEN, so it comes back
+// among the replayed history rather than at the end of it: the record's stored
+// ts is the same compose time the live bubble was standing on, and both sides
+// of a reload therefore draw the identical thread (sendorder.ts). The .restored
+// marker that used to hold these rows down at the tail is gone with the rule
+// that needed it. Try Again and Delete behave exactly as for a live failed
+// send, and Try Again reuses the same transmit path (seq/ACK adoption
+// included) so a restored retry cannot double-send.
 async function restoreOutbox(): Promise<void> {
   if (restoredOutbox) return; // once per session; a reconnect must not re-add them
   restoredOutbox = true;
@@ -6287,15 +6297,19 @@ async function restoreOutbox(): Promise<void> {
     return; // a broken or unavailable store must never block boot
   }
   if (!records.length || !document.getElementById("thread")) return;
-  records.sort((a, b) => a.ts - b.ts); // oldest first: appended in order at the tail
+  // oldest first, and the id settling any tie: the ordinals handed out below
+  // then come in one fixed order, so two records written in the same
+  // millisecond come back the same way round on every boot (sendorder.ts)
+  records.sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const prevSuppress = suppressAnim;
   suppressAnim = true; // a batch of restored bubbles must not pop one by one
   for (const rec of records) {
     const files = rec.files.map((f) => new File([f.buf], f.name, { type: f.type }));
-    const w = localWrapper("user");
-    w.classList.add("restored");
+    // seated by the time it was WRITTEN, not appended at the end: the record is
+    // a message composed before everything the server has since accepted, so it
+    // comes back among them, exactly where a live failure would be standing
+    const w = localWrapper("user", rec.ts);
     w.dataset.outboxId = rec.id; // reuse the stored id, not a fresh one
-    w.dataset.ts = String(rec.ts); // markFailed re-persists with this same ts (no drift)
     for (const file of files) {
       const div = rowEl(w, "user", "shot", rec.ts);
       const img = document.createElement("img");

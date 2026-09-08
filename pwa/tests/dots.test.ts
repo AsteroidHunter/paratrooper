@@ -59,11 +59,10 @@ function thread(...kids: FakeNode[]): FakeNode {
 
 const msg = (id: string): FakeNode => new FakeNode(id, "evt");
 const dots = (): FakeNode => new FakeNode("typing");
-// a prior session's unsent send: restored from the outbox and marked failed,
-// which is the class the order rule reads (main.ts markFailed)
-const restored = (): FakeNode => new FakeNode("old-fail", "evt", "restored", "failed");
-// this session's failure: no restored marker at all, and it holds the tail
-// exactly the same way
+// a prior session's unsent send, rebuilt from the outbox and marked failed
+const restored = (): FakeNode => new FakeNode("old-fail", "evt", "failed");
+// this session's failure: the same mark, and under strict compose order it
+// holds no ground at all — the dots go below it like below any other row
 const failed = (): FakeNode => new FakeNode("new-fail", "evt", "failed");
 
 describe("moveTypingAfter", () => {
@@ -85,10 +84,12 @@ describe("moveTypingAfter", () => {
     expect(order(t)).toEqual(["m1", "w1", "w2", "typing"]);
   });
 
-  it("keyed tail append above the unsent tail: messages, dots, failures", () => {
+  it("a frame seated above an older failure still takes the dots with it", () => {
+    // applyEvent seats by compose time, so a frame CAN land above a failure
+    // written before it; wherever it lands, the dots follow that wrapper
     const t = thread(msg("m1"), dots(), restored());
     const w = msg("w1");
-    t.insertBefore(w, t.querySelector(".evt.failed")); // applyEvent's tail slot
+    t.insertBefore(w, t.querySelector(".evt.failed"));
     moveTypingAfter(el(t), el(w));
     expect(order(t)).toEqual(["m1", "w1", "typing", "old-fail"]);
   });
@@ -117,24 +118,25 @@ describe("placeTyping", () => {
     expect(order(t)).toEqual(["m1", "m2", "typing"]);
   });
 
-  // rewritten for 0.3.116: the marker the rule reads is .evt.failed, so a
-  // failure from THIS session holds the dots up the same way a restored one does
-  it("fresh dots slot above restored failures, never below them", () => {
+  // rewritten with the tail rule's removal: a failure is no longer a band the
+  // dots have to stay above, it is a row dated where it was written. The dots
+  // say the agent is typing NOW, so they belong under everything, failures too.
+  it("fresh dots land under a restored failure, not above it", () => {
     const t = thread(msg("m1"), restored());
     placeTyping(el(t), el(dots()));
-    expect(order(t)).toEqual(["m1", "typing", "old-fail"]);
+    expect(order(t)).toEqual(["m1", "old-fail", "typing"]);
   });
 
-  it("fresh dots slot above a live failure too, not only a restored one", () => {
+  it("fresh dots land under this session's failure the same way", () => {
     const t = thread(msg("m1"), failed());
     placeTyping(el(t), el(dots()));
-    expect(order(t)).toEqual(["m1", "typing", "new-fail"]);
+    expect(order(t)).toEqual(["m1", "new-fail", "typing"]);
   });
 
-  it("dots already in position are left alone", () => {
-    const t = thread(msg("m1"), dots(), failed());
-    const d = t.kids[1];
+  it("dots already at the end are left alone", () => {
+    const t = thread(msg("m1"), failed(), dots());
+    const d = t.kids[2];
     placeTyping(el(t), el(d));
-    expect(order(t)).toEqual(["m1", "typing", "new-fail"]);
+    expect(order(t)).toEqual(["m1", "new-fail", "typing"]);
   });
 });

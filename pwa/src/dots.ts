@@ -9,22 +9,19 @@
 // no transition or entrance animation is involved (the dots carry only their
 // looping blink, and .typing has no entrance rule to replay).
 //
-// Order rule preserved from applyEvent: keyed tail appends slot above
-// .evt.failed wrappers (an unsent send stays pinned at the very tail, whether
-// it failed this session or was restored from a previous one), so the resting
-// order from the top is: messages, dots, failures. moveTypingAfter anchors to
-// the wrapper that just landed, so it composes with either append site without
-// re-deriving that rule. The marker was .evt.restored, which named only the
-// restored half; tailorder.ts now holds one rule for both.
+// The dots are not an event and have no compose time: they say the agent is
+// typing NOW, which is later than anything already written, so they belong at
+// the very end of the thread and nothing sorts under them. They used to be
+// held above the .evt.failed band, because a failure was pinned to the tail and
+// burying the dots under it would have hidden them; with the thread now in
+// strict compose order (sendorder.ts) there is no band to stay above, and a
+// failed bubble sits wherever it was written like any other row.
+// moveTypingAfter anchors to the wrapper that just landed, so it composes with
+// either append site without re-deriving anything.
 
-/** initial placement for a fresh #typing: above the unsent tail, else the end */
+/** initial placement for a fresh #typing: the end of the thread */
 export function placeTyping(thread: HTMLElement, dots: HTMLElement): void {
-  const unsent = thread.querySelector<HTMLElement>(".evt.failed");
-  if (unsent) {
-    if (dots.nextElementSibling !== unsent) thread.insertBefore(dots, unsent);
-  } else if (thread.lastElementChild !== dots) {
-    thread.appendChild(dots);
-  }
+  if (thread.lastElementChild !== dots) thread.appendChild(dots);
 }
 
 /** a wrapper just landed at the tail: an existing #typing moves directly after it */

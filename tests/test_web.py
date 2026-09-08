@@ -3558,3 +3558,98 @@ def test_enqueue_broadcasts_job_marker_to_connected_sockets(tmp_path):
     assert frame["payload"] == "job-7"
     [(stored_seq, stored)] = store.messages("d")
     assert frame["seq"] == stored_seq  # client store keys by seq; must match
+
+
+# --- send order: the thread is drawn by compose time, not by write order ------
+# His report off the phone: a send failed, and the next message "flies above the
+# not delivered ones". That was the tail rule of 0.3.119 doing what it was
+# built to do. No app the research pass could check behaves that way — Messages,
+# Signal, Telegram, Google Messages and Discord all order a conversation by the
+# instant the send was pressed, so a failure keeps its slot and later messages
+# land below it. That instant is what ``sent_at`` carries, and a Try Again
+# repeats the same one, which is how a retried message resends in place instead
+# of jumping to the end.
+
+def test_a_send_is_stored_under_its_own_compose_time(client):
+    auth = {"Authorization": "Bearer tok"}
+    client.post(
+        "/api/send", headers=auth,
+        json={"thread_id": "d", "text": "hi", "sent_at": "2026-09-07T10:00:00+00:00"},
+    )
+    [(_, stored)] = client.app.state.app_state.store.messages("d")
+    assert stored.ts == "2026-09-07T10:00:00+00:00"
+
+
+def test_a_retry_keeps_its_slot_while_taking_a_brand_new_number(client):
+    auth = {"Authorization": "Bearer tok"}
+    # A is composed first and fails on the phone; B is composed next and lands
+    b = client.post(
+        "/api/send", headers=auth,
+        json={"thread_id": "d", "text": "B", "sent_at": "2026-09-07T10:00:20+00:00"},
+    ).json()
+    # Try Again on A: a brand new row, carrying the compose time A always had
+    a = client.post(
+        "/api/send", headers=auth,
+        json={"thread_id": "d", "text": "A", "sent_at": "2026-09-07T10:00:10+00:00"},
+    ).json()
+    assert a["seq"] > b["seq"]  # written last
+
+    # ...and drawn first, on every path the client reads the thread through
+    store = client.app.state.app_state.store
+    assert [m.payload for _, m in store.messages("d")] == ["A", "B"]
+    assert [m.payload for _, m in store.messages_page("d")] == ["A", "B"]
+    assert [m.payload for m in store.recent("d", n=10)] == ["A", "B"]
+    rows = client.get("/api/thread/d", headers=auth).json()["messages"]
+    assert [r["payload"] for r in rows] == ["A", "B"]
+
+
+def test_a_missing_or_unreadable_compose_time_falls_back_to_the_server_clock(client):
+    auth = {"Authorization": "Bearer tok"}
+    # an older client sends none at all; a broken one sends nonsense
+    for body in ({"thread_id": "d", "text": "old"},
+                 {"thread_id": "d", "text": "bad", "sent_at": "whenever"}):
+        client.post("/api/send", headers=auth, json=body)
+    stamps = [m.ts for _, m in client.app.state.app_state.store.messages("d")]
+    assert len(stamps) == 2
+    assert all(s.startswith("20") and s.endswith("+00:00") for s in stamps)
+
+
+def test_a_compose_time_from_the_future_is_clamped_to_the_server_clock(client):
+    # a wrong device clock must not pin a bubble to the bottom until real time
+    # catches up; the past is never clamped, because the past IS the retry
+    auth = {"Authorization": "Bearer tok"}
+    client.post(
+        "/api/send", headers=auth,
+        json={"thread_id": "d", "text": "ahead", "sent_at": "2099-01-01T00:00:00+00:00"},
+    )
+    [(_, stored)] = client.app.state.app_state.store.messages("d")
+    assert not stored.ts.startswith("2099")
+
+
+def test_a_naive_compose_time_is_read_as_utc_and_normalised(client):
+    auth = {"Authorization": "Bearer tok"}
+    client.post(
+        "/api/send", headers=auth,
+        json={"thread_id": "d", "text": "naive", "sent_at": "2026-09-07T10:00:00"},
+    )
+    [(_, stored)] = client.app.state.app_state.store.messages("d")
+    assert stored.ts == "2026-09-07T10:00:00+00:00"
+
+
+def test_history_pages_are_cut_by_number_and_sorted_by_compose_time(tmp_path):
+    # the window is "the rows most recently written", which is the seq cursor;
+    # the order inside it is the order the phone draws them in
+    store = ThreadStore(tmp_path / "order.sqlite")
+
+    def add(payload, ts):
+        return store.add_message(
+            ThreadEvent(thread_id="d", role="user", payload=payload, ts=ts)
+        )
+
+    add("one", "2026-09-07T10:00:10+00:00")
+    add("two", "2026-09-07T10:00:20+00:00")
+    retried = add("retry", "2026-09-07T10:00:15+00:00")  # written last, dated middle
+
+    assert [m.payload for _, m in store.messages_page("d")] == ["one", "retry", "two"]
+    # the cursor still walks by number: everything written before the retry
+    assert [m.payload for _, m in store.messages_page("d", before_seq=retried)] == ["one", "two"]
