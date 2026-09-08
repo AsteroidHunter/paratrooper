@@ -2016,14 +2016,21 @@ def test_run_job_sets_the_scrub_switch_either_way(tmp_path, monkeypatch, with_to
     assert options.allowed_tools == ["mcp__paratrooper__report_pr"] + worker_mod.BUILTIN_TOOLS
 
 
-def test_worker_image_carries_the_tool_the_scrub_switch_needs():
-    """The switch above is not free on Linux: the CLI implements it by running
-    every agent shell under bubblewrap, and refuses to start at all when the
-    binary is missing — which is a dead worker, every message failing, not a
-    quiet loss of isolation. The Mac needs no such binary, so the image is the
-    only place this can be caught."""
+def test_worker_image_carries_the_tools_the_scrub_switch_needs():
+    """The switch above is not free on Linux, and it costs two packages, found
+    from two outages. The CLI implements it by running every agent shell under
+    bubblewrap and refuses to start at all when that binary is missing, which
+    is a dead worker, every message failing. Then the sandbox those shells run
+    in initializes on the first shell command of a session, and that step
+    lists socat as a hard error and bridges its proxies with socat whether or
+    not the network is restricted (the scrub restricts nothing); under the
+    scrub the sandbox is mandatory, so a missing socat is an agent with no
+    shell: every command answers "Sandbox is required but failed to
+    initialize: Sandbox dependencies not available: socat not installed". The
+    Mac needs neither binary, so the image is the only place this is caught."""
     dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.worker").read_text()
     assert re.search(r"apt-get install[^\n]*\bbubblewrap\b", dockerfile)
+    assert re.search(r"apt-get install[^\n]*\bsocat\b", dockerfile)
 
 
 # --- the GitHub App: hourly installation tokens (checklist 2.2) --------------
@@ -2796,8 +2803,10 @@ def test_worker_image_shape():
       fails the build.
     * the entrypoint wrapper is what keeps the worker-only secrets out of the
       launch record; a plain ``CMD`` would put them all back.
-    * bubblewrap is what the CLI's env scrub needs on Linux, and its absence is
-      a worker where every message fails.
+    * bubblewrap is what the CLI's env scrub needs on Linux to start, and its
+      absence is a worker where every message fails; socat is what the same
+      scrub's sandbox needs to initialize on the first shell command, and its
+      absence is an agent with no shell.
     * ``gh`` stays gone: the shell holds no GitHub credential any more.
     """
     dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.worker").read_text()
@@ -2822,6 +2831,7 @@ def test_worker_image_shape():
     assert "CMD [" not in built
 
     assert re.search(r"apt-get install[^\n]*\bbubblewrap\b", built)
+    assert re.search(r"apt-get install[^\n]*\bsocat\b", built)
 
     assert "cli.github.com" not in built
     assert "githubcli-archive-keyring" not in built

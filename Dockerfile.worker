@@ -24,9 +24,18 @@ ENV PYTHONUNBUFFERED=1
 # every message dies with "bubblewrap is required for subprocess env scrubbing".
 # The macOS CLI needs no such binary, which is why only the Linux image cares.
 # Debian's build is not setuid: it relies on unprivileged user namespaces, which
-# the platform permits, so it works as the non-root user below. socat is NOT
-# needed with it: the CLI only spawns socat to bridge a restricted network, and
-# the scrub leaves the network alone.
+# the platform permits, so it works as the non-root user below.
+# socat: the second thing the same switch needs, found from a second outage.
+# Starting is only the first gate. The sandbox itself initializes on the first
+# shell command of a session, and that initialization runs a dependency check
+# whose Linux branch lists socat as a hard error, then starts an HTTP and a
+# SOCKS proxy inside the CLI and bridges them into the sandbox with two socat
+# processes, whether or not the session restricts the network (the scrub does
+# not: no --unshare-net is ever passed for a command). Under the scrub the
+# sandbox is mandatory, so without socat every shell command answers "Sandbox
+# is required but failed to initialize: Sandbox dependencies not available:
+# socat not installed" and the agent has no shell at all. Both packages come
+# from Debian's own repository.
 # Node stays on major 22, which is what the running worker reports (v22.23.2).
 # The major is pinned; the rest is not, and honestly so: `setup_22.x` is fetched
 # from nodesource at build time and installs whatever 22.x their apt suite holds
@@ -34,7 +43,7 @@ ENV PYTHONUNBUFFERED=1
 # the way means dropping the script and installing a named nodejs version from
 # a keyring and apt source written into the image by hand. That is a change of
 # install route, so it is a deliberate follow-up, not part of this pass.
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl bubblewrap \
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl bubblewrap socat \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \

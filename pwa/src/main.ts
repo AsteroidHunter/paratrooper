@@ -184,7 +184,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.141"; // Braking a fast scroll with a touch no longer throws the bubbles about: the stretch melts around the vertex it already had, and the new finger takes that vertex only when its own drag moves the thread
+const APP_VERSION = "0.3.142"; // The agent has its shell back on the worker: the sandbox its commands run in needs socat as well as bubblewrap, and the image now carries both
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
