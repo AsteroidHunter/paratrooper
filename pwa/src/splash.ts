@@ -368,15 +368,30 @@ export function splashHandleBox(g: SplashLayout, screenH: number = g.screenH): S
 
 // --- DOM/canvas layer ---------------------------------------------------------
 
+/**
+ * Opened from the home screen rather than in a browser tab: iOS's own flag on
+ * the navigator, or the display mode the manifest asked for.
+ *
+ * Three places ask it and all three ask it here: the launch image, which only
+ * ever meant anything to an installed window; the loading page, which is the
+ * handover from that image and so has nothing to hold up in a tab; and the
+ * sign-in screen in main.ts, which shows the home-screen steps in a tab and the
+ * passcode card in an installed window. One function, because two copies of a
+ * question are two answers waiting to disagree.
+ */
+export function isInstalledWindow(nav: Navigator): boolean {
+  return (
+    (nav as unknown as { standalone?: boolean }).standalone === true ||
+    (typeof matchMedia === "function" && matchMedia("(display-mode: standalone)").matches)
+  );
+}
+
 // iOS (incl. iPadOS, which reports as a Mac but has a touch screen) or an
 // already-installed standalone window — the only places these tags do anything.
 function isAppleHomeScreenTarget(nav: Navigator): boolean {
   const ua = nav.userAgent;
   const iOS = /iP(hone|od|ad)/.test(ua) || (/Macintosh/.test(ua) && nav.maxTouchPoints > 1);
-  const standalone =
-    (nav as unknown as { standalone?: boolean }).standalone === true ||
-    (typeof matchMedia === "function" && matchMedia("(display-mode: standalone)").matches);
-  return iOS || standalone;
+  return iOS || isInstalledWindow(nav);
 }
 
 let started = false; // once per load, no matter how many times we are called
@@ -609,12 +624,8 @@ export function watchQuiet(
 
 // A launch image preceded this load only when the app opened as an installed
 // window; a browser tab has no handover to hold, so the page stays out of one.
-function isInstalledWindow(nav: Navigator): boolean {
-  return (
-    (nav as unknown as { standalone?: boolean }).standalone === true ||
-    (typeof matchMedia === "function" && matchMedia("(display-mode: standalone)").matches)
-  );
-}
+// The question itself is asked at the top of the DOM layer (isInstalledWindow),
+// where the launch image asks it too.
 
 // nothing to hold up (a browser tab, or no document at all): every call is a
 // no-op, so the caller needs no null checks

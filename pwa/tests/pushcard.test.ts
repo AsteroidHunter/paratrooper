@@ -127,8 +127,11 @@ describe("the notification card's pills are painted out of the sent bubble", () 
   it("those two rules are the buttons the dialog actually renders", () => {
     expect(main).toContain('id="push-not-now" class="alert-quiet"');
     expect(main).toContain('id="push-action" class="alert-action"');
-    // and it is the shared row they sit in, not one of the card's own
-    expect(main.match(/<div class="alert-actions">/g)).toHaveLength(2);
+    // and it is the shared row they sit in, not one of the card's own. Three
+    // boxes ask the app's questions now: this card, the log-out question, and
+    // the sign-in screen's warning about staying in the browser. Every one of
+    // them sits in this same row.
+    expect(main.match(/<div class="alert-actions">/g)).toHaveLength(3);
   });
 });
 

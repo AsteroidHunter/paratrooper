@@ -489,6 +489,70 @@ html, body {
   opacity: 1;
 }
 
+/* --- the sign-in card's other face: the home-screen steps ------------------
+   The same card, with the steps where the box goes: same badge, same measure,
+   same centring, so the two faces are one card showing one of two things
+   rather than two screens. main.ts renderTokenGate puts this class on when the
+   app is opened in a browser tab and nothing is signed in.
+   It is painted white on purpose, and in BOTH appearances: the card is asking
+   for a place on the home screen, and the flow it walks through is Safari's
+   own, which is drawn on white. The ink comes with the paint, because a card
+   that kept the page's own --text would be white letters on a white sheet the
+   moment the phone is in dark mode. Rather than restate the badge's rules for
+   this face, the card declares the two colour tokens the light appearance
+   already resolves to and lets them inherit: --text is what the card and the
+   title write in, --muted is what the version line under the name is faded to,
+   and neither declaration can be seen by anything outside this card, because a
+   custom property only ever travels downwards. So the face is exactly the card
+   a light phone already shows, and there is no second copy of the badge's
+   colours anywhere. The radius is what turns a white block on a black canvas
+   into a sheet; on white it is invisible and costs nothing. */
+.gate.install {
+  --text: #000000;
+  --muted: #8e8e93;
+  background: #ffffff;
+  color: var(--text);
+  border-radius: 20px;
+}
+/* The one sentence this face says, in the voice the other face asks its
+   question in: the ask's own type, inherited from .gate p above, so the card
+   speaks the same way whichever thing it is showing. Only the gaps are its
+   own, and they are the pair rule read the other way round: the sentence still
+   breaks from the badge, and it sits a clear step above the steps, because
+   what follows it is a list rather than the single field it introduces. */
+.gate .install-title {
+  margin: 2.5rem 0 1.25rem;
+}
+/* The five steps, numbered, because the order IS the instruction. The block is
+   seated by the card's own centring (auto margins on a max-content box) while
+   the lines inside it stay left aligned to each other, so the eye runs down one
+   column of numbers instead of down a ragged middle. The markers sit inside the
+   content box, which is what lets the block be exactly as wide as its longest
+   line and still be centred; markers outside would hang into the card's padding
+   and pull the whole list off centre. */
+.gate .install-steps {
+  width: max-content;
+  max-width: 100%;
+  margin: 0 auto 1.75rem;
+  padding: 0;
+  list-style: decimal inside;
+  text-align: left;
+}
+.gate .install-steps li {
+  margin: 0.4rem 0;
+}
+/* The other way out of this card, said quietly. The card is asking for the home
+   screen, so the browser is not what it is offering: this is the app's accent
+   as a plain text button, the way iOS writes the answer it is not asking for,
+   rather than the filled pill Connect wears on the other face. It is the same
+   pill rule underneath and only re-paints it, so the shape, the padding and the
+   dim under a finger are the ones the card already had. */
+.gate button.gate-quiet {
+  background: none;
+  color: var(--accent);
+  font-weight: 500;
+}
+
 /* --- nav bar (frosted, centered title, hairline) --- */
 .bar {
   display: grid;

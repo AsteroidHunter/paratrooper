@@ -114,7 +114,13 @@ import {
   watchLiftLanding,
   watchScrollWrites,
 } from "./shell";
-import { bootBlankGap, installLoadingScreen, installStartupImage, watchQuiet } from "./splash";
+import {
+  bootBlankGap,
+  installLoadingScreen,
+  installStartupImage,
+  isInstalledWindow,
+  watchQuiet,
+} from "./splash";
 import { createSpringField } from "./springscroll";
 import { seatBefore } from "./sendorder";
 import type { Standing } from "./sendorder";
@@ -184,7 +190,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.144"; // The compose bar and the thread now start rising when the phone reports the keyboard rather than at the tap, so they climb with it and land with it on every open, cold launch included, and a corrected report re-times the motion from wherever it stands
+const APP_VERSION = "0.3.145"; // Opened in a browser tab with nothing signed in, the sign-in screen now leads with the five steps for putting Paratrooper on the home screen, and the passcode box is behind one quiet button and the warning box it opens; opened from the home screen the screen is the passcode card exactly as before
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -534,8 +540,23 @@ holdDiagAuth(authHeaders);
 // place to correct. Nothing is stored until the yes comes back, so a wrong
 // token can no longer leave the app behind an empty thread reconnecting into a
 // refused socket forever.
+//
+// The screen has two faces now, and the phone picks which one opens. From the
+// home screen there is nothing left to ask for, so the card is the passcode
+// card and always was. In a browser tab it opens on the steps for putting
+// Paratrooper on the home screen, because that is the one thing worth saying to
+// somebody who has not signed in yet and is reading this in Safari: no
+// notifications on an iPhone, and the browser's own bars take part of the
+// screen. The other way is still there, one quiet button under the steps, and
+// it goes through the same centred box the chat asks its questions in.
+// Nothing is stored for any of it: a reload is a fresh open and the steps come
+// back, which is the whole of the memory this version has.
 function renderTokenGate(): void {
-  app.innerHTML = `
+  // The head of the card, and the app's one badge outside the chat. Written
+  // once because both faces wear it, so the trooper, the name and the version
+  // cannot drift apart between them, and the version is on screen on the very
+  // first open whichever face that open lands on.
+  const head = `
     <div class="gate">
       <div class="contact">
         <img class="avatar" src="/topbar-logo.png" alt="" />
@@ -543,45 +564,109 @@ function renderTokenGate(): void {
           <span class="title">Paratrooper</span>
           <span class="ver">v${APP_VERSION}</span>
         </div>
-      </div>
+      </div>`;
+  // The passcode face: the same markup, the same controller and the same three
+  // lines behind the server's yes as before. It is a function only because
+  // there are two ways to arrive at it now, an installed window and Yes in the
+  // warning box, and neither may be a second copy of the card.
+  const askForToken = (): void => {
+    app.innerHTML = `${head}
       <p>Your access token please?</p>
       <input id="token-input" type="password" autocomplete="off" data-owned-focus />
       <button id="token-save">Connect</button>
       <div id="token-note" class="gate-note" role="status" aria-live="polite"></div>
     </div>`;
-  // the caret's hold while the card is in flight (shell.ts bindGateFlight):
-  // bound here because the card is rebuilt with the markup above
-  bindGateFlight(app.querySelector<HTMLElement>(".gate")!);
-  const input = document.getElementById("token-input") as HTMLInputElement;
-  const save = document.getElementById("token-save") as HTMLButtonElement;
-  // the third answer's line: empty until there is something to say, and out of
-  // the flow (styles.css .gate-note), so nothing above it ever moves for it
-  const note = document.getElementById("token-note") as HTMLDivElement;
-  // the accepted path is this card's whole reason to exist, so it stays here in
-  // the open: the token is stored, the chat is built and the socket opens — the
-  // same three lines as before, now behind the server's yes
-  const gate = createTokenGate(input, save, note, {
-    fetcher: gateFetch,
-    wait: (ms, run) => setTimeout(run, ms),
-    accepted: (value) => {
-      token = value;
-      localStorage.setItem(TOKEN_KEY, value);
-      renderChat();
-      connect();
-    },
+    // the caret's hold while the card is in flight (shell.ts bindGateFlight):
+    // bound here because the card is rebuilt with the markup above
+    bindGateFlight(app.querySelector<HTMLElement>(".gate")!);
+    const input = document.getElementById("token-input") as HTMLInputElement;
+    const save = document.getElementById("token-save") as HTMLButtonElement;
+    // the third answer's line: empty until there is something to say, and out of
+    // the flow (styles.css .gate-note), so nothing above it ever moves for it
+    const note = document.getElementById("token-note") as HTMLDivElement;
+    // the accepted path is this card's whole reason to exist, so it stays here in
+    // the open: the token is stored, the chat is built and the socket opens — the
+    // same three lines as before, now behind the server's yes
+    const gate = createTokenGate(input, save, note, {
+      fetcher: gateFetch,
+      wait: (ms, run) => setTimeout(run, ms),
+      accepted: (value) => {
+        token = value;
+        localStorage.setItem(TOKEN_KEY, value);
+        renderChat();
+        connect();
+      },
+    });
+    tokenGate = gate; // so a socket refused later can paint THIS card red
+    document.getElementById("token-save")!.addEventListener("click", () => {
+      void gate.submit();
+    });
+    // Return is Connect. The box is the only field on the card, so the key that
+    // ends the typing is the key that sends it — the same handler, not a second
+    // path to the same place. No <form> around any of it: a form would submit
+    // and reload the page, and everything this card does it does in place.
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      void gate.submit();
+    });
+  };
+  // Opened from the home screen (splash.ts owns the one answer to that
+  // question, and the launch image reads the same one): the app is where it
+  // belongs, so this screen is the passcode card and nothing else.
+  if (isInstalledWindow(navigator)) {
+    askForToken();
+    return;
+  }
+  // A browser tab. The card asks for the home screen first, and there is no
+  // controller on this face, so a socket refused while it is up has nothing to
+  // paint and says so by holding nothing.
+  tokenGate = null;
+  app.innerHTML = `${head}
+      <p class="install-title">Paratrooper feels better as an app on the home screen.</p>
+      <ol class="install-steps">
+        <li>Click …</li>
+        <li>Share</li>
+        <li>View more</li>
+        <li>Add to Home Screen</li>
+        <li>Add and done!</li>
+      </ol>
+      <button type="button" id="use-browser" class="gate-quiet">Use it in the browser instead</button>
+    </div>
+    <!-- The chat's own centred box, asking the third question. The card is
+         rendered into #app on its own, so the box is written here rather than
+         with the other two, and it is written OUTSIDE the card: .gate keeps a
+         compositor layer for the keyboard lift, and a fixed overlay inside one
+         is fixed to the card instead of to the screen. Same classes, so
+         alert.css dresses it, and the same two functions put it up and take it
+         down. -->
+    <div id="browser-warn" class="alert-dialog" role="alertdialog" aria-modal="true"
+      aria-labelledby="browser-warn-copy" hidden>
+      <div class="alert-card">
+        <p id="browser-warn-copy" class="alert-copy">In a browser you get no notifications on an iPhone, and the browser's bars take part of the screen. Still want to proceed?</p>
+        <div class="alert-actions">
+          <button type="button" id="browser-warn-no" class="alert-quiet">No</button>
+          <button type="button" id="browser-warn-yes" class="alert-action">Yes</button>
+        </div>
+      </div>
+    </div>`;
+  // the install face's own paint (styles.css .gate.install). The class goes on
+  // here because the markup above is the head both faces share.
+  app.querySelector<HTMLElement>(".gate")!.classList.add("install");
+  const warn = document.getElementById("browser-warn")!;
+  document.getElementById("use-browser")!.addEventListener("click", () => {
+    showAlert(warn);
   });
-  tokenGate = gate; // so a socket refused later can paint THIS card red
-  document.getElementById("token-save")!.addEventListener("click", () => {
-    void gate.submit();
+  warn.addEventListener("click", (event) => {
+    if (event.target === warn) hideAlert(warn); // backdrop tap = No
   });
-  // Return is Connect. The box is the only field on the card, so the key that
-  // ends the typing is the key that sends it — the same handler, not a second
-  // path to the same place. No <form> around any of it: a form would submit
-  // and reload the page, and everything this card does it does in place.
-  input.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    void gate.submit();
+  document.getElementById("browser-warn-no")!.addEventListener("click", () => {
+    hideAlert(warn);
+  });
+  document.getElementById("browser-warn-yes")!.addEventListener("click", () => {
+    // the box leaves whole first, exactly as the log-out question does, and the
+    // card it was asking about is built on the other side of that fade
+    hideAlert(warn, askForToken);
   });
 }
 
