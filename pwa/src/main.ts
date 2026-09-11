@@ -190,7 +190,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.145"; // Opened in a browser tab with nothing signed in, the sign-in screen now leads with the five steps for putting Paratrooper on the home screen, and the passcode box is behind one quiet button and the warning box it opens; opened from the home screen the screen is the passcode card exactly as before
+const APP_VERSION = "0.3.146"; // The worker stops asking the Claude tool for the credential scrub whose sandbox this platform will not let start, which is what left the agent without a shell, and every git command that carries the GitHub credential now runs with the checkout's own hooks switched off
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

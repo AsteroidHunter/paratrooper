@@ -258,8 +258,11 @@ def test_shell_guard_also_refuses_the_secret_mount():
 # --- the scrub switch: the Claude credential out of the agent's shells --------
 #
 # The CLI must keep the credential; the shells it opens must not. The switch is
-# a CLI feature, so the SDK pin and the bundled CLI's version are what make it
-# something the image is known to carry rather than something it might.
+# the CLI's way of saying so, and the session now pins it off — its Linux
+# implementation makes the shell sandbox mandatory, and this platform will not let
+# that sandbox start. The pin below is what makes the CLI behind that decision a
+# known one: which CLI an image carries, and what it does with the switch either
+# way, is fixed by the SDK version rather than by the build date.
 
 MIN_SCRUB_CLI = (2, 1, 83)  # the release the switch first appears in
 
@@ -274,9 +277,10 @@ def test_the_agent_sdk_is_pinned_exactly():
 
 def test_the_bundled_cli_carries_the_scrub_switch():
     """Pinning the SDK is half the guarantee; the other half is reading the CLI
-    that pin actually ships. Below 2.1.83 the session sets the switch and
-    nothing behind it scrubs anything, which is the one failure the setting
-    cannot announce by itself."""
+    that pin actually ships. Below 2.1.83 the switch is a name nothing behind
+    reads, so neither value means anything — which is the one failure a setting
+    cannot announce by itself, and the floor that keeps turning it back on a
+    one-line change rather than an upgrade."""
     import claude_agent_sdk
 
     cli = Path(claude_agent_sdk.__file__).resolve().parent / "_bundled" / "claude"
@@ -1098,6 +1102,14 @@ def test_build_tool_server(tmp_path):
 
 # --- siterepo (bootstrap) ----------------------------------------------------
 
+def _subcommand(cmd: list[str]) -> str:
+    """The git subcommand in an argv, past any leading ``-c key=value`` pair."""
+    rest = list(cmd[1:])
+    while rest[:1] == ["-c"]:
+        rest = rest[2:]
+    return rest[0]
+
+
 def test_git_auth_never_embeds_token(tmp_path, monkeypatch):
     """The PAT must never ride in git argv (visible in `ps`, persisted by clone
     into .git/config) — only in the askpass env; the helper file holds no secret."""
@@ -1114,11 +1126,11 @@ def test_git_auth_never_embeds_token(tmp_path, monkeypatch):
     )
     repo.ensure_checkout()
     # clone (authenticated), then the two identity config calls (local, no auth)
-    assert [cmd[:2] for cmd, _ in calls] == [
-        ["git", "clone"], ["git", "config"], ["git", "config"],
-    ]
+    assert [_subcommand(cmd) for cmd, _ in calls] == ["clone", "config", "config"]
     for cmd, _ in calls:
         assert all("sekret" not in part for part in cmd)
+    # the authenticated one also runs its hooks from nowhere
+    assert calls[0][0][1:3] == ["-c", "core.hooksPath=/dev/null"]
     clone_env = calls[0][1]
     assert clone_env["PARATROOPER_GIT_ASKPASS_TOKEN"] == "sekret"
     askpass = Path(clone_env["GIT_ASKPASS"])
@@ -1272,6 +1284,144 @@ def test_the_workers_git_runs_on_the_allowlist_not_the_worker_environment(tmp_pa
     assert env["PARATROOPER_GIT_ASKPASS_HOST"] == "github.com"
     assert "sk-ant" not in "".join(env.values())
     assert not [k for k in env if k.startswith(("CLAUDE", "REDIS", "SPOTIFY"))]
+
+
+# --- no hook runs inside a command that carries the credential ---------------
+#
+# A git hook is a script in the checkout that git runs itself, with the running
+# command's own environment. The worker's push authenticates, so its environment
+# holds the installation token, and `.git/hooks/pre-push` is a file the agent's
+# file tools can write: that is a script of the agent's own, handed the
+# credential, during a push the worker was right to make. Every test below plants
+# a real executable hook and runs the same command twice — once by hand without
+# the protection, to show the fixture is a working hook and the environment
+# really does carry the credential, and once through the worker, which must not
+# run it. The credential is a fake string and the remote is a bare repository in
+# a temp directory; nothing here reaches a network.
+
+_FAKE_TOKEN = "ghs-NOT-A-REAL-TOKEN"  # never a credential, only a thing to watch
+
+
+def _plant_hook(hooks_dir: Path, name: str, marker: Path) -> Path:
+    """Plant an executable git hook that writes the credential it was handed to
+    ``marker``, and answer its path. A planted hook in real life would send it
+    somewhere instead; writing a file is the same access, observable offline."""
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hook = hooks_dir / name
+    hook.write_text(
+        "#!/bin/sh\n"
+        f'printf \'%s\' "${{PARATROOPER_GIT_ASKPASS_TOKEN:-NO-TOKEN}}" > "{marker}"\n'
+    )
+    hook.chmod(0o755)
+    return hook
+
+
+def _unprotected(work, env, *args: str) -> None:
+    """The control: the command the worker runs, by hand, without the one thing
+    under test. Anything these tests assert about the worker's own call is only
+    as good as this failing the other way."""
+    subprocess.run(["git", *args], cwd=work, check=True, capture_output=True, env=env)
+
+
+def test_a_planted_pre_push_hook_never_runs_during_the_workers_push(tmp_path):
+    """The push the agent can trigger must not run the agent's own script.
+
+    Both doors are planted here: the hooks directory git reads by default, and
+    `core.hooksPath` in the checkout's own config, which moves that directory.
+    Neither is refused — `core.hooksPath` is not one of the keys the remote check
+    turns away, and a writable setting is no place to put this decision anyway.
+    What stands instead is config passed per command, which outranks every file
+    git would otherwise read."""
+    bare, work = _seed_site_and_remote(tmp_path)
+    repo = SiteRepo(work, remote=str(bare), github_token=_FAKE_TOKEN)
+    auth_env = repo._clean_auth_env(str(bare))
+    marker = tmp_path / "stolen.txt"
+    hook = _plant_hook(work / ".git" / "hooks", "pre-push", marker)
+
+    _unprotected(work, auth_env,
+                 "push", str(bare), "refs/heads/paratrooper/x:refs/heads/control-1")
+    assert marker.read_text() == _FAKE_TOKEN, "the fixture is not a working hook"
+    marker.unlink()
+
+    repo.push_branch("paratrooper/x")
+    assert not marker.exists(), f"{hook} ran during the worker's push"
+    assert "paratrooper/x" in _remote_branches(bare)  # and the push still pushed
+
+    # the same again with the hooks directory moved by the checkout's own config,
+    # and a second commit so both pushes have a ref to actually update
+    subprocess.run(["git", "config", "--local", "core.hooksPath", ".git/theirs"],
+                   cwd=work, check=True, capture_output=True)
+    _plant_hook(work / ".git" / "theirs", "pre-push", marker)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "second"], cwd=work,
+                   check=True, capture_output=True,
+                   env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"})
+    head = repo._git("rev-parse", "HEAD")
+
+    _unprotected(work, auth_env,
+                 "push", str(bare), "refs/heads/paratrooper/x:refs/heads/control-2")
+    assert marker.read_text() == _FAKE_TOKEN, "the moved hook was never reached"
+    marker.unlink()
+
+    repo.push_branch("paratrooper/x")
+    assert not marker.exists(), "core.hooksPath in the checkout won the push"
+    assert repo._git("rev-parse", "refs/heads/paratrooper/x") == head
+    remote_head = subprocess.run(["git", "rev-parse", "refs/heads/paratrooper/x"],
+                                 cwd=bare, capture_output=True, text=True).stdout.strip()
+    assert remote_head == head  # the ref really was updated, so a hook had its cue
+
+
+def test_the_workers_fetch_runs_no_hook_either(tmp_path):
+    """The fetch authenticates too, and it has a hook of its own: every ref it
+    writes goes through `reference-transaction`, which is how a fetch before an
+    ordinary turn would have handed the same token to the same planted script."""
+    bare, work = _seed_site_and_remote(tmp_path)
+    repo = SiteRepo(work, remote=str(bare), github_token=_FAKE_TOKEN)
+    repo.push_branch("paratrooper/x")  # something on the remote worth fetching
+    auth_env = repo._clean_auth_env(str(bare))
+    marker = tmp_path / "stolen.txt"
+    refspec = "+refs/heads/*:refs/remotes/origin/*"
+    tracking = "refs/remotes/origin/paratrooper/x"
+
+    hook = _plant_hook(work / ".git" / "hooks", "reference-transaction", marker)
+    _unprotected(work, auth_env, "fetch", "--prune", str(bare), refspec)
+    assert marker.read_text() == _FAKE_TOKEN, "the fixture is not a working hook"
+
+    # back to no tracking ref, so the worker's fetch has the same work to do.
+    # The hook comes off disk first: deleting a ref is itself a transaction.
+    marker.unlink()
+    hook.unlink()
+    _unprotected(work, None, "update-ref", "-d", tracking)
+    _plant_hook(work / ".git" / "hooks", "reference-transaction", marker)
+
+    repo.fetch()
+    assert not marker.exists(), f"{hook} ran during the worker's fetch"
+    assert repo._git("rev-parse", tracking)  # and the fetch still fetched
+
+
+def test_the_boot_clone_runs_no_hook_from_a_planted_template(tmp_path, monkeypatch):
+    """The clone is the third command with the credential in its environment,
+    and the only one that keeps the worker's inherited environment — so unlike
+    the other two it still reads ``~/.gitconfig``, a file the agent can write and
+    a restart can find again. There is no checkout to hold hooks yet; an
+    ``init.templateDir`` line is what puts them there, in time for the
+    ``post-checkout`` the clone itself runs."""
+    bare, work = _seed_site_and_remote(tmp_path)
+    SiteRepo(work, remote=str(bare), github_token=_FAKE_TOKEN).push_branch("main")
+    marker = tmp_path / "stolen.txt"
+    _plant_hook(tmp_path / "template" / "hooks", "post-checkout", marker)
+    planted = tmp_path / "planted.gitconfig"
+    planted.write_text(f"[init]\n\ttemplateDir = {tmp_path / 'template'}\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(planted))
+
+    _unprotected(None, None, "clone", "--branch", "main", str(bare), str(tmp_path / "ctl"))
+    assert marker.exists(), "the fixture is not a working hook"
+    marker.unlink()
+
+    fresh = tmp_path / "fresh"
+    SiteRepo(fresh, remote=str(bare), github_token=_FAKE_TOKEN).ensure_checkout()
+    assert not marker.exists(), "a planted template hook ran during the boot clone"
+    assert (fresh / "f.txt").exists()  # and the clone still cloned
 
 
 # --- the worker's pull request calls (2.1) -----------------------------------
@@ -1982,12 +2132,18 @@ def test_run_job_rejects_an_unusable_branch_word_before_starting(tmp_path, monke
 
 
 @pytest.mark.parametrize("with_token", [True, False])
-def test_run_job_sets_the_scrub_switch_either_way(tmp_path, monkeypatch, with_token):
-    """The switch guards the Claude credential, which every session has,
-    with or without a GitHub token — so it cannot ride inside the block that
-    only runs when a PAT is configured. Its companion is the explicit
-    allowed_tools list: the switch resets the permission mode to `default`, and
-    that list is then the only thing denying an unlisted tool."""
+def test_run_job_pins_the_scrub_switch_off_either_way(tmp_path, monkeypatch, with_token):
+    """Off, and written down rather than left unset.
+
+    Off because the switch is implemented on Linux by running every agent shell
+    under bubblewrap and refusing the shell if that sandbox cannot start, and a
+    probe of the running worker found its container policy denying the first
+    mount the sandbox makes: on, the agent has no shell at all. Written down
+    because the SDK merges this dict over the inherited environment, so an
+    explicit value is what keeps the answer here rather than in whatever the
+    host's environment happens to say. Either way means with or without a GitHub
+    token: the value cannot ride inside the block that only runs when the App is
+    configured."""
     import paratrooper.agent.worker as worker_mod
 
     captured: dict = {}
@@ -2012,20 +2168,21 @@ def test_run_job_sets_the_scrub_switch_either_way(tmp_path, monkeypatch, with_to
     assert asyncio.run(worker_mod.run_job(job, config=_tool_cfg(tmp_path))).status == "done"
 
     options = captured["options"]
-    assert options.env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+    assert options.env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "0"
     assert options.allowed_tools == ["mcp__paratrooper__report_pr"] + worker_mod.BUILTIN_TOOLS
 
 
-def test_worker_image_carries_the_tools_the_scrub_switch_needs():
-    """The switch above is not free on Linux, and it costs two packages, found
-    from two outages. The CLI implements it by running every agent shell under
-    bubblewrap and refuses to start at all when that binary is missing, which
-    is a dead worker, every message failing. Then the sandbox those shells run
-    in initializes on the first shell command of a session, and that step
-    lists socat as a hard error and bridges its proxies with socat whether or
-    not the network is restricted (the scrub restricts nothing); under the
-    scrub the sandbox is mandatory, so a missing socat is an agent with no
-    shell: every command answers "Sandbox is required but failed to
+def test_worker_image_keeps_the_tools_the_scrub_switch_needs():
+    """The two packages the switch costs on Linux stay in the image although the
+    switch is off, because each was bought with an outage and the next attempt at
+    turning it on should not pay again. The CLI implements the switch by running
+    every agent shell under bubblewrap and refuses to start at all when that
+    binary is missing, which is a dead worker, every message failing. Then the
+    sandbox those shells run in initializes on the first shell command of a
+    session, and that step lists socat as a hard error and bridges its proxies
+    with socat whether or not the network is restricted (the scrub restricts
+    nothing); under the scrub the sandbox is mandatory, so a missing socat is an
+    agent with no shell: every command answers "Sandbox is required but failed to
     initialize: Sandbox dependencies not available: socat not installed". The
     Mac needs neither binary, so the image is the only place this is caught."""
     dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.worker").read_text()
@@ -2613,9 +2770,8 @@ def _stream_tools():
 def test_the_permission_gate_answers_only_from_the_sessions_own_list():
     """The gate is the session's own allowed_tools list read back as an answer.
     A name on it runs, a name off it is refused with a reason. There is no
-    branch that says yes to something unnamed: the scrub switch forces the
-    asking mode, and 'answer the question' must never turn into 'approve the
-    request'."""
+    branch that says yes to something unnamed: when the CLI is in the asking
+    mode, 'answer the question' must never turn into 'approve the request'."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
     import paratrooper.agent.worker as worker_mod
@@ -2633,11 +2789,12 @@ def test_the_permission_gate_answers_only_from_the_sessions_own_list():
 
 
 def test_run_job_hands_the_session_a_way_to_answer_a_permission_question(tmp_path, monkeypatch):
-    """The scrub switch resets the permission mode to `default`, which is the
-    mode that ASKS, and the CLI asks over the control stream. Without a callback
-    the SDK answers that question with an error and the CLI turns the error into
-    a denial, which is every shell and file command failing in a row. So the
-    session must carry one, and it must be the same list it declares."""
+    """The CLI can put the session in `default`, the mode that ASKS — the scrub
+    switch used to reset it there — and it asks over the control stream. Without
+    a callback the SDK answers that question with an error and the CLI turns the
+    error into a denial, which is every shell and file command failing in a row.
+    So the session must carry one whatever mode is in force, and it must be the
+    same list it declares."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
     import paratrooper.agent.worker as worker_mod
@@ -2806,7 +2963,9 @@ def test_worker_image_shape():
     * bubblewrap is what the CLI's env scrub needs on Linux to start, and its
       absence is a worker where every message fails; socat is what the same
       scrub's sandbox needs to initialize on the first shell command, and its
-      absence is an agent with no shell.
+      absence is an agent with no shell. Both stay although the switch is off:
+      each was found from an outage, and dropping them makes turning it on cost
+      a third one.
     * ``gh`` stays gone: the shell holds no GitHub credential any more.
     """
     dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.worker").read_text()

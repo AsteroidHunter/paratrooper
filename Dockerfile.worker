@@ -18,13 +18,16 @@ ENV PYTHONUNBUFFERED=1
 # none now, pushing and pull requests are worker-owned tools, and a GitHub
 # client sitting on the PATH with nothing to authenticate with is just one more
 # thing for a prompt injection to reach for.
-# bubblewrap: the CLI's subprocess env scrub (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,
-# set for every session) is implemented on Linux by running each agent shell
-# under `bwrap`, and the CLI refuses to start at all when it cannot find it —
-# every message dies with "bubblewrap is required for subprocess env scrubbing".
-# The macOS CLI needs no such binary, which is why only the Linux image cares.
-# Debian's build is not setuid: it relies on unprivileged user namespaces, which
-# the platform permits, so it works as the non-root user below.
+# bubblewrap and socat are what the CLI's subprocess env scrub
+# (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB) needs on Linux, and they stay here although
+# the worker now pins that switch to 0 — the two outages that bought them are
+# written down here so turning it back on costs no third one.
+# bubblewrap: the scrub is implemented on Linux by running each agent shell under
+# `bwrap`, and with the switch on the CLI refuses to start at all when it cannot
+# find it — every message dies with "bubblewrap is required for subprocess env
+# scrubbing". The macOS CLI needs no such binary, which is why only the Linux
+# image cares. Debian's build is not setuid: it relies on unprivileged user
+# namespaces, which the platform permits, so it works as the non-root user below.
 # socat: the second thing the same switch needs, found from a second outage.
 # Starting is only the first gate. The sandbox itself initializes on the first
 # shell command of a session, and that initialization runs a dependency check
@@ -34,8 +37,10 @@ ENV PYTHONUNBUFFERED=1
 # not: no --unshare-net is ever passed for a command). Under the scrub the
 # sandbox is mandatory, so without socat every shell command answers "Sandbox
 # is required but failed to initialize: Sandbox dependencies not available:
-# socat not installed" and the agent has no shell at all. Both packages come
-# from Debian's own repository.
+# socat not installed" and the agent has no shell at all. That same mandatory
+# sandbox is why the switch is off: a later probe found this platform's container
+# policy refusing the first mount it makes, which no package here can supply.
+# Both packages come from Debian's own repository.
 # Node stays on major 22, which is what the running worker reports (v22.23.2).
 # The major is pinned; the rest is not, and honestly so: `setup_22.x` is fetched
 # from nodesource at build time and installs whatever 22.x their apt suite holds

@@ -11,8 +11,12 @@
 # This script is therefore the process the platform starts with the secrets. It
 # writes them to a private file, removes them from its own environment, and
 # execs the worker, which reads the file once and deletes it. The Claude
-# credential is not on this list on purpose: the CLI needs it in its
-# environment, and the scrub switch plus the file deny rules cover it instead.
+# credential is not on this list on purpose: the CLI needs it in its own
+# environment, so it is in this record, and what covers it is the CLI keeping it
+# out of the shells it opens plus the guard's refusal of a /proc read on both
+# roads, the shell's and the file tools'. Those are fences on what is asked for,
+# not a sandbox around it — the switch that sandboxed the agent's shells is off,
+# because this platform refuses the mount that sandbox makes first.
 set -eu
 
 # owner-only from the moment it exists, not a chmod after the fact

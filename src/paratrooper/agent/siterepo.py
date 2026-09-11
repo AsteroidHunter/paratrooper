@@ -29,21 +29,25 @@ environment it has always had: it runs once at boot, before any agent exists.
 
 **Where the credential is allowed to go.** Both of them authenticate against
 :meth:`SiteRepo.configured_remote`, the full URL the worker was configured with,
-and never against the name ``origin``. The agent can write ``.git/config`` (its
-file tools are outside the CLI's shell sandbox) and could point ``origin``
-anywhere, so a push "to origin" would have handed a freshly minted token to
-whatever host the checkout last named. Three things stand behind that before
-either command runs: the checkout's ``origin`` still has to match the configured
-repository; the checkout's own config must carry no URL rewrite, credential
-helper or ``http.*`` setting, while the user and system config files, which the
-agent can write too, are switched off outright for these commands; and the
-askpass helper answers for one host and no other.
+and never against the name ``origin``. The agent can write ``.git/config`` and
+``.git/hooks`` with its file tools and could point ``origin`` anywhere, so a push
+"to origin" would have handed a freshly minted token to whatever host the
+checkout last named. Four things stand behind that before either command runs:
+the checkout's ``origin`` still has to match the configured repository; the
+checkout's own config must carry no URL rewrite, credential helper or ``http.*``
+setting, while the user and system config files, which the agent can write too,
+are switched off outright for these commands; the askpass helper answers for one
+host and no other; and every command that carries the credential runs its own
+hooks from nowhere (:data:`_NO_HOOKS`).
 
-Note for anyone reading this next to the CLI's shell sandbox: these run outside
-it. The agent's own shells are wrapped in bubblewrap with ``.git/config``
-read-only, which was the standing worry about ``git push -u`` — it writes the
-upstream line. That worry does not reach here twice over: the worker's process
-is not sandboxed, and this push sets no upstream and writes no config at all.
+Note for anyone reading this next to the CLI's shell sandbox: these run in the
+worker's own process, which nothing sandboxes. Neither does anything sandbox the
+agent's shells — the switch that wrapped them in bubblewrap is off, because the
+platform will not let that sandbox start. So every write the agent can reach the
+checkout with is a write it can reach with ordinary shell code too, which is why
+the fences above are all in this process rather than in the shell's. The push
+itself sets no upstream and writes no config at all, which is what the old worry
+about ``git push -u`` was about.
 """
 
 from __future__ import annotations
@@ -125,6 +129,27 @@ def _normalize_remote(url: str) -> str:
 # it is read instead, and a checkout carrying any of these keys is refused.
 _TAMPER_KEYS_RE = r"^(url\.|credential\.|http\.)"
 
+# No hooks, for any command that carries the credential. A hook is a script in
+# the checkout that git runs itself, with the command's own environment: a
+# `pre-push` file is the whole of it, and a push would hand that script the very
+# token it is authenticating with. `.git/hooks` is a directory the agent's
+# file tools can write, and `core.hooksPath` in the checkout's own config moves
+# the directory git looks in, so neither the file nor the setting is something
+# this process can rely on being untouched.
+#
+# `-c` on the command line is config at the highest precedence git has: it beats
+# the repository's config, the user's and the system's, so this is a decision
+# made per command rather than a setting in a file that the thing it is fencing
+# can rewrite. `/dev/null` is not a directory, so the hook path git builds from
+# it (`/dev/null/pre-push`) cannot exist and every hook lookup comes back empty
+# — nothing runs, and nothing has to be listed by name.
+#
+# It is not the same thing as `push --no-verify`: that skips `pre-push` on a
+# push and nothing else, and fetch and clone run hooks too
+# (`reference-transaction` on a fetch's ref updates, `post-checkout` from a
+# template on a clone).
+_NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+
 
 def write_askpass_helper() -> str:
     """Materialize the askpass script to an executable temp file and return its
@@ -172,6 +197,16 @@ class SiteRepo:
         if check and proc.returncode != 0:
             raise GitError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
         return proc.stdout.strip()
+
+    def _authenticated_git(self, url: str, *args: str) -> str:
+        """Run one git command with the credential wired in, and no hooks.
+
+        The two halves travel together because they are one decision: a command
+        that can answer a credential prompt is a command no script out of the
+        checkout may run inside. Every caller that authenticates goes through
+        here, so there is one place to read rather than a flag to remember at
+        each call site."""
+        return self._git(*_NO_HOOKS, *args, env=self._clean_auth_env(url))
 
     def remote_url(self) -> str:
         return self._remote or self._git("remote", "get-url", "origin")
@@ -278,9 +313,8 @@ class SiteRepo:
         because the URL, not the remote name, is what is fetched: without it
         git would update no ``refs/remotes/origin/*`` at all."""
         url = self._verified_remote()
-        self._git(
-            "fetch", "--prune", url, "+refs/heads/*:refs/remotes/origin/*",
-            env=self._clean_auth_env(url),
+        self._authenticated_git(
+            url, "fetch", "--prune", url, "+refs/heads/*:refs/remotes/origin/*"
         )
 
     def push_branch(self, branch: str) -> None:
@@ -292,10 +326,7 @@ class SiteRepo:
         anything outside the agent's namespace first, with the guard's own
         wording, and a check in two places drifts apart."""
         url = self._verified_remote()
-        self._git(
-            "push", url, f"refs/heads/{branch}:refs/heads/{branch}",
-            env=self._clean_auth_env(url),
-        )
+        self._authenticated_git(url, "push", url, f"refs/heads/{branch}:refs/heads/{branch}")
 
     # --- bootstrap -----------------------------------------------------------
 
@@ -310,8 +341,14 @@ class SiteRepo:
                     "cannot clone site repo: no remote configured (set PARATROOPER_REMOTE)"
                 )
             self.root.parent.mkdir(parents=True, exist_ok=True)
+            # The clone authenticates, so it gets the same no-hooks rule as the
+            # other two. Its hooks would come from a template directory rather
+            # than from a checkout that does not exist yet, and this is the one
+            # command here that keeps the inherited environment — `~/.gitconfig`
+            # included, where an `init.templateDir` or `core.hooksPath` line is a
+            # line the agent's file tools can write and a restart can find again.
             clone = [
-                "git", "clone", "--branch", self.default_branch,
+                "git", *_NO_HOOKS, "clone", "--branch", self.default_branch,
                 self.remote_url(), str(self.root),
             ]
             proc = subprocess.run(clone, capture_output=True, text=True, env=self._auth_env())

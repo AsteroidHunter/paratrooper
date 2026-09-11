@@ -71,7 +71,8 @@ BUILTIN_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 DENIED_READS = ["Read(//proc/**)", "Read(//etc/secrets/**)"]
 # Claude Code's own switch for stripping provider credentials from the
 # subprocesses it opens; carried by the bundled CLI from 2.1.83, which the
-# pinned SDK version is checked against in the tests
+# pinned SDK version is checked against in the tests. Every session pins it to a
+# value — see the comment on session_env in run_job for which value and why.
 SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
 
 EventCallback = Callable[[dict], Awaitable[None] | None]
@@ -80,13 +81,15 @@ EventCallback = Callable[[dict], Awaitable[None] | None]
 def make_tool_gate(session_tools: list[str]):
     """Answer the CLI's permission questions from the session's own tool list.
 
-    The scrub switch resets the permission mode to ``default``, which is the
-    mode that *asks*: any tool call the CLI's own rules do not settle becomes a
-    question put to this session over the control stream. A session that cannot
-    answer is not a stricter session, it is a broken one — the CLI turns an
-    unanswered question into "Tool permission request failed", so the agent's
-    shell and file tools fail one after another and it reports that it has no
-    shell.
+    The CLI does not always keep the mode the session asked for: it was the
+    scrub switch that reset it to ``default``, the mode that *asks*, and a reset
+    from any cause has the same consequence. Any tool call the CLI's own rules do
+    not settle becomes a question put to this session over the control stream. A
+    session that cannot answer is not a stricter session, it is a broken one —
+    the CLI turns an unanswered question into "Tool permission request failed",
+    so the agent's shell and file tools fail one after another and it reports
+    that it has no shell. Nothing here depends on which mode is in force, which
+    is the point: the answer is the same either way.
 
     This answers from :data:`session_tools`, the very list the session declares
     in ``allowed_tools``, so the set of tools the agent may run is exactly what
@@ -240,14 +243,31 @@ async def run_job(
         gh_token = installation_token(config)
     except ConfigError:
         gh_token = None
-    # Anthropic's scrub switch. The CLI must keep the Claude credential — it is
-    # what it authenticates with — but with this set it deletes that credential
-    # and the other provider keys from the environment of every Bash shell, hook
-    # and stdio MCP subprocess it opens, so the agent's own shell never sees it.
-    # It also resets the permission mode to `default`, which is why the explicit
-    # allowed_tools list below is load-bearing and not decoration.
+    # Anthropic's scrub switch, pinned OFF. With it on, the pinned CLI deletes
+    # the Claude credential and the other provider keys from the environment of
+    # every Bash shell, hook and stdio MCP subprocess it opens — but on Linux it
+    # implements that by running each of those shells under bubblewrap, and the
+    # sandbox is then mandatory: a shell that cannot be sandboxed does not run.
+    # On this host it cannot be. A probe of the running worker found its
+    # container policy refusing the mount the sandbox makes first
+    # (`mount(MS_SLAVE|MS_REC)` on `/`), so with the switch on every shell
+    # command the agent tries answers that it failed to initialize and the agent
+    # reports it has no shell at all. Off, the shells run.
+    #
+    # What that costs is real and is not nothing: the pinned CLI still keeps the
+    # Claude credential out of an ordinary shell's own environment, but nothing
+    # sandboxes that shell any more, so code running in it can go looking for
+    # other processes' environments and only the kernel's own checks stand in
+    # the way. The fences that remain are the tool gate, the allowed-tools list,
+    # the two denied read roots, the guard hooks, and a worker that hands the
+    # session no GitHub token.
+    #
+    # Written out rather than left unset on purpose: the SDK merges this dict
+    # over the worker's inherited environment, so an explicit value is the only
+    # form that answers the question here instead of wherever the host's
+    # environment was configured.
     session_env: dict[str, str] = {
-        SCRUB_VAR: "1",
+        SCRUB_VAR: "0",
         "GIT_TERMINAL_PROMPT": "0",  # fail fast, never hang on a prompt
     }
 
@@ -304,9 +324,9 @@ async def run_job(
         disallowed_tools=DENIED_READS,
         # headless least-privilege: listed tools run, unlisted are denied without
         # prompting; the main-guard hook denies dangerous Bash (deny beats this mode).
-        # The scrub switch overrides this to `default` on its own, which is why the
-        # gate below has to exist: the mode this asks for is the behaviour the gate
-        # then has to produce by hand.
+        # This is what the session asks for, not a guarantee of what the CLI runs
+        # with — the scrub switch used to override it to `default` — so the gate
+        # below produces the same behaviour by hand whatever the CLI settles on.
         permission_mode="dontAsk",
         # who answers when the CLI asks. Same list as allowed_tools above, so the
         # answer cannot widen what the session declared.
