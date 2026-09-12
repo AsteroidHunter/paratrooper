@@ -552,6 +552,14 @@ html, body {
   color: var(--accent);
   font-weight: 500;
 }
+/* Reserve space for feedback below the share button. */
+.gate .share-note {
+  margin: 0.75rem 0 0.25rem;
+  min-height: 1.2em;
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--muted);
+}
 
 /* --- nav bar (frosted, centered title, hairline) --- */
 .bar {

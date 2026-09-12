@@ -68,7 +68,7 @@ describe("the card says what it was given to say", () => {
     const labels = [...installMarkup.matchAll(/<button[^>]*>([^<]+)<\/button>/g)].map((m) =>
       m[1].trim(),
     );
-    expect(labels).toEqual([BUTTON, "No", "Yes"]); // the card's button, then the box's two
+    expect(labels).toEqual(["Open Share Sheet", BUTTON, "No", "Yes"]);
   });
 
   it("warns before it takes it, in the box's one sentence and two answers", () => {
