@@ -24,6 +24,11 @@ pwa/dist/
 !.env.example
 *.local
 
+# The real deployment configuration. Not a secret store — secrets are env vars —
+# but it names one person's site, repository and commit identity, so only the
+# placeholder example is committed.
+config/paratrooper.toml
+
 # Runtime data (persistent disk on Render; local dev only)
 data/
 inbox/

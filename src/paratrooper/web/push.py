@@ -188,16 +188,44 @@ def _message_excerpt(payload: object) -> str | None:
     return f"{text[:NOTIFICATION_EXCERPT_CHARS].rstrip()} ..."
 
 
-def notification_text(kind: str, payload: object = None) -> str | None:
+@dataclass(frozen=True)
+class NotificationTexts:
+    """The four fallback banner bodies, as this deployment words them.
+
+    ``reply`` and ``error`` are shared by every profile. ``screenshot`` and
+    ``pr`` describe artifacts only a pinboard produces, so they are ``None``
+    elsewhere — and a kind with no text does not notify, which is the same
+    answer as a kind whose policy says it never notifies.
+    """
+
+    reply: str
+    error: str
+    screenshot: str | None = None
+    pr: str | None = None
+
+    def fallback(self, kind: str) -> str | None:
+        return {
+            "done": self.reply,
+            "error": self.error,
+            "screenshot": self.screenshot,
+            "pr": self.pr,
+        }.get(kind)
+
+
+def notification_text(kind: str, texts: NotificationTexts, payload: object = None) -> str | None:
     """Push body for one result; None for kinds that do not notify.
 
     The terminal result carries its own job's user-facing reply/error into this
-    call, so concurrent runs never consult shared "last reply" state. Special
-    screenshot and PR wording remains policy-owned.
+    call, so concurrent runs never consult shared "last reply" state. The
+    excerpt behaviour is unchanged: a reply with words of its own is previewed,
+    and the configured text is the fallback for a reply that has none.
     """
     policy = EVENT_POLICY.get(kind)
-    if policy is None or policy.push_text is None:
+    if policy is None or not policy.notifies:
         return None
+    fallback = texts.fallback(kind)
+    if fallback is None:
+        return None  # this profile produces no such artifact
     if kind in {"done", "error"}:
-        return _message_excerpt(payload) or policy.push_text
-    return policy.push_text
+        return _message_excerpt(payload) or fallback
+    return fallback

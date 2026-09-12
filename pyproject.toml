@@ -55,6 +55,13 @@ web = [
     "redis>=5.0",
     "pywebpush>=2.0",
 ]
+# The config delivery command (`python -m paratrooper.deploy`). A laptop's
+# dependencies, not a service's: neither image installs this extra, and nothing
+# a service imports reaches for httpx or yaml on its account.
+deploy = [
+    "httpx>=0.27",  # the Render API calls
+    "pyyaml>=6.0",  # reading the Render CLI's own config for a saved token
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",

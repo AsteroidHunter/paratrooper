@@ -46,8 +46,10 @@ from claude_agent_sdk import (
 
 from .auth import configure_auth
 from .config import (
+    PINBOARD,
     Config,
     ConfigError,
+    PinboardConfig,
     load_config,
     spotify_credentials,
     validate_branch_prefix,
@@ -61,7 +63,6 @@ from .tools import SERVER_NAME, ToolContext, build_tool_server
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "claude-opus-4-8"
 # headless built-ins the agent needs; Bash is gated by the main-guard hook and
 # the three file tools by the file guard
 BUILTIN_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
@@ -74,11 +75,15 @@ DENIED_READS = ["Read(//proc/**)", "Read(//etc/secrets/**)"]
 # pinned SDK version is checked against in the tests. Every session pins it to a
 # value — see the comment on session_env in run_job for which value and why.
 SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
+# What the permission gate says this session holds. Each profile names its own
+# set: a plain session refused a tool used to be told it lacked "the pinboard
+# tools", which is a sentence about a deployment it is not.
+_PINBOARD_TOOLS = "the pinboard tools, the shell and the file tools"
 
 EventCallback = Callable[[dict], Awaitable[None] | None]
 
 
-def make_tool_gate(session_tools: list[str]):
+def make_tool_gate(session_tools: list[str], *, what_this_session_has: str = _PINBOARD_TOOLS):
     """Answer the CLI's permission questions from the session's own tool list.
 
     The CLI does not always keep the mode the session asked for: it was the
@@ -107,8 +112,8 @@ def make_tool_gate(session_tools: list[str]):
         return PermissionResultDeny(
             message=(
                 f"{tool_name} is not one of this session's tools. Paratrooper's "
-                "agent has the pinboard tools, the shell and the file tools, and "
-                "nothing else; there is no way to widen that from inside a turn."
+                f"agent has {what_this_session_has}, and nothing else; there is "
+                "no way to widen that from inside a turn."
             )
         )
 
@@ -177,7 +182,45 @@ async def _emit(cb: EventCallback | None, event: dict) -> None:
         await res
 
 
-def _refresh_checkout(config: Config, token: str) -> None:
+def session_env(config: Config) -> dict[str, str]:
+    """The environment overrides one session's CLI runs with.
+
+    Merged by the SDK over the worker's inherited environment, never replacing
+    it: this adds and overrides, it cannot subtract. Keeping a secret out of the
+    agent's shells is done by removing it from ``os.environ`` at boot (see
+    ``config.take_github_app`` / ``take_spotify_credentials``), not here. Claude's
+    own credential deliberately stays reachable, because the CLI needs it.
+
+    ``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`` is written explicitly either way rather
+    than left unset, because unset means "whatever this host happened to be
+    configured with" and this is the one place that question should be answered.
+    With it on, the pinned CLI strips provider credentials from every Bash shell,
+    hook and stdio MCP subprocess it opens — but on Linux it implements that by
+    running each of those under bubblewrap, and the sandbox is then mandatory: a
+    shell that cannot be sandboxed does not run. A probe of the running worker
+    found its container policy refusing the mount the sandbox makes first
+    (``mount(MS_SLAVE|MS_REC)`` on ``/``), so with the switch on every shell
+    command answered that it failed to initialize and the agent reported having
+    no shell at all. That is why ``shell_isolation`` defaults to false.
+
+    When a deployer sets it true and the platform refuses, the failure surfaces:
+    nothing here rewrites it back to "0". What it costs while off is real and is
+    not nothing — the CLI still keeps the Claude credential out of an ordinary
+    shell's own environment, but nothing sandboxes that shell, so the fences that
+    remain are the tool gate, the allowed-tools list, the two denied read roots,
+    the guard hooks, and a worker that hands the session no GitHub token.
+
+    This switch is deployer configuration. No tool and no product control
+    changes it from inside a turn — but it is an ordinary variable in the CLI's
+    environment, so it is visible runtime data rather than something hidden.
+    """
+    return {
+        SCRUB_VAR: "1" if config.shell_isolation else "0",
+        "GIT_TERMINAL_PROMPT": "0",  # fail fast, never hang on a prompt
+    }
+
+
+def _refresh_checkout(pinboard: PinboardConfig, token: str) -> None:
     """Bring ``origin/*`` up to date before a turn starts.
 
     A failure warns and lets the turn run. This is a refresh of state the agent
@@ -188,12 +231,12 @@ def _refresh_checkout(config: Config, token: str) -> None:
     pull request — fails loudly on its own with the same cause."""
     try:
         SiteRepo(
-            config.site_root,
-            default_branch=config.default_branch,
+            pinboard.site_root,
+            default_branch=pinboard.default_branch,
             github_token=token,
-            remote=config.remote,
-            git_name=config.git_name,
-            git_email=config.git_email,
+            remote=pinboard.remote,
+            git_name=pinboard.git_name,
+            git_email=pinboard.git_email,
         ).fetch()
     except Exception as exc:
         logger.warning("could not refresh the site checkout before the turn: %s", exc)
@@ -204,24 +247,43 @@ async def run_job(
     *,
     config: Config | None = None,
     auth_mode: str | None = None,
-    model: str = DEFAULT_MODEL,
     on_event: EventCallback | None = None,
 ) -> JobResult:
-    """Run one job end-to-end. Auth is locked in first (loud failure, no
-    fallback). Returns a :class:`JobResult`; never raises for ordinary tool
-    failures (those reach the agent), but a config/auth error propagates — by
-    design it should crash the job visibly."""
+    """Run one job end-to-end, on whichever profile this deployment is.
+
+    Auth is locked in first (loud failure, no fallback). Returns a
+    :class:`JobResult`; never raises for ordinary tool failures (those reach the
+    agent), but a config/auth error propagates — by design it should crash the
+    job visibly. The model is the configured one: there is no code default left
+    to fall back to, so a deployment runs the model its source names.
+    """
     configure_auth(auth_mode)  # subscription|api, hard-error if misconfigured
-    config = config or load_config()
+    config = config or load_config(require_site_root=True)
+    if config.is_pinboard:
+        return await _run_pinboard_job(job, config=config, on_event=on_event)
+    raise ConfigError(
+        f"profile {config.profile!r} has no session in this build: only "
+        f"{PINBOARD!r} runs jobs so far"
+    )
+
+
+async def _run_pinboard_job(
+    job: Job,
+    *,
+    config: Config,
+    on_event: EventCallback | None = None,
+) -> JobResult:
+    """The full deployment's turn: site checkout, pin tools, guard hooks."""
+    pinboard = config.require_pinboard()
     # one word fences the guard, names the branches the prompt asks for, and
     # filters the Publish PR lookup: check it here, before any git or agent work,
     # so a bad one is a loud failure and never a quiet fall back to the default
-    validate_branch_prefix(config.branch_prefix)
+    validate_branch_prefix(pinboard.branch_prefix)
 
     async def emit(kind: str, payload: object) -> None:
         await _emit(on_event, {"job_id": job.job_id, "kind": kind, "payload": payload})
 
-    changelog = Changelog(config.changelog)
+    changelog = Changelog(pinboard.changelog)
 
     try:
         spotify_creds = spotify_credentials()
@@ -243,40 +305,16 @@ async def run_job(
         gh_token = installation_token(config)
     except ConfigError:
         gh_token = None
-    # Anthropic's scrub switch, pinned OFF. With it on, the pinned CLI deletes
-    # the Claude credential and the other provider keys from the environment of
-    # every Bash shell, hook and stdio MCP subprocess it opens — but on Linux it
-    # implements that by running each of those shells under bubblewrap, and the
-    # sandbox is then mandatory: a shell that cannot be sandboxed does not run.
-    # On this host it cannot be. A probe of the running worker found its
-    # container policy refusing the mount the sandbox makes first
-    # (`mount(MS_SLAVE|MS_REC)` on `/`), so with the switch on every shell
-    # command the agent tries answers that it failed to initialize and the agent
-    # reports it has no shell at all. Off, the shells run.
-    #
-    # What that costs is real and is not nothing: the pinned CLI still keeps the
-    # Claude credential out of an ordinary shell's own environment, but nothing
-    # sandboxes that shell any more, so code running in it can go looking for
-    # other processes' environments and only the kernel's own checks stand in
-    # the way. The fences that remain are the tool gate, the allowed-tools list,
-    # the two denied read roots, the guard hooks, and a worker that hands the
-    # session no GitHub token.
-    #
-    # Written out rather than left unset on purpose: the SDK merges this dict
-    # over the worker's inherited environment, so an explicit value is the only
-    # form that answers the question here instead of wherever the host's
-    # environment was configured.
-    session_env: dict[str, str] = {
-        SCRUB_VAR: "0",
-        "GIT_TERMINAL_PROMPT": "0",  # fail fast, never hang on a prompt
-    }
+    # The isolation switch and the git prompt setting, written out explicitly —
+    # see session_env for what each costs and why neither is left unset.
+    env = session_env(config)
 
     # The agent used to run `git fetch` itself. It cannot now, so the worker
     # refreshes origin/* before the session: without this the agent branches off
     # whatever the default branch looked like at boot and never sees the branch
     # of a pull request it is meant to continue.
     if gh_token:
-        await anyio.to_thread.run_sync(_refresh_checkout, config, gh_token)
+        await anyio.to_thread.run_sync(_refresh_checkout, pinboard, gh_token)
 
     async def emit_update(text: str) -> None:
         # the post_update tool's live channel: an agent-authored interim bubble
@@ -297,9 +335,10 @@ async def run_job(
     # the guard fences the agent onto the configured <prefix>/* branches; the site
     # checkout root lets it also enforce the local agent-branch cap by counting there
     guard = make_main_guard_hook(
-        config.default_branch,
-        repo_root=config.site_root,
-        branch_prefix=config.branch_prefix,
+        pinboard.default_branch,
+        repo_root=pinboard.site_root,
+        branch_prefix=pinboard.branch_prefix,
+        owner=pinboard.owner,
     )
     # the shell guard's twin for the tools that open files without a command
     # line: one Read of /proc/1/environ would hand over the whole environment
@@ -311,14 +350,14 @@ async def run_job(
     session_tools = tool_names + BUILTIN_TOOLS
 
     options = ClaudeAgentOptions(
-        model=model,
+        model=config.model,
         system_prompt=build_system_prompt(
-            format_digest(changelog.hot_digest()), branch_prefix=config.branch_prefix
+            config, digest_text=format_digest(changelog.hot_digest())
         ),
-        cwd=str(config.site_root),
+        cwd=str(pinboard.site_root),
         # extra vars for the CLI subprocess (and so the agent's Bash shells);
         # merged over the inherited worker env by the SDK transport
-        env=session_env,
+        env=env,
         mcp_servers={SERVER_NAME: server},
         allowed_tools=session_tools,
         disallowed_tools=DENIED_READS,

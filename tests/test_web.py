@@ -4,13 +4,15 @@ publish parsing, and the FastAPI routes (with injected state, no Redis)."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import threading
 
 import pytest
 from fastapi.testclient import TestClient
 
-from paratrooper.agent.config import Config
-from paratrooper.web import ThreadCoordinator, ThreadStore, is_stop_word
+from confighelpers import example_config, pinboard_config
+from paratrooper.agent.config import Uploads
+from paratrooper.web import ThreadCoordinator, ThreadStore, is_stop_word, push
 from paratrooper.web.app import AppState, create_app
 from paratrooper.web.auth import verify_token
 from paratrooper.web.batching import DEFAULT_WINDOW
@@ -23,7 +25,24 @@ from paratrooper.web.publish import (
 )
 from paratrooper.web.uploads import delete_staged, save_upload
 
+
+async def _noop_async(*args, **kwargs):
+    """A lifespan collaborator a test does not want to run."""
+    return None
+
+
 # --- auth (4.2) ---------------------------------------------------------------
+
+
+# The banner wording is configuration now, so a test that asks what a push says
+# has to say whose words. These are the committed example's.
+EXAMPLE_TEXTS = push.NotificationTexts(
+    reply=example_config().notifications.reply,
+    error=example_config().notifications.error,
+    screenshot=example_config().pinboard.notifications.screenshot,
+    pr=example_config().pinboard.notifications.pr,
+)
+
 
 def test_verify_token(monkeypatch):
     monkeypatch.setenv("PARATROOPER_APP_TOKEN", "s3cret")
@@ -225,7 +244,7 @@ def test_default_window_is_seven_seconds():
 def _relay_state(tmp_path, coord):
     """AppState trimmed to what _relay_result touches (no render -> the
     suspend machinery short-circuits before ever reaching the queue)."""
-    return AppState(config=None, store=ThreadStore(tmp_path / "t.sqlite"),
+    return AppState(config=example_config(), store=ThreadStore(tmp_path / "t.sqlite"),
                     queue=object(), coordinator=coord, inbox=DiskInbox(tmp_path / "ib"))
 
 
@@ -336,8 +355,8 @@ def test_concurrent_terminal_pushes_keep_each_thread_and_job_payload_isolated(
         await _settle_push_tasks(state)
 
         assert sorted(sent) == sorted([
-            push.notification_text("done", alpha),
-            push.notification_text("error", beta),
+            push.notification_text("done", EXAMPLE_TEXTS, alpha),
+            push.notification_text("error", EXAMPLE_TEXTS, beta),
         ])
         [(_, alpha_event)] = state.store.messages("thread-alpha")
         [(_, beta_event)] = state.store.messages("thread-beta")
@@ -389,7 +408,7 @@ def test_terminal_bookkeeping_and_linger_start_before_push_finishes(tmp_path, mo
     async def scenario():
         coord = Coordinator()
         state = AppState(
-            config=None,
+            config=example_config(),
             store=ThreadStore(tmp_path / "order.sqlite"),
             queue=Queue(),
             coordinator=coord,
@@ -556,7 +575,7 @@ def test_redis_idle_check_failure_does_not_skip_push(tmp_path, monkeypatch):
 
     async def scenario():
         state = AppState(
-            config=None,
+            config=example_config(),
             store=ThreadStore(tmp_path / "redis-push.sqlite"),
             queue=BrokenQueue(),
             coordinator=Coordinator(),
@@ -992,7 +1011,7 @@ class _FakeRedis:
 
 def test_redis_inbox_preserves_binary_through_base64():
     async def scenario():
-        ib = RedisInbox(_FakeRedis())
+        ib = RedisInbox(_FakeRedis(), ttl=24 * 3600)
         blob = bytes(range(256))  # all byte values, incl. non-utf8
         await ib.put("k.webp", blob)
         assert await ib.get("k.webp") == blob  # survives decode_responses=True
@@ -1140,10 +1159,11 @@ def test_push_config_off_when_unset(monkeypatch):
     monkeypatch.setenv("VAPID_SUBJECT", "mailto:a@b.c")
     cfg = push.config()
     assert cfg and cfg.subject == "mailto:a@b.c"
-    assert push.notification_text("pr") and push.notification_text("log") is None
+    assert push.notification_text("pr", EXAMPLE_TEXTS)
+    assert push.notification_text("log", EXAMPLE_TEXTS) is None
     # screenshots buzz too (user decision 20260708, overturning the plan-era
     # behavior-preservation): a board preview is worth a notification on its own
-    assert push.notification_text("screenshot")
+    assert push.notification_text("screenshot", EXAMPLE_TEXTS)
 
 
 def test_push_send_has_a_bounded_provider_wait(monkeypatch):
@@ -1271,10 +1291,14 @@ def test_dropping_a_dead_subscription_is_logged_by_fingerprint(tmp_path, monkeyp
 def test_terminal_push_uses_user_facing_message_excerpt():
     from paratrooper.web import push
 
-    assert push.notification_text("done", "  fading\n because\tthis worked  ") == (
+    assert push.notification_text(
+        "done", EXAMPLE_TEXTS, "  fading\n because\tthis worked  "
+    ) == (
         "fading because this worked"
     )
-    assert push.notification_text("error", "  The update could not be completed.  ") == (
+    assert push.notification_text(
+        "error", EXAMPLE_TEXTS, "  The update could not be completed.  "
+    ) == (
         "The update could not be completed."
     )
 
@@ -1283,32 +1307,70 @@ def test_notification_excerpt_boundary_and_ellipsis_spacing():
     from paratrooper.web import push
 
     exact = "x" * push.NOTIFICATION_EXCERPT_CHARS
-    assert push.notification_text("done", exact) == exact  # no ellipsis at the boundary
-    assert push.notification_text("done", exact + "tail") == exact + " ..."
+    # no ellipsis at the boundary
+    assert push.notification_text("done", EXAMPLE_TEXTS, exact) == exact
+    assert push.notification_text(
+        "done", EXAMPLE_TEXTS, exact + "tail"
+    ) == exact + " ..."
 
     # The cut lands on normalized whitespace: rstrip + one explicit normal
     # blank must produce exactly one space before the three dots.
     spaced = "x" * (push.NOTIFICATION_EXCERPT_CHARS - 1) + "    tail"
-    excerpt = push.notification_text("done", spaced)
+    excerpt = push.notification_text("done", EXAMPLE_TEXTS, spaced)
     assert excerpt == "x" * (push.NOTIFICATION_EXCERPT_CHARS - 1) + " ..."
     assert excerpt.endswith(" ...") and not excerpt.endswith("  ...")
 
 
 def test_notification_text_fallbacks_and_special_kinds_are_preserved():
+    """Which kinds notify is policy; what they SAY is this deployment's words.
+    The excerpt behaviour around them is unchanged: a reply with words of its
+    own is previewed, and the configured text is the fallback when it has none."""
     from paratrooper.web import push
 
-    assert push.notification_text("done", None) == "Paratrooper finished your update."
-    assert push.notification_text("done", " \n\t ") == "Paratrooper finished your update."
-    assert push.notification_text("error", {"detail": "not user-facing text"}) == (
-        "Paratrooper hit a problem with your update."
+    texts = EXAMPLE_TEXTS
+    assert push.notification_text("done", texts, None) == texts.reply
+    assert push.notification_text("done", texts, " \n\t ") == texts.reply
+    assert push.notification_text("error", texts, {"detail": "not user-facing"}) == texts.error
+    # the two pinboard artifacts keep their own wording, excerpt-free
+    assert push.notification_text("screenshot", texts, "ignored") == texts.screenshot
+    assert push.notification_text("pr", texts, "ignored") == texts.pr
+    # a kind whose policy says it never notifies stays silent whatever it carries
+    assert push.notification_text("log", texts, "ignored") is None
+    assert push.notification_text("working", texts) is None
+    assert push.notification_text("not-a-kind", texts) is None
+
+
+def test_a_profile_without_an_artifact_never_pushes_about_it():
+    """screenshot and pr describe things only a pinboard produces. A deployment
+    that cannot produce one has no wording for it, and no wording means no
+    banner rather than a banner reading None."""
+    from paratrooper.web import push
+
+    shared = push.NotificationTexts(reply="replied", error="broke")
+    assert shared.screenshot is None and shared.pr is None
+    assert push.notification_text("screenshot", shared, "x") is None
+    assert push.notification_text("pr", shared, "x") is None
+    # while the two shared kinds answer exactly as before
+    assert push.notification_text("done", shared, None) == "replied"
+    assert push.notification_text("error", shared, None) == "broke"
+
+
+def test_the_app_state_takes_its_banner_wording_from_the_config(tmp_path):
+    """Carried on the state, derived from the config, so there is no way to
+    build a state whose banners disagree with the configuration it holds."""
+    cfg = pinboard_config(tmp_path)
+    state = AppState(
+        config=cfg,
+        store=ThreadStore(tmp_path / "t.sqlite"),
+        queue=object(),
+        coordinator=_FakeCoordinator(),
+        inbox=DiskInbox(tmp_path / "inbox"),
     )
-    assert push.notification_text("screenshot", "ignored") == (
-        "Paratrooper sent a board preview 📸"
-    )
-    assert push.notification_text("pr", "ignored") == (
-        "Your pin is ready. Tap to review and publish 🪂"
-    )
-    assert push.notification_text("log", "ignored") is None
+    assert state.notification_texts.reply == cfg.notifications.reply
+    assert state.notification_texts.error == cfg.notifications.error
+    assert state.notification_texts.screenshot == cfg.pinboard.notifications.screenshot
+    assert state.notification_texts.pr == cfg.pinboard.notifications.pr
+    state.store.close()
 
 
 def test_subscription_store(tmp_path):
@@ -1340,17 +1402,7 @@ class _FakeCoordinator:
 
 def _config(tmp_path):
     """The paths config the app is built from, all under a throwaway root."""
-    return Config(
-        inbox=tmp_path / "inbox",
-        site_root=tmp_path / "site",
-        pins_dir=tmp_path / "pins",
-        archive_dir=tmp_path / "arch",
-        later_dir=tmp_path / "later",
-        changelog=tmp_path / "cl.jsonl",
-        remote="https://github.com/AsteroidHunter/webpage.git",
-        default_branch="main",
-        branch_prefix="paratrooper",
-    )
+    return pinboard_config(tmp_path, remote="https://github.com/AsteroidHunter/webpage.git")
 
 
 @pytest.fixture
@@ -1372,6 +1424,93 @@ def client(tmp_path, monkeypatch):
 def test_health_open(client):
     body = client.get("/api/health").json()
     assert body["ok"] is True and "version" in body
+
+
+def test_health_names_the_profile_and_stays_public(client):
+    """The phone cannot work the profile out for itself, and it needs to know
+    before it presents a board preview or a Publish button. Public like the rest
+    of this response: it names a deployment shape, not a person."""
+    response = client.get("/api/health")  # no Authorization header
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"] == "pinboard"
+    assert set(body) == {"ok", "version", "profile"}
+
+
+# --- the upload expiry has two readers, and they must agree ------------------
+
+
+def test_the_web_store_is_built_with_the_configured_expiry(tmp_path, monkeypatch):
+    """A source saying one hour has to reach the blob store as 3600 seconds.
+    The old module default was right for exactly one deployment."""
+    import paratrooper.web.app as app_mod
+
+    cfg = pinboard_config(tmp_path, uploads=Uploads(ttl_hours=1))
+    built: list = []
+
+    class _Redis:
+        pass
+
+    class _Queue:
+        def __init__(self):
+            self.r = _Redis()
+
+    monkeypatch.setattr(app_mod, "load_config", lambda: cfg)
+    monkeypatch.setattr(app_mod, "connect", lambda: _Redis())
+    monkeypatch.setattr(app_mod, "JobQueue", lambda client: _Queue())
+    monkeypatch.setattr(
+        app_mod, "RedisInbox",
+        lambda client, ttl: built.append(ttl) or DiskInbox(tmp_path / "ib"),
+    )
+    monkeypatch.setattr(app_mod, "drop_subscriptions_on_token_change", lambda store: None)
+    monkeypatch.setattr(app_mod, "recover_unprocessed", _noop_async)
+    monkeypatch.setattr(app_mod, "_linger_after_restart", _noop_async)
+    monkeypatch.setattr(app_mod, "_result_relay", _noop_async)
+    monkeypatch.setenv("PARATROOPER_APP_TOKEN", "tok")
+
+    with TestClient(create_app()):
+        pass
+    assert built == [3600]
+
+
+def test_the_worker_store_is_built_with_the_same_configured_expiry(tmp_path):
+    """The worker builds the shared store too, and its missing-photo message
+    quotes the number back to the person. A worker left on a module default
+    would tell someone the wrong length of time."""
+    from paratrooper.web.worker_runner import Worker
+
+    class _Queue:
+        def __init__(self):
+            self.r = _FakeRedis()
+
+    for hours in (1, 24, 168):
+        cfg = pinboard_config(tmp_path, uploads=Uploads(ttl_hours=hours))
+        assert Worker(_Queue(), config=cfg).inbox.ttl == hours * 3600
+
+
+def test_the_missing_photo_message_quotes_the_configured_expiry(tmp_path):
+    """The wording is checkable rather than guessable, and the number in it has
+    to be this deployment's own."""
+    from paratrooper.web.models import JobMessage
+    from paratrooper.web.worker_runner import Worker
+
+    published: list = []
+
+    class _Queue:
+        def __init__(self):
+            self.r = _FakeRedis()
+
+        async def publish_result(self, thread_id, result):
+            published.append(result)
+
+    cfg = pinboard_config(tmp_path, uploads=Uploads(ttl_hours=1))
+    w = Worker(_Queue(), config=cfg)
+    msg = JobMessage(job_id="j1", thread_id="d", text="add this",
+                     attachments=[_aged_key(2 * 3600)])  # past a one-hour expiry
+    _run(w._run_one(msg))
+    err = next(r for r in published if r.kind == "error")
+    assert "older than 1 hours" in str(err.payload)
+    assert "24" not in str(err.payload)
 
 
 # --- malformed credentials are refused, not crashed on ------------------------
@@ -1591,7 +1730,9 @@ def test_config_route_names_the_configured_repository(client):
 
 def test_config_route_says_null_when_no_remote_is_configured(client):
     auth = {"Authorization": "Bearer tok"}
-    client.app.state.app_state.config.remote = None
+    # a profile with no repository at all answers the same way
+    state = client.app.state.app_state
+    state.config = dataclasses.replace(state.config, pinboard=None)
     assert client.get("/api/config", headers=auth).json() == {"repo_url": None}
 
 
@@ -2231,7 +2372,7 @@ class _FakeJobQueue:
 
 def _linger_state(render, coord, queue, **kw):
     """AppState trimmed to what the worker-sleep machinery touches."""
-    return AppState(config=None, store=None, queue=queue, coordinator=coord,
+    return AppState(config=example_config(), store=None, queue=queue, coordinator=coord,
                     inbox=None, render=render, **kw)
 
 
@@ -2712,7 +2853,7 @@ def test_recover_unprocessed_feeds_coordinator(tmp_path):
     ))
     coord = _FakeCoordinator()
     state = AppState(
-        config=None, store=store, queue=object(), coordinator=coord,
+        config=example_config(), store=store, queue=object(), coordinator=coord,
         inbox=DiskInbox(tmp_path / "ib"),
     )
 
@@ -2740,16 +2881,9 @@ def test_failed_job_reports_error_and_spares_the_loop(tmp_path):
         async def publish_result(self, thread_id, result):
             published.append(result)
 
-    from paratrooper.agent.config import Config
 
-    cfg = Config(
-        inbox=tmp_path / "inbox", site_root=tmp_path / "site",
-        pins_dir=tmp_path / "pins", archive_dir=tmp_path / "arch",
-        later_dir=tmp_path / "later", changelog=tmp_path / "cl.jsonl",
-        remote=None, default_branch="main", branch_prefix="paratrooper",
-    )
-    w = Worker(_FakeQueue())
-    w._config = cfg  # skip load_config
+    cfg = pinboard_config(tmp_path)
+    w = Worker(_FakeQueue(), config=cfg)
     msg = JobMessage(job_id="j1", thread_id="d", text="add this",
                      attachments=[_aged_key(30 * 3600)])  # really is past the TTL
 
@@ -2781,17 +2915,10 @@ def test_shutdown_requeues_job_without_user_facing_noise(tmp_path, monkeypatch):
         async def requeue_front(self, job):
             requeued.append(job.job_id)
 
-    from paratrooper.agent.config import Config
 
-    cfg = Config(
-        inbox=tmp_path / "inbox", site_root=tmp_path / "site",
-        pins_dir=tmp_path / "pins", archive_dir=tmp_path / "arch",
-        later_dir=tmp_path / "later", changelog=tmp_path / "cl.jsonl",
-        remote=None, default_branch="main", branch_prefix="paratrooper",
-    )
+    cfg = pinboard_config(tmp_path)
     q = _FakeQueue()
-    w = Worker(q)
-    w._config = cfg
+    w = Worker(q, config=cfg)
     # stage an attachment so we can assert it survives a shutdown-cancel
     _run(w.inbox.put("k.jpeg", b"img"))
     msg = JobMessage(job_id="j1", thread_id="d", text="add", attachments=["k.jpeg"])
@@ -2836,14 +2963,7 @@ class _RecordingQueue:
 def _worker(tmp_path):
     from paratrooper.web.worker_runner import Worker
 
-    w = Worker(_RecordingQueue())
-    w._config = Config(  # skip load_config
-        inbox=tmp_path / "inbox", site_root=tmp_path / "site",
-        pins_dir=tmp_path / "pins", archive_dir=tmp_path / "arch",
-        later_dir=tmp_path / "later", changelog=tmp_path / "cl.jsonl",
-        remote=None, default_branch="main", branch_prefix="paratrooper",
-    )
-    return w
+    return Worker(_RecordingQueue(), config=pinboard_config(tmp_path))
 
 
 def _scratch_exists(tmp_path, key) -> bool:
@@ -3360,7 +3480,7 @@ def test_job_context_projection_skips_blobs_and_markers(tmp_path):
             self.jobs.append(job)
 
     queue = _RecordingQueue()
-    state = AppState(config=None, store=store, queue=queue,
+    state = AppState(config=example_config(), store=store, queue=queue,
                      coordinator=_FakeCoordinator(), inbox=DiskInbox(tmp_path / "ib"))
     _run(_enqueue_job(state, "d", "job-xyz", "next request", []))
 
@@ -3548,7 +3668,7 @@ def test_enqueue_broadcasts_job_marker_to_connected_sockets(tmp_path):
             self.sent.append(data)
 
     ws = _WS()
-    state = AppState(config=None, store=store, queue=_RecordingQueue(),
+    state = AppState(config=example_config(), store=store, queue=_RecordingQueue(),
                      coordinator=_FakeCoordinator(), inbox=DiskInbox(tmp_path / "ib"))
     state.sockets["d"] = {ws}
     _run(_enqueue_job(state, "d", "job-7", "hi", []))

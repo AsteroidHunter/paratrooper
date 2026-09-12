@@ -20,7 +20,6 @@ from typing import Protocol
 from .uploads import _safe_ext, safe_segment
 
 INBOX_PREFIX = "paratrooper:inbox:"
-DEFAULT_TTL = 24 * 3600  # staged uploads must survive deploys + queue waits
 
 
 def new_key(filename: str | None) -> str:
@@ -86,9 +85,18 @@ class RedisInbox:
 
     Blobs are base64-encoded so they survive a ``decode_responses=True`` client
     (the same client the queue uses), avoiding a second binary connection.
+
+    ``ttl`` is required, in seconds, and comes from ``uploads.ttl_hours`` in the
+    deployment's configuration. It used to be a module default, which was fine
+    while one number described one deployment and wrong the moment a second
+    existed: this object has two constructors, the web service (which writes the
+    expiry onto every staged blob) and the worker (whose missing-photo message
+    quotes the number back to the person). A default here would let those two
+    disagree, and the way that shows up is the worker telling someone their
+    photo is kept for a length of time it is not.
     """
 
-    def __init__(self, client, ttl: int = DEFAULT_TTL) -> None:
+    def __init__(self, client, ttl: int) -> None:
         self.r = client
         self.ttl = ttl
 

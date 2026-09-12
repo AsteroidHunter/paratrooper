@@ -19,8 +19,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from confighelpers import pinboard_config
 from paratrooper.agent import memory, screenshot
-from paratrooper.agent.config import Config
+from paratrooper.agent.config import ScreenshotConfig
 from paratrooper.agent.screenshot import ScreenshotError
 from paratrooper.agent.tools import ToolContext
 
@@ -87,6 +88,20 @@ FIXTURE_HTML = """<!DOCTYPE html>
 """
 
 
+# The fixture page's own markup, as a [pinboard.screenshot] table would describe
+# it. The selectors, viewport, npm script name and dist folder are configuration
+# now; the hardening flags around the build deliberately are not.
+FIXTURE_SHAPE = ScreenshotConfig(
+    build_script="build",
+    dist="dist",
+    viewport=(1440, 1440),
+    selector=".cloth",
+    pin_selector=".board-pin",
+    card_selector=".polaroid-card",
+    title_selector=".polaroid-title",
+)
+
+
 def _fixture_site(tmp_path: Path) -> Path:
     site = tmp_path / "site"
     dist = site / "dist"
@@ -96,8 +111,10 @@ def _fixture_site(tmp_path: Path) -> Path:
     return site
 
 
-def _shot(site: Path, out: Path, **kw) -> Image.Image:
-    path = asyncio.run(screenshot.screenshot_board(site, out, build=False, **kw))
+def _shot(site: Path, out: Path, *, shape=FIXTURE_SHAPE, **kw) -> Image.Image:
+    path = asyncio.run(
+        screenshot.screenshot_board(site, out, build=False, shape=shape, **kw)
+    )
     return Image.open(path).convert("RGB")
 
 
@@ -164,7 +181,7 @@ SECRET_NAMES = (
     "ANTHROPIC_API_KEY",
     "PARATROOPER_GITHUB_TOKEN",
     "PARATROOPER_APP_TOKEN",
-    "PARATROOPER_REMOTE",
+    "PARATROOPER_CONFIG_B64",
     "SPOTIFY_CLIENT_ID",
     "SPOTIFY_CLIENT_SECRET",
     "REDIS_URL",
@@ -205,7 +222,11 @@ def test_npm_argv_is_pinned(tmp_path, monkeypatch):
     — ahead of the script name, where npm reads them as its own flags."""
     calls = _record_launches(monkeypatch)
     site = _fixture_site(tmp_path)  # no node_modules -> the install runs too
-    asyncio.run(screenshot.screenshot_board(site, tmp_path / "board.png", build=True))
+    asyncio.run(
+        screenshot.screenshot_board(
+            site, tmp_path / "board.png", build=True, shape=FIXTURE_SHAPE
+        )
+    )
 
     assert [c["cmd"] for c in calls] == [
         (
@@ -236,7 +257,9 @@ def test_npm_env_is_the_allowlist_and_nothing_else(tmp_path, monkeypatch):
     # faked npm builds nothing, so the capture stops at the missing dist: this
     # test is about what npm was handed, not about the picture
     with pytest.raises(ScreenshotError):
-        asyncio.run(screenshot.screenshot_board(site, tmp_path / "b.png"))
+        asyncio.run(
+            screenshot.screenshot_board(site, tmp_path / "b.png", shape=FIXTURE_SHAPE)
+        )
 
     assert len(calls) == 2
     for call in calls:
@@ -335,24 +358,16 @@ def test_screenshot_tool_forwards_pin_id(tmp_path, monkeypatch):
     """The tool hands pin_id through to the capture; an absent or blank arg
     degrades to the plain board call (pin_id=None), keeping today's path."""
     calls = []
+    shapes = []
 
-    async def fake_shot(site_root, out_path, *, pin_id=None):
+    async def fake_shot(site_root, out_path, *, shape, pin_id=None):
         calls.append(pin_id)
+        shapes.append(shape)
         return Path(out_path)
 
     monkeypatch.setattr("paratrooper.agent.screenshot.screenshot_board", fake_shot)
-    cfg = Config(
-        inbox=tmp_path / "inbox",
-        site_root=tmp_path / "site",
-        pins_dir=tmp_path / "pins",
-        archive_dir=tmp_path / "arch",
-        later_dir=tmp_path / "later",
-        changelog=tmp_path / "cl.jsonl",
-        remote=None,
-        default_branch="main",
-        branch_prefix="paratrooper",
-    )
-    ctx = ToolContext(config=cfg, changelog=memory.Changelog(cfg.changelog))
+    cfg = pinboard_config(tmp_path)
+    ctx = ToolContext(config=cfg, changelog=memory.Changelog(cfg.pinboard.changelog))
     handlers = _tool_handlers(ctx)
 
     out = asyncio.run(handlers["screenshot_board"]({"pin_id": "twen"}))
@@ -360,4 +375,7 @@ def test_screenshot_tool_forwards_pin_id(tmp_path, monkeypatch):
     asyncio.run(handlers["screenshot_board"]({}))
     asyncio.run(handlers["screenshot_board"]({"pin_id": "   "}))
     assert calls == ["twen", None, None]
-    assert ctx.last_screenshot == str(cfg.site_root / "_paratrooper_board.png")
+    assert ctx.last_screenshot == str(cfg.pinboard.site_root / "_paratrooper_board.png")
+    # the site's own shape reaches the capture, from the config and not from
+    # module constants describing one particular board
+    assert all(shape is cfg.pinboard.screenshot for shape in shapes)

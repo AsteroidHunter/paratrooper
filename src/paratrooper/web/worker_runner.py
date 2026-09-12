@@ -78,19 +78,25 @@ def _screenshot_data_uri(path: str) -> str:
 
 
 class Worker:
-    def __init__(self, queue: JobQueue, *, auth_mode: str | None = None) -> None:
+    def __init__(
+        self, queue: JobQueue, *, config: Config, auth_mode: str | None = None
+    ) -> None:
         self.queue = queue
         self.auth_mode = auth_mode
-        self.inbox = RedisInbox(queue.r)  # shared store; web put, worker get
-        self._config: Config | None = None
+        self._config = config
+        # the shared store, read with the SAME expiry the web wrote with. Built
+        # from the injected config rather than a module default, because
+        # _missing_photos_message quotes this number back to the person.
+        self.inbox = RedisInbox(queue.r, ttl=config.uploads.ttl_seconds)
         self._current_thread: str | None = None
         self._current_job: str | None = None
         self._task: asyncio.Task | None = None
         self._shutting_down = False  # SIGTERM: requeue the in-flight job, exit clean
 
     def _cfg(self) -> Config:
-        if self._config is None:
-            self._config = load_config()
+        """The configuration this worker was booted with. Read once per process,
+        at boot, and handed in: a lazy re-read could pick up a different source
+        mid-life and leave two halves of one turn disagreeing."""
         return self._config
 
     async def _materialize(self, keys: list[str]) -> None:
@@ -99,7 +105,7 @@ class Worker:
         a READ of the shared store: the copy is ours, the original is not.
         Anything not there raises an error worded for the owner, not a bare
         KeyError."""
-        local = DiskInbox(self._cfg().inbox)
+        local = DiskInbox(self._cfg().require_inbox())
         missing = []
         for key in keys:
             try:
@@ -128,7 +134,7 @@ class Worker:
         set at upload time is the reclamation mechanism, and one day of a few
         photos is the whole cost of leaving it to do its work.
         """
-        local = DiskInbox(self._cfg().inbox)
+        local = DiskInbox(self._cfg().require_inbox())
         for key in keys:
             with contextlib.suppress(Exception):
                 await local.delete(key)
@@ -202,15 +208,20 @@ class Worker:
     def _bootstrap_checkout(self) -> None:
         """Clone the site repo on first boot and pin the bot commit identity on
         the checkout (idempotent) — the agent commits via its own shell, so the
-        identity must already sit in the repo-local git config."""
+        identity must already sit in the repo-local git config.
+
+        Pinboard only. A profile with no site has nothing to clone, no App to
+        authenticate as and no token to mint, and :meth:`run` skips this call
+        entirely rather than reaching GitHub and discovering that."""
         cfg = self._cfg()
+        pinboard = cfg.require_pinboard()
         SiteRepo(
-            cfg.site_root,
-            default_branch=cfg.default_branch,
+            pinboard.site_root,
+            default_branch=pinboard.default_branch,
             github_token=installation_token(cfg),
-            remote=cfg.remote,
-            git_name=cfg.git_name,
-            git_email=cfg.git_email,
+            remote=pinboard.remote,
+            git_name=pinboard.git_name,
+            git_email=pinboard.git_email,
         ).ensure_checkout()
 
     def _install_shutdown_handler(self) -> None:
@@ -229,7 +240,10 @@ class Worker:
                 loop.add_signal_handler(sig, _on_term)
 
     async def run(self, *, idle_timeout: int = 5) -> None:
-        await asyncio.to_thread(self._bootstrap_checkout)
+        # The boot clone is a pinboard step, guarded by profile rather than by
+        # catching what a profile without a repository would fail with.
+        if self._cfg().is_pinboard:
+            await asyncio.to_thread(self._bootstrap_checkout)
         self._install_shutdown_handler()
         listener = asyncio.ensure_future(self._interrupt_listener())
         try:
@@ -265,6 +279,18 @@ def main() -> None:
     # the file deleted. Those values reach os.environ only now, after this
     # process started, so they are in no launch record.
     load_worker_secrets()
+    # Then the configuration, before any credential is touched and before the
+    # queue is reached: a source that does not decode, does not parse or does
+    # not validate should stop the boot here, with one line naming the variable,
+    # rather than after a GitHub App has been read out of the environment.
+    # Read exactly once per process and carried into the Worker from here.
+    config = load_config(require_site_root=True)
+    print(
+        f"paratrooper worker: profile={config.profile} model={config.model} "
+        f"shell_isolation={config.shell_isolation} "
+        f"uploads.ttl_hours={config.uploads.ttl_hours}",
+        flush=True,
+    )
     # Then take the worker-only secrets out of the environment, before anything
     # can start a session. The agent's CLI inherits os.environ and the SDK can
     # only add to it, so a value still sitting there at session time is a value
@@ -275,9 +301,14 @@ def main() -> None:
     # of the environment, before any session exists. A missing value, or a key
     # that does not parse, stops the boot with a log line naming the variable;
     # there is no personal token and no key file to fall back to any more.
-    take_github_app()
+    #
+    # Pinboard only. GitHub is a pinboard mechanism entirely: another profile
+    # never reads these variables, never mints an installation token and never
+    # clones, so a deployment that has no App is not a deployment missing one.
+    if config.is_pinboard:
+        take_github_app()
     client = connect()  # takes the queue address, password and all, with it
-    asyncio.run(Worker(JobQueue(client)).run())
+    asyncio.run(Worker(JobQueue(client), config=config).run())
 
 
 if __name__ == "__main__":

@@ -190,7 +190,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.146"; // The worker stops asking the Claude tool for the credential scrub whose sandbox this platform will not let start, which is what left the agent without a shell, and every git command that carries the GitHub credential now runs with the checkout's own hooks switched off
+const APP_VERSION = "0.3.147"; // Every deployment-specific value leaves the code for one typed configuration source that reaches both services as a single base64 environment variable, the upload expiry and the notification wording come from it rather than from constants, and the health check now says which deployment shape is answering
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

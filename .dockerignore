@@ -15,4 +15,8 @@ site_checkout/
 *.sqlite3
 .env
 .env.*
+# the real configuration never enters an image: the services read it out of
+# PARATROOPER_CONFIG_B64 at run time and from nowhere else
+config/paratrooper.toml
+*.local
 .DS_Store

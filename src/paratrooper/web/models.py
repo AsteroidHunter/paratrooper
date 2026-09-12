@@ -20,11 +20,17 @@ SYSTEM_KINDS = ("job", "published")
 
 class EventPolicy(BaseModel):
     """Per-kind event behavior — the one row that used to be five scattered
-    conditionals (relay ephemerality/terminality, push text, job context)."""
+    conditionals (relay ephemerality/terminality, push text, job context).
+
+    ``notifies`` replaced the literal notification body that used to sit here.
+    Whether a kind wakes the phone is a property of the kind and belongs in this
+    table; what the banner SAYS names a deployment, and that moved into the
+    configuration source. :func:`push.notification_text` joins the two.
+    """
 
     ephemeral: bool = False  # sockets only: never persisted, never replayed
     persist: bool = True
-    push_text: str | None = None  # notification body; None -> kind never pushes
+    notifies: bool = False  # does this kind wake the phone at all?
     terminal: bool = False  # ends the job: relay releases the thread's batch
     context: Literal["text", "pr_ref", "skip"] = "text"  # job-context projection
 
@@ -39,12 +45,10 @@ EVENT_POLICY: dict[str, EventPolicy] = {
     "update": EventPolicy(),
     # a screenshot payload is a multi-MB base64 data URI — it must never be
     # pasted into the agent prompt as "context"
-    "screenshot": EventPolicy(push_text="Paratrooper sent a board preview 📸", context="skip"),
-    "pr": EventPolicy(
-        push_text="Your pin is ready. Tap to review and publish 🪂", context="pr_ref"
-    ),
-    "done": EventPolicy(push_text="Paratrooper finished your update.", terminal=True),
-    "error": EventPolicy(push_text="Paratrooper hit a problem with your update.", terminal=True),
+    "screenshot": EventPolicy(notifies=True, context="skip"),
+    "pr": EventPolicy(notifies=True, context="pr_ref"),
+    "done": EventPolicy(notifies=True, terminal=True),
+    "error": EventPolicy(notifies=True, terminal=True),
     # system rows: the enqueue marker is bookkeeping, not chat content
     "job": EventPolicy(context="skip"),
     "published": EventPolicy(),

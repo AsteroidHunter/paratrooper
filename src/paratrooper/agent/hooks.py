@@ -95,6 +95,12 @@ _SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n|&)\s*")
 BRANCH_PREFIX = "paratrooper/"
 # hygiene cap: at most this many local paratrooper/* branches in the checkout
 MAX_AGENT_BRANCHES = 7
+# Two denials name the person who taps Publish. The deployment's own word for
+# them arrives from [pinboard].owner; this is the generic stand-in for a caller
+# that configures nothing (the pure-function tests below, and nothing else in a
+# running service). It is a role, deliberately not a name: no person's name is a
+# code default any more.
+DEFAULT_OWNER = "the owner"
 
 # branch-creation flags per subcommand (the shapes the workflow uses, plus the
 # long/orphan spellings so they can't sidestep the allowlist)
@@ -297,7 +303,7 @@ def _substitution_violation(command: str) -> str | None:
     return None
 
 
-def _check_gh(tokens: list[str]) -> str | None:
+def _check_gh(tokens: list[str], owner: str = DEFAULT_OWNER) -> str | None:
     """``gh`` is refused, whatever follows it.
 
     It used to be an allowlist of pull-request commands, which was the right
@@ -307,7 +313,7 @@ def _check_gh(tokens: list[str]) -> str | None:
     rest = tokens[1:]
     if rest[:2] == ["pr", "merge"]:
         return (
-            "gh pr merge is forbidden: merging is the web service's job, after Akash "
+            f"gh pr merge is forbidden: merging is the web service's job, after {owner} "
             f"taps Publish — {GITHUB_ROUTE}"
         )
     if rest[:1] == ["api"]:
@@ -435,13 +441,13 @@ def push_denial(dest: str, branch_prefix: str = BRANCH_PREFIX) -> str:
     )
 
 
-def base_denial(base: str, default_branch: str) -> str:
+def base_denial(base: str, default_branch: str, owner: str = DEFAULT_OWNER) -> str:
     """The wording for a pull request aimed anywhere but the default branch.
     Same reasoning as :func:`push_denial`: the tool holds the credential, so the
     tool is where the merge target is fenced."""
     return (
         f"opening a pull request into '{base}' is forbidden: Paratrooper's pull "
-        f"requests always target '{default_branch}', which is the branch Akash "
+        f"requests always target '{default_branch}', which is the branch {owner} "
         "publishes from"
     )
 
@@ -470,7 +476,10 @@ def _check_branch(rest: list[str], branch_prefix: str = BRANCH_PREFIX) -> str | 
 
 
 def _check_subcommand(
-    tokens: list[str], default_branch: str, branch_prefix: str = BRANCH_PREFIX
+    tokens: list[str],
+    default_branch: str,
+    branch_prefix: str = BRANCH_PREFIX,
+    owner: str = DEFAULT_OWNER,
 ) -> str | None:
     if not tokens:
         return None
@@ -481,7 +490,7 @@ def _check_subcommand(
     if reason:
         return reason
     if head == "gh":
-        return _check_gh(command)
+        return _check_gh(command, owner)
     if head != "git":
         return None
     sub = command[1] if len(command) > 1 else ""
@@ -510,7 +519,10 @@ def _subcommands(command: str) -> Iterator[list[str]]:
 
 
 def git_violation(
-    command: str, default_branch: str = "main", branch_prefix: str = BRANCH_PREFIX
+    command: str,
+    default_branch: str = "main",
+    branch_prefix: str = BRANCH_PREFIX,
+    owner: str = DEFAULT_OWNER,
 ) -> str | None:
     """Return a denial reason if ``command`` (a Bash command string) steps
     outside the <prefix>/* branch allowlist, touches the default branch, merges,
@@ -521,7 +533,7 @@ def git_violation(
     :func:`cap_violation`)."""
     branch_prefix = normalize_prefix(branch_prefix)
     for tokens in _subcommands(command):
-        reason = _check_subcommand(tokens, default_branch, branch_prefix)
+        reason = _check_subcommand(tokens, default_branch, branch_prefix, owner)
         if reason:
             return reason
     return _regex_backstop(command, default_branch)
@@ -677,21 +689,22 @@ def make_main_guard_hook(
     default_branch: str = "main",
     repo_root: str | Path | None = None,
     branch_prefix: str = BRANCH_PREFIX,
+    owner: str = DEFAULT_OWNER,
 ) -> Callable[[dict[str, Any], str | None, Any], Awaitable[dict[str, Any]]]:
     """Build the PreToolUse hook (closes over the default branch name, the
-    agent's branch prefix and, optionally, the site checkout root). With a
-    ``repo_root`` the hook also enforces the <prefix>/* branch cap by counting
-    local branches there; without one the cap is skipped and the hook stays
-    fully pure. ``branch_prefix`` takes the site config's bare word
-    (``paratrooper``) or the slash-terminated form. Register via
-    ``HookMatcher(matcher="Bash", hooks=[hook])``."""
+    agent's branch prefix, the deployment's word for the person who publishes
+    and, optionally, the site checkout root). With a ``repo_root`` the hook also
+    enforces the <prefix>/* branch cap by counting local branches there; without
+    one the cap is skipped and the hook stays fully pure. ``branch_prefix`` takes
+    the configured bare word (``paratrooper``) or the slash-terminated form.
+    Register via ``HookMatcher(matcher="Bash", hooks=[hook])``."""
     branch_prefix = normalize_prefix(branch_prefix)
 
     async def hook(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict:
         if input_data.get("tool_name") != "Bash":
             return {}
         command = (input_data.get("tool_input") or {}).get("command", "")
-        reason = git_violation(command, default_branch, branch_prefix)
+        reason = git_violation(command, default_branch, branch_prefix, owner)
         if reason is None and repo_root is not None:
             reason = cap_violation(command, repo_root, branch_prefix)
         if reason is None:
