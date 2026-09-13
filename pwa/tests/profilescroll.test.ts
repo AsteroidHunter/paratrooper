@@ -22,6 +22,7 @@ import { runInNewContext } from "node:vm";
 import { beforeAll, describe, expect, it } from "vitest";
 import { transformWithEsbuild } from "vite";
 import { createEndSpring } from "../src/endspring";
+import { springCreditsReader, springTakesCoastBack } from "../src/springown";
 import { TUNING, createSpringField, relaxLag } from "../src/springscroll";
 import type { SpringField } from "../src/springscroll";
 
@@ -51,6 +52,9 @@ globalThis.__probe = {
   get dirty() { return springDirty; },
   set dirty(v) { springDirty = v; },
   get els() { return springEls; },
+  get motionAt() { return springMotionAt; },
+  set motionAt(v) { springMotionAt = v; },
+  get appWroteAt() { return springAppWroteAt; },
 };
 `;
 
@@ -246,12 +250,23 @@ function harness(options: HarnessOptions = {}) {
     scrollToBottom: (force?: boolean) => {
       pins.push(force === true);
       thread.scrollTop = thread.scrollHeight; // the pin's write, clamped like any other
+      // main.ts's own scrollToBottom notes its write to the springs beside this
+      // line; the stub does the same so the seam sees the app's write clock move
+      (context.noteSpringAppWrite as () => void)();
     },
     scrollGhostWrite: (tag: string, at: number) => void ghosts.push([tag, at]),
     // --- the spring seam's collaborators
     createSpringField: field,
     createEndSpring,
     laidOutRows: () => laidOut(),
+    // the ownership question the scroll seam asks, imported rather than
+    // stubbed: what runs here is springown.ts itself
+    springCreditsReader,
+    springTakesCoastBack,
+    performance: { now: () => now },
+    threadTouching: false, // a finger is on the thread (the touch handlers own it)
+    lastScrollAt: 0, // stamped by the scroll listener AFTER the seam, as below
+    resumeClaimed: false, // a gesture has taken this resume era back
     flightsUp: 0,
     airborneRows: new Set(),
     arrival: null,
@@ -283,12 +298,16 @@ function harness(options: HarnessOptions = {}) {
     field: SpringField;
     dirty: boolean;
     els: FakeRow[];
+    motionAt: number;
+    appWroteAt: number;
   } {
     return context.__probe as {
       profile: string | null;
       field: SpringField;
       dirty: boolean;
       els: FakeRow[];
+      motionAt: number;
+      appWroteAt: number;
     };
   }
 
@@ -311,8 +330,28 @@ function harness(options: HarnessOptions = {}) {
     arm: (touchY: number, fingerDown: boolean) =>
       call<[number | null, boolean]>("armSpring")(touchY, fingerDown),
     finger: (touchY: number) => call<[number]>("springFinger")(touchY),
-    /** the scroller's own scroll event, which any write fires */
-    scrolled: () => call<[]>("springHandleScroll")(),
+    /** the scroller's own scroll event, which any write fires. main.ts's
+        listener calls the seam and stamps lastScrollAt after it, so the seam
+        always reads the PREVIOUS event's time; the same order here. */
+    scrolled: () => {
+      call<[]>("springHandleScroll")();
+      context.lastScrollAt = now;
+    },
+    /** a finger arrives on or leaves the glass */
+    touching: (v: boolean) => void (context.threadTouching = v),
+    /** the hold-off: any motion the app owns is in flight (springBlocked) */
+    block: (v: boolean) => void (context.landingHold = v),
+    /** what every app write in main.ts says beside itself */
+    note: () => call<[]>("noteSpringAppWrite")(),
+    /** touchend: the finger leaves, and its momentum (if any) is still his */
+    lift: () => call<[]>("liftSpring")(),
+    /** the clock the seam reads, so a test can let a motion go quiet */
+    wait: (ms: number) => void (now += ms),
+    /** noteThreadGesture's one effect on this seam: the era is his and live */
+    gesture: () => void (probe().motionAt = now),
+    /** the era's clock and the app's own write clock, as the seam holds them */
+    era: () => probe().motionAt,
+    wroteAt: () => probe().appWroteAt,
     /** one animation frame */
     tick: () => {
       now += FRAME;
@@ -343,10 +382,13 @@ type Harness = ReturnType<typeof harness>;
 // a finger dragging the thread, one 16 ms frame at a time. Returns where the
 // finger got to, so a test can carry the same drag on through the correction.
 function drag(h: Harness, frames: number, pxPerMs: number, fingerY = 500): number {
+  h.touching(true);
+  h.gesture(); // touchstart
   h.arm(fingerY, true);
   for (let i = 0; i < frames; i++) {
     h.thread.scrollTop += pxPerMs * FRAME;
     fingerY -= pxPerMs * FRAME; // the finger travels up as the content does
+    h.gesture(); // touchmove
     h.finger(fingerY);
     h.scrolled();
     h.tick();
@@ -518,5 +560,137 @@ describe("a profile reconcile with no gesture live", () => {
     expect(h.reseats).toEqual([]); // told once, or not at all: never twice
     expect(h.ghosts).toEqual([]); // and the correction branch never ran
     expect(h.thread.scrollTop).toBe(h.thread.scrollHeight - CLIENT_H);
+  });
+});
+
+describe("a profile reconcile with no finger and no momentum anywhere", () => {
+  // The reconcile is one of the app's writers, and the writers are what the
+  // spring hand-back has to be able to refuse. Each case here leaves a gesture
+  // era in the state an ordinary gesture leaves it, then drives the app's own
+  // reconcile — the real function, the real write, the real seam — and asks
+  // whether a single row moved. Synthetic DOM, synthetic clock: no browser.
+
+  /** a tap: the thread is touched and released, and nothing scrolls */
+  function tap(h: Harness): void {
+    h.touching(true);
+    h.gesture(); // touchstart -> noteThreadGesture
+    h.arm(500, true);
+    h.tick();
+    h.touching(false); // touchend, with no scroll event in between
+    h.lift();
+    h.tick();
+  }
+
+  it("a tap, then the reconcile's correction, moves nothing", () => {
+    const h = harness();
+    h.park(900);
+    tap(h);
+    expect(h.field().armed()).toBe(false); // the tap's own gesture ended itself
+    h.wait(1500); // he puts the phone down; nothing scrolls, so no closer runs
+
+    h.adopt("pinboard"); // health answers: the artifacts appear above his fold
+    h.scrolled();
+    h.tick();
+
+    expect(h.reseats).toEqual([ARTIFACT_HEIGHT]); // the correction still announced
+    expect(h.field().armed()).toBe(false); // ... and no gesture was invented
+    expect(h.field().lag()).toBe(0);
+    expect(h.worstRow()).toBe(0);
+    expect(h.translated()).toBe(0);
+  });
+
+  it("a tap, then the tail branch's unannounced bottom pin, moves nothing", () => {
+    // the tail branch is deliberately left unannounced (the test above says
+    // why), which is only safe while nothing can arm the springs without a
+    // gesture of the reader's
+    const h = harness();
+    h.follow(true);
+    h.park(9999);
+    tap(h);
+    h.wait(1500);
+
+    h.adopt("pinboard");
+    h.scrolled();
+    h.tick();
+
+    expect(h.pins).toEqual([true]); // the app's own pin ran
+    expect(h.reseats).toEqual([]); // unannounced, as designed
+    expect(h.field().armed()).toBe(false);
+    expect(h.worstRow()).toBe(0);
+    expect(h.translated()).toBe(0);
+  });
+
+  it("a run of the app's writes after a real drag has gone quiet moves nothing", () => {
+    const h = harness();
+    h.park(900);
+    drag(h, 8, 0.5); // a genuine drag, with real scroll events
+    h.touching(false); // and it ends
+    h.block(true); // a hold-off crosses the end of it: the arm is dropped
+    h.tick();
+    h.block(false);
+    expect(h.field().armed()).toBe(false);
+    h.wait(1500); // the thread comes to rest
+
+    // now the app writes this scroller at frame cadence, which is what every
+    // box-animation settle burst in the app does
+    for (let i = 0; i < 20; i++) {
+      h.note();
+      h.thread.scrollTop -= 6;
+      h.scrolled();
+      h.tick();
+      expect(h.field().armed()).toBe(false);
+      expect(h.worstRow()).toBe(0);
+    }
+    expect(h.translated()).toBe(0);
+  });
+
+  it("the era a gesture opened lapses on its own, with no closer anywhere", () => {
+    // the defect this replaced needed a scroll event to close an era, and a
+    // tap, a peek or a still hold produces none
+    const h = harness();
+    h.park(900);
+    h.touching(true);
+    h.gesture();
+    h.touching(false);
+    const opened = h.era();
+    expect(Number.isFinite(opened)).toBe(true);
+    h.wait(1500);
+    // the clock has not been touched: it is the READING that has gone stale
+    expect(h.era()).toBe(opened);
+    h.note();
+    h.thread.scrollTop -= 6;
+    h.scrolled();
+    h.tick();
+    h.thread.scrollTop -= 6;
+    h.scrolled();
+    h.tick();
+    expect(h.field().armed()).toBe(false);
+    expect(h.worstRow()).toBe(0);
+  });
+
+  it("his own momentum across a hold-off that writes nothing is still taken back", () => {
+    // the change this correction sits inside, kept: a coast the hold-off
+    // crossed comes back to the springs on the reader's own evidence
+    const h = harness();
+    h.park(900);
+    drag(h, 8, 0.5);
+    h.touching(false); // touchend: the momentum is still his
+    h.block(true); // a landing, a seat move, a keyboard edge — no writes
+    for (let i = 0; i < 6; i++) {
+      h.thread.scrollTop += 0.5 * FRAME;
+      h.scrolled();
+      h.tick();
+    }
+    h.block(false);
+    expect(h.field().armed()).toBe(false); // the freeze dropped the gesture
+
+    for (let i = 0; i < 10; i++) {
+      h.thread.scrollTop += 0.5 * FRAME;
+      h.scrolled();
+      h.tick();
+    }
+    expect(h.field().armed()).toBe(true); // taken back on his coast
+    expect(h.worstRow()).toBeGreaterThan(1);
+    expect(h.reseats).toEqual([]); // nothing announced: this is a real scroll
   });
 });

@@ -14,7 +14,12 @@
 // Two halves, because main.ts boots a real shell at import and cannot load
 // under node (springscroll.test.ts says the same): the field contract the
 // hand-back leans on is driven directly, and the wiring is source-pinned the
-// way flight.test.ts and shift.test.ts pin theirs.
+// way flight.test.ts and shift.test.ts pin theirs. What the wiring DECIDES —
+// whose motion a scroll event is, and how long a gesture era lives — is
+// behaviour, and it is tested as behaviour against the shipped helper in
+// springown.test.ts rather than pinned as a spelling here.
+//
+// Synthetic throughout: no device, no browser, no recording, no real data.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { TUNING, createSpringField } from "../src/springscroll";
@@ -196,7 +201,14 @@ describe("the field contract the hand-back leans on", () => {
   });
 });
 
-// --- the wiring, source-pinned (main.ts boots a shell at import) -------------
+// --- the wiring, as far as a source read can pin it -------------------------
+//
+// main.ts boots a real shell at import and cannot load under node, so what is
+// checked here is the CALL ORDER and the COMPLETENESS of the wiring — the two
+// things a behavioural test of the helper cannot see. What the wiring's
+// decision actually does to the rows is tested against the shipped helper and
+// the shipped field in springown.test.ts, and end to end in a local browser
+// against synthetic fixtures, outside this suite.
 describe("main.ts wiring: the finger takes its own drag back", () => {
   const finger = src.slice(
     src.indexOf("function springFinger("),
@@ -220,73 +232,129 @@ describe("main.ts wiring: the finger takes its own drag back", () => {
   });
 });
 
-describe("main.ts wiring: a coast is taken back only on the reader's own evidence", () => {
+describe("main.ts wiring: the scroll handler asks springown.ts, in this order", () => {
   const handler = src.slice(
     src.indexOf("function springHandleScroll()"),
     src.indexOf("function armSpring("),
   );
 
-  it("the hold-off is still the first thing the scroll handler asks", () => {
-    expect(handler.indexOf("if (springBlocked())")).toBeLessThan(handler.indexOf("armSpring("));
+  it("the event is credited BEFORE the hold-off's early return", () => {
+    // Otherwise a motion of his stops being his the moment the app holds the
+    // springs at zero, and the hand-back below has nothing left to recognise
+    // when the hold-off lets go. This ordering is the mid-coast recovery.
+    expect(handler.indexOf("springCreditsReader(run)")).toBeLessThan(
+      handler.indexOf("if (springBlocked())"),
+    );
     expect(handler).toContain("springFreeze();");
   });
 
-  it("it re-opens only with no finger, an open gesture era, and scroll events still arriving", () => {
-    expect(handler).toContain("!springField.armed() &&");
-    expect(handler).toContain("!threadTouching &&"); // a finger takes its own drag back
-    expect(handler).toContain("springGestureEra &&"); // his gesture started this motion
-    expect(handler).toContain("performance.now() - lastScrollAt < SPRING_RUN_GAP_MS");
-    expect(handler).toContain("armSpring(springTouchY, false);"); // the anchor the momentum belongs to
+  it("the clocks are read BEFORE this event re-stamps them", () => {
+    // the question is whether this event CONTINUES a motion of his, so every
+    // reading handed to the helper has to pre-date it
+    const build = handler.indexOf("const run = {");
+    expect(build).toBeGreaterThan(-1);
+    expect(build).toBeLessThan(handler.indexOf("springMotionAt = now"));
+    expect(handler).toMatch(/sinceAppWriteMs: now - springAppWroteAt,/);
+    expect(handler).toMatch(/sinceScrollMs: now - lastScrollAt,/);
+    expect(handler).toMatch(/sinceMotionMs: now - springMotionAt,/);
+    expect(handler).toMatch(/armed: springField\.armed\(\),/);
+    expect(handler).toMatch(/fingerDown: threadTouching,/);
   });
 
-  it("it still drives nothing itself and still pumps only an open gesture", () => {
+  it("the hold-off still comes before any arming, and the handler drives nothing itself", () => {
+    expect(handler.indexOf("if (springBlocked())")).toBeLessThan(handler.indexOf("armSpring("));
+    expect(handler).toContain("if (springTakesCoastBack(run)) armSpring(springTouchY, false);");
     expect(handler).not.toContain("springField.frame(");
     expect(handler).not.toContain("springField.begin(");
     expect(handler).not.toMatch(/scrollTop\s*=/);
     expect(handler).toContain("if (springField.armed()) springPump();");
   });
 
-  it("the era is opened by every genuine gesture on the thread, and by nothing else", () => {
+  it("the era is opened by a gesture on the thread and by nothing else", () => {
     const note = src.slice(
       src.indexOf("function noteThreadGesture()"),
       src.indexOf("}", src.indexOf("function noteThreadGesture()")),
     );
     expect(note).toContain("lastGestureAt = performance.now();");
-    expect(note).toContain("springGestureEra = true;");
+    expect(note).toContain("springMotionAt = lastGestureAt;");
     const wheel = src.slice(
       src.indexOf('thread.addEventListener("wheel"'),
       src.indexOf('thread.addEventListener("scroll"'),
     );
-    expect(wheel).toContain("noteThreadGesture();"); // wheel and pointerdown
-    expect(wheel.match(/noteThreadGesture\(\);/g)?.length).toBe(2);
+    expect(wheel.match(/noteThreadGesture\(\);/g)?.length).toBe(2); // wheel and pointerdown
     const touch = src.slice(
       src.indexOf('thread.addEventListener(\n    "touchstart"'),
       src.indexOf("const endPeek = () =>"),
     );
     expect(touch.match(/noteThreadGesture\(\);/g)?.length).toBe(2); // touchstart and touchmove
-    // the era is a gesture's, so nothing else may open one
-    expect(src.match(/springGestureEra = true;/g)?.length).toBe(1);
+    // Only a gesture and a credited scroll event may stamp the clock, and the
+    // credited one is inside the handler above. Anything else stamping it is a
+    // way for an era to exist that no reader opened.
+    const stamps = src.match(/springMotionAt = (?!-Infinity)/g)?.length ?? 0;
+    expect(stamps).toBe(2);
   });
 
-  it("the era closes where the thread comes to rest, where the page goes away, and with a fresh shell", () => {
-    const endAt = src.indexOf('thread.addEventListener("scrollend"');
-    const scrollend = src.slice(endAt, src.indexOf("});", endAt));
-    expect(scrollend).toContain("springGestureEra = false;");
-    const debounce = src.slice(
-      src.indexOf("restTimer = setTimeout(() => {"),
-      src.indexOf('if (hasScrollend) {'),
+  it("the era is cleared outright where it cannot survive, and lapses everywhere else", () => {
+    for (const [from, to] of [
+      ['thread.addEventListener("scrollend"', "tryApplyOlder();"], // the engine says so
+      ["restTimer = setTimeout(() => {", "tryApplyOlder();"], // the rest debounce
+      ["function resumeHidden()", "closeResumeWindow();"], // the page goes away
+      ["springField.reset();", "springTouchY = null;"], // a fresh shell
+    ] as const) {
+      const at = src.indexOf(from);
+      expect(at).toBeGreaterThan(-1);
+      const body = src.slice(at, src.indexOf(to, at));
+      expect(body).toContain("springMotionAt = -Infinity;");
+    }
+    // ... and the lapse itself needs no closer to run: -Infinity is the only
+    // value that means "no era", and a stale clock reads the same way
+    expect(src).toContain("let springMotionAt = -Infinity;");
+  });
+});
+
+describe("main.ts wiring: every write of the app's own is declared as one", () => {
+  // The completeness check, and the one that matters most. The helper can only
+  // refuse credit to a write it is told about, so a writer added later without
+  // a note beside it is the defect coming back. This finds every statement in
+  // main.ts that moves an element's scroll offset and insists each one is
+  // either noted directly or announced through springReseat, which notes it.
+  const WRITE = /^[^\n]*?\b\w+\.scrollTop\s*(?:=|\+=|-=)[^\n]*$|^[^\n]*?\.scrollTo\(\{[^\n]*$/gm;
+
+  it("every scroll-offset write in main.ts notes itself to the springs", () => {
+    const lines = src.split("\n");
+    const missing: string[] = [];
+    let found = 0;
+    for (const m of src.matchAll(WRITE)) {
+      const line = m[0];
+      if (line.includes("window.scrollTo")) continue; // the document, not a scroller
+      if (line.trimStart().startsWith("//")) continue; // prose
+      found++;
+      const at = src.slice(0, m.index).split("\n").length - 1;
+      const near = lines.slice(at, at + 4).join("\n");
+      if (!near.includes("noteSpringAppWrite()") && !near.includes("springReseat(")) {
+        missing.push(`${at + 1}: ${line.trim()}`);
+      }
+    }
+    expect(missing).toEqual([]);
+    expect(found).toBeGreaterThanOrEqual(9); // the writers this app actually has
+  });
+
+  it("the springs' write clock is its own, and the follow flip's is untouched", () => {
+    // appWroteAt credits the RESUME ride only, on purpose: resume.ts's
+    // appOwnsScroll is what keeps the chevron's ride unfollowed and the
+    // resume's followed. Folding the springs into it would change that
+    // attribution, so they have a clock of their own that every write stamps.
+    expect(src).toContain('if (owner === "resume") appWroteAt = performance.now();');
+    expect(src.match(/appWroteAt = performance\.now\(\);/g)?.length).toBe(1);
+    const note = src.slice(
+      src.indexOf("function noteSpringAppWrite()"),
+      src.indexOf("}", src.indexOf("function noteSpringAppWrite()")),
     );
-    expect(debounce).toContain("springGestureEra = false;");
-    const hidden = src.slice(
-      src.indexOf("function resumeHidden()"),
-      src.indexOf("function resumeHidden()") + 600,
-    );
-    expect(hidden).toContain("springGestureEra = false;");
-    const freshShell = src.slice(
-      src.indexOf("springField.reset();"),
-      src.indexOf("replyHold.reset();"),
-    );
-    expect(freshShell).toContain("springGestureEra = false;");
+    expect(note).toContain("springAppWroteAt = performance.now();");
+    // the ride is the app's for the springs whichever ride it is
+    const ride = src.slice(src.indexOf("function startGlide("), src.indexOf("function blinkComposer("));
+    expect(ride).toContain("noteSpringAppWrite();");
+    expect(ride).not.toMatch(/if \([^)]*\) noteSpringAppWrite\(\);/);
   });
 });
 
@@ -321,7 +389,7 @@ describe("main.ts wiring: the resume era's hold-off, and what the reader takes b
     expect(blocked.match(/resumeClaimed/g)?.length).toBe(1);
   });
 
-  it("the claim is a gesture's, is fresh for each resume era, and is read by the hold-off alone", () => {
+  it("the claim is a gesture's, and it never outlives the era it was made in", () => {
     const note = src.slice(
       src.indexOf("function noteThreadGesture()"),
       src.indexOf("}", src.indexOf("function noteThreadGesture()")),
@@ -332,10 +400,16 @@ describe("main.ts wiring: the resume era's hold-off, and what the reader takes b
       src.indexOf("function closeResumeWindow()"),
     );
     expect(openWin).toContain("resumeClaimed = threadTouching;"); // a finger already down owns it
+    // the two boundaries where a claim could go stale with no new era to reset
+    // it: the page going away, and a shell rebuilt under an open window
+    const hiddenAt = src.indexOf("function resumeHidden()");
+    const hidden = src.slice(hiddenAt, src.indexOf("closeResumeWindow();", hiddenAt));
+    expect(hidden).toContain("resumeClaimed = false;");
+    const freshShell = src.slice(src.indexOf("springField.reset();"), src.indexOf("springTouchY = null;"));
+    expect(freshShell).toContain("resumeClaimed = false;");
     // the window's other duties are untouched: nothing else reads the claim, so
     // the instant pins, the landing's arming and its end rules are as they were
     for (const fn of [
-      ["function closeResumeWindow()", "function resumeArrival()"],
       ["function armResumeRide(", "function stopResumeRide()"],
       ["function stopResumeRide()", "// The window in which the app is still landing"],
       ["function resumeArrival()", "function resumeVisible()"],
@@ -345,8 +419,5 @@ describe("main.ts wiring: the resume era's hold-off, and what the reader takes b
       expect(body.length).toBeGreaterThan(50);
       expect(body).not.toContain("resumeClaimed");
     }
-    // declared once, set in the two places above, read by the hold-off, named
-    // in the hold-off's own note: a claim that spreads is a claim nobody owns
-    expect(src.match(/resumeClaimed/g)?.length).toBeLessThanOrEqual(5);
   });
 });

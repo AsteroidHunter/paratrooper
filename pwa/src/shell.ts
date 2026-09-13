@@ -854,6 +854,7 @@ export function watchKeyboard(cb: (up: boolean) => void): void {
 // the presentation the tap started.
 let appliedProven = false;
 let onKeyboardProven: ((proven: boolean) => void) | null = null;
+let onScrollRestore: (() => void) | null = null;
 
 export function watchKeyboardProven(cb: (proven: boolean) => void): void {
   onKeyboardProven = cb;
@@ -920,6 +921,15 @@ export function watchLiftLanding(cb: (up: boolean, lift: number) => void): void 
 // unregistered, the landing record simply leaves the count off.
 export function watchScrollWrites(read: () => number): void {
   readScrollWrites = read;
+}
+
+// Register the app's "I just moved a scroller" note (main.ts
+// noteSpringAppWrite). The heal in correctionPass is the one place THIS module
+// writes a scroll offset inside the app, and a write of the app's must never be
+// read as a reader's travel (springown.ts holds that rule). Unregistered, the
+// heal simply says nothing, exactly as it did before.
+export function watchScrollRestore(cb: () => void): void {
+  onScrollRestore = cb;
 }
 
 // the Y translate a computed transform carries; 0 for none. DOMMatrixReadOnly
@@ -1247,6 +1257,9 @@ function correctionPass(phase: "close" | "retry"): void {
     void appEl.offsetHeight; // the forced reflow IS the heal
     appEl.style.display = "";
     for (const [el, st] of scrolled) el.scrollTop = st;
+    // display:none forgot those offsets and this put them back: two writes of
+    // the app's on whatever it healed, the thread included
+    if (scrolled.length) onScrollRestore?.();
   }
   // TEMP DIAGNOSTIC (dom-census, block at the bottom): what the document really
   // holds at a close, alongside the kb-close record and once per close

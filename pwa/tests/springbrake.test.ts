@@ -323,11 +323,12 @@ describe("the profile's level follows the vertex, not the row nearest it", () =>
   });
 
   it("rows keep document order and the floor: no pair is ever driven through another", () => {
-    // exact for these tables. The level is applied before the per-row rounding
+    // Exact for these tables. The level is applied before the per-row rounding
     // in `snap`, so a pair already sitting ON the floor can end up inside it by
-    // as much as that rounding (0.01 px) when one row of the pair rounds to
-    // zero and the other does not — under the browser's own transform
-    // rounding, and never an inversion.
+    // as much as that rounding (up to 0.0099 px) when one row of the pair
+    // rounds to zero and the other does not. No sampled case inverts a pair.
+    // What that undershoot looks like on a screen is not measured anywhere: it
+    // is a bound on the number, not a claim about a paint.
     const rows = makeThread();
     for (const L of [-200, -60, 60, 200]) {
       const p = profileFor(rows, 40, 60, rows[50].top + 20, L);

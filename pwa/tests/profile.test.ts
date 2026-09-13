@@ -164,6 +164,7 @@ function harness(options: HarnessOptions = {}) {
   const logged: string[] = [];
   const scrolls: string[] = [];
   const reseats: number[] = [];
+  const writes: string[] = [];
   let connected = false;
 
   // renderInto's collaborators, stubbed to record rather than draw
@@ -203,6 +204,9 @@ function harness(options: HarnessOptions = {}) {
     // the springs are told when the reconcile corrects the position, so that
     // write is not read as a finger's (profilescroll.test.ts has the interaction)
     springReseat: (dy: number) => void reseats.push(dy),
+    // and every app write says so beside itself, announced or not, so a burst
+    // of them is never credited to a reader (springown.ts)
+    noteSpringAppWrite: () => void writes.push("app"),
     openLightbox: () => {},
     prUrl: (payload: unknown) =>
       typeof payload === "object" && payload !== null

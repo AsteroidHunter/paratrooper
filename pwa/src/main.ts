@@ -112,6 +112,7 @@ import {
   watchKeyboard,
   watchKeyboardProven,
   watchLiftLanding,
+  watchScrollRestore,
   watchScrollWrites,
 } from "./shell";
 import {
@@ -121,6 +122,7 @@ import {
   isInstalledWindow,
   watchQuiet,
 } from "./splash";
+import { springCreditsReader, springTakesCoastBack } from "./springown";
 import { createSpringField } from "./springscroll";
 import { seatBefore } from "./sendorder";
 import type { Standing } from "./sendorder";
@@ -191,7 +193,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.150"; // Two profiles from one configured source, on the current scroll build
+const APP_VERSION = "0.3.151"; // Springs: braked stops, the hand-back, and the app's own writes excluded
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
@@ -491,6 +493,7 @@ function setLiftPad(next: number): void {
   app.style.setProperty("--lift-pad", `${next}px`);
   const top = padShift(st, delta);
   t.scrollTop = top; // same frame as the padding, so the two paint as one
+  noteSpringAppWrite();
   scrollGhostWrite("lift-pad", top); // TEMP DIAGNOSTIC (scroll-ghost)
   holdDiagRecord("lift-pad", { pad: Math.round(next), from: Math.round(st), to: Math.round(top) });
 }
@@ -506,6 +509,9 @@ watchLiftLanding((up, lift) => {
 // TEMP DIAGNOSTIC (kb-lift, shell.ts): the app's write counter, so a landing
 // record can say whether anything scrolled inside the keyboard's motion
 watchScrollWrites(scrollWriteCount);
+// the stuck-viewport heal saves and restores descendants' scroll offsets around
+// its forced reflow; those are the app's writes like any other (springown.ts)
+watchScrollRestore(noteSpringAppWrite);
 
 // boot-replay ledger (bootgate.ts owns it): the honest replay marker. Every
 // socket frame at or below the server's tail-at-connect is backlog and must
@@ -1165,7 +1171,7 @@ function renderChat(): void {
       if (restTimer) clearTimeout(restTimer);
       restTimer = setTimeout(() => {
         lastScrollAt = 0;
-        springGestureEra = false; // the thread is at rest: his motion is over
+        springMotionAt = -Infinity; // the thread is at rest: his motion is over
         tryApplyOlder();
       }, 100);
     }
@@ -1173,7 +1179,7 @@ function renderChat(): void {
   if (hasScrollend) {
     thread.addEventListener("scrollend", () => {
       lastScrollAt = 0; // the browser says the glide is over — authoritative
-      springGestureEra = false; // ... and with it the motion his gesture threw
+      springMotionAt = -Infinity; // ... and with it the motion his gesture threw
       tryApplyOlder();
     });
   }
@@ -1247,7 +1253,8 @@ function renderChat(): void {
   springRaf = 0;
   springField.reset();
   endSpring.reset(); // END-SPRING SEAM: the old thread's ends are gone too
-  springGestureEra = false; // the motion belonged to rows that no longer exist
+  springMotionAt = -Infinity; // the motion belonged to rows that no longer exist
+  resumeClaimed = false; // ... and so did the reader who claimed this resume era
   springTouchY = null;
   springMaxScroll = 0;
   springEls = [];
@@ -2024,23 +2031,35 @@ let springTouchY: number | null = null; // where the finger last was (the anchor
 let springRaf = 0; // the frame pump; 0 = not scheduled
 let springDirty = true; // the row table is stale (content changed): re-measure next frame
 
-// The reader's own scroll era: opened by a gesture on the thread, and open for
-// as long as the motion that gesture started is still going: his finger's
-// travel and the momentum it throws. The field's arm is a per-GESTURE thing and
-// the hold-off's freeze drops it, so when the hold-off lets go part way through
-// a motion the wiring has to know whose motion it is looking at. A finger on
-// the glass answers that by itself; a coast has no finger, and this is what
-// stands in for one. Closed where the thread comes to rest (the scroll
-// handler's scrollend, and its rest debounce on engines without one), when the
-// page goes away, and with a fresh shell.
-let springGestureEra = false;
+// The reader's own scroll era, as ONE clock: performance.now() of the last
+// evidence that the motion on this thread is his. A gesture act on the thread
+// stamps it (noteThreadGesture), and so does a scroll event credited to him,
+// but only while the era is already live — springown.ts holds that rule and the
+// reasons for it. -Infinity is "no era": nothing of his is moving.
+//
+// The era therefore LAPSES rather than needing to be closed. An era that had to
+// be closed by an event could be left open forever by any gesture whose last
+// act produced no scroll — a tap, a sideways peek that moves no scrollTop, a
+// still hold at the end of a drag, a pointer press with no drag — and the next
+// burst of the app's own writes would then be drawn as his travel. The closers
+// below (rest, scrollend, a fresh shell, the page going away) still say so at
+// the authoritative moment; none of them is load-bearing for the lapse.
+let springMotionAt = -Infinity;
 
-// How long a gap between two scroll events still reads as ONE motion. A drag or
-// its momentum delivers an event a frame; the app's own rest debounce calls
-// 100 ms of silence the end of a glide, so anything inside that is the same
-// motion still running, and anything outside it is an isolated write. It is
-// what keeps a lone programmatic scroll from being taken for a coast.
-const SPRING_RUN_GAP_MS = 100;
+// performance.now() of the last scroll write the APP made to this scroller, for
+// the springs and for nothing else. Every write goes through noteSpringAppWrite
+// beside it. Deliberately NOT appWroteAt: that one credits the resume ride only
+// (resume.ts appOwnsScroll), and the chevron's ride is pointedly outside it so
+// the follow flip keeps working. The springs have no such split — a write is a
+// write — and folding the two would change an attribution that has nothing to
+// do with them.
+let springAppWroteAt = -Infinity;
+
+// "The app just moved this scroller." Call it in the same statement group as
+// the write, before the scroll event it fires can arrive.
+function noteSpringAppWrite(): void {
+  springAppWroteAt = performance.now();
+}
 
 // The hold-off. While any motion the app owns is in flight the springs must read
 // zero and stay there, so nothing they write can corrupt a FLIP measurement, an
@@ -2177,6 +2196,7 @@ function springFreeze(): void {
 // a step either. Nothing else is disturbed — a stretch already on screen keeps
 // relaxing, and no seat, gesture or transform is touched.
 function springReseat(dy: number): void {
+  noteSpringAppWrite(); // announced or not, the app moved this scroller
   if (!dy) return;
   const band = endSpring.over();
   endSpring.reseat(dy);
@@ -2187,6 +2207,27 @@ function springReseat(dy: number): void {
 // a drag. Armed, wake the pump: the frame reads the position. Otherwise
 // nothing: an app write or an idle drift with no gesture live is not a drag.
 function springHandleScroll(): void {
+  // Whose event this is, decided FIRST and from the clocks as they stand before
+  // it. Two orderings matter here and both are deliberate.
+  //
+  // Before the hold-off's early return, because a motion of his does not stop
+  // being his while the app is holding the springs at zero: a coast crossing a
+  // keyboard edge or a seat move keeps its era alive, which is exactly what the
+  // hand-back below needs when the hold-off lets go. The hold-off that also
+  // WRITES this scroller is the case where that credit is refused, by the app's
+  // own write clock, and then the era lapses on its own.
+  //
+  // Before springMotionAt is re-stamped, because the question is whether this
+  // event CONTINUES a motion of his, not whether it is one.
+  const now = performance.now();
+  const run = {
+    sinceAppWriteMs: now - springAppWroteAt,
+    sinceScrollMs: now - lastScrollAt, // stamped at the end of the handler: still the previous event
+    sinceMotionMs: now - springMotionAt,
+    armed: springField.armed(),
+    fingerDown: threadTouching,
+  };
+  if (springCreditsReader(run)) springMotionAt = now; // his motion, still running
   if (springBlocked()) {
     springFreeze();
     return;
@@ -2194,23 +2235,14 @@ function springHandleScroll(): void {
   // The hold-off can open and close INSIDE a coast the reader threw, and its
   // freeze takes the arm with it, so there is no gesture left for the pump to
   // serve and the rest of that momentum would run rigid to a stop. This is the
-  // path with no finger on the glass. A finger takes its own drag back through
-  // springFinger, on the position it is actually at, so two things have to
-  // agree before the gesture is re-opened: the era says this motion began as
-  // his and the thread has not come to rest since, and this event stands in a
-  // RUN of scroll events, which is what a thread still moving delivers and a
-  // single app write does not. Re-opening takes a fresh baseline, so neither
-  // the travel the hold-off held at zero nor the write that woke this event can
-  // be read as a frame of scrolling. The anchor is the one the momentum already
-  // belongs to: where the finger lifted (null for a wheel, the centre).
-  if (
-    !springField.armed() &&
-    !threadTouching &&
-    springGestureEra &&
-    performance.now() - lastScrollAt < SPRING_RUN_GAP_MS
-  ) {
-    armSpring(springTouchY, false);
-  }
+  // path with no finger on the glass: a finger takes its own drag back through
+  // springFinger, on the position it is actually at. springown.ts holds what
+  // has to agree before the gesture is re-opened and why each term is there.
+  // Re-opening takes a fresh baseline, so neither the travel the hold-off held
+  // at zero nor the write that woke this event can be read as a frame of
+  // scrolling. The anchor is the one the momentum already belongs to: where the
+  // finger lifted (null for a wheel, the centre).
+  if (springTakesCoastBack(run)) armSpring(springTouchY, false);
   if (springField.armed()) springPump();
 }
 
@@ -2327,7 +2359,7 @@ function userScrollIntent(): boolean {
 // every motion the app has in the air, and that is the same rule.
 function noteThreadGesture(): void {
   lastGestureAt = performance.now();
-  springGestureEra = true; // his motion: the finger's, and the momentum it throws
+  springMotionAt = lastGestureAt; // his motion: the finger's, and what it throws
   resumeClaimed = true; // the resume's own work stands aside for a reader
 }
 
@@ -2430,6 +2462,7 @@ function scrollToBottom(force = false): void {
   const instant = suppressAnim || force || pinInstant || resumeWindowOpen();
   if (instant) {
     t.scrollTo({ top, behavior: "auto" });
+    noteSpringAppWrite();
     scrollGhostWrite("bottom", top); // TEMP DIAGNOSTIC (scroll-ghost)
     return;
   }
@@ -2603,6 +2636,7 @@ function settleTail(via: string, quiet = false): void {
   const write = plan.moved || !resumeHolding();
   if (write) {
     t.scrollTo({ top: plan.top, behavior: "auto" });
+    noteSpringAppWrite();
     scrollGhostWrite(via, plan.top); // TEMP DIAGNOSTIC (scroll-ghost)
   }
   jankSpan("settle-tail", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
@@ -2711,6 +2745,7 @@ function keepView(row: HTMLElement, change: () => void): void {
     followTail);
   if (fix === 0) return;
   t.scrollTop += fix; // same frame as the change, so the two paint as one
+  noteSpringAppWrite();
   scrollGhostWrite("keep-view", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
   holdDiagRecord("keep-view", {
     fix: Math.round(fix), bot: Math.round(before.bottom), fold: Math.round(fold),
@@ -2743,12 +2778,14 @@ function startGlide(owner: GlideOwner = "jump"): void {
     }
     pos += run.step(now, t.scrollHeight - t.clientHeight - pos, t.clientHeight);
     t.scrollTop = pos;
+    noteSpringAppWrite(); // for the springs a ride is the app's, either owner
+    scrollGhostWrite("glide", pos); // TEMP DIAGNOSTIC (scroll-ghost)
     // the resume's ride is followed all the way down, so every frame of it is
     // stamped and its scroll events are credited to the app rather than read as
     // a reader leaving the tail. The chevron's ride is deliberately not stamped
-    // (resume.ts appOwnsScroll says why the two are opposite).
+    // (resume.ts appOwnsScroll says why the two are opposite, and springown.ts
+    // why the springs make no such distinction).
     if (owner === "resume") appWroteAt = performance.now();
-    scrollGhostWrite("glide", pos); // TEMP DIAGNOSTIC (scroll-ghost)
     if (run.done()) {
       glide = null;
       glideRaf = 0;
@@ -2809,6 +2846,9 @@ function autosize(typed = false): void {
   // compensate from an already-clamped position and so landed low by the clamp.
   // 120px is the five-line cap, the same one styles.css puts on the element.
   const fit = fitComposeBox(textEl, composeMirror(textEl), t, 120);
+  // the fit's own save-and-restore puts the thread's offset back if the forced
+  // layout clamped it, which is a write of the app's like any other
+  if (fit.scrollMid !== fit.scrollBefore) noteSpringAppWrite();
   const oldHeight = fit.oldHeight;
   const newHeight = fit.newHeight;
   // publish the pill's live height: the jump chevron seats itself off it
@@ -2845,6 +2885,7 @@ function autosize(typed = false): void {
     // its box just shrank from the bottom, so without this the line that sat
     // on that edge (the message he just sent) is clipped away under the bar
     t.scrollTop = giveUpTarget(t.scrollTop, oldHeight, newHeight, t.scrollHeight - t.clientHeight);
+    noteSpringAppWrite();
     scrollGhostWrite("give-up", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
   }
   // TEMP DIAGNOSTIC field stM: the thread's position read the instant the
@@ -4917,6 +4958,13 @@ let resumeNewArrived = false; // a message has already claimed this resume's dec
 // the one moving the thread any more. Only the springs' hold-off reads it
 // (springBlocked): the window's other duties are unchanged, and the ride and
 // the wait end through their own rules, which already give way to a gesture.
+//
+// Its life is the ERA's, not the finger's, and that is on purpose: the momentum
+// he threw is still his after he lifts. It is reset at the top of every resume
+// era, when the page goes away, and with a fresh shell, so a claim never
+// carries into an era he was not present for. Within one era a claim does
+// outlive the finger, and what that can unblock is the springs alone — it arms
+// nothing. Arming still needs a live gesture or a credited coast (springown.ts).
 let resumeClaimed = false;
 
 function resumeWindowOpen(): boolean {
@@ -4936,6 +4984,13 @@ function closeResumeWindow(): void {
   if (!resumeTimer) return;
   clearTimeout(resumeTimer);
   resumeTimer = null;
+  // the claim is NOT cleared here. This is the one closer a reader's own
+  // gesture reaches (the scroll handler ends the window the moment he reads
+  // away by hand), and clearing it there would hand the springs straight back
+  // to a landing wait he has just taken over. With the window shut and no
+  // landing in the air the claim is inert, a new era resets it, and the two
+  // boundaries where it could go stale — the page going away, a fresh shell —
+  // clear it themselves.
 }
 
 // A tail frame applied while the app is still coming back. Once per resume: the
@@ -4969,7 +5024,8 @@ function resumeHidden(): void {
   // where the reader actually was, taken while the answer is still true
   resumeWasFollowing = followTail;
   resumeAwayByHand = scrolledUpByHand;
-  springGestureEra = false; // a motion of his does not survive the page going away
+  springMotionAt = -Infinity; // a motion of his does not survive the page going away
+  resumeClaimed = false; // nor does his claim on the era it happened in
   closeResumeWindow();
   stopResumeRide(); // a landing half way through is not resumed on the far side
   // the last word out, BEFORE the keep-alive stops: from here the page may be
@@ -7208,6 +7264,7 @@ function armBootFrameGuard(): void {
     if (t && followTail) {
       repin = t.scrollHeight - t.scrollTop - t.clientHeight >= 1;
       if (repin) t.scrollTop = t.scrollHeight; // instant: a settle must not glide
+      if (repin) noteSpringAppWrite();
       if (repin) scrollGhostWrite("boot-repin", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
     }
     if (snap || repin) holdDiagRecord("boot-repin", { src, x, y, top, snap, repin });
@@ -7268,6 +7325,7 @@ async function bootFromCache(): Promise<void> {
       // it. A bottom-geometry settle landing in between has already answered
       // for the fresh box, so this stands down rather than pinning over it.
       if (el && armed === tailGen) el.scrollTop = el.scrollHeight;
+      if (el && armed === tailGen) noteSpringAppWrite();
       if (el) scrollGhostWrite("cache-pin", el.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
     });
     holdDiagRecord("cache-applied", { lastSeq, ms: Math.round(performance.now() - t0) });
