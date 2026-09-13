@@ -190,7 +190,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.147"; // Add an Open Share Sheet button below the browser intro steps for phone testing
+const APP_VERSION = "0.3.148"; // Hold the spring's vertex on the content and bound how far one pair may open
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec

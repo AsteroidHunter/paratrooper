@@ -161,19 +161,49 @@ interface Drive {
   rows: SpringRow[];
   now: number;
   scrollTop: number;
+  /** where the finger is on the glass now */
+  fingerY: number;
+  /** the vertex in CONTENT space: the row the gesture was started on. The field
+      reads this once, on the gesture's first frame, and it rides the thread from
+      there, so under a 1:1 drag it stays under the finger by itself. */
+  vertex: number;
 }
 
 function grab(rows = makeThread(), scrollTop = START): Drive {
   const f = createSpringField();
   f.measure(rows);
   f.begin(CLIENT_H, THREAD_TOP, THUMB, true);
-  const d: Drive = { f, rows, now: 0, scrollTop };
-  f.frame(d.now, d.scrollTop); // the baseline frame
+  const d: Drive = {
+    f,
+    rows,
+    now: 0,
+    scrollTop,
+    fingerY: THUMB,
+    vertex: scrollTop + (THUMB - THREAD_TOP),
+  };
+  f.frame(d.now, d.scrollTop); // the baseline frame: it seats the vertex
   return d;
 }
 
-/** a constant-speed drag, px/ms; dir -1 = toward older (scrollTop falls) */
+/** a constant-speed FINGER drag, px/ms; dir -1 = toward older (scrollTop falls,
+    so the finger travels DOWN the glass). The finger rides the content and is
+    re-anchored every frame, which is what the wiring does on every touchmove —
+    a drag in which the scroll moves and the finger does not is not a thing a
+    hand can do, and pretending otherwise hid the vertex's own behaviour. */
 function drag(d: Drive, speed: number, ms: number, dir: -1 | 1): void {
+  const frames = Math.round(ms / FRAME);
+  for (let k = 0; k < frames; k++) {
+    d.now += FRAME;
+    d.scrollTop += dir * speed * FRAME;
+    d.fingerY -= dir * speed * FRAME;
+    d.f.anchor(d.fingerY);
+    d.f.frame(d.now, d.scrollTop);
+  }
+}
+
+/** the thread carrying on under its own momentum: no finger, so nothing
+    re-anchors and the vertex stays on the content the finger left it on */
+function coast(d: Drive, speed: number, ms: number, dir: -1 | 1): void {
   const frames = Math.round(ms / FRAME);
   for (let k = 0; k < frames; k++) {
     d.now += FRAME;
@@ -259,7 +289,7 @@ describe("createSpringField — the stretch is speed x tau x resistance, there w
     drag(d, 1.0, 300, -1);
     const L = d.f.lag();
     const disp = d.f.displacements();
-    const anchorContent = d.scrollTop + THUMB;
+    const anchorContent = d.vertex;
     let sawSaturated = 0;
     for (const [i, dy] of disp) {
       const dist = Math.abs(d.rows[i].top + d.rows[i].height / 2 - anchorContent);
@@ -291,7 +321,7 @@ describe("createSpringField — the stretch is speed x tau x resistance, there w
     const d = grab();
     drag(d, 1.0, 300, -1);
     const disp = d.f.displacements();
-    const anchorContent = d.scrollTop + THUMB;
+    const anchorContent = d.vertex;
     let widest = 0;
     for (let i = 0; i < d.rows.length - 1; i++) {
       if (!disp.has(i) || !disp.has(i + 1)) continue;
@@ -506,17 +536,25 @@ describe("createSpringField — a catch keeps the vertex it had", () => {
   // move anywhere is 3 to 4.3 CSS px on stretches of 11 and 27 CSS px. Nothing
   // jumps, and no bubble's displacement ever grows.
 
-  /** a fast drag, a lift, a coast, then a finger landing at `catchY` */
-  function coastThenCatch(catchY: number): { d: Drive; before: Map<number, number> } {
+  /** a fast drag, a lift, a coast, then a finger landing at `catchY`.
+      `vertex` is where the vertex sits in CONTENT space: the finger held it on
+      that content when it lifted, and it rides with the thread from there
+      rather than standing on the screen row the coast leaves behind. */
+  function coastThenCatch(catchY: number): {
+    d: Drive;
+    before: Map<number, number>;
+    vertex: number;
+  } {
     const d = grab();
     drag(d, 2.0, 150, -1);
+    const vertex = d.vertex; // the content the gesture was started on
     d.f.lift();
-    drag(d, 1.8, 100, -1); // the thread coasts
+    coast(d, 1.8, 100, -1); // the thread coasts
     const before = new Map(d.f.displacements());
     d.f.begin(CLIENT_H, THREAD_TOP, catchY, true);
     d.now += FRAME;
     d.f.frame(d.now, d.scrollTop); // the catch killed the momentum: no new motion
-    return { d, before };
+    return { d, before, vertex };
   }
 
   function worstMove(before: Map<number, number>, after: Map<number, number>): number {
@@ -548,15 +586,20 @@ describe("createSpringField — a catch keeps the vertex it had", () => {
   });
 
   it("the row at the old vertex stays put through the whole return, as it does in the recording", () => {
-    const { d } = coastThenCatch(150);
-    // the row under the OLD finger carries almost nothing, and catching
+    const { d, vertex } = coastThenCatch(150);
+    // the row the OLD finger was on carries almost nothing, and catching
     // elsewhere must not give it any more: in the recording the bubble at the
-    // vertex moved 0 px across the whole return while a far one moved 27
-    const seatRow = topRowAt(d.rows, d.scrollTop + (THUMB - THREAD_TOP));
+    // vertex moved 0 px across the whole return while a far one moved 27.
+    // The row is found in CONTENT space: the vertex rides with the thread, so
+    // after 180 px of coast it is no longer at the screen-Y the finger left.
+    const seatRow = topRowAt(d.rows, vertex);
     const farRow = topRowAt(d.rows, d.scrollTop);
     const atCatch = Math.abs(d.f.displacements().get(seatRow) ?? 0);
     const farAtCatch = Math.abs(d.f.displacements().get(farRow) ?? 0);
-    expect(atCatch).toBeLessThan(0.03 * farAtCatch); // 1.2 px against 78: it sits at the vertex
+    // 2.6 px against 56.7: the row spans the vertex, its centre 23 px off it,
+    // so it carries 23/500 of the lag and no more. (The far row reads 56.7
+    // rather than 78 now because the strain bound trims the profile's total.)
+    expect(atCatch).toBeLessThan(0.06 * farAtCatch);
     let prev = atCatch;
     for (let k = 0; k < 12; k++) {
       d.now += FRAME;
@@ -568,22 +611,46 @@ describe("createSpringField — a catch keeps the vertex it had", () => {
     expect(prev).toBeLessThan(0.25);
   });
 
-  it("the new finger takes the vertex the moment its own drag moves the scroll", () => {
+  it("the new finger takes the vertex the moment its own drag starts", () => {
     const { d } = coastThenCatch(150);
     expect(Math.abs(d.f.lag())).toBeGreaterThan(20); // still melting
     const parked = d.f.displacements();
     d.now += FRAME;
-    d.f.anchor(150);
-    d.scrollTop -= 1.0 * FRAME; // the caught finger drags on
+    d.f.anchor(146); // the caught finger travels: this is a drag, not a brake
+    d.scrollTop -= 1.0 * FRAME;
     d.f.frame(d.now, d.scrollTop);
     const adopted = d.f.displacements();
     // the vertex has moved to the new finger, so the profile is a different
     // shape now: the row nearest the NEW anchor carries the least
-    const newVertexRow = topRowAt(d.rows, d.scrollTop + (150 - THREAD_TOP));
+    const newVertexRow = topRowAt(d.rows, d.scrollTop + (146 - THREAD_TOP));
     expect(Math.abs(adopted.get(newVertexRow) ?? 0)).toBeLessThan(
       Math.abs(parked.get(newVertexRow) ?? 0),
     );
     expect(d.f.phase()).toBe("driving");
+  });
+
+  it("a finger that lands to BRAKE keeps the parked vertex while the caught scroll runs on", () => {
+    // The scroll does not stop in the frame the finger lands: on the phone the
+    // coast is still being handed over for a frame or two, and that used to be
+    // read as "a new drag has started", so the whole profile re-centred on the
+    // new finger anyway. Measured in the browser harness on the build before
+    // this one: one row jumped 22 px toward its seat on the catch frame while
+    // its neighbour went 7 px the other way. A brake is a finger that has not
+    // moved, so the vertex it landed near does not become the vertex.
+    const { d } = coastThenCatch(150);
+    const parked = new Map(d.f.displacements());
+    for (let k = 0; k < 6; k++) {
+      d.now += FRAME;
+      d.scrollTop -= 0.4 * FRAME; // the caught coast still being handed over
+      d.f.anchor(150); // the finger is ON the glass but has not travelled
+      d.f.frame(d.now, d.scrollTop);
+      const now = d.f.displacements();
+      for (const [i, dy] of parked) {
+        // nothing re-centres: no row is thrown the other way, and none gains
+        expect(Math.abs(now.get(i) ?? 0)).toBeLessThan(Math.abs(dy) + 3);
+        expect((now.get(i) ?? 0) * dy).toBeGreaterThanOrEqual(0); // same side of its seat
+      }
+    }
   });
 
   it("a grab of a settled thread takes its anchor at once: there is nothing to protect", () => {
@@ -603,6 +670,179 @@ describe("createSpringField — a catch keeps the vertex it had", () => {
     expect(Math.abs(d.f.displacements().get(atNew) ?? 0)).toBeLessThan(
       Math.abs(d.f.displacements().get(far) ?? 0),
     );
+  });
+});
+
+// --- the owner's three, 2026-09-12 -------------------------------------------
+// From ScreenRecording_09-12-2026 14-46-26_1 and from the same gestures driven
+// in a real browser on this module. The three complaints and the three things
+// that must stay true now.
+describe("the transcript moves as one thing", () => {
+  /** a thread with a real transcript's mix of bubble heights: the tall ones are
+      what put a whole bubble's height of stretch into the gap beside them */
+  function mixedThread(n = 900): SpringRow[] {
+    const rows: SpringRow[] = [];
+    let top = 0;
+    let s = 7;
+    const rnd = (): number => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (let i = 0; i < n; i++) {
+      const height = 40 + Math.floor(rnd() * 4) * 36; // 40 to 148 px
+      rows.push({ top, height });
+      top += height + (rnd() < 0.6 ? 4 : 12);
+    }
+    return rows;
+  }
+
+  /** a flick, a lift, and a coast; the state is left mid-coast */
+  function flickAndCoast(rows: SpringRow[], coastMs: number): Drive {
+    const d = grab(rows, 20000);
+    d.fingerY = 140; // a flick toward older starts high on the glass
+    d.f.begin(CLIENT_H, THREAD_TOP, d.fingerY, true);
+    d.vertex = d.scrollTop + (d.fingerY - THREAD_TOP);
+    d.f.frame(d.now, d.scrollTop);
+    drag(d, 1.9, 200, -1);
+    d.f.lift();
+    coast(d, 1.9, coastMs, -1);
+    return d;
+  }
+
+  it("no row's displacement GROWS while the lag melts: the vertex rides the thread, it does not saw through it", () => {
+    // The vertex used to be a screen position, so under momentum the content
+    // flowed past it and every row it passed grew away from its seat while the
+    // rest were coming home. Measured in the browser harness on the build before
+    // this one: 21 frames of a single fling had some row growing while the lag
+    // fell, the worst by 5.5 px, and on the caught coast 15.5 px.
+    const d = flickAndCoast(mixedThread(), 200);
+    let prev = new Map(d.f.displacements());
+    let prevLag = Math.abs(d.f.lag());
+    let worstGrowth = 0;
+    for (let k = 0; k < 90; k++) {
+      d.now += FRAME;
+      d.scrollTop -= Math.max(0, 1.9 - k * 0.05) * FRAME; // the coast running down
+      d.f.frame(d.now, d.scrollTop);
+      const now = d.f.displacements();
+      const lag = Math.abs(d.f.lag());
+      if (lag < prevLag - 0.05) {
+        for (const [i, dy] of prev) {
+          const grew = Math.abs(now.get(i) ?? 0) - Math.abs(dy);
+          worstGrowth = Math.max(worstGrowth, grew);
+        }
+      }
+      prev = new Map(now);
+      prevLag = lag;
+    }
+    expect(worstGrowth).toBeLessThan(0.05);
+  });
+
+  it("a braked coast lands every row together, not the ones near the finger first", () => {
+    // "when I stop a scroll using my finger, the bubbles above the finger stop
+    // after the bubbles at the bottom ... the stuff above seems to take half an
+    // extra second to come to a halt". On the build before this one the same
+    // brake left the rows stopping over a 200 ms spread, travelling anywhere
+    // from 5 px to 86 px.
+    const rows = mixedThread();
+    const d = flickAndCoast(rows, 300);
+    d.f.begin(CLIENT_H, THREAD_TOP, 640, true); // the braking finger lands low
+    const onScreen = [...d.f.displacements().keys()].filter(
+      (i) => rows[i].top + rows[i].height > d.scrollTop && rows[i].top < d.scrollTop + CLIENT_H,
+    );
+    expect(onScreen.length).toBeGreaterThan(4);
+    let prev = new Map(d.f.displacements());
+    const stopAt = new Map<number, number>();
+    const travel = new Map<number, number>();
+    for (let k = 1; k <= 42; k++) {
+      d.now += FRAME;
+      d.f.anchor(640); // the finger is braking: it does not travel
+      d.f.frame(d.now, d.scrollTop); // and the scroller is stopped dead
+      const now = d.f.displacements();
+      for (const i of onScreen) {
+        const moved = Math.abs((now.get(i) ?? 0) - (prev.get(i) ?? 0));
+        travel.set(i, (travel.get(i) ?? 0) + moved);
+        if (moved > 0.25) stopAt.set(i, k * FRAME);
+      }
+      prev = new Map(now);
+    }
+    const stops = onScreen.map((i) => stopAt.get(i) ?? 0);
+    const spread = Math.max(...stops) - Math.min(...stops);
+    expect(spread).toBeLessThan(2 * FRAME); // was 200 ms; the rows land together
+    // and none of them is thrown further than the worst row was before
+    expect(Math.max(...onScreen.map((i) => travel.get(i) ?? 0))).toBeLessThan(86);
+    expect(Math.max(...stops)).toBeLessThan(400); // it is still over inside 400 ms
+  });
+
+  it("one pair never gains more white space than the strain bound, whatever the bubbles around it", () => {
+    // the owner's "too much white space": a tall bubble's whole height was
+    // charged to the small gap beside it, 23 px into a 4 px gap on an ordinary
+    // flick, measured in the browser harness on the build before this one
+    const rows = mixedThread();
+    const d = flickAndCoast(rows, 100);
+    let worst = 0;
+    for (let k = 0; k < 60; k++) {
+      d.now += FRAME;
+      d.scrollTop -= 1.9 * FRAME;
+      d.f.frame(d.now, d.scrollTop);
+      const disp = d.f.displacements();
+      for (const i of disp.keys()) {
+        if (!disp.has(i + 1)) continue;
+        worst = Math.max(worst, (disp.get(i + 1) ?? 0) - (disp.get(i) ?? 0));
+      }
+    }
+    expect(worst).toBeGreaterThan(4); // the effect is still plainly there
+    expect(worst).toBeLessThanOrEqual(TUNING.GAP_STRAIN_PX);
+  });
+
+  it("the participation window chooses which rows are written and nothing else", () => {
+    // The profile is a chain of per-pair changes now, so where the chain STARTS
+    // sets every row's place. It starts at the vertex, found over the whole row
+    // table; if it were started at a window edge instead, every visible row
+    // would shift the moment a row entered or left off screen. The same rows,
+    // the same lag and the same vertex must give the same numbers whatever the
+    // window happens to be.
+    const rows = mixedThread(200);
+    for (const anchorY of [400, 4000, 12000, -3000, 40000]) {
+      for (const L of [-106, -30, 12, 80]) {
+        const wide = profileFor(rows, 20, 120, anchorY, L);
+        for (const [a, b] of [
+          [21, 121],
+          [30, 110],
+          [19, 119],
+          [45, 90],
+        ]) {
+          const narrow = profileFor(rows, a, b, anchorY, L);
+          for (const [i, dy] of narrow) {
+            if (i < 20 || i > 120) continue;
+            expect(dy).toBeCloseTo(wide.get(i) ?? 0, 9);
+          }
+        }
+      }
+    }
+  });
+
+  it("a one-frame delivery gap does not throw the speed window away, so the lag does not jump past its steady value", () => {
+    // The run used to be emptied the moment the budget called a still frame a
+    // stop, so the next fresh position had only itself and a still frame to be a
+    // speed over and a lumpy delivery's double step read as double the speed.
+    const d = grab();
+    let truth = d.scrollTop;
+    const speed = 0.5;
+    const Ls: number[] = [];
+    for (let k = 0; k < 90; k++) {
+      d.now += FRAME;
+      truth -= speed * FRAME;
+      d.fingerY += speed * FRAME;
+      // the finger's reported position is quantised to 2 px, so it repeats on
+      // some frames; the scroll position reaches the frame on 3 frames in 4
+      d.f.anchor(Math.round(d.fingerY / 2) * 2);
+      if (k % 4 !== 3) d.scrollTop = Math.round(truth * 3) / 3;
+      d.f.frame(d.now, d.scrollTop);
+      Ls.push(Math.abs(d.f.lag()));
+    }
+    const settled = Ls.slice(30);
+    const ideal = speed * TAU;
+    // the mean sits on the steady stretch rather than above it
+    const mean = settled.reduce((a, b) => a + b, 0) / settled.length;
+    expect(mean).toBeGreaterThan(ideal * 0.9);
+    expect(mean).toBeLessThan(ideal * 1.05); // it used to run 26% high
   });
 });
 
@@ -641,7 +881,7 @@ describe("createSpringField — a fling: the lag tracks the decaying speed and i
     const d = grab();
     drag(d, 2.0, 150, -1);
     d.f.lift();
-    drag(d, 1.8, 100, -1); // coasting
+    coast(d, 1.8, 100, -1); // coasting
     d.f.begin(CLIENT_H, THREAD_TOP, THUMB, true); // the catch
     const top = topRowAt(d.rows, d.scrollTop);
     const held = Math.abs(d.f.displacements().get(top) ?? 0);
@@ -663,7 +903,7 @@ describe("createSpringField — a fling: the lag tracks the decaying speed and i
     const d = grab();
     drag(d, 1.5, 150, -1);
     d.f.lift();
-    drag(d, 1.0, 100, -1); // coasting
+    coast(d, 1.0, 100, -1); // coasting
     const held = d.f.lag();
     d.f.begin(CLIENT_H, THREAD_TOP, THUMB, true); // the grab
     expect(d.f.lag()).toBe(held);
@@ -745,7 +985,11 @@ describe("createSpringField — rows never overlap", () => {
 
   it("the compressing side closes up to the floor and no further: the guard binds on a hard drag", () => {
     const d = grab();
-    drag(d, 3.0, 300, 1); // toward newer: the rows above the thumb bunch (135px of reference lag)
+    // toward newer: the finger travels UP the glass and the rows above it bunch.
+    // 120 ms at 3 px/ms is 360 px of travel — a hard flick that a hand can
+    // actually make on a 700 px viewport, so the finger (and the vertex it put
+    // on the content) is still on the glass at the end of it.
+    drag(d, 3.0, 120, 1);
     const disp = d.f.displacements();
     let closedSome = false;
     for (let i = 0; i < d.rows.length - 1; i++) {
@@ -763,7 +1007,7 @@ describe("createSpringField — rows never overlap", () => {
     // the 12px sender gaps just above the thumb close by ~spacing x 22.5 / 500 = 2.3px
     expect(check(d)).toBeGreaterThan(TUNING.GAP_MIN_PX);
     const disp = d.f.displacements();
-    const anchorContent = d.scrollTop + THUMB;
+    const anchorContent = d.vertex;
     const closes: number[] = [];
     for (let i = 0; i < d.rows.length - 1; i++) {
       if (!disp.has(i) || !disp.has(i + 1)) continue;
@@ -779,7 +1023,7 @@ describe("createSpringField — rows never overlap", () => {
   });
 });
 
-describe("profileFor — the guard, on its own", () => {
+describe("profileFor — the strain bound, on its own", () => {
   const rows = makeThread(20);
   it("with a zero rest gap a pair can never close at all", () => {
     const tight: SpringRow[] = [
@@ -791,24 +1035,52 @@ describe("profileFor — the guard, on its own", () => {
     expect((p.get(1) ?? 0) - (p.get(0) ?? 0)).toBeGreaterThanOrEqual(-1e-9);
   });
 
-  it("a pair closes down to the floor exactly, never past it", () => {
+  it("a pair closes toward the floor and never reaches it, however hard the lag pulls", () => {
     const pair: SpringRow[] = [
       { top: 0, height: 40 },
       { top: 52, height: 40 }, // a 12px sender gap
       { top: 104, height: 40 },
     ];
-    const p = profileFor(pair, 0, 2, 124, 300); // finger at the bottom row, a huge L
-    const gap = pair[1].top + (p.get(1) ?? 0) - (pair[0].top + (p.get(0) ?? 0) + 40);
-    expect(gap).toBeCloseTo(TUNING.GAP_MIN_PX, 9);
+    // the bound is approached, not met: softStrain is strictly inside its
+    // allowance, which is what keeps a squeezed pair melting with the lag
+    // instead of sitting frozen on a clamp and then letting go
+    const hard = profileFor(pair, 0, 2, 124, 300); // finger at the bottom row, a huge L
+    const gap = (p: Map<number, number>): number =>
+      pair[1].top + (p.get(1) ?? 0) - (pair[0].top + (p.get(0) ?? 0) + 40);
+    expect(gap(hard)).toBeGreaterThan(TUNING.GAP_MIN_PX);
+    expect(gap(hard)).toBeLessThan(TUNING.GAP_MIN_PX + 0.01);
+    // and it is still a strictly rising function of the lag down there: half the
+    // pull leaves the pair measurably wider, so the melt is seen frame by frame
+    expect(gap(profileFor(pair, 0, 2, 124, 150))).toBeGreaterThan(gap(hard));
   });
 
-  it("the stretching side is the pure resistance profile, untouched by the guard", () => {
+  it("the stretching side is the pure resistance profile below the strain bound", () => {
     const anchor = rows[15].top + 20;
-    const p = profileFor(rows, 0, 19, anchor, -200);
+    // 40px rows on 44 and 52px pitches: at L = -50 the widest pair wants 5.2px,
+    // inside the bound's linear half, so the profile is exactly resistance x L
+    const p = profileFor(rows, 0, 19, anchor, -50);
     for (let i = 0; i < 15; i++) {
       const r = resistanceFor(rows[i].top + 20 - anchor);
-      expect(p.get(i) ?? 0).toBeCloseTo(-200 * r, 6);
+      expect(p.get(i) ?? 0).toBeCloseTo(-50 * r, 6);
     }
+  });
+
+  it("above the bound the stretching side eases onto it: a tall bubble's height stops pouring into the gap", () => {
+    // one three-line bubble and its neighbour, the shape that made the owner's
+    // 4px gap grow ninefold: a 110px pitch charged the whole bubble height to
+    // the gap beside it
+    const tall: SpringRow[] = [
+      { top: 0, height: 40 },
+      { top: 44, height: 150 }, // a tall bubble: 110px of pitch to its neighbour
+      { top: 198, height: 40 },
+    ];
+    const anchor = 320; // below the three, inside the divisor: no saturation
+    const p = profileFor(tall, 0, 2, anchor, -106); // a flick's reference lag
+    const open = (p.get(1) ?? 0) - (p.get(0) ?? 0); // the pair opens by this much
+    const raw = ((tall[1].top + 75 - (tall[0].top + 20)) * 106) / TUNING.RESISTANCE_DIVISOR;
+    expect(raw).toBeGreaterThan(20); // what the pure profile wanted: 21.0px
+    expect(open).toBeLessThan(TUNING.GAP_STRAIN_PX);
+    expect(open).toBeGreaterThan(TUNING.GAP_STRAIN_PX * 0.75); // eased on, not cut off
   });
 
   it("returns nothing for L = 0 and nothing outside lo..hi", () => {
