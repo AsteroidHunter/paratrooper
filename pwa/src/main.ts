@@ -1097,12 +1097,12 @@ function renderChat(): void {
   // scroll back from a running tap glide — the user always wins mid-flight.
   thread.addEventListener("wheel", () => {
     cancelGlide();
-    lastGestureAt = performance.now();
+    noteThreadGesture();
     armSpring(null, false); // a wheel has no finger: the springs anchor on the viewport centre
   }, { passive: true });
   thread.addEventListener("pointerdown", (e) => {
     cancelGlide();
-    lastGestureAt = performance.now();
+    noteThreadGesture();
     if (e.pointerType !== "touch") armSpring(e.clientY, false); // touch arms in touchstart
   });
   thread.addEventListener("scroll", () => {
@@ -1165,6 +1165,7 @@ function renderChat(): void {
       if (restTimer) clearTimeout(restTimer);
       restTimer = setTimeout(() => {
         lastScrollAt = 0;
+        springGestureEra = false; // the thread is at rest: his motion is over
         tryApplyOlder();
       }, 100);
     }
@@ -1172,6 +1173,7 @@ function renderChat(): void {
   if (hasScrollend) {
     thread.addEventListener("scrollend", () => {
       lastScrollAt = 0; // the browser says the glide is over — authoritative
+      springGestureEra = false; // ... and with it the motion his gesture threw
       tryApplyOlder();
     });
   }
@@ -1199,7 +1201,7 @@ function renderChat(): void {
       startY = e.touches[0].clientY;
       peeking = null;
       threadTouching = true; // no history inserts under a resting finger
-      lastGestureAt = performance.now();
+      noteThreadGesture();
       armSpring(e.touches[0].clientY, true); // the finger is the springs' anchor
     },
     { passive: true },
@@ -1207,7 +1209,7 @@ function renderChat(): void {
   thread.addEventListener(
     "touchmove",
     (e) => {
-      lastGestureAt = performance.now();
+      noteThreadGesture();
       springFinger(e.touches[0].clientY); // the anchor tracks the finger
       const dx = e.touches[0].clientX - startX;
       const dy = e.touches[0].clientY - startY;
@@ -1245,6 +1247,7 @@ function renderChat(): void {
   springRaf = 0;
   springField.reset();
   endSpring.reset(); // END-SPRING SEAM: the old thread's ends are gone too
+  springGestureEra = false; // the motion belonged to rows that no longer exist
   springTouchY = null;
   springMaxScroll = 0;
   springEls = [];
@@ -2021,11 +2024,39 @@ let springTouchY: number | null = null; // where the finger last was (the anchor
 let springRaf = 0; // the frame pump; 0 = not scheduled
 let springDirty = true; // the row table is stale (content changed): re-measure next frame
 
+// The reader's own scroll era: opened by a gesture on the thread, and open for
+// as long as the motion that gesture started is still going: his finger's
+// travel and the momentum it throws. The field's arm is a per-GESTURE thing and
+// the hold-off's freeze drops it, so when the hold-off lets go part way through
+// a motion the wiring has to know whose motion it is looking at. A finger on
+// the glass answers that by itself; a coast has no finger, and this is what
+// stands in for one. Closed where the thread comes to rest (the scroll
+// handler's scrollend, and its rest debounce on engines without one), when the
+// page goes away, and with a fresh shell.
+let springGestureEra = false;
+
+// How long a gap between two scroll events still reads as ONE motion. A drag or
+// its momentum delivers an event a frame; the app's own rest debounce calls
+// 100 ms of silence the end of a glide, so anything inside that is the same
+// motion still running, and anything outside it is an isolated write. It is
+// what keeps a lone programmatic scroll from being taken for a coast.
+const SPRING_RUN_GAP_MS = 100;
+
 // The hold-off. While any motion the app owns is in flight the springs must read
 // zero and stay there, so nothing they write can corrupt a FLIP measurement, an
 // instant pin, a ride, the keyboard lift or a seat/receipt move. Every state is
 // one the app already tracks; a seat move and the receipt crossfade both run
 // through beginSiblingShift, which freezes the field outright before it measures.
+//
+// The resume era is the one of them a real gesture takes back (resumeClaimed,
+// set by the thread's own gesture handlers): the landing's WAIT writes nothing
+// while it watches the engine finish restoring the scroll, and the window's
+// instant pins are the app landing for a reader who is not there yet. The
+// moment he puts a finger on the thread he is, the app's own end-of-wait rule
+// already gives the scroll back to a gesture, and the same handlers have
+// cancelled whatever ride was in the air. The landing's actual RIDE is NOT
+// released by the claim: that is a scroll the app is writing, and the glide
+// terms above hold it off whoever owns the era.
 function springBlocked(): boolean {
   return (
     flightsUp > 0 ||
@@ -2033,8 +2064,7 @@ function springBlocked(): boolean {
     arrival !== null ||
     glide !== null ||
     glideRaf !== 0 ||
-    landingHold ||
-    resumeWindowOpen() ||
+    (!resumeClaimed && (landingHold || resumeWindowOpen())) ||
     shiftAnims.length > 0 ||
     app.classList.contains("kb")
   );
@@ -2161,6 +2191,26 @@ function springHandleScroll(): void {
     springFreeze();
     return;
   }
+  // The hold-off can open and close INSIDE a coast the reader threw, and its
+  // freeze takes the arm with it, so there is no gesture left for the pump to
+  // serve and the rest of that momentum would run rigid to a stop. This is the
+  // path with no finger on the glass. A finger takes its own drag back through
+  // springFinger, on the position it is actually at, so two things have to
+  // agree before the gesture is re-opened: the era says this motion began as
+  // his and the thread has not come to rest since, and this event stands in a
+  // RUN of scroll events, which is what a thread still moving delivers and a
+  // single app write does not. Re-opening takes a fresh baseline, so neither
+  // the travel the hold-off held at zero nor the write that woke this event can
+  // be read as a frame of scrolling. The anchor is the one the momentum already
+  // belongs to: where the finger lifted (null for a wheel, the centre).
+  if (
+    !springField.armed() &&
+    !threadTouching &&
+    springGestureEra &&
+    performance.now() - lastScrollAt < SPRING_RUN_GAP_MS
+  ) {
+    armSpring(springTouchY, false);
+  }
   if (springField.armed()) springPump();
 }
 
@@ -2180,6 +2230,15 @@ function armSpring(touchY: number | null, fingerDown: boolean): void {
 
 // The finger moved: the field re-centres on it, and a parked pump wakes.
 function springFinger(touchY: number): void {
+  // A finger travelling on the glass IS a live drag, whatever happened before
+  // it. The hold-off can open and close INSIDE one gesture (a seat move, the
+  // receipt crossfade, a landing, a keyboard edge) and its freeze drops the
+  // arm, and arming only ever happened where a gesture began, so the remainder
+  // of a drag one of those crossed ran with no springs at all and nothing gave
+  // them back until the finger was lifted and put down again. Take the gesture
+  // back on this finger the moment the hold-off lets go. Re-opening takes a
+  // fresh baseline, so the stretch held at zero is never injected as travel.
+  if (!springField.armed() && !springBlocked()) armSpring(touchY, true);
   springField.anchor(touchY);
   endSpring.finger(touchY); // END-SPRING SEAM: the pull is this finger's travel
   springTouchY = touchY;
@@ -2258,6 +2317,18 @@ let lastGestureAt = -Infinity;
 
 function userScrollIntent(): boolean {
   return threadTouching || performance.now() - lastGestureAt < USER_SCROLL_INTENT_MS;
+}
+
+// Every genuine gesture ON THE THREAD passes through here: wheel, pointer,
+// touch down, touch travel. So the three things that have to know a reader is
+// driving are said in one place: the intent clock the follow flip reads, the
+// era the springs read, and his claim on a resume era the app was still landing
+// for. The rides are cancelled by the handlers themselves: a gesture beats
+// every motion the app has in the air, and that is the same rule.
+function noteThreadGesture(): void {
+  lastGestureAt = performance.now();
+  springGestureEra = true; // his motion: the finger's, and the momentum it throws
+  resumeClaimed = true; // the resume's own work stands aside for a reader
 }
 
 // Re-establish when the THREAD BOX resizes (compose growth, the photo drawer's
@@ -4840,6 +4911,13 @@ let resumeTimer: ReturnType<typeof setTimeout> | null = null;
 let resumeWasFollowing = true; // followTail the moment the app went hidden
 let resumeAwayByHand = false; // a reader had gone up by hand before leaving
 let resumeNewArrived = false; // a message has already claimed this resume's decision
+// A real gesture has taken the thread's scroll back inside THIS resume era. The
+// era's own work (the landing's wait, its ride, the window's instant pins) is
+// the app landing for a reader who was not there; once he is, the app is not
+// the one moving the thread any more. Only the springs' hold-off reads it
+// (springBlocked): the window's other duties are unchanged, and the ride and
+// the wait end through their own rules, which already give way to a gesture.
+let resumeClaimed = false;
 
 function resumeWindowOpen(): boolean {
   return resumeTimer !== null;
@@ -4848,6 +4926,9 @@ function resumeWindowOpen(): boolean {
 function openResumeWindow(): void {
   if (resumeTimer) clearTimeout(resumeTimer);
   resumeNewArrived = false;
+  // a fresh era: the app is landing again, and nobody has taken it back yet,
+  // unless a finger is already on the glass, which is a reader who never left
+  resumeClaimed = threadTouching;
   resumeTimer = setTimeout(closeResumeWindow, RESUME_WINDOW_MS);
 }
 
@@ -4888,6 +4969,7 @@ function resumeHidden(): void {
   // where the reader actually was, taken while the answer is still true
   resumeWasFollowing = followTail;
   resumeAwayByHand = scrolledUpByHand;
+  springGestureEra = false; // a motion of his does not survive the page going away
   closeResumeWindow();
   stopResumeRide(); // a landing half way through is not resumed on the far side
   // the last word out, BEFORE the keep-alive stops: from here the page may be
