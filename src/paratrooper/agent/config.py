@@ -1,12 +1,22 @@
-"""Paths config loader + secret access.
+"""Deployment configuration + secret access.
 
-Two kinds of configuration, deliberately separated:
+Three kinds of value, deliberately separated:
 
-* **Paths & site settings** live in a TOML file (folders + repo settings — no
-  secrets). Loaded by :func:`load_config`. Folders: ``inbox`` (raw staged
-  photos), ``pins_dir``, ``archive_dir``; plus the changelog path and the
-  site-repo remote/default-branch/branch-prefix.
-* **Secrets** are **environment variables, never a config file** — the app
+* **Deployment configuration** — the profile, the model, the notification texts,
+  the upload expiry and, on ``pinboard``, everything that describes one person's
+  site: owner, address, remote, branch names, commit identity, stage folders,
+  changelog and the optional screenshot shape. All of it lives in one TOML
+  source which reaches a running service through exactly one environment
+  variable, ``PARATROOPER_CONFIG_B64``, holding that text base64-encoded. There
+  is no path variable, no mounted file, no search order and no second source: a
+  service either has that one value or does not start. ``config/paratrooper.toml``
+  is the thing a human edits and ``config/paratrooper.example.toml`` documents
+  every field; neither is ever read by a running service.
+* **Machine paths** stay environment values, because they are the two things
+  that genuinely differ between two containers reading one source:
+  ``PARATROOPER_INBOX`` on both services and ``PARATROOPER_SITE_ROOT`` on the
+  pinboard worker. They name a place on a disk rather than anything personal.
+* **Secrets** are **environment variables, never the config source** — the app
   bearer token, the GitHub App's ids and private key, ``CLAUDE_CODE_OAUTH_TOKEN`` /
   ``ANTHROPIC_API_KEY``, Spotify id/secret, VAPID keys. Read via
   :func:`require_env` / the typed accessors, which **hard-error loudly** when a
@@ -15,30 +25,52 @@ Two kinds of configuration, deliberately separated:
   2026-09-07, read once by :func:`take_github_app` and taken out of the
   environment with the two ids. It was a mounted file until then; no path is
   read any more and none is consulted as a fallback.
+
+**Pure validation vs runtime loading.** :func:`parse_config` and
+:func:`validate_config` are pure: text (or a parsed table) in, a :class:`Config`
+out, with no environment, no filesystem and no credential involved. That is what
+lets ``python -m paratrooper.deploy check`` validate a source on a laptop that
+has no inbox, no checkout and no secrets, using the very same code the service
+boots with rather than a second implementation that can drift from it.
+:func:`load_config` is that function plus the two machine paths.
 """
 
 from __future__ import annotations
 
 import base64
+import binascii
 import contextlib
 import logging
 import os
 import tomllib
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_PATH = "config/paths.toml"
-DEFAULT_BRANCH = "main"
-DEFAULT_BRANCH_PREFIX = "paratrooper"
-# Commit identity: the paratrooper-98cc GitHub App's bot user. GitHub links a
-# contributor (avatar + hyperlink) only when the commit email resolves to a
-# real identity, and this <bot-user-id>+<slug>@users.noreply address is that
-# bot's. Self-hosters swap in their own app via [site] git_name/git_email or
-# the PARATROOPER_GIT_* env vars.
-DEFAULT_GIT_NAME = "paratrooper-98cc[bot]"
-DEFAULT_GIT_EMAIL = "301089772+paratrooper-98cc[bot]@users.noreply.github.com"
+# The one route. Its value is standard base64 (RFC 4648, padding kept) of the
+# UTF-8 bytes of the TOML source.
+CONFIG_VAR = "PARATROOPER_CONFIG_B64"
+# The path variable this replaced. The loader refuses to start while it is still
+# set: a half-finished migration has to be loud rather than look like a working
+# deployment that quietly read something else.
+LEGACY_CONFIG_VAR = "PARATROOPER_CONFIG"
+INBOX_VAR = "PARATROOPER_INBOX"
+SITE_ROOT_VAR = "PARATROOPER_SITE_ROOT"
+
+SCHEMA_VERSION = 1
+PINBOARD, PLAIN = "pinboard", "plain"
+# Both words run. The pinboard profile is the full deployment; the plain profile
+# is a chat with photos, web search and page reading, and its whole source is
+# the shared settings above the profile line. There was a third name here while
+# the plain session did not exist yet — a gate that refused the word rather than
+# booting a worker with no tools behind it — and it is gone now that the session
+# is written.
+PROFILES = (PINBOARD, PLAIN)
+# A photo only has to survive until the worker picks it up; never infinite.
+TTL_HOURS_MIN, TTL_HOURS_MAX = 1, 168
+
 # Standardized asset filenames inside a pin folder (post-refactor contract).
 PREVIEW_ASSET = "preview.webp"  # the pinned/board preview image
 OPENED_ASSET = "opened.webp"  # the larger "opened" artwork (dual-asset pins, e.g. substack)
@@ -60,115 +92,588 @@ def validate_branch_prefix(prefix: str) -> str:
     """
     if not isinstance(prefix, str) or not prefix:
         raise ConfigError(
-            f"[site].branch_prefix must be a non-empty string (got {prefix!r}): "
+            f"[pinboard].branch_prefix must be a non-empty string (got {prefix!r}): "
             'name the branch namespace, e.g. "paratrooper"'
         )
     if "/" in prefix:
         raise ConfigError(
-            f"[site].branch_prefix {prefix!r} must not contain '/': write the bare "
+            f"[pinboard].branch_prefix {prefix!r} must not contain '/': write the bare "
             'word (e.g. "paratrooper"), the separator before the branch name is added'
         )
     if any(ch.isspace() for ch in prefix):
         raise ConfigError(
-            f"[site].branch_prefix {prefix!r} must not contain whitespace: "
+            f"[pinboard].branch_prefix {prefix!r} must not contain whitespace: "
             "a branch namespace is one word"
         )
     return prefix
 
 
-@dataclass
-class Config:
-    """Resolved worker configuration. Folders are absolute paths.
+# --- the loaded shape --------------------------------------------------------
 
-    Pin stages (user-defined layout, all under ``src/content/``): the rendered
-    board lives in ``pins-on-display`` (the only dir Astro's glob loads),
-    archived pins move to ``pins-off-display``, and pins staged for future
-    publishing wait in ``pins-for-later``.
+
+@dataclass(frozen=True)
+class Notifications:
+    """Push bodies both profiles have. ``reply`` is the body for a reply with no
+    text of its own; ``error`` is the body for a failed job."""
+
+    reply: str
+    error: str
+
+
+@dataclass(frozen=True)
+class Uploads:
+    ttl_hours: int  # 1..168; how long a staged photo lives in the shared store
+
+    @property
+    def ttl_seconds(self) -> int:
+        """What both readers actually want. The web writes it onto every staged
+        blob and the worker quotes the hours back to the person when a photo is
+        gone, so the two must come from this one number rather than a module
+        default either of them could keep after the other moved."""
+        return self.ttl_hours * 3600
+
+
+@dataclass(frozen=True)
+class PinboardNotifications:
+    screenshot: str
+    pr: str
+
+
+@dataclass(frozen=True)
+class ScreenshotConfig:
+    """The shape of one site, for the board capture.
+
+    Only what describes a *site* lives here. ``screenshot.NPM_HARDENING`` and
+    ``INSTALL_CMD`` deliberately stay in code: the ignore-scripts flag, the
+    emptied node options and the fixed script shell are what keep a build the
+    agent can edit from becoming code execution, and a value in a configuration
+    file is a value an edit can drop. ``build_script`` therefore carries the npm
+    script name and nothing else.
     """
 
-    inbox: Path  # staging dir for uploaded photos (persistent disk on Render)
-    site_root: Path  # the website repo checkout root
-    pins_dir: Path  # pins-on-display: the rendered board
-    archive_dir: Path  # pins-off-display: archived pins move here
-    later_dir: Path  # pins-for-later: staged for future publishing
-    changelog: Path  # the paratrooper changelog, committed in the website repo
-    remote: str | None  # site repo git remote URL (None => use the checkout's origin)
-    default_branch: str  # the branch the agent must never push to (merge target)
-    branch_prefix: str  # feature-branch prefix, e.g. "paratrooper" -> paratrooper/<pin>-<slug>
-    git_name: str = DEFAULT_GIT_NAME  # commit author/committer name
-    git_email: str = DEFAULT_GIT_EMAIL  # commit email — must resolve to a GitHub identity to render linked
+    build_script: str
+    dist: str
+    viewport: tuple[int, int]
+    selector: str
+    pin_selector: str
+    card_selector: str
+    title_selector: str
 
 
-def _resolve(base: Path, value: str) -> Path:
-    p = Path(value).expanduser()
-    return p if p.is_absolute() else (base / p).resolve()
+@dataclass(frozen=True)
+class PinboardConfig:
+    """Everything that describes one person's pinboard deployment.
+
+    The four site paths are held exactly as the source wrote them, relative to
+    the site root, and resolved through the properties below. That split is what
+    lets the web service carry this object without a checkout: it needs the
+    branch names and the remote, never a folder on the worker's disk. The
+    pinboard worker binds ``site_root`` at boot and the same attribute names
+    then answer with absolute paths.
+    """
+
+    owner: str  # the person the prompt, two tool descriptions and two denials name
+    site: str  # the address the prompt names
+    remote: str  # the site repository, always explicit: never read back off the checkout
+    default_branch: str  # never pushed to; the Publish merge target
+    branch_prefix: str  # guard, prompt, Publish lookup — one bare word
+    git_name: str  # commit identity on the checkout
+    git_email: str  # must resolve to a GitHub identity to render linked
+    # relative to the site root; the three stages share one parent
+    pins_rel: str
+    archive_rel: str
+    later_rel: str
+    changelog_rel: str
+    notifications: PinboardNotifications
+    screenshot: ScreenshotConfig | None = None
+    site_root: Path | None = None  # env PARATROOPER_SITE_ROOT; the worker requires it
+
+    def _under_root(self, relative: str, name: str) -> Path:
+        if self.site_root is None:
+            raise ConfigError(
+                f"{name} is relative to the site root and this process has no "
+                f"site root: set ${SITE_ROOT_VAR}. (The web service is not meant "
+                "to reach for one — read the relative value instead.)"
+            )
+        return self.site_root / relative
+
+    @property
+    def pins_dir(self) -> Path:
+        """pins-on-display: the rendered board, the only stage the site loads."""
+        return self._under_root(self.pins_rel, "pins_dir")
+
+    @property
+    def archive_dir(self) -> Path:
+        """pins-off-display: archived pins move here."""
+        return self._under_root(self.archive_rel, "archive_dir")
+
+    @property
+    def later_dir(self) -> Path:
+        """pins-for-later: staged for future publishing."""
+        return self._under_root(self.later_rel, "later_dir")
+
+    @property
+    def changelog(self) -> Path:
+        return self._under_root(self.changelog_rel, "changelog")
+
+    @property
+    def stages_parent(self) -> str:
+        """The one folder the three stages sit in, as the prompt says it.
+
+        Validation has already refused a source whose stages have different
+        parents, so reading it off the first one is reading it off all three.
+        """
+        return str(PurePosixPath(self.pins_rel).parent)
+
+    @property
+    def pins_name(self) -> str:
+        return PurePosixPath(self.pins_rel).name
+
+    @property
+    def archive_name(self) -> str:
+        return PurePosixPath(self.archive_rel).name
+
+    @property
+    def later_name(self) -> str:
+        return PurePosixPath(self.later_rel).name
 
 
-def load_config(path: str | os.PathLike[str] | None = None) -> Config:
-    """Load the TOML paths/site config. ``path`` defaults to ``$PARATROOPER_CONFIG``
-    or ``config/paths.toml``. Relative paths in the file resolve against the
-    config file's directory. Raises :class:`ConfigError` if the file is missing
-    or malformed."""
-    cfg_path = Path(path or os.environ.get("PARATROOPER_CONFIG", DEFAULT_CONFIG_PATH))
-    if not cfg_path.is_file():
-        raise ConfigError(f"config file not found: {cfg_path} (set PARATROOPER_CONFIG)")
+@dataclass(frozen=True)
+class Config:
+    """One deployment's configuration, as the services hold it.
+
+    ``inbox`` is ``None`` on a config that was only *validated* (the local
+    ``check`` command, and every schema test): it is a machine path, bound by
+    :func:`load_config` from the environment. Anything returned by
+    :func:`load_config` has it.
+    """
+
+    schema: int
+    profile: str
+    model: str
+    notifications: Notifications
+    uploads: Uploads
+    # Shared, optional, off unless a deployer says otherwise — on both profiles.
+    # Not a product control and not reachable from inside a turn: see the switch
+    # written in agent/worker.py for what it does and what it costs.
+    shell_isolation: bool = False
+    inbox: Path | None = None  # env PARATROOPER_INBOX, required by both services
+    pinboard: PinboardConfig | None = None  # None on plain
+
+    @property
+    def is_pinboard(self) -> bool:
+        return self.profile == PINBOARD
+
+    def require_pinboard(self) -> PinboardConfig:
+        """The pinboard block, or a loud error naming the profile that has none.
+
+        Used by the code paths that only exist on pinboard, so that a dispatch
+        bug reads as one sentence about the profile instead of an
+        ``AttributeError`` on ``None`` three frames further in."""
+        if self.pinboard is None:
+            raise ConfigError(
+                f"this deployment's profile is {self.profile!r}, which has no "
+                "pinboard configuration: the site, its repository and its pin "
+                "stages exist only under profile = \"pinboard\""
+            )
+        return self.pinboard
+
+    def require_inbox(self) -> Path:
+        if self.inbox is None:
+            raise ConfigError(
+                f"no inbox path is bound: set ${INBOX_VAR}. (A config that was "
+                "only validated locally has no machine paths by design.)"
+            )
+        return self.inbox
+
+
+# --- the pure validator (no environment, no filesystem, no secrets) ----------
+#
+# Shared verbatim by `deploy check`, `deploy push` and the runtime loader, so a
+# source that passes on a laptop is a source the service accepts. Every
+# rejection names the offending key and the source it came from, because the
+# thing a deployer needs at 2am is which key in which place, not that something
+# somewhere was invalid.
+
+_TOP_LEVEL_KEYS = frozenset(
+    {"schema", "model", "notifications", "uploads", "shell_isolation", "profile"}
+)
+_PINBOARD_KEYS = frozenset({
+    "owner", "site", "remote", "default_branch", "branch_prefix", "git_name",
+    "git_email", "pins_dir", "archive_dir", "later_dir", "changelog",
+    "notifications", "screenshot",
+})
+_SCREENSHOT_KEYS = frozenset({
+    "build_script", "dist", "viewport", "selector", "pin_selector",
+    "card_selector", "title_selector",
+})
+
+
+def _where(table_name: str, key: str) -> str:
+    return f"{table_name}.{key}" if table_name else key
+
+
+def _reject_unknown(table: dict, allowed: frozenset[str], *, source: str, name: str) -> None:
+    """An unknown key is an error, never something quietly ignored.
+
+    A typo in a key that is silently dropped is a deployment running on a
+    default nobody chose, which is exactly the class of surprise this whole
+    change exists to remove."""
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"{source}: unknown key {_where(name, unknown[0])!r}"
+            + (f" (and {len(unknown) - 1} more)" if len(unknown) > 1 else "")
+            + f". Known keys here: {', '.join(sorted(allowed))}"
+        )
+
+
+def _required(table: dict, key: str, *, source: str, name: str) -> Any:
+    if key not in table:
+        raise ConfigError(f"{source}: missing required key {_where(name, key)!r}")
+    return table[key]
+
+
+def _string(table: dict, key: str, *, source: str, name: str) -> str:
+    value = _required(table, key, source=source, name=name)
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(
+            f"{source}: {_where(name, key)!r} must be a non-empty string (got {value!r})"
+        )
+    return value
+
+
+def _sub_table(table: dict, key: str, *, source: str, name: str) -> dict:
+    value = _required(table, key, source=source, name=name)
+    if not isinstance(value, dict):
+        raise ConfigError(f"{source}: {_where(name, key)!r} must be a table (got {value!r})")
+    return value
+
+
+def _relative_path(table: dict, key: str, *, source: str, name: str) -> str:
+    """A site path, as written, checked for the two ways it could point out of
+    the checkout.
+
+    Site paths are relative to the site root and to nothing else — never to the
+    TOML source, the current directory or the image's own source tree. An
+    absolute value would silently make the configuration name a place on one
+    particular machine, and ``..`` would let it climb out of the checkout the
+    agent is fenced inside."""
+    raw = _string(table, key, source=source, name=name)
+    if "\\" in raw:
+        raise ConfigError(
+            f"{source}: {_where(name, key)!r} must use '/' separators (got {raw!r})"
+        )
+    candidate = PurePosixPath(raw)
+    if candidate.is_absolute():
+        raise ConfigError(
+            f"{source}: {_where(name, key)!r} must be relative to the site root, "
+            f"not absolute (got {raw!r})"
+        )
+    if ".." in candidate.parts:
+        raise ConfigError(
+            f"{source}: {_where(name, key)!r} must stay inside the site root: "
+            f"'..' is not allowed (got {raw!r})"
+        )
+    return str(candidate)
+
+
+def _viewport(table: dict, *, source: str, name: str) -> tuple[int, int]:
+    value = _required(table, "viewport", source=source, name=name)
+    key = _where(name, "viewport")
+    if not isinstance(value, list) or len(value) != 2:
+        raise ConfigError(
+            f"{source}: {key!r} must be two whole numbers, [width, height] (got {value!r})"
+        )
+    for part in value:
+        # a TOML boolean is an int in Python; it is not a pixel count
+        if isinstance(part, bool) or not isinstance(part, int) or part <= 0:
+            raise ConfigError(
+                f"{source}: {key!r} must be two positive whole numbers (got {value!r})"
+            )
+    return (value[0], value[1])
+
+
+def _ttl_hours(table: dict, *, source: str) -> int:
+    uploads = _sub_table(table, "uploads", source=source, name="")
+    _reject_unknown(uploads, frozenset({"ttl_hours"}), source=source, name="uploads")
+    value = _required(uploads, "ttl_hours", source=source, name="uploads")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(
+            f"{source}: 'uploads.ttl_hours' must be a whole number of hours (got {value!r})"
+        )
+    if not TTL_HOURS_MIN <= value <= TTL_HOURS_MAX:
+        raise ConfigError(
+            f"{source}: 'uploads.ttl_hours' must be between {TTL_HOURS_MIN} and "
+            f"{TTL_HOURS_MAX} (got {value}). A staged photo only has to outlive the "
+            "queue wait, and it is never kept for ever."
+        )
+    return value
+
+
+def _screenshot_config(raw: dict, *, source: str) -> ScreenshotConfig:
+    name = "pinboard.screenshot"
+    _reject_unknown(raw, _SCREENSHOT_KEYS, source=source, name=name)
+    build_script = _string(raw, "build_script", source=source, name=name)
+    if build_script.startswith("-"):
+        raise ConfigError(
+            f"{source}: 'pinboard.screenshot.build_script' must name an npm script, "
+            "not an option starting with '-'"
+        )
+    return ScreenshotConfig(
+        build_script=build_script,
+        dist=_relative_path(raw, "dist", source=source, name=name),
+        viewport=_viewport(raw, source=source, name=name),
+        selector=_string(raw, "selector", source=source, name=name),
+        pin_selector=_string(raw, "pin_selector", source=source, name=name),
+        card_selector=_string(raw, "card_selector", source=source, name=name),
+        title_selector=_string(raw, "title_selector", source=source, name=name),
+    )
+
+
+def _pinboard_config(raw: dict, *, source: str) -> PinboardConfig:
+    name = PINBOARD
+    _reject_unknown(raw, _PINBOARD_KEYS, source=source, name=name)
+    notifications = _sub_table(raw, "notifications", source=source, name=name)
+    _reject_unknown(
+        notifications, frozenset({"screenshot", "pr"}),
+        source=source, name=f"{name}.notifications",
+    )
+    stages = {
+        key: _relative_path(raw, key, source=source, name=name)
+        for key in ("pins_dir", "archive_dir", "later_dir")
+    }
+    # The prompt tells the agent the three stages are sibling folders, and the
+    # site renders exactly one of them, so a source that scatters them would
+    # make the prompt untrue and could put the archive inside the glob base.
+    parents = {str(PurePosixPath(value).parent) for value in stages.values()}
+    if len(parents) != 1:
+        raise ConfigError(
+            f"{source}: 'pinboard.pins_dir', 'pinboard.archive_dir' and "
+            f"'pinboard.later_dir' must be sibling folders sharing one parent "
+            f"(got parents {sorted(parents)})"
+        )
+    if len(set(stages.values())) != 3:
+        raise ConfigError(
+            f"{source}: 'pinboard.pins_dir', 'pinboard.archive_dir' and "
+            f"'pinboard.later_dir' must be three different folders (got "
+            f"{sorted(stages.values())})"
+        )
+    screenshot = raw.get("screenshot")
+    if screenshot is not None and not isinstance(screenshot, dict):
+        raise ConfigError(
+            f"{source}: 'pinboard.screenshot' must be a table (got {screenshot!r})"
+        )
+    prefix = _string(raw, "branch_prefix", source=source, name=name)
     try:
-        with cfg_path.open("rb") as fh:
-            raw = tomllib.load(fh)
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"invalid TOML in {cfg_path}: {exc}") from exc
+        prefix = validate_branch_prefix(prefix)
+    except ConfigError as exc:
+        raise ConfigError(f"{source}: {exc}") from exc
+    return PinboardConfig(
+        owner=_string(raw, "owner", source=source, name=name),
+        site=_string(raw, "site", source=source, name=name),
+        remote=_string(raw, "remote", source=source, name=name),
+        default_branch=_string(raw, "default_branch", source=source, name=name),
+        branch_prefix=prefix,
+        git_name=_string(raw, "git_name", source=source, name=name),
+        git_email=_string(raw, "git_email", source=source, name=name),
+        pins_rel=stages["pins_dir"],
+        archive_rel=stages["archive_dir"],
+        later_rel=stages["later_dir"],
+        changelog_rel=_relative_path(raw, "changelog", source=source, name=name),
+        notifications=PinboardNotifications(
+            screenshot=_string(
+                notifications, "screenshot", source=source, name=f"{name}.notifications"
+            ),
+            pr=_string(notifications, "pr", source=source, name=f"{name}.notifications"),
+        ),
+        screenshot=(
+            _screenshot_config(screenshot, source=source) if screenshot is not None else None
+        ),
+    )
 
-    base = cfg_path.parent
-    paths = raw.get("paths", {})
-    site = raw.get("site", {})
 
-    def _root(env_name: str, toml_key: str) -> Path:
-        # env wins over TOML so render.yaml can set per-service absolute paths
-        # without editing the committed (local-dev) config.
-        val = os.environ.get(env_name) or paths.get(toml_key)
-        if not val:
-            raise ConfigError(f"{toml_key}: set [paths].{toml_key} in {cfg_path} or ${env_name}")
-        return _resolve(base, val)
+def validate_config(raw: dict, *, source: str = CONFIG_VAR) -> Config:
+    """Validate one parsed TOML source into a :class:`Config`. Pure.
 
-    site_root = _root("PARATROOPER_SITE_ROOT", "site_root")
-    inbox = _root("PARATROOPER_INBOX", "inbox")
-    content = site_root / "src" / "content"
-    # Only pins-on-display is inside the Astro glob base; the other two stages
-    # are siblings so they never render.
-    pins_dir = (
-        _resolve(base, paths["pins_dir"])
-        if "pins_dir" in paths
-        else content / "pins-on-display"
+    No environment is read, no path is touched and no credential is needed, so
+    this is the same call a deployer makes on a laptop and the service makes at
+    boot. ``source`` only names the thing being validated in error messages.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{source}: the configuration must be a TOML table")
+    # refused by name rather than as "unknown", because a [plain] table is the
+    # mistake someone makes by symmetry with [pinboard] and deserves the reason
+    if PLAIN in raw:
+        raise ConfigError(
+            f"{source}: there is no '[plain]' table. The plain profile is the "
+            "shared settings and nothing else; write profile = \"plain\" and stop."
+        )
+
+    schema = _required(raw, "schema", source=source, name="")
+    if isinstance(schema, bool) or not isinstance(schema, int):
+        raise ConfigError(f"{source}: 'schema' must be a whole number (got {schema!r})")
+    if schema != SCHEMA_VERSION:
+        raise ConfigError(
+            f"{source}: 'schema' is {schema}, and this build reads schema "
+            f"{SCHEMA_VERSION} only"
+        )
+
+    profile = _string(raw, "profile", source=source, name="")
+    if profile not in PROFILES:
+        raise ConfigError(
+            f"{source}: 'profile' must be one of {' or '.join(repr(p) for p in PROFILES)} "
+            f"(got {profile!r})"
+        )
+    # The profile is read before the unknown-key sweep so a pinboard key written
+    # at the top level can be answered with the profile it belongs to. Loose at
+    # the top it is not "unknown" in any useful sense: it is a key in the wrong
+    # place, or a key on the wrong deployment, and those want different fixes.
+    stray = sorted((set(raw) - _TOP_LEVEL_KEYS - {PINBOARD}) & _PINBOARD_KEYS)
+    if stray:
+        raise ConfigError(
+            f"{source}: {stray[0]!r} is a '[pinboard]' key, not a shared one"
+            + (
+                f", and this source says profile = {profile!r}, which has no site, "
+                "no repository and no pin stages"
+                if profile != PINBOARD
+                else ": write it under the '[pinboard]' table"
+            )
+        )
+    _reject_unknown(raw, _TOP_LEVEL_KEYS | {PINBOARD}, source=source, name="")
+
+    isolation = raw.get("shell_isolation", False)
+    if not isinstance(isolation, bool):
+        raise ConfigError(
+            f"{source}: 'shell_isolation' must be true or false (got {isolation!r})"
+        )
+
+    notifications = _sub_table(raw, "notifications", source=source, name="")
+    _reject_unknown(
+        notifications, frozenset({"reply", "error"}), source=source, name="notifications"
     )
-    archive_dir = (
-        _resolve(base, paths["archive_dir"])
-        if "archive_dir" in paths
-        else content / "pins-off-display"
-    )
-    later_dir = (
-        _resolve(base, paths["later_dir"])
-        if "later_dir" in paths
-        else content / "pins-for-later"
-    )
-    changelog = (
-        _resolve(base, paths["changelog"])
-        if "changelog" in paths
-        else site_root / "paratrooper-changelog.jsonl"
-    )
+
+    pinboard_table = raw.get(PINBOARD)
+    if profile == PINBOARD:
+        if pinboard_table is None:
+            raise ConfigError(
+                f"{source}: profile = \"pinboard\" needs a '[pinboard]' table "
+                "describing the site, its repository and its pin stages"
+            )
+        if not isinstance(pinboard_table, dict):
+            raise ConfigError(
+                f"{source}: '[pinboard]' must be a table (got {pinboard_table!r})"
+            )
+    elif pinboard_table is not None:
+        raise ConfigError(
+            f"{source}: '[pinboard]' belongs to profile = \"pinboard\"; this source "
+            f"says profile = {profile!r}"
+        )
 
     return Config(
-        inbox=inbox,
-        site_root=site_root,
-        pins_dir=pins_dir,
-        archive_dir=archive_dir,
-        later_dir=later_dir,
-        changelog=changelog,
-        remote=site.get("remote") or os.environ.get("PARATROOPER_REMOTE"),
-        default_branch=site.get("default_branch", DEFAULT_BRANCH),
-        branch_prefix=validate_branch_prefix(site.get("branch_prefix", DEFAULT_BRANCH_PREFIX)),
-        git_name=os.environ.get("PARATROOPER_GIT_NAME") or site.get("git_name", DEFAULT_GIT_NAME),
-        git_email=os.environ.get("PARATROOPER_GIT_EMAIL") or site.get("git_email", DEFAULT_GIT_EMAIL),
+        schema=schema,
+        profile=profile,
+        model=_string(raw, "model", source=source, name=""),
+        notifications=Notifications(
+            reply=_string(notifications, "reply", source=source, name="notifications"),
+            error=_string(notifications, "error", source=source, name="notifications"),
+        ),
+        uploads=Uploads(ttl_hours=_ttl_hours(raw, source=source)),
+        shell_isolation=isolation,
+        pinboard=(
+            _pinboard_config(pinboard_table, source=source) if profile == PINBOARD else None
+        ),
     )
+
+
+def parse_config(text: str, *, source: str = CONFIG_VAR) -> Config:
+    """TOML text in, a validated :class:`Config` out. Pure; the parse error and
+    the schema error are told apart so the reader knows whether the file is
+    malformed or merely wrong."""
+    try:
+        raw = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{source}: not valid TOML: {exc}") from exc
+    return validate_config(raw, source=source)
+
+
+def decode_config_value(encoded: str, *, source: str = CONFIG_VAR) -> Config:
+    """The base64 value in the environment, decoded and validated.
+
+    Each step has its own message naming the variable, because the five ways
+    this can fail want five different fixes: re-encode, re-encode as UTF-8, fix
+    the TOML, fix the key, or set the variable at all."""
+    stripped = encoded.translate(str.maketrans("", "", " \t\n\r\v\f"))
+    try:
+        data = base64.b64decode(stripped, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ConfigError(
+            f"${source} is not valid base64 ({exc}). It holds the configuration "
+            "TOML base64-encoded: `base64 < config/paratrooper.toml | tr -d '\\n'`"
+        ) from exc
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"${source} decoded to bytes that are not UTF-8 ({exc}): encode the "
+            "TOML text itself, not a compressed or re-encoded form of it"
+        ) from exc
+    return parse_config(text, source=f"${source}")
+
+
+def load_config(*, require_site_root: bool = False) -> Config:
+    """The running service's configuration, from the one environment route.
+
+    Reads exactly ``PARATROOPER_CONFIG_B64``. There is no path argument, no
+    default location, no search order and no second source: this function either
+    returns a fully validated configuration or raises :class:`ConfigError` with
+    one sentence saying which step failed and what to do about it.
+
+    ``require_site_root`` is the pinboard worker's boot, which cannot work
+    without a checkout to stand in. The web service leaves it false: it holds
+    the same configuration and never touches the site's folders.
+    """
+    if LEGACY_CONFIG_VAR in os.environ:
+        raise ConfigError(
+            f"${LEGACY_CONFIG_VAR} is still set, and this build does not read it. "
+            f"The configuration now arrives base64-encoded in ${CONFIG_VAR}, and a "
+            f"deployment carrying both is half-migrated: remove ${LEGACY_CONFIG_VAR} "
+            "from this service before starting this image."
+        )
+    encoded = os.environ.get(CONFIG_VAR, "")
+    if not encoded.strip():
+        raise ConfigError(
+            f"required environment variable ${CONFIG_VAR} is unset or empty: it "
+            "carries this deployment's whole configuration, base64-encoded. See "
+            "config/paratrooper.example.toml, or run "
+            "`python -m paratrooper.deploy push config/paratrooper.toml`."
+        )
+    config = decode_config_value(encoded)
+
+    inbox = os.environ.get(INBOX_VAR, "").strip()
+    if not inbox:
+        raise ConfigError(
+            f"required environment variable ${INBOX_VAR} is unset or empty: it "
+            "names this container's own staging folder for photos"
+        )
+    config = replace(config, inbox=Path(inbox).expanduser().resolve())
+
+    if config.pinboard is not None:
+        site_root = os.environ.get(SITE_ROOT_VAR, "").strip()
+        if not site_root and require_site_root:
+            raise ConfigError(
+                f"required environment variable ${SITE_ROOT_VAR} is unset or empty: "
+                "the pinboard worker edits a checkout of the site repository and "
+                "has nowhere to put one"
+            )
+        if site_root:
+            config = replace(
+                config,
+                pinboard=replace(
+                    config.pinboard, site_root=Path(site_root).expanduser().resolve()
+                ),
+            )
+    return config
 
 
 # --- Secrets (environment only) ---------------------------------------------

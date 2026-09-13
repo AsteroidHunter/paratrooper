@@ -1,10 +1,23 @@
-# Render Blueprint (checklist 5.1): web + worker + Key Value.
+# Render Blueprint: web + worker + Key Value.
 #
-# Secrets are `sync: false` — set them in the Render dashboard at first deploy
-# (5.3, [YOU]). The persistent disk holds the thread DB; image blobs ride the
-# shared Key Value (see web/inbox.py) since a Render disk attaches to only one
-# service. After deploy, branch-protect `main` to require a PR before merge
-# (5.4 / Phase 0.2, [YOU]).
+# Secrets are `sync: false` — set them in the Render dashboard at first deploy.
+# The persistent disk holds the thread DB; image blobs ride the shared Key Value
+# (see web/inbox.py) since a Render disk attaches to only one service. After
+# deploy, branch-protect `main` to require a PR before merge.
+#
+# CONFIGURATION. Both services read this deployment's whole configuration —
+# profile, model, notification texts, upload expiry and, on pinboard, the site's
+# own settings — out of ONE environment variable, PARATROOPER_CONFIG_B64, whose
+# value is the TOML source base64-encoded. It is declared `sync: false` here
+# because a Blueprint may declare a key without carrying its value; the value is
+# set by `python -m paratrooper.deploy push config/paratrooper.toml`, or by hand
+# from `base64 < config/paratrooper.toml | tr -d '\n'`. No configuration file
+# ships in either image and no path variable is read: there is one route and no
+# fallback, so a service either has this value or does not start.
+#
+# Only two machine paths stay environment values, because they are exactly what
+# differs between two containers reading one source: PARATROOPER_INBOX on both,
+# and PARATROOPER_SITE_ROOT on the pinboard worker.
 
 services:
   # --- web: socket + PWA + auth + uploads + threads + /publish ---
@@ -21,19 +34,15 @@ services:
       mountPath: /data
       sizeGB: 1
     envVars:
-      - key: PARATROOPER_CONFIG
-        value: config/paths.toml
+      - key: PARATROOPER_CONFIG_B64
+        sync: false  # the whole configuration, base64-encoded; see the header
       - key: PARATROOPER_INBOX
         value: /data/inbox  # thread DB derives as /data/threads.sqlite (persistent)
-      - key: PARATROOPER_SITE_ROOT
-        value: /data/_site_unused  # web doesn't use the checkout; satisfies load_config
       - key: REDIS_URL
         fromService:
           type: keyvalue
           name: paratrooper-kv
           property: connectionString
-      - key: PARATROOPER_REMOTE
-        sync: false
       - key: PARATROOPER_APP_TOKEN
         sync: false
       # Optional cost saver: set both and the web service suspends the worker
@@ -64,10 +73,10 @@ services:
     plan: standard  # ~2GB RAM for Chromium
     region: oregon
     envVars:
-      - key: PARATROOPER_CONFIG
-        value: config/paths.toml
+      - key: PARATROOPER_CONFIG_B64
+        sync: false  # the whole configuration, base64-encoded; see the header
       - key: PARATROOPER_SITE_ROOT
-        value: /app/site_checkout  # cloned on boot from PARATROOPER_REMOTE
+        value: /app/site_checkout  # cloned on boot from [pinboard].remote
       - key: PARATROOPER_INBOX
         value: /tmp/paratrooper-inbox  # transient: blobs materialized from Key Value
       - key: REDIS_URL
@@ -95,8 +104,6 @@ services:
       - key: PARATROOPER_GITHUB_APP_INSTALLATION_ID
         sync: false
       - key: PARATROOPER_GITHUB_APP_KEY_PEM
-        sync: false
-      - key: PARATROOPER_REMOTE
         sync: false
       - key: SPOTIFY_CLIENT_ID
         sync: false

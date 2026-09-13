@@ -11,7 +11,7 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
-from paratrooper.agent.config import Config
+from confighelpers import example_config, pinboard_config
 from paratrooper.web import ThreadCoordinator, ThreadStore
 from paratrooper.web.app import AppState, _relay_result, create_app
 from paratrooper.web.inbox import DiskInbox
@@ -51,17 +51,7 @@ class _IdleCoordinator:
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("PARATROOPER_APP_TOKEN", "tok")
-    cfg = Config(
-        inbox=tmp_path / "inbox",
-        site_root=tmp_path / "site",
-        pins_dir=tmp_path / "pins",
-        archive_dir=tmp_path / "arch",
-        later_dir=tmp_path / "later",
-        changelog=tmp_path / "cl.jsonl",
-        remote="https://github.com/AsteroidHunter/webpage.git",
-        default_branch="main",
-        branch_prefix="paratrooper",
-    )
+    cfg = pinboard_config(tmp_path, remote="https://github.com/AsteroidHunter/webpage.git")
     state = AppState(
         config=cfg,
         store=ThreadStore(tmp_path / "threads.sqlite"),
@@ -541,7 +531,7 @@ def test_relay_logs_persist_and_superseded_drop(tmp_path, monkeypatch, caplog):
     async def scenario():
         enq, intr, enqueued, _ = _recorders()
         coord = ThreadCoordinator(enq, intr, window=0.02)
-        state = AppState(config=None, store=ThreadStore(tmp_path / "t.sqlite"),
+        state = AppState(config=example_config(), store=ThreadStore(tmp_path / "t.sqlite"),
                          queue=object(), coordinator=coord, inbox=DiskInbox(tmp_path / "ib"))
         await coord.handle_message("d", "first", [])
         await asyncio.sleep(0.05)  # fires -> running

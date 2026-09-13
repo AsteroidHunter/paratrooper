@@ -2,11 +2,16 @@
 
 Per the architecture: after the pin folder is written on the feature branch, run
 ``astro build`` in the checkout, serve the built ``dist/`` over an ephemeral
-local HTTP server, open it with headless Chromium at a fixed desktop viewport,
-and capture the ``.cloth`` element (or, with ``pin_id``, click that polaroid
-open and capture the opened view). Building (rather than a persistent dev
-server) means each screenshot reflects exactly the committed state; the server
-is spun up per-capture and torn down.
+local HTTP server, open it with headless Chromium at the configured desktop
+viewport, and capture the configured board element (or, with ``pin_id``, click
+that polaroid open and capture the opened view). Building (rather than a
+persistent dev server) means each screenshot reflects exactly the committed
+state; the server is spun up per-capture and torn down.
+
+The viewport, the four selectors, the npm script name and the built output
+folder describe one particular site, so they arrive from the deployment's
+``[pinboard.screenshot]`` table. How the build is *run* does not: see
+``NPM_HARDENING`` below.
 
 Chromium runs with its own sandbox on: no ``--no-sandbox``. The flag used to be
 here because managed hosts were assumed to block the user namespaces that
@@ -36,8 +41,8 @@ import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-DEFAULT_VIEWPORT = (1440, 1440)  # square-ish desktop; the board is square
-DEFAULT_SELECTOR = ".cloth"
+from .config import ScreenshotConfig
+
 # The build executes the site's own config, plugins and package scripts — files
 # the agent edits and a pull request can change — so the environment it runs in
 # must hold nothing worth stealing. Only what a build genuinely needs crosses
@@ -58,14 +63,20 @@ FALLBACK_PATH = "/usr/local/bin:/usr/bin:/bin"
 # ``build`` script itself still runs.
 NPM_HARDENING = ("--ignore-scripts", "--node-options=", "--script-shell=/bin/sh")
 INSTALL_CMD = ("npm", "ci", "--no-audit", "--no-fund", *NPM_HARDENING)
-DEFAULT_BUILD_CMD = ("npm", "run", *NPM_HARDENING, "build")
-# The board's polaroid markup (src/pages/index.astro in the site repo): each
-# pin renders as a clickable ``.board-pin`` div carrying its id in
-# ``data-pin-id``; clicking it opens the ``.polaroid-overlay`` lightbox (a
-# fixed full-viewport backdrop) with the ``.polaroid-card`` zooming in.
-PIN_SELECTOR = ".board-pin"
-CARD_SELECTOR = ".polaroid-card"
-TITLE_SELECTOR = ".polaroid-title"
+
+
+def build_command(script: str) -> tuple[str, ...]:
+    """``npm run`` for one configured script, with the hardening flags ahead of
+    the script name where npm's own flags go.
+
+    Only the script NAME is configuration. The three flags are not: a command
+    line beats every ``.npmrc``, and the agent is free to write an ``.npmrc``
+    into the checkout, so ``--ignore-scripts``, the emptied node options and the
+    fixed script shell have to come from here rather than from a file an edit
+    could change."""
+    return ("npm", "run", *NPM_HARDENING, script)
+
+
 # breathing room around the opened card + title union: enough backdrop to read
 # as a lightbox close-up without shrinking the card back into a corner
 CLIP_PAD = 32
@@ -127,23 +138,34 @@ def _match_pin(requested: str, ids: list[str]) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
-async def _shoot_opened(page, pin_id: str, out_path: Path) -> None:
+async def _shoot_opened(
+    page,
+    pin_id: str,
+    out_path: Path,
+    *,
+    pin_selector: str,
+    card_selector: str,
+    title_selector: str,
+) -> None:
     """Click open the polaroid whose ``data-pin-id`` matches ``pin_id`` and
     capture it close up. The lightbox is a fixed full-viewport overlay, but
     the card fills only its middle — a viewport shot arrives mostly dim
     backdrop with a tiny card. Clip to the union box of the card and its
     floating title (a sibling on the backdrop, shown only on multi-song pins;
     empty means display:none, a zero rect), padded by ``CLIP_PAD`` of backdrop
-    so it still reads as a lightbox, clamped to the viewport."""
-    ids = await page.locator(PIN_SELECTOR).evaluate_all(
+    so it still reads as a lightbox, clamped to the viewport.
+
+    The three selectors describe one site's markup, so they arrive from
+    ``[pinboard.screenshot]`` rather than being written down here."""
+    ids = await page.locator(pin_selector).evaluate_all(
         "els => els.map(e => e.dataset.pinId ?? '')"
     )
     target = _match_pin(pin_id, ids)
     if target is None:
         known = ", ".join(i for i in ids if i) or "(none)"
         raise ScreenshotError(f"no polaroid matches {pin_id!r}; the board has: {known}")
-    await page.locator(PIN_SELECTOR).nth(ids.index(target)).click(timeout=15_000)
-    card = page.locator(CARD_SELECTOR)
+    await page.locator(pin_selector).nth(ids.index(target)).click(timeout=15_000)
+    card = page.locator(card_selector)
     await card.wait_for(state="visible", timeout=15_000)
     # the card zooms in via a CSS animation and its artwork is injected on
     # open — capture only once both have settled
@@ -151,7 +173,7 @@ async def _shoot_opened(page, pin_id: str, out_path: Path) -> None:
         "sel => { const c = document.querySelector(sel);"
         " return c && c.getAnimations().every(a => a.playState === 'finished')"
         " && [...c.querySelectorAll('img')].every(i => i.complete); }",
-        arg=CARD_SELECTOR,
+        arg=card_selector,
         timeout=15_000,
     )
     # measured only after the settle wait above: the zoom animation scales the
@@ -166,7 +188,7 @@ async def _shoot_opened(page, pin_id: str, out_path: Path) -> None:
         " const right = Math.min(innerWidth, Math.max(...rects.map(r => r.right)) + pad);"
         " const bottom = Math.min(innerHeight, Math.max(...rects.map(r => r.bottom)) + pad);"
         " return { x, y, width: right - x, height: bottom - y }; }",
-        [[CARD_SELECTOR, TITLE_SELECTOR], CLIP_PAD],
+        [[card_selector, title_selector], CLIP_PAD],
     )
     await page.screenshot(path=str(out_path), clip=clip)
 
@@ -175,31 +197,34 @@ async def screenshot_board(
     site_root: str | Path,
     out_path: str | Path,
     *,
-    viewport: tuple[int, int] = DEFAULT_VIEWPORT,
-    selector: str = DEFAULT_SELECTOR,
+    shape: ScreenshotConfig,
     build: bool = True,
-    build_cmd: tuple[str, ...] = DEFAULT_BUILD_CMD,
-    dist_subdir: str = "dist",
     pin_id: str | None = None,
 ) -> Path:
-    """Build the site (unless ``build=False``) and screenshot the ``.cloth``
-    element to ``out_path`` (PNG). With ``pin_id``, click that polaroid open
-    once the board is visible and capture a close-up of the opened view (the
-    card and its floating title, padded) instead; an unknown id raises
-    :class:`ScreenshotError` naming the ids that exist. Returns the path."""
+    """Build the site (unless ``build=False``) and screenshot the configured
+    board element to ``out_path`` (PNG). With ``pin_id``, click that polaroid
+    open once the board is visible and capture a close-up of the opened view
+    (the card and its floating title, padded) instead; an unknown id raises
+    :class:`ScreenshotError` naming the ids that exist. Returns the path.
+
+    ``shape`` is ``[pinboard.screenshot]``: the viewport, the four selectors,
+    the npm script name and the built output folder. Everything about how the
+    build is *run* stays in this module, so no configuration edit can drop the
+    hardening flags."""
     from playwright.async_api import async_playwright  # lazy: browser dep is heavy
 
     site_root = Path(site_root)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    viewport = shape.viewport
 
     if build:
         # fresh clones have no node_modules; install once per container life
         if not (site_root / "node_modules").is_dir():
             await _run(INSTALL_CMD, site_root)
-        await _run(build_cmd, site_root)
+        await _run(build_command(shape.build_script), site_root)
 
-    dist = site_root / dist_subdir
+    dist = site_root / shape.dist
     if not (dist / "index.html").is_file():
         raise ScreenshotError(f"no built board at {dist/'index.html'} (did the build run?)")
 
@@ -212,12 +237,17 @@ async def screenshot_board(
                     viewport={"width": viewport[0], "height": viewport[1]}
                 )
                 await page.goto(base_url, wait_until="networkidle")
-                element = page.locator(selector).first
+                element = page.locator(shape.selector).first
                 await element.wait_for(state="visible", timeout=15_000)
                 if pin_id is None:
                     await element.screenshot(path=str(out_path))
                 else:
-                    await _shoot_opened(page, pin_id, out_path)
+                    await _shoot_opened(
+                        page, pin_id, out_path,
+                        pin_selector=shape.pin_selector,
+                        card_selector=shape.card_selector,
+                        title_selector=shape.title_selector,
+                    )
             finally:
                 await browser.close()
     return out_path

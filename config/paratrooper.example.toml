@@ -1,0 +1,103 @@
+# Paratrooper deployment configuration — EXAMPLE. Placeholders only.
+#
+# Copy this to config/paratrooper.toml (git ignored, docker ignored), fill it in
+# with your own values, and deliver it to the services with:
+#
+#   python -m paratrooper.deploy check config/paratrooper.toml   # validate only
+#   python -m paratrooper.deploy push  config/paratrooper.toml   # set it on Render
+#
+# A running service never reads either file. It reads ONE environment variable,
+# PARATROOPER_CONFIG_B64, holding this text base64-encoded. To set it by hand:
+#
+#   base64 < config/paratrooper.toml | tr -d '\n'
+#
+# NO SECRETS LIVE HERE. Tokens, keys and credentials are environment variables
+# and nothing else; see .env.example. Two machine paths are environment values
+# too, because they differ between containers reading one source:
+# PARATROOPER_INBOX (both services) and PARATROOPER_SITE_ROOT (pinboard worker).
+#
+# Every key below is required unless its comment says otherwise. An unknown key,
+# a missing one, a wrong type, or a key belonging to the other profile is an
+# error at boot naming the key. TOML's root table ends at the first table
+# header, so the shared values are written as dotted keys and `profile` is the
+# last line before the profile's own table.
+
+schema = 1                                   # the only version this build accepts
+model = "claude-opus-4-8"                     # the model id the worker runs
+# A plain deployment usually runs a smaller model, e.g.
+#   model = "claude-sonnet-5"
+# Either profile takes either id: this is configuration, not a profile rule.
+
+# Push bodies both profiles use.
+notifications.reply = "Paratrooper replied."  # a reply with no text of its own
+notifications.error = "Paratrooper hit a problem."
+
+# How long a staged photo lives in the shared store, in whole hours, 1 to 168.
+# A photo only has to outlive the queue wait. Never infinite. On a free Key Value
+# tier, where the whole store is small, one hour is the sensible plain setting:
+#   uploads.ttl_hours = 1
+uploads.ttl_hours = 24
+
+# OPTIONAL, both profiles, absent means false. Ask the agent's CLI to strip
+# provider credentials from the subprocesses it opens. On Linux the CLI
+# implements that by running every shell under bubblewrap, and a host that
+# refuses the sandbox's first mount then has no shell at all — which is why this
+# is off by default and why turning it on surfaces the failure instead of
+# quietly reverting. Nothing inside a turn can change it.
+# shell_isolation = false
+
+profile = "pinboard"                          # "pinboard" or "plain"
+
+# ---------------------------------------------------------------------------
+# Present only under profile = "pinboard". A plain source is the shared lines
+# above and nothing else: no [pinboard] table, and there is no [plain] table.
+# A whole plain source is this short:
+#
+#   schema = 1
+#   model = "claude-sonnet-5"
+#   notifications.reply = "Paratrooper replied."
+#   notifications.error = "Paratrooper hit a problem."
+#   uploads.ttl_hours = 1
+#   profile = "plain"
+#
+# It runs a chat with photos, web search and page reading, plus the Spotify tool
+# when SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are set. No shell, no file
+# tools, no repository and no GitHub credential of any kind.
+# ---------------------------------------------------------------------------
+[pinboard]
+owner = "Your Name"                           # prompt, two tool descriptions, two denials
+site = "example.com"                          # the address the prompt names
+remote = "https://github.com/you/your-site.git"
+default_branch = "main"                       # never pushed to; the Publish merge target
+branch_prefix = "paratrooper"                 # one bare word: guard, prompt, Publish lookup
+
+# Commit identity on the checkout. GitHub renders a commit as a linked
+# contributor only when the email resolves to a real identity, so a GitHub App's
+# bot address is <bot-user-id>+<app-slug>[bot]@users.noreply.github.com.
+git_name = "your-app[bot]"
+git_email = "000000+your-app[bot]@users.noreply.github.com"
+
+# The three pin stages, relative to the site root and sharing ONE parent: the
+# prompt tells the agent they are sibling folders and only the first is
+# rendered. Absolute paths and '..' are refused.
+pins_dir = "src/content/pins-on-display"      # the live board
+archive_dir = "src/content/pins-off-display"  # the archive
+later_dir = "src/content/pins-for-later"      # staged for future publishing
+changelog = "paratrooper-changelog.jsonl"     # committed in the site repository
+
+# Push bodies only a pinboard can send.
+notifications.screenshot = "Paratrooper sent a board preview."
+notifications.pr = "Your update is ready to review and publish."
+
+# OPTIONAL. Absent means no screenshot_board tool and no screenshot lines in the
+# prompt. build_script is only the npm script NAME: the hardening flags that run
+# it (--ignore-scripts, emptied node options, a fixed script shell) stay in code,
+# so no edit to this file can drop them.
+[pinboard.screenshot]
+build_script = "build"
+dist = "dist"                                 # the built site, relative to the site root
+viewport = [1440, 1440]                       # the headless capture size, not the phone UI
+selector = ".board"                           # the element captured for a board shot
+pin_selector = ".board-pin"                   # one pin, carrying its id in data-pin-id
+card_selector = ".opened-card"                # the opened view a pin_id shot captures
+title_selector = ".opened-title"              # its floating title, if the site has one

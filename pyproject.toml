@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "paratrooper"
 version = "0.1.0"
-description = "Phone -> agent -> PR system that edits the theonetrueakash.com pinboard."
+description = "Phone chat with a configurable agent and optional pinboard tools."
 requires-python = ">=3.12"
 license = { file = "LICENSE.md" }
 authors = [{ name = "Akash Satpathy" }]
@@ -13,8 +13,9 @@ authors = [{ name = "Akash Satpathy" }]
 # The ranges below are the intent: the oldest version of each package whose
 # behaviour the code relies on. They are deliberately NOT the pin. What each
 # image actually installs is fixed by constraints-web.txt and
-# constraints-agent.txt, each a verbatim reading of the matching live service,
-# applied by the matching Dockerfile with `pip install -c`. A constraints file
+# constraints-agent.txt for the existing services, plus constraints-agent-plain.txt
+# for the plain worker's resolved dependency closure. Each Dockerfile applies its
+# own file with `pip install -c`. A constraints file
 # is the only place a transitive package can be pinned without being declared a
 # direct dependency, which it is not. PINNING.md says how to bump either side.
 #
@@ -44,6 +45,16 @@ agent = [
     "redis>=5.0",
     "pydantic>=2.0",  # the worker shares the web's wire-contract models
 ]
+# Plain worker: the same SDK, chat/photos, queue and optional Spotify lookup.
+# No direct GitHub or browser dependency. The SDK's MCP dependency still requires
+# PyJWT[crypto] transitively; the plain runtime does not use its GitHub auth path.
+agent-plain = [
+    "claude-agent-sdk==0.2.110",
+    "httpx>=0.27",
+    "redis>=5.0",
+    "pydantic>=2.0",
+    "pillow>=10.3",
+]
 # Web service: FastAPI socket/PWA host + queue + push.
 web = [
     "fastapi>=0.110",
@@ -54,6 +65,13 @@ web = [
     "websockets>=12.0",
     "redis>=5.0",
     "pywebpush>=2.0",
+]
+# The config delivery command (`python -m paratrooper.deploy`). A laptop's
+# dependencies, not a service's: neither image installs this extra, and nothing
+# a service imports reaches for httpx or yaml on its account.
+deploy = [
+    "httpx>=0.27",  # the Render API calls
+    "pyyaml>=6.0",  # reading the Render CLI's own config for a saved token
 ]
 dev = [
     "pytest>=8.0",

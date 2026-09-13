@@ -325,6 +325,12 @@ class AppState:
     queue: JobQueue
     coordinator: ThreadCoordinator
     inbox: InboxStore
+    # The banner wording, carried here rather than read out of the event table:
+    # what a notification says is this deployment's own words, and the table is
+    # about which kinds notify at all. Derived from the config below rather than
+    # passed in, so there is no way to build a state whose banners disagree with
+    # the configuration it is holding.
+    notification_texts: push.NotificationTexts = field(init=False)
     render: RenderControl | None = None  # set -> worker wakes/sleeps per job
     linger_s: float = field(default_factory=_linger_seconds)
     linger_task: asyncio.Task | None = None  # armed countdown to suspend (at most one)
@@ -335,6 +341,17 @@ class AppState:
     presence: dict[WebSocket, Presence] = field(default_factory=dict)
     relay_task: asyncio.Task | None = None
     push_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        pinboard = self.config.pinboard
+        self.notification_texts = push.NotificationTexts(
+            reply=self.config.notifications.reply,
+            error=self.config.notifications.error,
+            # only a pinboard produces a board preview or a pull request, so on
+            # any other profile these stay None and those kinds never notify
+            screenshot=pinboard.notifications.screenshot if pinboard else None,
+            pr=pinboard.notifications.pr if pinboard else None,
+        )
 
 
 def _note_presence(state: AppState, thread_id: str, ws: WebSocket, *, on_screen: bool) -> None:
@@ -554,7 +571,7 @@ async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
 async def _maybe_push(state: AppState, thread_id: str, kind: str, payload: object = None) -> None:
     """Deliver one notifying result without doing database work in send threads."""
     cfg = push.config()
-    text = push.notification_text(kind, payload)
+    text = push.notification_text(kind, state.notification_texts, payload)
     if cfg is None or text is None:
         return
 
@@ -702,15 +719,22 @@ async def _result_relay(state: AppState) -> None:
             await pubsub.aclose()
 
 
-def _lifespan(injected: AppState | None):
+def _lifespan(injected: AppState | None, _config: Config | None = None):
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if injected is not None:
             app.state.app_state = injected
             yield
             return
-        config = load_config()
-        store = ThreadStore(config.inbox.parent / "threads.sqlite")
+        # the configuration create_app already read, so this process decodes and
+        # validates the one variable exactly once and cannot end up with a
+        # different answer here than the one its routes were built from
+        config = _config if _config is not None else load_config()
+        logger.info(
+            "paratrooper web: profile=%s model=%s shell_isolation=%s uploads.ttl_hours=%d",
+            config.profile, config.model, config.shell_isolation, config.uploads.ttl_hours,
+        )
+        store = ThreadStore(config.require_inbox().parent / "threads.sqlite")
         # before anything can push: registrations made under a token that is no
         # longer the token do not survive the boot that notices
         await asyncio.to_thread(drop_subscriptions_on_token_change, store)
@@ -725,7 +749,9 @@ def _lifespan(injected: AppState | None):
         coordinator = ThreadCoordinator(enqueue_cb, interrupt_cb)
         state = AppState(
             config=config, store=store, queue=queue, coordinator=coordinator,
-            inbox=RedisInbox(queue.r),
+            # the configured expiry, written onto every staged blob. The worker
+            # builds its own reader with the same number out of the same source.
+            inbox=RedisInbox(queue.r, ttl=config.uploads.ttl_seconds),
             render=RenderControl.from_env(),  # None -> worker stays always-on
         )
         app.state.app_state = state
@@ -772,6 +798,12 @@ _diag = logging.getLogger("paratrooper.holddiag")
 def create_app(injected: AppState | None = None) -> FastAPI:
     install_service_logging()
     install_log_redaction()
+    # The profile has to be known here, not only inside the lifespan, because one
+    # route exists only on one profile and a route is registered when the app is
+    # built. Read once: an injected state brings its own configuration (tests and
+    # local harnesses), and a real boot decodes the one variable here and hands it
+    # to the lifespan rather than reading it twice.
+    config = injected.config if injected is not None else load_config()
     # The interactive docs and the schema they are built from are off. They take
     # no token, so in the deployed service they were an unauthenticated index of
     # every route, its method and its request shape — a map handed to anyone who
@@ -779,7 +811,7 @@ def create_app(injected: AppState | None = None) -> FastAPI:
     # that was written against these routes by hand.
     app = FastAPI(
         title="Paratrooper",
-        lifespan=_lifespan(injected),
+        lifespan=_lifespan(injected, config),
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -792,7 +824,16 @@ def create_app(injected: AppState | None = None) -> FastAPI:
     async def health() -> dict:
         # Render injects RENDER_GIT_COMMIT; 'dev' locally. Ground truth for
         # "which code is actually serving" — no more guessing.
-        return {"ok": True, "version": os.environ.get("RENDER_GIT_COMMIT", "dev")[:7]}
+        #
+        # The profile rides along because it is the one thing the phone cannot
+        # work out for itself and needs before it presents a board preview or a
+        # Publish button. Public, like the rest of this response: it names a
+        # deployment shape, not a person and not a credential.
+        return {
+            "ok": True,
+            "version": os.environ.get("RENDER_GIT_COMMIT", "dev")[:7],
+            "profile": st().config.profile,
+        }
 
     # The sign-in screen's one question, and the only honest answer to it: is
     # this token the token? No body, no state, no DB — require_token settles it
@@ -906,49 +947,62 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         meta = await asyncio.to_thread(_page_meta, st().store, rows)
         return {"messages": [_frame(seq, m, meta) for seq, m in rows]}
 
-    @app.post("/api/publish", dependencies=[Depends(require_token)])
-    async def publish(req: PublishRequest) -> JSONResponse:
-        state = st()
-        remote = state.config.remote
-        if not remote:
-            raise HTTPException(status_code=400, detail="site remote not configured")
-        try:
-            owner, repo = owner_repo_from_remote(remote)
-            token = merge_token()
-            if req.pr.strip():
-                number = parse_pr_number(req.pr)
-                # only the NUMBER came off the phone, so nothing about the
-                # branch behind it is known until it is read back from GitHub
-                found = await asyncio.to_thread(
-                    get_pull_request, owner, repo, number, token=token
+    # Publish merges a pull request into a site repository, so it exists only
+    # where there is one. On any other profile the route is never registered: no
+    # handler, no token check, no merge credential read, nothing to reach. A
+    # request to it gets whatever the router says about an address with no route
+    # on it, which is a bare 404, or a 405 on a service that also serves the built
+    # phone app, because the static mount below then matches the path and refuses
+    # the method. The feature is unreachable from the other end too: a plain
+    # session has no tool that could produce the pull request a tap would merge.
+    if config.is_pinboard:
+
+        @app.post("/api/publish", dependencies=[Depends(require_token)])
+        async def publish(req: PublishRequest) -> JSONResponse:
+            state = st()
+            # the registration above is the gate; this is the same answer said
+            # once more where the value is actually used
+            pinboard = state.config.require_pinboard()
+            remote = pinboard.remote
+            if not remote:
+                raise HTTPException(status_code=400, detail="site remote not configured")
+            try:
+                owner, repo = owner_repo_from_remote(remote)
+                token = merge_token()
+                if req.pr.strip():
+                    number = parse_pr_number(req.pr)
+                    # only the NUMBER came off the phone, so nothing about the
+                    # branch behind it is known until it is read back from GitHub
+                    found = await asyncio.to_thread(
+                        get_pull_request, owner, repo, number, token=token
+                    )
+                else:
+                    # pr rows persisted before 6da5b3c carry an empty payload —
+                    # resolve the one open agent PR instead of 409ing on it
+                    found = await asyncio.to_thread(
+                        find_open_pr, owner, repo,
+                        token=token, branch_prefix=pinboard.branch_prefix,
+                    )
+                    number = int(found["number"])
+                # the agent's own branch, on the configured repository, at the
+                # commit it is sitting on right now — anything else refuses below
+                head_sha = check_publishable(
+                    found, owner=owner, repo=repo, branch_prefix=pinboard.branch_prefix
                 )
-            else:
-                # pr rows persisted before 6da5b3c carry an empty payload —
-                # resolve the one open agent PR instead of 409ing on it
-                found = await asyncio.to_thread(
-                    find_open_pr, owner, repo,
-                    token=token, branch_prefix=state.config.branch_prefix,
+                result = await asyncio.to_thread(
+                    merge_pull_request, owner, repo, number, token=token, sha=head_sha
                 )
-                number = int(found["number"])
-            # the agent's own branch, on the configured repository, at the
-            # commit it is sitting on right now — anything else refuses below
-            head_sha = check_publishable(
-                found, owner=owner, repo=repo, branch_prefix=state.config.branch_prefix
+            except PublishError as exc:
+                # surface WHY (already merged, conflicts, bad PR ref) instead of a 500
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            published = ThreadEvent(
+                thread_id=req.thread_id, role="system",
+                payload=f"published PR #{number}", ts=_now(), kind="published",
             )
-            result = await asyncio.to_thread(
-                merge_pull_request, owner, repo, number, token=token, sha=head_sha
-            )
-        except PublishError as exc:
-            # surface WHY (already merged, conflicts, bad PR ref) instead of a 500
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        published = ThreadEvent(
-            thread_id=req.thread_id, role="system",
-            payload=f"published PR #{number}", ts=_now(), kind="published",
-        )
-        seq = await asyncio.to_thread(state.store.add_message, published)
-        # live confirmation on the phone, not just a row in history
-        await _send_to_sockets(state, req.thread_id, {"seq": seq, **published.model_dump()})
-        return JSONResponse({"merged": True, "sha": result.get("sha")})
+            seq = await asyncio.to_thread(state.store.add_message, published)
+            # live confirmation on the phone, not just a row in history
+            await _send_to_sockets(state, req.thread_id, {"seq": seq, **published.model_dump()})
+            return JSONResponse({"merged": True, "sha": result.get("sha")})
 
     @app.get("/api/config", dependencies=[Depends(require_token)])
     async def site_config() -> dict:
@@ -960,8 +1014,11 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         now renders a link only for an address inside this repository, and this
         is where that address comes from — configuration on the server, not the
         message. Null when no remote is configured, which the phone reads as
-        "link nothing"."""
-        remote = st().config.remote
+        "link nothing", and null on any profile that has no repository at all."""
+        pinboard = st().config.pinboard
+        if pinboard is None:
+            return {"repo_url": None}
+        remote = pinboard.remote
         try:
             owner, repo = owner_repo_from_remote(remote or "")
         except PublishError:

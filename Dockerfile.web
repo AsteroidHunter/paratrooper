@@ -31,7 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # SPDX publishes, so the build cannot produce metadata without it.
 COPY pyproject.toml LICENSE.md constraints-web.txt ./
 COPY src ./src
-COPY config ./config
+# No config folder ships in the image. The whole configuration arrives at run
+# time in PARATROOPER_CONFIG_B64, base64-encoded, and a copy baked in here would
+# be a second source able to disagree with it.
 # The ranges in pyproject.toml say what the code needs; constraints-web.txt
 # says which version of each the running service actually holds, transitive
 # packages included. Without it every rebuild re-resolved the ranges against

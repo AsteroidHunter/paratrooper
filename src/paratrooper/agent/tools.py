@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC
 from typing import Any
 
@@ -34,7 +34,7 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from ..placement import NewItem, check_overlaps, place_pin, sanity_check
 from . import github, images, pins, screenshot, spotify
-from .config import OPENED_ASSET, PREVIEW_ASSET, Config
+from .config import OPENED_ASSET, PREVIEW_ASSET, Config, PinboardConfig
 from .hooks import base_denial, normalize_prefix, push_denial
 from .memory import Changelog, ChangelogEntry
 from .siterepo import SiteRepo
@@ -53,6 +53,10 @@ NO_CREDENTIAL = (
 class ToolContext:
     config: Config
     changelog: Changelog
+    # the pinboard block, resolved once. Every handler below is a pinboard
+    # handler, so reaching through ``config.pinboard`` at each call site would
+    # be the same None-check written twelve times.
+    pinboard: PinboardConfig = field(init=False)
     # The head branch of the work in flight, set by push_branch and
     # open_pull_request — bookkeeping for the worker's "pr" event and JobResult,
     # not a gate. The agent branches in its own shell; a purely conversational
@@ -71,6 +75,12 @@ class ToolContext:
     # result mid-job. None on offline/CLI runs — post_update degrades to a no-op.
     emit_update: Any = None
 
+    def __post_init__(self) -> None:
+        # loud here rather than as an AttributeError inside a tool handler: a
+        # tool server built from a config with no pinboard block is a dispatch
+        # bug, and it should say so at construction.
+        self.pinboard = self.config.require_pinboard()
+
 
 def _ok(payload: dict) -> dict:
     return {"content": [{"type": "text", "text": json.dumps(payload)}]}
@@ -83,12 +93,12 @@ def _err(message: str) -> dict:
 def _site_repo(ctx: ToolContext) -> SiteRepo:
     """The worker's own git handle on the checkout, carrying the credential."""
     return SiteRepo(
-        ctx.config.site_root,
-        default_branch=ctx.config.default_branch,
+        ctx.pinboard.site_root,
+        default_branch=ctx.pinboard.default_branch,
         github_token=ctx.github_token,
-        remote=ctx.config.remote,
-        git_name=ctx.config.git_name,
-        git_email=ctx.config.git_email,
+        remote=ctx.pinboard.remote,
+        git_name=ctx.pinboard.git_name,
+        git_email=ctx.pinboard.git_email,
     )
 
 
@@ -97,7 +107,7 @@ def _agent_branch_violation(ctx: ToolContext, branch: str) -> str | None:
     credential actually is. The shell hook says the same thing about a
     ``git push``; this is the copy that matters, because this is the one with a
     token behind it."""
-    prefix = normalize_prefix(ctx.config.branch_prefix)
+    prefix = normalize_prefix(ctx.pinboard.branch_prefix)
     if not branch:
         return "name the branch to push, e.g. " + f"{prefix}<slug>"
     if not branch.startswith(prefix) or len(branch) == len(prefix):
@@ -105,8 +115,78 @@ def _agent_branch_violation(ctx: ToolContext, branch: str) -> str | None:
     return None
 
 
+def wants_screenshot_tool(config: Config) -> bool:
+    """One predicate, read by the tool server AND by the prompt's conditional
+    block, so the tool the agent is told about is exactly the tool it has."""
+    return config.pinboard is not None and config.pinboard.screenshot is not None
+
+
+def wants_spotify_tool(spotify_creds: tuple[str, str] | None) -> bool:
+    """Spotify name search is optional on every profile. Links resolve without
+    credentials, but the tool as a whole is dropped when there are none, rather
+    than registered and failing at call time."""
+    return spotify_creds is not None
+
+
+def spotify_handler(creds: tuple[str, str] | None):
+    """The ``resolve_spotify`` tool, built once here for both profiles.
+
+    It is the one custom tool a plain session can have, and it needs nothing
+    except the credential pair: no checkout, no changelog, no pin stages. Written
+    as a module-level factory rather than inside :func:`build_tool_server` so the
+    plain server registers the same implementation instead of a second copy of
+    it that could drift.
+    """
+
+    @tool("resolve_spotify", "Resolve a Spotify track link or song name to an embed URL. "
+          "Args: query, optional is_link(bool).", {"query": str, "is_link": bool})
+    async def resolve_spotify_tool(args: dict) -> dict:
+        query = args["query"]
+        is_link = bool(args.get("is_link", "open.spotify.com" in query))
+
+        def _run() -> dict:
+            if is_link:
+                r = spotify.resolve_link(query)
+            else:
+                if not creds:
+                    raise RuntimeError("Spotify credentials not configured for name search")
+                r = spotify.resolve_name(query, *creds)
+            return {"embed": r.embed, "track_id": r.track_id, "title": r.title, "artist": r.artist}
+
+        try:
+            return _ok(await anyio.to_thread.run_sync(_run))
+        except Exception as exc:
+            return _err(f"resolve_spotify failed: {exc}")
+
+    return resolve_spotify_tool
+
+
+def build_plain_tool_server(spotify_creds: tuple[str, str] | None):
+    """The plain profile's custom tools: Spotify when it is configured, and
+    nothing else ever.
+
+    Returns ``(None, [])`` when there is no credential, because a server with no
+    tools on it is a server the session would declare and the CLI would start for
+    no reason. Nothing here builds a :class:`ToolContext`: the pinboard handlers
+    need a site root, a changelog and a pin layout, and a plain deployment has
+    none of the three, so it must not be constructing objects that require them.
+    """
+    if not wants_spotify_tool(spotify_creds):
+        return None, []
+    handler = spotify_handler(spotify_creds)
+    server = create_sdk_mcp_server(name=SERVER_NAME, version="0.1.0", tools=[handler])
+    return server, [f"mcp__{SERVER_NAME}__{handler.name}"]
+
+
 def build_tool_server(ctx: ToolContext):
-    """Construct the in-process MCP server + the ``allowed_tools`` names."""
+    """Construct the in-process MCP server + the ``allowed_tools`` names.
+
+    Two handlers are conditional: ``resolve_spotify`` needs credentials and
+    ``screenshot_board`` needs the ``[pinboard.screenshot]`` table. Both are
+    dropped from the registration list rather than registered-and-broken, so the
+    names the session declares are the names that work.
+    """
+    owner = ctx.pinboard.owner
 
     @tool("place_pin", "Compute non-overlapping {position,size} for a pin. Args: pin_id, "
           "aspect (asset width/height), optional rotation, optional sample(bool).",
@@ -117,13 +197,13 @@ def build_tool_server(ctx: ToolContext):
         rotation = float(args.get("rotation", 0.0))
 
         def _run() -> dict:
-            board = pins.load_board(ctx.config.pins_dir, exclude=pin_id)
+            board = pins.load_board(ctx.pinboard.pins_dir, exclude=pin_id)
             sil = None
-            preview = pins.preview_path(ctx.config.pins_dir, pin_id)
+            preview = pins.preview_path(ctx.pinboard.pins_dir, pin_id)
             # a frameless cutout placing itself uses exact-silhouette feasibility
             data = None
             try:
-                data = pins.read_pin(ctx.config.pins_dir, pin_id)
+                data = pins.read_pin(ctx.pinboard.pins_dir, pin_id)
             except pins.PinError:
                 data = None
             if data and data.get("frameless") and preview.is_file():
@@ -144,7 +224,7 @@ def build_tool_server(ctx: ToolContext):
           "bounds. No args.", {})
     async def check_overlaps_tool(args: dict) -> dict:
         def _run() -> dict:
-            report = check_overlaps(pins.load_board(ctx.config.pins_dir))
+            report = check_overlaps(pins.load_board(ctx.pinboard.pins_dir))
             return {
                 "ok": report.ok,
                 "overlaps": report.overlaps,
@@ -156,9 +236,9 @@ def build_tool_server(ctx: ToolContext):
 
     def _stage_dir(stage: str):
         dirs = {
-            "on-display": ctx.config.pins_dir,
-            "off-display": ctx.config.archive_dir,
-            "for-later": ctx.config.later_dir,
+            "on-display": ctx.pinboard.pins_dir,
+            "off-display": ctx.pinboard.archive_dir,
+            "for-later": ctx.pinboard.later_dir,
         }
         if stage not in dirs:
             raise ValueError(f"unknown stage {stage!r} (use on-display|off-display|for-later)")
@@ -170,7 +250,7 @@ def build_tool_server(ctx: ToolContext):
           {"inbox_key": str, "pin_id": str, "opened": bool, "stage": str})
     async def process_image_tool(args: dict) -> dict:
         def _run() -> dict:
-            src = ctx.config.inbox / args["inbox_key"]
+            src = ctx.config.require_inbox() / args["inbox_key"]
             asset = OPENED_ASSET if args.get("opened") else PREVIEW_ASSET
             stage_dir = _stage_dir(args.get("stage", "on-display"))
             dest = pins.pin_folder(stage_dir, args["pin_id"]) / asset
@@ -188,25 +268,8 @@ def build_tool_server(ctx: ToolContext):
         except Exception as exc:
             return _err(f"process_image failed: {exc}")
 
-    @tool("resolve_spotify", "Resolve a Spotify track link or song name to an embed URL. "
-          "Args: query, optional is_link(bool).", {"query": str, "is_link": bool})
-    async def resolve_spotify_tool(args: dict) -> dict:
-        query = args["query"]
-        is_link = bool(args.get("is_link", "open.spotify.com" in query))
-
-        def _run() -> dict:
-            if is_link:
-                r = spotify.resolve_link(query)
-            else:
-                if not ctx.spotify_creds:
-                    raise RuntimeError("Spotify credentials not configured for name search")
-                r = spotify.resolve_name(query, *ctx.spotify_creds)
-            return {"embed": r.embed, "track_id": r.track_id, "title": r.title, "artist": r.artist}
-
-        try:
-            return _ok(await anyio.to_thread.run_sync(_run))
-        except Exception as exc:
-            return _err(f"resolve_spotify failed: {exc}")
+    # the one tool both profiles can have, from the one factory above
+    resolve_spotify_tool = spotify_handler(ctx.spotify_creds)
 
     @tool("move_pin", "Move a pin folder between stages. Archive = to='off-display'; "
           "publish a staged pin = to='on-display' (then place_pin + update its JSON). "
@@ -218,9 +281,9 @@ def build_tool_server(ctx: ToolContext):
             dst_dir = _stage_dir(to)
             src_dir = next(
                 (d for s, d in (
-                    ("on-display", ctx.config.pins_dir),
-                    ("off-display", ctx.config.archive_dir),
-                    ("for-later", ctx.config.later_dir),
+                    ("on-display", ctx.pinboard.pins_dir),
+                    ("off-display", ctx.pinboard.archive_dir),
+                    ("for-later", ctx.pinboard.later_dir),
                 ) if d != dst_dir and pins.pin_folder(d, pin_id).is_dir()),
                 None,
             )
@@ -265,7 +328,7 @@ def build_tool_server(ctx: ToolContext):
         ctx.branch = branch
         return _ok(payload)
 
-    @tool("open_pull_request", "Open the pull request for a branch you pushed, so Akash "
+    @tool("open_pull_request", f"Open the pull request for a branch you pushed, so {owner} "
           "gets his Publish button. Call it every time you push, including on a branch "
           "that already has one: it hands back the open pull request instead of making "
           "a second. Args: branch, title, body.",
@@ -278,9 +341,9 @@ def build_tool_server(ctx: ToolContext):
         # the base is the site's default branch, always. It is read out of the
         # arguments only so that a request naming a different one is refused
         # rather than quietly retargeted.
-        base = str(args.get("base") or ctx.config.default_branch).strip()
-        if base != ctx.config.default_branch:
-            return _err(base_denial(base, ctx.config.default_branch))
+        base = str(args.get("base") or ctx.pinboard.default_branch).strip()
+        if base != ctx.pinboard.default_branch:
+            return _err(base_denial(base, ctx.pinboard.default_branch, owner))
         title = str(args.get("title", "")).strip()
         if not title:
             return _err("open_pull_request needs a title")
@@ -325,7 +388,7 @@ def build_tool_server(ctx: ToolContext):
             return {
                 "pull_requests": github.open_pull_requests(
                     owner, name, token=ctx.github_token,
-                    branch_prefix=normalize_prefix(ctx.config.branch_prefix),
+                    branch_prefix=normalize_prefix(ctx.pinboard.branch_prefix),
                 )
             }
 
@@ -334,20 +397,22 @@ def build_tool_server(ctx: ToolContext):
         except Exception as exc:
             return _err(f"list_pull_requests failed: {exc}")
 
-    @tool("screenshot_board", "Build the site and screenshot the board (.cloth). Optional "
+    @tool("screenshot_board", "Build the site and screenshot the board. Optional "
           "pin_id: click that polaroid open and capture the opened view instead. Returns "
           "a PNG path.", {"pin_id": str})
     async def screenshot_board_tool(args: dict) -> dict:
         try:
             pin_id = str(args.get("pin_id") or "").strip() or None
-            out = ctx.config.site_root / "_paratrooper_board.png"
-            path = await screenshot.screenshot_board(ctx.config.site_root, out, pin_id=pin_id)
+            out = ctx.pinboard.site_root / "_paratrooper_board.png"
+            path = await screenshot.screenshot_board(
+                ctx.pinboard.site_root, out, shape=ctx.pinboard.screenshot, pin_id=pin_id
+            )
             ctx.last_screenshot = str(path)
             return _ok({"screenshot": str(path)})
         except Exception as exc:
             return _err(f"screenshot_board failed: {exc}")
 
-    @tool("post_update", "Text Akash ONE short interim message right now, while the job "
+    @tool("post_update", f"Text {owner} ONE short interim message right now, while the job "
           "is still running (your final reply is separate and stays the single closing "
           "message). Only for: a brief ack before starting a multi-step board change, or "
           "a heads-up when something failed or is taking longer. Args: text.",
@@ -393,12 +458,12 @@ def build_tool_server(ctx: ToolContext):
         place_pin_tool,
         check_overlaps_tool,
         process_image_tool,
-        resolve_spotify_tool,
+        *([resolve_spotify_tool] if wants_spotify_tool(ctx.spotify_creds) else []),
         move_pin_tool,
         push_branch_tool,
         open_pull_request_tool,
         list_pull_requests_tool,
-        screenshot_board_tool,
+        *([screenshot_board_tool] if wants_screenshot_tool(ctx.config) else []),
         post_update_tool,
         fetch_history_tool,
         append_changelog_tool,

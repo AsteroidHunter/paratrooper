@@ -13,7 +13,7 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
-from paratrooper.agent.config import Config
+from confighelpers import pinboard_config
 from paratrooper.web.app import AppState, _enqueue_job, create_app
 from paratrooper.web.db import ThreadStore
 from paratrooper.web.inbox import DiskInbox
@@ -59,17 +59,7 @@ def _event(thread_id, role, payload, kind=None):
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("PARATROOPER_APP_TOKEN", "tok")
-    cfg = Config(
-        inbox=tmp_path / "inbox",
-        site_root=tmp_path / "site",
-        pins_dir=tmp_path / "pins",
-        archive_dir=tmp_path / "arch",
-        later_dir=tmp_path / "later",
-        changelog=tmp_path / "cl.jsonl",
-        remote="https://github.com/AsteroidHunter/webpage.git",
-        default_branch="main",
-        branch_prefix="paratrooper",
-    )
+    cfg = pinboard_config(tmp_path, remote="https://github.com/AsteroidHunter/webpage.git")
     state = AppState(
         config=cfg,
         store=ThreadStore(tmp_path / "threads.sqlite"),

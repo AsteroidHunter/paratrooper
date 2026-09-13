@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
-import jwt
 
 from .config import Config, ConfigError, GitHubApp, take_github_app
 from .github import GITHUB_API, GitHubError, owner_repo
@@ -59,6 +58,14 @@ def build_jwt(app: GitHubApp, *, issued_at: int | None = None) -> str:
     """The App's own assertion, signed with its private key. It authenticates
     the App to GitHub just long enough to ask for an installation token; it is
     not a repository credential and cannot touch one."""
+    # imported here, not at the top, for the same reason `cryptography` is
+    # imported inside config._github_app_key: PyJWT arrives with the pinboard
+    # worker's own dependency extra, and the plain worker installs neither it nor
+    # a GitHub App to use it with. The plain worker still imports this module
+    # transitively (worker_runner reaches it for the boot clone it never makes),
+    # so the import has to be where the signing is rather than at the door.
+    import jwt
+
     moment = int(issued_at if issued_at is not None else time.time())
     try:
         return jwt.encode(
@@ -142,23 +149,24 @@ def installation_token(
     failed turn rather than a quiet degrade."""
     global _held
     app = take_github_app()
-    if not config.remote:
+    pinboard = config.require_pinboard()
+    if not pinboard.remote:
         raise ConfigError(
-            "no site repository is configured (set PARATROOPER_REMOTE): an "
-            "installation token is minted for one named repository, so there is "
-            "nothing to ask for without it"
+            "no site repository is configured (set [pinboard].remote in the "
+            "configuration source): an installation token is minted for one named "
+            "repository, so there is nothing to ask for without it"
         )
     if _held is None or _held.stale(now=now):
         try:
-            _, repo = owner_repo(config.remote)
+            _, repo = owner_repo(pinboard.remote)
         except GitHubError as exc:
             # a local rehearsal pointed at a bare repository lands here. Raised
             # as a ConfigError so the caller meets the one exception type it is
             # documented to expect from a worker that has no usable credential,
             # rather than an unhandled one that fails every turn.
             raise ConfigError(
-                f"PARATROOPER_REMOTE does not name a GitHub repository "
-                f"({config.remote!r}): an installation token is minted for one "
+                f"[pinboard].remote does not name a GitHub repository "
+                f"({pinboard.remote!r}): an installation token is minted for one "
                 "named repository, and this whole mechanism is GitHub's"
             ) from exc
         _held = mint_installation_token(app, repositories=[repo], client=client)

@@ -59,7 +59,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .config import DEFAULT_GIT_EMAIL, DEFAULT_GIT_NAME
 from .screenshot import ENV_PASSTHROUGH, FALLBACK_PATH
 
 
@@ -173,8 +172,8 @@ class SiteRepo:
         default_branch: str = "main",
         github_token: str | None = None,
         remote: str | None = None,
-        git_name: str = DEFAULT_GIT_NAME,
-        git_email: str = DEFAULT_GIT_EMAIL,
+        git_name: str,
+        git_email: str,
     ) -> None:
         self.root = Path(site_root)
         self.default_branch = default_branch
@@ -264,9 +263,10 @@ class SiteRepo:
         host the checkout last named"."""
         if not self._remote:
             raise GitError(
-                "no site repository is configured (set PARATROOPER_REMOTE): the "
-                "worker authenticates only against the repository it is configured "
-                "with, never against whatever the checkout calls 'origin'"
+                "no site repository is configured (set [pinboard].remote in the "
+                "configuration source): the worker authenticates only against the "
+                "repository it is configured with, never against whatever the "
+                "checkout calls 'origin'"
             )
         return self._remote
 
@@ -338,7 +338,8 @@ class SiteRepo:
         if not (self.root / ".git").is_dir():
             if not self._remote:
                 raise GitError(
-                    "cannot clone site repo: no remote configured (set PARATROOPER_REMOTE)"
+                    "cannot clone site repo: no remote configured (set "
+                    "[pinboard].remote in the configuration source)"
                 )
             self.root.parent.mkdir(parents=True, exist_ok=True)
             # The clone authenticates, so it gets the same no-hooks rule as the

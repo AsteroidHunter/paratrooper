@@ -15,4 +15,11 @@ site_checkout/
 *.sqlite3
 .env
 .env.*
+# the real configuration never enters an image: the services read it out of
+# PARATROOPER_CONFIG_B64 at run time and from nowhere else. The pattern also
+# covers a local plain source sitting beside it.
+config/paratrooper.toml
+config/paratrooper*.toml
+!config/paratrooper.example.toml
+*.local
 .DS_Store
