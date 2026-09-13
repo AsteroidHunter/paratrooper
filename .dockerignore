@@ -22,4 +22,5 @@ config/paratrooper.toml
 config/paratrooper*.toml
 !config/paratrooper.example.toml
 *.local
+**/*.local
 .DS_Store
