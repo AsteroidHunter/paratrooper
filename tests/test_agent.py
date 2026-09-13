@@ -563,7 +563,16 @@ def test_worker_image_no_longer_carries_the_github_cli():
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # the [dev] extra never enters an image, so nothing pins it
-PINNED_EXTRAS = {"agent": "constraints-agent.txt", "web": "constraints-web.txt"}
+PINNED_EXTRAS = {
+    "agent": "constraints-agent.txt",
+    "agent-plain": "constraints-agent-plain.txt",
+    "web": "constraints-web.txt",
+}
+IMAGE_CONSTRAINTS = {
+    "Dockerfile.web": "constraints-web.txt",
+    "Dockerfile.worker": "constraints-agent.txt",
+    "Dockerfile.worker-plain": "constraints-agent-plain.txt",
+}
 
 
 def _requirement_name(spec: str) -> str:
@@ -597,7 +606,7 @@ def _project_dependencies() -> tuple[list[str], dict[str, list[str]]]:
 
 def test_every_dependency_an_image_installs_is_pinned_exactly():
     """A range says what the code needs; it does not say what gets installed.
-    Every package either image resolves, the declared ones here and the
+    Every package an image resolves, the declared ones here and the
     transitive ones the freeze carries, has to have exactly one version named
     in that image's constraints file, or a rebuild is free to pick another."""
     base, extras = _project_dependencies()
@@ -608,34 +617,45 @@ def test_every_dependency_an_image_installs_is_pinned_exactly():
             assert name in pins, f"{name} is declared for [{extra}] but unpinned in {filename}"
 
 
-def test_the_two_extras_keep_their_own_pin_sets():
+def test_the_image_extras_keep_their_own_pin_sets():
     """One shared list would let the web image's resolution reach a version
     chosen for the worker's tree. The files are separate so each image's pins
     are a reading of that image, and the packages that are genuinely only one
     service's stay only one service's."""
     web = _constraint_versions("constraints-web.txt")
     agent = _constraint_versions("constraints-agent.txt")
+    plain = _constraint_versions("constraints-agent-plain.txt")
     assert "playwright" not in web and "claude-agent-sdk" not in web
     assert "fastapi" not in agent and "pywebpush" not in agent
+    assert not {"playwright", "greenlet", "pyee", "fastapi", "pywebpush",
+                "pygithub", "github3-py", "ghapi"} & plain.keys()
+    # These remain required through the SDK's MCP dependency. Omitting their
+    # pins would let installation silently choose new versions, not remove them.
+    assert {"pyjwt", "cryptography", "numpy", "scipy", "pillow"} <= plain.keys()
     # where they do overlap they must agree, or the shared base deps would mean
     # two different numpys depending on which image you asked
-    for name in set(web) & set(agent):
-        assert web[name] == agent[name], f"{name}: web {web[name]} vs agent {agent[name]}"
+    from itertools import combinations
+
+    sets = {extra: _constraint_versions(path) for extra, path in PINNED_EXTRAS.items()}
+    for left, right in combinations(sets, 2):
+        for name in sets[left].keys() & sets[right].keys():
+            assert sets[left][name] == sets[right][name], f"{name}: {left} vs {right}"
 
 
 def test_the_sdk_pin_lives_in_pyproject_not_only_the_constraints():
     """The SDK is the one version whose reason is worth reading beside it, so it
     stays an `==` in pyproject.toml as well as a line in the constraints."""
     _, extras = _project_dependencies()
-    assert "claude-agent-sdk==0.2.110" in extras["agent"]
-    assert _constraint_versions("constraints-agent.txt")["claude-agent-sdk"] == "0.2.110"
+    for extra in ("agent", "agent-plain"):
+        assert "claude-agent-sdk==0.2.110" in extras[extra]
+        assert _constraint_versions(PINNED_EXTRAS[extra])["claude-agent-sdk"] == "0.2.110"
 
 
 def test_no_image_ships_a_config_folder():
     """The configuration arrives at run time in one variable. A copy baked into
     an image would be a second source able to disagree with it, and the old
     bundled default is exactly what the migration has to step around."""
-    for name in ("Dockerfile.web", "Dockerfile.worker"):
+    for name in IMAGE_CONSTRAINTS:
         dockerfile = (REPO_ROOT / name).read_text()
         assert "COPY config" not in dockerfile, name
     assert not (REPO_ROOT / "config" / "paths.toml").exists()
@@ -680,26 +700,45 @@ def test_the_env_example_documents_the_one_route_and_drops_the_removed_names():
     assert "base64" in example
 
 
-def test_both_images_pin_their_base_by_digest():
+def test_all_images_pin_their_base_by_digest():
     """A tag is a moving pointer. `python:3.12-slim` meant one image the day the
     service last deployed and means another after the next upstream rebuild, so
     the tag alone makes the floor of both images a function of the date."""
-    for name in ("Dockerfile.web", "Dockerfile.worker"):
+    python_bases = set()
+    for name in IMAGE_CONSTRAINTS:
         for line in (REPO_ROOT / name).read_text().splitlines():
             if not line.startswith("FROM "):
                 continue
             assert re.search(r"@sha256:[0-9a-f]{64}", line), f"{name}: undigested base: {line}"
+            if line.startswith("FROM python:"):
+                python_bases.add(line.split()[1])
+    assert len(python_bases) == 1
 
 
-def test_both_images_install_under_their_constraints():
+def test_all_images_install_under_their_constraints():
     """The constraints files only bind if the build passes them. Dropping the
     `-c` leaves the pins sitting in the repo doing nothing, which looks exactly
     like being pinned right up until the versions move."""
-    for name, filename in (("Dockerfile.web", "constraints-web.txt"),
-                           ("Dockerfile.worker", "constraints-agent.txt")):
+    for name, filename in IMAGE_CONSTRAINTS.items():
         dockerfile = (REPO_ROOT / name).read_text()
         assert re.search(rf"pip install[^\n]*-c {re.escape(filename)}", dockerfile), name
         assert filename in dockerfile.split("RUN pip install")[0], f"{name}: {filename} not copied"
+
+
+def test_plain_image_keeps_the_wrapper_and_isolation_without_site_tools():
+    dockerfile = (REPO_ROOT / "Dockerfile.worker-plain").read_text()
+    commands = re.sub(r"(?m)^\s*#.*$", "", dockerfile)
+    assert not re.search(r"\b(git|nodejs|npm|npx|gh|playwright|chromium)\b", commands)
+    assert '".[agent-plain]"' in commands
+    assert "ca-certificates bubblewrap socat" in commands
+    assert "docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint" in commands
+    assert 'ENTRYPOINT ["worker-entrypoint"]' in commands
+    assert "USER app" in commands
+    assert "--uid 1000" in commands and "chown -R app:app" in commands
+    assert "chmod 0700 /home/app/.ssh" in commands
+    assert "PARATROOPER_INBOX=/tmp/paratrooper-inbox" in commands
+    assert "site_checkout" not in commands
+    assert "LICENSE.md" in commands
 
 
 def test_the_phone_app_builds_from_its_lock_file():
@@ -3966,11 +4005,15 @@ def test_a_plain_job_reports_an_sdk_error_result_as_failure(tmp_path, monkeypatc
     assert events[0]["payload"] == result.error
 
 
-def test_importing_the_worker_needs_no_jwt_and_no_browser():
-    """The plain image carries neither PyJWT nor a browser driver, so importing
-    the worker modules must not need either. Both are made unimportable in a
-    subprocess and the import still has to succeed."""
+@pytest.mark.parametrize("with_spotify", [False, True])
+def test_importing_the_worker_needs_no_jwt_and_no_browser(with_spotify):
+    """The plain runtime must not enter either optional pinboard import path.
+
+    PyJWT remains an installed SDK dependency, but both modules are made
+    unimportable here. Importing and executing a plain turn still succeeds.
+    """
     script = (
+        f"with_spotify = {with_spotify!r}\n"
         "import builtins, sys\n"
         "real = builtins.__import__\n"
         "blocked = ('jwt', 'playwright')\n"
@@ -3983,9 +4026,42 @@ def test_importing_the_worker_needs_no_jwt_and_no_browser():
         "import paratrooper.web.worker_runner as r\n"
         "assert w.PLAIN_TOOLS == ['WebSearch', 'WebFetch']\n"
         "assert r.Worker is not None\n"
-        "from paratrooper.agent.tools import build_plain_tool_server\n"
-        "server, names = build_plain_tool_server(('id', 'secret'))\n"
-        "assert names == ['mcp__paratrooper__resolve_spotify']\n"
+        "import asyncio, dataclasses, tempfile\n"
+        "from pathlib import Path\n"
+        "from claude_agent_sdk import ResultMessage\n"
+        "from paratrooper.agent.config import validate_config, ConfigError\n"
+        "config = validate_config({\n"
+        "    'schema': 1, 'profile': 'plain', 'model': 'test-model',\n"
+        "    'notifications': {'reply': 'Reply', 'error': 'Error'},\n"
+        "    'uploads': {'ttl_hours': 1},\n"
+        "})\n"
+        "def no_spotify():\n"
+        "    raise ConfigError('not configured')\n"
+        "def forbidden(*a, **k):\n"
+        "    raise AssertionError('plain turn entered a pinboard path')\n"
+        "w.configure_auth = lambda mode: 'api'\n"
+        "w.spotify_credentials = (lambda: ('id', 'secret')) if with_spotify else no_spotify\n"
+        "for name in ('installation_token', 'build_tool_server',\n"
+        "             '_refresh_checkout', 'SiteRepo'):\n"
+        "    setattr(w, name, forbidden)\n"
+        "async def fake_session(*, prompt, options):\n"
+        "    messages = [message async for message in prompt]\n"
+        "    assert len(messages) == 1\n"
+        "    assert messages[0]['message']['content'] == [{'type': 'text', 'text': 'hello'}]\n"
+        "    expected = ['WebSearch', 'WebFetch']\n"
+        "    if with_spotify: expected.append('mcp__paratrooper__resolve_spotify')\n"
+        "    assert options.allowed_tools == expected\n"
+        "    assert bool(options.mcp_servers) == with_spotify\n"
+        "    yield ResultMessage(subtype='success', duration_ms=1, duration_api_ms=1,\n"
+        "                        is_error=False, num_turns=1, session_id='fake', result='reply')\n"
+        "w.run_session = fake_session\n"
+        "with tempfile.TemporaryDirectory() as scratch:\n"
+        "    config = dataclasses.replace(config, inbox=Path(scratch) / 'inbox')\n"
+        "    events = []\n"
+        "    result = asyncio.run(w.run_job(w.Job(job_id='j', thread_id='t', text='hello'),\n"
+        "                                   config=config, on_event=events.append))\n"
+        "    assert result.status == 'done' and result.result_text == 'reply'\n"
+        "    assert [event['kind'] for event in events] == ['done']\n"
         "print('ok')\n"
     )
     root = Path(__file__).resolve().parents[1]

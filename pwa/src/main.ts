@@ -191,7 +191,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.148"; // The plain profile runs: a chat with photos, web search and page reading, and the app hides the board artifacts on a deployment that has none
+const APP_VERSION = "0.3.149"; // Add the plain worker image and its dependency pins
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.

@@ -10,14 +10,16 @@ one on purpose.
 | --- | --- | --- |
 | Python packages, web image | `constraints-web.txt` | verbatim `pip freeze` of the live web service |
 | Python packages, worker image | `constraints-agent.txt` | verbatim `pip freeze` of the live worker |
+| Python packages, plain worker | `constraints-agent-plain.txt` | Linux/Python 3.12 resolution constrained to the full worker's existing versions; no deployed-image freeze yet |
 | Claude Agent SDK | `pyproject.toml` (`==`) | pinned there because the reason is written there: the SDK bundles the CLI whose env scrub the worker depends on |
 | Phone-app packages | `pwa/package-lock.json` | `Dockerfile.web` installs with `npm ci`, which refuses to drift from the lock |
-| Base images | `FROM ...@sha256:` in both Dockerfiles | tag and date named in the comment above each |
+| Base images | `FROM ...@sha256:` in all three Dockerfiles | tag and date named in the comment above each |
 | Chromium | follows `playwright` in `constraints-agent.txt` | the browser revision is chosen by the pinned package, not fetched loose |
 
 `pyproject.toml` keeps ranges, not pins. The ranges are the intent, the floor
 each package has to clear for the code to work. The constraints files are the
-fact, the version each image actually holds today. Keeping them apart means a
+resolved versions used by each image. The existing service files are live
+readings; the new plain worker's file is a verified resolver result. Keeping them apart means a
 range never has to be edited to record a routine version move, and a transitive
 package can be pinned without being promoted to a direct dependency it is not.
 
@@ -53,8 +55,31 @@ change what is running and read it again.
 4. Run the suites: `.venv/bin/python -m pytest -q tests/` and, in `pwa/`,
    `npm test`, `npx tsc --noEmit`, `npm run build`.
 
-The web and worker sets are kept in separate files on purpose. Neither image
-should be able to gain the other's packages by way of a shared list.
+The web, full worker and plain worker keep separate files. Shared versions agree
+pairwise, while each file contains only that image's dependency closure.
+
+## The plain worker's dependency closure
+
+The `agent-plain` extra omits the full worker's direct GitHub and browser
+dependencies. The pinned SDK still requires MCP, and [MCP 1.30.0 requires
+PyJWT with its crypto extra](https://pypi.org/pypi/mcp/1.30.0/json). PyJWT,
+cryptography and their dependencies therefore remain pinned in the plain image.
+The plain runtime does not enter the GitHub authentication path; subprocess
+tests run a plain turn with both `jwt` and `playwright` made unimportable.
+
+The initial plain closure was resolved for Linux/Python 3.12 under
+`constraints-agent.txt`, preserving all shared versions. It contains 35 packages,
+including the existing NumPy, SciPy and Pillow base dependencies, and excludes
+Playwright, greenlet and pyee. Check closure without installing an image:
+
+```sh
+uv pip compile --python-version 3.12 --python-platform x86_64-unknown-linux-gnu \
+    --extra agent-plain -c constraints-agent-plain.txt pyproject.toml
+```
+
+The resolved package/version set must exactly match `constraints-agent-plain.txt`.
+This does not verify an image build, image size or runtime memory. Record those
+separately when a Docker daemon or an authorized deployment build is available.
 
 ## Bumping a base image
 
@@ -73,8 +98,8 @@ curl -sI -H "Authorization: Bearer $TOKEN" \
      "https://registry-1.docker.io/v2/$REPO/manifests/$TAG" | grep -i docker-content-digest
 ```
 
-Write the new digest into both `FROM` lines that use it and update the date in
-the comment beside each. Both Dockerfiles use the same Python base, so the two
+Write the new digest into every `FROM` line that uses it and update the date in
+the comment beside each. All three Dockerfiles use the same Python base, so they
 move together.
 
 ## What still floats
@@ -99,14 +124,14 @@ Pinning has an edge, and this is where it currently sits.
   command line does not reach into that environment; only the `PIP_CONSTRAINT`
   environment variable does. It is build-time only and none of it ships in the
   image, so it is noted rather than fixed.
-- **pip itself.** Both images use the pip that ships in the base image, 25.0.1
+- **pip itself.** All images use the pip that ships in the base image, 25.0.1
   today, so it moves only when the base image digest moves.
 
 ## The test that guards this
 
 `tests/test_agent.py` holds the check. It fails if a dependency in
 `pyproject.toml` has no exact version in the matching constraints file, if a
-`FROM` line in either Dockerfile carries a bare tag instead of a digest, if a
+`FROM` line in any Dockerfile carries a bare tag instead of a digest, if a
 Dockerfile installs without its `-c`, or if the phone-app build stops using
 `npm ci`. It is there so that adding a package and forgetting to pin it is a
 red suite rather than a surprise on a rebuild months later.

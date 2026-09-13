@@ -1,0 +1,32 @@
+# Plain chat worker. The SDK bundles its native CLI; this image has no site
+# build, git, Node, browser driver or Chromium installation.
+# Same Python 3.12.14 / Debian 13 base as the full worker. See PINNING.md.
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+
+# Keep the shared, optional subprocess isolation setting usable. Whether a
+# platform permits its namespace mounts remains a deployment acceptance check.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates bubblewrap socat \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml LICENSE.md constraints-agent-plain.txt ./
+COPY src ./src
+RUN pip install --no-cache-dir -c constraints-agent-plain.txt -e ".[agent-plain]"
+
+# The inbox and CLI settings are the only runtime write locations this worker
+# needs. The unlocked, key-only account and private .ssh match the full worker.
+ENV HOME=/home/app
+ENV PARATROOPER_INBOX=/tmp/paratrooper-inbox
+RUN useradd --create-home --home-dir /home/app --uid 1000 --shell /bin/bash app \
+    && usermod -p '*' app \
+    && mkdir -p /home/app/.claude /home/app/.ssh /tmp/paratrooper-inbox \
+    && chown -R app:app /home/app /tmp/paratrooper-inbox \
+    && chmod 0700 /home/app/.ssh
+
+# The same 0600 secret handoff and environment removal as the full worker.
+COPY docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint
+RUN chmod 0755 /usr/local/bin/worker-entrypoint
+USER app
+ENTRYPOINT ["worker-entrypoint"]
