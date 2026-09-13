@@ -1113,10 +1113,13 @@ function renderChat(): void {
   // desktop paths (scrollbar drags land pointerdown on the thread), touch is
   // marked in the peek handlers below. Every real gesture also takes the
   // scroll back from a running tap glide — the user always wins mid-flight.
-  thread.addEventListener("wheel", () => {
+  thread.addEventListener("wheel", (e) => {
     cancelGlide();
     noteThreadGesture();
-    claimResumeEra(); // a wheel tick is travel asked for: no bare contact here
+    // a tick with vertical travel in it is a scroll of his asked for, and
+    // there is no bare contact on this path at all; a purely sideways tick
+    // (trackpad, tilt wheel) asks this thread for nothing and buys nothing
+    if (e.deltaY !== 0) claimResumeEra();
     armSpring(null, false); // a wheel has no finger: the springs anchor on the viewport centre
   }, { passive: true });
   thread.addEventListener("pointerdown", (e) => {
@@ -1240,10 +1243,14 @@ function renderChat(): void {
         if (peeking) thread.classList.add("dragging");
       }
       if (!peeking) {
-        // the app's own verdict on this gesture: it is scrolling the thread,
-        // not peeking sideways at the time rail. That is the travel a resume
-        // era's claim is bought with, from the first decided drag on.
-        claimResumeEra();
+        // The verdict above rules out a LEFTWARD peek and nothing else, so a
+        // sideways swipe the other way falls through here having scrolled the
+        // thread by nothing. The travel a resume era's claim is bought with is
+        // travel down the axis this thread scrolls on, counted from the touch
+        // that opened the gesture and over the same 10 px the direction is
+        // decided on (short first drags included). A drag that only starts
+        // scrolling later claims then, through its credited scroll event.
+        if (Math.abs(dy) >= 10) claimResumeEra();
         return;
       }
       e.preventDefault(); // we own this gesture; vertical scroll stays native
@@ -2076,7 +2083,7 @@ let springMotionAt = -Infinity;
 // do with them.
 let springAppWroteAt = -Infinity;
 
-// "The app just moved this scroller." Call it in the same statement group as
+// "The app wrote to this scroller." Call it in the same statement group as
 // the write, before the scroll event it fires can arrive.
 //
 // Inside the RESUME WINDOW it does one thing more, and only there. The window
@@ -2085,13 +2092,17 @@ let springAppWroteAt = -Infinity;
 // scrolling takes it back (claimResumeEra), so from that moment every write the
 // app makes in the window can reach an ARMED field. An announced pin carries
 // its own reference across the jump and needs nothing here (`carried`, which is
-// springReseat's call). The rest of the window's writes move the VIEW to a new
-// end and have no reference to carry — the bottom pin, which the window itself
-// forces INSTANT where a settled session would ride it, the tail settle, the
-// boot and cache re-pins — so the field is dropped exactly as the hold-off
-// drops it, and his next travelling touch re-opens it on a fresh baseline
-// (springFinger). Outside the window nothing changes: those same pins keep the
-// relationship with the springs they have always had.
+// springReseat's call, and the bottom pin's when the jump did not happen: an
+// instant pin asked for on the end the view is already on clamps to the offset
+// it started from, and a write that moved the scroller by nothing leaves the
+// reference it had good). The rest of the window's writes move the VIEW to a
+// new end and have no reference to carry — the bottom pin where it really does
+// move, which the window itself forces INSTANT where a settled session would
+// ride it, the tail settle, the boot and cache re-pins — so the field is
+// dropped exactly as the hold-off drops it, and his next travelling touch
+// re-opens it on a fresh baseline (springFinger). Outside the window nothing
+// changes: those same pins keep the relationship with the springs they have
+// always had.
 function noteSpringAppWrite(carried = false): void {
   springAppWroteAt = performance.now();
   if (!carried && resumeWindowOpen()) springFreeze();
@@ -2426,17 +2437,20 @@ function noteThreadGesture(): void {
 //
 // So the three acts that carry travel say it instead, and each one is evidence
 // the app already had:
-//   a wheel tick            — a wheel event IS a scroll request, there is no
-//                             bare contact on that path at all
-//   a decided vertical drag — the peek handler's own direction verdict, after
-//                             its 10 px threshold: not a peek, so it is a
-//                             scroll of his (short first drags included)
+//   a travelling wheel tick — a nonzero deltaY: a wheel event IS a scroll
+//                             request, and a purely sideways tick asks this
+//                             thread for nothing
+//   a decided vertical drag — the peek handler's own direction verdict and
+//                             10 px of travel down the axis this thread
+//                             scrolls on: not a peek and not a sideways swipe,
+//                             so it is a scroll of his (short first drags
+//                             included)
 //   a credited scroll event — springown.ts's answer to "whose motion is this",
 //                             which is what covers a scrollbar drag, a coast he
 //                             threw, and a finger recovering mid-drag
-// The app's own writes can never buy it: a credited event is by definition not
-// one of them, and a credited event cannot open an era either, so a platform
-// restore claims nothing.
+// Declared app writes cannot buy it, and platform restoration cannot open a
+// claim without a live gesture era. Unannounced movement during a live era
+// remains indistinguishable from user motion (springown.ts).
 function claimResumeEra(): void {
   resumeClaimed = true;
 }
@@ -2539,8 +2553,9 @@ function scrollToBottom(force = false): void {
   // messages in a settled session ride
   const instant = suppressAnim || force || pinInstant || resumeWindowOpen();
   if (instant) {
+    const beforePin = t.scrollTop;
     t.scrollTo({ top, behavior: "auto" });
-    noteSpringAppWrite();
+    noteSpringAppWrite(t.scrollTop === beforePin); // no movement keeps the spring reference intact
     scrollGhostWrite("bottom", top); // TEMP DIAGNOSTIC (scroll-ghost)
     return;
   }

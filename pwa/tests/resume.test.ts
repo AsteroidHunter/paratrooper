@@ -582,7 +582,12 @@ describe("wiring — the landing holds, then rides, and its own motion cannot di
     // browser's smooth scroll (retired on 2026-09-02: one such scroll put the
     // engine into dropping the page's offset writes around every box change
     // for the rest of the session)
-    expect(pin).toContain('if (instant) {\n    t.scrollTo({ top, behavior: "auto" });');
+    // the branch's first act is reading the offset it is about to write over,
+    // so the pin can tell a jump from a pin asked for on the end the view is
+    // already on; the write itself follows it and is the native instant one
+    expect(pin).toContain(
+      'if (instant) {\n    const beforePin = t.scrollTop;\n    t.scrollTo({ top, behavior: "auto" });',
+    );
     expect(pin).not.toContain('"smooth"');
     expect(pin).toContain("startGlide()");
     // the replay path's own era is scoped and restored; the window asks for

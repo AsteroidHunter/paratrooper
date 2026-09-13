@@ -332,7 +332,12 @@ describe("main.ts wiring: every write of the app's own is declared as one", () =
   // after it say which obligation each writer has. What the difference DOES to
   // the rows is proved as behaviour in springpins.test.ts; nothing here is
   // evidence about an armed field.
-  const WRITE = /^[^\n]*?\b\w+\.scrollTop\s*(?:=|\+=|-=)[^\n]*$|^[^\n]*?\.scrollTo\(\{[^\n]*$/gm;
+  // ASSIGNMENT, not comparison: `=` only where no second `=` follows it, so a
+  // writer that reads its own offset back to ask whether the write moved
+  // anything (`t.scrollTop === before`) is not counted as a write itself. `==`,
+  // `===` and `!==` are reads; `=`, `+=` and `-=` are the three ways this file
+  // moves a scroller, and .scrollTo({...}) is the fourth.
+  const WRITE = /^[^\n]*?\b\w+\.scrollTop\s*(?:=(?!=)|\+=|-=)[^\n]*$|^[^\n]*?\.scrollTo\(\{[^\n]*$/gm;
   const lines = src.split("\n");
 
   /** every scroll-offset write in main.ts, with the code that follows it (the
@@ -395,7 +400,18 @@ describe("main.ts wiring: every write of the app's own is declared as one", () =
       const at = src.indexOf(from);
       expect(at, name).toBeGreaterThan(-1);
       const body = src.slice(at, src.indexOf(to, at));
-      expect(body, name).toContain("noteSpringAppWrite()");
+      // Declared, and declared honestly. A write that lands the view somewhere
+      // new declares with no argument at all. The one exception is a pin that
+      // can be ASKED FOR on the end it is already on — the bottom pin, whose
+      // instant write clamps to the position it started from — and it may say
+      // so only from the offset read BACK off the scroller after the write.
+      // A bare `noteSpringAppWrite(true)` here would be the lie this guard
+      // exists to catch: a reference claimed across a jump that did happen.
+      const notes = body.match(/noteSpringAppWrite\([^)]*\)/g) ?? [];
+      expect(notes, name).not.toEqual([]);
+      for (const note of notes) {
+        expect(note, name).toMatch(/^noteSpringAppWrite\((?:|\w+\.scrollTop === \w+)\)$/);
+      }
       expect(body, name).not.toContain("springReseat(");
     }
   });
