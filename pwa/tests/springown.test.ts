@@ -375,6 +375,37 @@ describe("the reader's own momentum is still taken back", () => {
     expect(since(d, again).spring).toBeGreaterThan(4);
   });
 
+  it("a stall longer than the run gap ends an unarmed coast's eligibility too", () => {
+    // The same arithmetic, with no write in it at all, and the reason the
+    // module says a LIMIT rather than a recovery guarantee. The era needs
+    // evidence inside the run gap; a main thread that stops delivering for
+    // longer than that leaves the next event outside it, and there is nothing
+    // left to credit. The app's own scroll-jank diagnostics suspect exactly
+    // this at the history drain. It fails toward no springs, which is the safe
+    // direction, and it bites only while the field is already UNARMED.
+    const d = thread();
+    flick(d);
+    d.blocked = true;
+    run(d, 200, -COAST * FRAME, "engine");
+    d.blocked = false;
+    d.now += SPRING_RUN_GAP_MS + 20; // the main thread stops: no frames, no events
+    const at = d.now;
+    run(d, 400, -COAST * FRAME, "engine"); // the momentum is still running
+    expect(since(d, at)).toEqual({ spring: 0, px: 0 });
+  });
+
+  it("... and a stall inside the gap does not: the same coast comes back", () => {
+    const d = thread();
+    flick(d);
+    d.blocked = true;
+    run(d, 200, -COAST * FRAME, "engine");
+    d.blocked = false;
+    d.now += 60; // a shorter stall, still inside the run gap
+    const at = d.now;
+    run(d, 400, -COAST * FRAME, "engine");
+    expect(since(d, at).spring).toBeGreaterThan(8);
+  });
+
   it("THE COST, stated: while the app writes every frame, a genuine coast is NOT taken back", () => {
     // Nothing here can tell a coast from a burst of writes at the same cadence,
     // and the springs stay handed back rather than guess. This is the price of

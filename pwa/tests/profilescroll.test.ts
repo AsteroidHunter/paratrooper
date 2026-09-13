@@ -38,6 +38,7 @@ function sourceBetween(start: string, end: string): string {
 
 let profileBlock = "";
 let springBlock = "";
+let gestureBlock = "";
 
 // `profile`, `springField` and `springDirty` are lexical bindings, invisible
 // from outside the script even though the functions beside them are not. The
@@ -74,6 +75,15 @@ beforeAll(async () => {
       "// --- scrolling: glide when following the tail",
     ),
     "springseam.ts",
+  );
+  // the thread's own gesture note and the resume claim beside it: the seam
+  // calls both, so they are cut rather than stubbed
+  gestureBlock = await ts(
+    sourceBetween(
+      "// Every genuine gesture ON THE THREAD passes through here",
+      "// Re-establish when the THREAD BOX resizes",
+    ),
+    "gesture.ts",
   );
 });
 
@@ -264,6 +274,7 @@ function harness(options: HarnessOptions = {}) {
     springCreditsReader,
     springTakesCoastBack,
     performance: { now: () => now },
+    lastGestureAt: 0, // the intent clock the follow flip reads (not this seam's)
     threadTouching: false, // a finger is on the thread (the touch handlers own it)
     lastScrollAt: 0, // stamped by the scroll listener AFTER the seam, as below
     resumeClaimed: false, // a gesture has taken this resume era back
@@ -291,7 +302,7 @@ function harness(options: HarnessOptions = {}) {
     probe().dirty = true;
   };
 
-  runInNewContext(`${profileBlock}\n${springBlock}\n${PROBE}`, context);
+  runInNewContext(`${profileBlock}\n${springBlock}\n${gestureBlock}\n${PROBE}`, context);
 
   function probe(): {
     profile: string | null;
@@ -339,16 +350,18 @@ function harness(options: HarnessOptions = {}) {
     },
     /** a finger arrives on or leaves the glass */
     touching: (v: boolean) => void (context.threadTouching = v),
-    /** the hold-off: any motion the app owns is in flight (springBlocked) */
-    block: (v: boolean) => void (context.landingHold = v),
+    /** the hold-off: any motion the app owns is in flight (springBlocked).
+        A seat move, which stands OUTSIDE the reader's resume claim, so a test
+        that has already scrolled for real still meets a real hold-off. */
+    block: (v: boolean) => void (context.shiftAnims = v ? [{}] : []),
     /** what every app write in main.ts says beside itself */
     note: () => call<[]>("noteSpringAppWrite")(),
     /** touchend: the finger leaves, and its momentum (if any) is still his */
     lift: () => call<[]>("liftSpring")(),
     /** the clock the seam reads, so a test can let a motion go quiet */
     wait: (ms: number) => void (now += ms),
-    /** noteThreadGesture's one effect on this seam: the era is his and live */
-    gesture: () => void (probe().motionAt = now),
+    /** a gesture act on the thread, through the app's own one place for it */
+    gesture: () => call<[]>("noteThreadGesture")(),
     /** the era's clock and the app's own write clock, as the seam holds them */
     era: () => probe().motionAt,
     wroteAt: () => probe().appWroteAt,

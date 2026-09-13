@@ -491,9 +491,21 @@ function setLiftPad(next: number): void {
   liftPad = next;
   const st = t.scrollTop; // before the padding lands, so the shift is off the old offset
   app.style.setProperty("--lift-pad", `${next}px`);
+  // the padding is the THREAD's own (styles.css .thread), so every row's
+  // offsetTop moves by the delta and the springs' row table is stale from here
+  springDirty = true;
+  // Content-preserving, exactly as keepView is, so the springs are given the
+  // reference and not only the note. It is the CLOSE that needs it: shell.ts
+  // drops the .kb class at the viewport's own edge and only hands this landing
+  // over when the lift's transition ends (liftLanded -> onLiftLanding), so by
+  // the time the padding comes back off the springs' hold-off has already let
+  // go and a finger on the thread can be armed. The open lands with .kb still
+  // applied, where the field is frozen and there is no reference to carry. The
+  // delta announced is the one the scroller took, read back off it: padShift
+  // floors at the top of the range and the engine floors it at the end.
   const top = padShift(st, delta);
   t.scrollTop = top; // same frame as the padding, so the two paint as one
-  noteSpringAppWrite();
+  springReseat(t.scrollTop - st); // the reference across it, and the note
   scrollGhostWrite("lift-pad", top); // TEMP DIAGNOSTIC (scroll-ghost)
   holdDiagRecord("lift-pad", { pad: Math.round(next), from: Math.round(st), to: Math.round(top) });
 }
@@ -1104,6 +1116,7 @@ function renderChat(): void {
   thread.addEventListener("wheel", () => {
     cancelGlide();
     noteThreadGesture();
+    claimResumeEra(); // a wheel tick is travel asked for: no bare contact here
     armSpring(null, false); // a wheel has no finger: the springs anchor on the viewport centre
   }, { passive: true });
   thread.addEventListener("pointerdown", (e) => {
@@ -1220,11 +1233,19 @@ function renderChat(): void {
       const dx = e.touches[0].clientX - startX;
       const dy = e.touches[0].clientY - startY;
       if (peeking === null) {
+        // under the threshold the direction is not decided yet, and a finger
+        // wandering inside it is a hold: neither is travel to claim on
         if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
         peeking = dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.5;
         if (peeking) thread.classList.add("dragging");
       }
-      if (!peeking) return;
+      if (!peeking) {
+        // the app's own verdict on this gesture: it is scrolling the thread,
+        // not peeking sideways at the time rail. That is the travel a resume
+        // era's claim is bought with, from the first decided drag on.
+        claimResumeEra();
+        return;
+      }
       e.preventDefault(); // we own this gesture; vertical scroll stays native
       // resistance: tracks the finger at first, then fights back toward 64px
       const pull = 64 * Math.tanh(Math.max(-dx, 0) / 110);
@@ -2057,8 +2078,23 @@ let springAppWroteAt = -Infinity;
 
 // "The app just moved this scroller." Call it in the same statement group as
 // the write, before the scroll event it fires can arrive.
-function noteSpringAppWrite(): void {
+//
+// Inside the RESUME WINDOW it does one thing more, and only there. The window
+// is six seconds of the app landing for a reader who was not present, and it
+// used to hold the springs at zero throughout; now a reader who is present and
+// scrolling takes it back (claimResumeEra), so from that moment every write the
+// app makes in the window can reach an ARMED field. An announced pin carries
+// its own reference across the jump and needs nothing here (`carried`, which is
+// springReseat's call). The rest of the window's writes move the VIEW to a new
+// end and have no reference to carry — the bottom pin, which the window itself
+// forces INSTANT where a settled session would ride it, the tail settle, the
+// boot and cache re-pins — so the field is dropped exactly as the hold-off
+// drops it, and his next travelling touch re-opens it on a fresh baseline
+// (springFinger). Outside the window nothing changes: those same pins keep the
+// relationship with the springs they have always had.
+function noteSpringAppWrite(carried = false): void {
   springAppWroteAt = performance.now();
+  if (!carried && resumeWindowOpen()) springFreeze();
 }
 
 // The hold-off. While any motion the app owns is in flight the springs must read
@@ -2196,7 +2232,7 @@ function springFreeze(): void {
 // a step either. Nothing else is disturbed — a stretch already on screen keeps
 // relaxing, and no seat, gesture or transform is touched.
 function springReseat(dy: number): void {
-  noteSpringAppWrite(); // announced or not, the app moved this scroller
+  noteSpringAppWrite(true); // the app moved this scroller, and carries the reference
   if (!dy) return;
   const band = endSpring.over();
   endSpring.reseat(dy);
@@ -2227,7 +2263,14 @@ function springHandleScroll(): void {
     armed: springField.armed(),
     fingerDown: threadTouching,
   };
-  if (springCreditsReader(run)) springMotionAt = now; // his motion, still running
+  if (springCreditsReader(run)) {
+    springMotionAt = now; // his motion, still running
+    // ... and the thread really did move under him, which is the resume era's
+    // claim (claimResumeEra). This is the wide one: a scrollbar drag, a wheel
+    // coast, momentum after his finger has gone, a drag recovering across a
+    // hold-off. An app write is refused credit here, so none of them can buy it.
+    claimResumeEra();
+  }
   if (springBlocked()) {
     springFreeze();
     return;
@@ -2252,11 +2295,19 @@ function springHandleScroll(): void {
 // gesture already live (a wheel's next tick, a finger catching a coasting
 // thread) keeps its geometry and its lag.
 function armSpring(touchY: number | null, fingerDown: boolean): void {
+  // The anchor this gesture belongs to, recorded BEFORE the hold-off's refusal
+  // and for a null as readily as for a number. A wheel and the viewport-centre
+  // pointer say "no finger", and that answer has to be able to REPLACE the last
+  // finger's screen-Y: the take-back below re-opens on whatever stands here, so
+  // a wheel-thrown coast would otherwise put its vertex on a finger that left
+  // the glass minutes ago and stretch the rows around the wrong place. Recorded
+  // even when the arm itself is refused, because the hold-off can swallow a
+  // wheel's first tick while the coast it throws is still the wheel's.
+  springTouchY = touchY;
   if (springBlocked()) return;
   if (springDirty || !springField.armed()) measureSpring();
   springField.begin(springClientH, springThreadTop, touchY, fingerDown);
   endSpring.begin(fingerDown, touchY); // END-SPRING SEAM
-  if (touchY !== null) springTouchY = touchY;
   springPump();
 }
 
@@ -2352,15 +2403,42 @@ function userScrollIntent(): boolean {
 }
 
 // Every genuine gesture ON THE THREAD passes through here: wheel, pointer,
-// touch down, touch travel. So the three things that have to know a reader is
-// driving are said in one place: the intent clock the follow flip reads, the
-// era the springs read, and his claim on a resume era the app was still landing
-// for. The rides are cancelled by the handlers themselves: a gesture beats
-// every motion the app has in the air, and that is the same rule.
+// touch down, touch travel. So the two things that have to know a reader is
+// driving are said in one place: the intent clock the follow flip reads, and
+// the era the springs read. The rides are cancelled by the handlers themselves:
+// a gesture beats every motion the app has in the air, and that is the same
+// rule. What is NOT said here is the resume claim, which is bought with travel
+// and not with contact — claimResumeEra below.
 function noteThreadGesture(): void {
   lastGestureAt = performance.now();
   springMotionAt = lastGestureAt; // his motion: the finger's, and what it throws
-  resumeClaimed = true; // the resume's own work stands aside for a reader
+}
+
+// The reader's claim on a resume era, and the acts that buy it.
+//
+// The claim releases the landing's hold and the whole resume window for the
+// springs (springBlocked), so what it has to mean is "the thread is moving
+// under him", not "something touched the glass". A tap to open a lightbox, a
+// tap on a link, a tap to put the keyboard away, a finger resting still and a
+// sideways time-rail peek are all gestures on the thread and none of them
+// scrolls it: bought from those, one contact released six seconds of the app's
+// own landing writes into a field his next touch can arm.
+//
+// So the three acts that carry travel say it instead, and each one is evidence
+// the app already had:
+//   a wheel tick            — a wheel event IS a scroll request, there is no
+//                             bare contact on that path at all
+//   a decided vertical drag — the peek handler's own direction verdict, after
+//                             its 10 px threshold: not a peek, so it is a
+//                             scroll of his (short first drags included)
+//   a credited scroll event — springown.ts's answer to "whose motion is this",
+//                             which is what covers a scrollbar drag, a coast he
+//                             threw, and a finger recovering mid-drag
+// The app's own writes can never buy it: a credited event is by definition not
+// one of them, and a credited event cannot open an era either, so a platform
+// restore claims nothing.
+function claimResumeEra(): void {
+  resumeClaimed = true;
 }
 
 // Re-establish when the THREAD BOX resizes (compose growth, the photo drawer's
@@ -2741,11 +2819,29 @@ function keepView(row: HTMLElement, change: () => void): void {
   const fold = t.getBoundingClientRect().top; // the reader's top edge
   const before = row.getBoundingClientRect();
   change();
-  const fix = scrollFix(before.bottom, fold, row.getBoundingClientRect().height - before.height,
-    followTail);
+  const grew = row.getBoundingClientRect().height - before.height;
+  // The springs' row table is a list of offsetTops read once per gesture, and
+  // every row under this one has just moved by `grew`. Nothing else marks it
+  // stale: decorate() is the only other setter and a decode renders nothing. On
+  // a live field the seats are then wrong for the whole rest of the gesture —
+  // the wrong rows are picked as participating and each one's distance from the
+  // vertex is measured from a seat it has left. It costs one re-measure on the
+  // next frame the pump runs, and nothing at all when no gesture is live.
+  if (grew !== 0) springDirty = true;
+  const fix = scrollFix(before.bottom, fold, grew, followTail);
   if (fix === 0) return;
+  // The correction goes to the springs as a RESEAT, which carries the field's
+  // reference across the jump, and not as the bare note it used to be. This is
+  // a content-preserving pin — the same shape as the profile reconcile, the
+  // older-page drain and the replay pin, which all announce it this way — and
+  // declaring a write only refuses its scroll event CREDIT. An armed field
+  // never asks that question: it reads the position itself on its next frame,
+  // and a photo's box landing above the fold is hundreds of pixels of it. What
+  // is announced is the delta the scroller actually took, read back off it, so
+  // a range that runs out is not reported as travel that happened.
+  const prevScroll = t.scrollTop;
   t.scrollTop += fix; // same frame as the change, so the two paint as one
-  noteSpringAppWrite();
+  springReseat(t.scrollTop - prevScroll); // the reference across it, and the note
   scrollGhostWrite("keep-view", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
   holdDiagRecord("keep-view", {
     fix: Math.round(fix), bot: Math.round(before.bottom), fold: Math.round(fold),
@@ -4974,9 +5070,11 @@ function resumeWindowOpen(): boolean {
 function openResumeWindow(): void {
   if (resumeTimer) clearTimeout(resumeTimer);
   resumeNewArrived = false;
-  // a fresh era: the app is landing again, and nobody has taken it back yet,
-  // unless a finger is already on the glass, which is a reader who never left
-  resumeClaimed = threadTouching;
+  // a fresh era: the app is landing again, and nobody has taken it back yet.
+  // A finger already on the glass does NOT take it: contact is not travel
+  // (claimResumeEra), and a reader who really never left claims the era on his
+  // very next move without having to lift and put the finger down again.
+  resumeClaimed = false;
   resumeTimer = setTimeout(closeResumeWindow, RESUME_WINDOW_MS);
 }
 

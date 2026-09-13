@@ -698,9 +698,9 @@ describe("keepView: read, change, read, one write", () => {
 
   it("asks photofit what the change costs, and hands back exactly that", () => {
     expect(keep()).toContain(
-      "scrollFix(before.bottom, fold, row.getBoundingClientRect().height - before.height,",
+      "const grew = row.getBoundingClientRect().height - before.height;",
     );
-    expect(keep()).toContain("followTail)");
+    expect(keep()).toContain("scrollFix(before.bottom, fold, grew, followTail)");
     expect(keep()).toContain("if (fix === 0) return");
     expect(keep()).toContain("t.scrollTop += fix");
   });

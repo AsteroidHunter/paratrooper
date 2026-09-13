@@ -49,11 +49,33 @@
 //   work. For the springs there is no such distinction — every write of the
 //   app's is the app's.
 //
-// The cost is stated plainly: while the app is writing this scroller at frame
-// cadence, a genuine coast crossing the same window cannot be told from those
-// writes by anything here, and the springs stay handed back rather than
-// guessing. Recovery resumes on the first credited event after the writes stop,
-// if the era is still live.
+// WHAT DECLARING A WRITE DOES NOT DO. It refuses the write's scroll event
+// CREDIT: the event cannot open a gesture, keep an era alive, or take a coast
+// back. It says nothing to a field that is ALREADY armed, because an armed
+// field reads the position off the scroller itself on its next frame and never
+// asks this module anything. So a write that slides content under a still
+// reader has a second obligation: carry the field's reference across the jump
+// (main.ts springReseat) so the correction is not read as one frame of travel.
+// The two are different questions and both have to be answered where the write
+// moves content rather than the view — the profile reconcile, the older-page
+// drain, the replay pin, the keep-view fix and the lift padding all do both.
+// The writes that move the VIEW to a new end (the bottom pin, the tail settle,
+// the rides) have no reference to carry and declare themselves only.
+//
+// The cost is stated plainly, and it is bigger than "writes delay recovery".
+// While the app is writing this scroller at frame cadence, a genuine coast
+// crossing the same window cannot be told from those writes by anything here,
+// and the springs stay handed back rather than guessing. With ONE constant
+// serving both windows, that hand-back does not end by itself: credit is first
+// allowed again SPRING_RUN_GAP_MS after the last write, and by then the era
+// needs a stamp newer than SPRING_RUN_GAP_MS ago, which only a credited event
+// or a gesture could have left. So a single app write inside an UNARMED coast
+// ends that coast's eligibility until the reader's next gesture act — not until
+// the writes stop. The same arithmetic ends it after a main-thread stall longer
+// than SPRING_RUN_GAP_MS, with no write involved at all. Both fail toward no
+// springs, which is the safe direction, and springown.test.ts holds them as the
+// stated cost rather than as a recovery guarantee. An ARMED field is untouched
+// by either: this module gates the take-back only.
 
 /** How long a gap between two scroll events still reads as ONE motion.
  *

@@ -313,30 +313,91 @@ describe("main.ts wiring: the scroll handler asks springown.ts, in this order", 
 });
 
 describe("main.ts wiring: every write of the app's own is declared as one", () => {
-  // The completeness check, and the one that matters most. The helper can only
-  // refuse credit to a write it is told about, so a writer added later without
-  // a note beside it is the defect coming back. This finds every statement in
-  // main.ts that moves an element's scroll offset and insists each one is
-  // either noted directly or announced through springReseat, which notes it.
+  // The completeness sweep, and the taxonomy under it. There are TWO
+  // obligations here and they are not interchangeable.
+  //
+  //   DECLARING a write (noteSpringAppWrite, which springReseat calls for its
+  //   own callers) refuses that write's scroll event any credit as the reader's
+  //   travel. It is what stops a burst of the app's writes from being drawn as
+  //   momentum, and it is all a write that moves the VIEW to a new end can
+  //   offer: there is no reference to keep, the end really did move.
+  //
+  //   RESEATING carries the field's reference across the jump. A write that
+  //   slides CONTENT under a still reader owes this as well, because an ARMED
+  //   field reads the scroll position itself on its next frame and never asks
+  //   the ownership helper anything — declared or not, the correction is one
+  //   frame of travel to it, and every row on screen is thrown.
+  //
+  // So the sweep below insists every writer declares itself, and the two lists
+  // after it say which obligation each writer has. What the difference DOES to
+  // the rows is proved as behaviour in springpins.test.ts; nothing here is
+  // evidence about an armed field.
   const WRITE = /^[^\n]*?\b\w+\.scrollTop\s*(?:=|\+=|-=)[^\n]*$|^[^\n]*?\.scrollTo\(\{[^\n]*$/gm;
+  const lines = src.split("\n");
 
-  it("every scroll-offset write in main.ts notes itself to the springs", () => {
-    const lines = src.split("\n");
-    const missing: string[] = [];
-    let found = 0;
+  /** every scroll-offset write in main.ts, with the code that follows it (the
+      comments stripped: a writer may explain itself before it declares) */
+  function writers(): Array<{ at: number; line: string; after: string }> {
+    const out: Array<{ at: number; line: string; after: string }> = [];
     for (const m of src.matchAll(WRITE)) {
       const line = m[0];
       if (line.includes("window.scrollTo")) continue; // the document, not a scroller
       if (line.trimStart().startsWith("//")) continue; // prose
-      found++;
       const at = src.slice(0, m.index).split("\n").length - 1;
-      const near = lines.slice(at, at + 4).join("\n");
-      if (!near.includes("noteSpringAppWrite()") && !near.includes("springReseat(")) {
-        missing.push(`${at + 1}: ${line.trim()}`);
-      }
+      const after = lines
+        .slice(at + 1, at + 20)
+        .filter((l) => l.trim() !== "" && !l.trim().startsWith("//"))
+        .slice(0, 3)
+        .join("\n");
+      out.push({ at, line, after });
     }
+    return out;
+  }
+
+  it("every scroll-offset write in main.ts declares itself to the springs", () => {
+    const missing = writers()
+      .filter((w) => !w.after.includes("noteSpringAppWrite(") && !w.after.includes("springReseat("))
+      .map((w) => `${w.at + 1}: ${w.line.trim()}`);
     expect(missing).toEqual([]);
-    expect(found).toBeGreaterThanOrEqual(9); // the writers this app actually has
+    // the exact count, not a floor: a floor below the real number lets writers
+    // be deleted without notice, and a new one has to be classified below
+    expect(writers()).toHaveLength(11);
+  });
+
+  it("the pins that preserve content carry the reference, not just the note", () => {
+    // Each of these corrects scrollTop by exactly what a change above the fold
+    // cost, so that nothing on screen moves. The delta announced is read BACK
+    // off the scroller, never the one asked for: the range can run out at
+    // either end and the field must be told the move that happened.
+    for (const [name, from, to] of [
+      ["the profile reconcile", "function reconcileProfileArtifacts(", "\n}"],
+      ["the lift padding", "function setLiftPad(", "\n}"],
+      ["the older-page drain", "function drainOlder(", "\n}"],
+      ["the keep-view fix", "function keepView(", "\n}"],
+      ["the replay pin", "function applyReplay(", "\n}"],
+    ] as const) {
+      const at = src.indexOf(from);
+      expect(at, name).toBeGreaterThan(-1);
+      const body = src.slice(at, src.indexOf(to, at));
+      expect(body, name).toMatch(/springReseat\(\s*\w+\.scrollTop - \w+\)/);
+    }
+  });
+
+  it("the pins that move the view to a new end declare themselves and no more", () => {
+    // The view really does go somewhere new here, so there is no reference to
+    // carry and reseating one of these would be a lie about where the reader
+    // is. They declare, and that is the whole obligation.
+    for (const [name, from, to] of [
+      ["the bottom pin", "function scrollToBottom(", "// the jump tap's glide"],
+      ["the tail settle", "function settleTail(", "\n}"],
+      ["the ride", "function startGlide(", "function blinkComposer("],
+    ] as const) {
+      const at = src.indexOf(from);
+      expect(at, name).toBeGreaterThan(-1);
+      const body = src.slice(at, src.indexOf(to, at));
+      expect(body, name).toContain("noteSpringAppWrite()");
+      expect(body, name).not.toContain("springReseat(");
+    }
   });
 
   it("the springs' write clock is its own, and the follow flip's is untouched", () => {
@@ -346,15 +407,25 @@ describe("main.ts wiring: every write of the app's own is declared as one", () =
     // attribution, so they have a clock of their own that every write stamps.
     expect(src).toContain('if (owner === "resume") appWroteAt = performance.now();');
     expect(src.match(/appWroteAt = performance\.now\(\);/g)?.length).toBe(1);
-    const note = src.slice(
-      src.indexOf("function noteSpringAppWrite()"),
-      src.indexOf("}", src.indexOf("function noteSpringAppWrite()")),
-    );
+    const noteAt = src.indexOf("function noteSpringAppWrite(");
+    const note = src.slice(noteAt, src.indexOf("\n}", noteAt));
     expect(note).toContain("springAppWroteAt = performance.now();");
     // the ride is the app's for the springs whichever ride it is
     const ride = src.slice(src.indexOf("function startGlide("), src.indexOf("function blinkComposer("));
     expect(ride).toContain("noteSpringAppWrite();");
     expect(ride).not.toMatch(/if \([^)]*\) noteSpringAppWrite\(\);/);
+  });
+
+  it("a write inside the resume window drops the field, unless it carries the reference", () => {
+    // the one place the window's own exposure is closed: the claim releases the
+    // springs' hold-off for that window, so the writes in it that have no
+    // reference to carry drop the field the way the hold-off does. What that
+    // does to the rows is behaviour, and springclaim.test.ts drives it.
+    const noteAt = src.indexOf("function noteSpringAppWrite(");
+    const note = src.slice(noteAt, src.indexOf("\n}", noteAt));
+    expect(note).toContain("if (!carried && resumeWindowOpen()) springFreeze();");
+    const reseatAt = src.indexOf("function springReseat(");
+    expect(src.slice(reseatAt, src.indexOf("\n}", reseatAt))).toContain("noteSpringAppWrite(true)");
   });
 });
 
@@ -389,17 +460,50 @@ describe("main.ts wiring: the resume era's hold-off, and what the reader takes b
     expect(blocked.match(/resumeClaimed/g)?.length).toBe(1);
   });
 
-  it("the claim is a gesture's, and it never outlives the era it was made in", () => {
+  it("the claim is bought with travel, and never outlives the era it was made in", () => {
+    // Contact is not travel. noteThreadGesture is every gesture ACT on the
+    // thread — a tap, a still hold and a sideways peek included — and it must
+    // not claim; the three acts that carry travel do, through one function.
+    // What each of them then does to the rows is behaviour, and
+    // springclaim.test.ts drives it against the real seam.
     const note = src.slice(
       src.indexOf("function noteThreadGesture()"),
       src.indexOf("}", src.indexOf("function noteThreadGesture()")),
     );
-    expect(note).toContain("resumeClaimed = true;");
+    expect(note).not.toContain("resumeClaimed");
+    const claimAt = src.indexOf("function claimResumeEra()");
+    expect(claimAt).toBeGreaterThan(-1);
+    expect(src.slice(claimAt, src.indexOf("}", claimAt))).toContain("resumeClaimed = true;");
+    expect(src.match(/resumeClaimed = true;/g)?.length).toBe(1); // one writer of it
+    // and its three callers: the wheel, a drag the app has decided is a scroll
+    // rather than a peek, and a scroll event credited to the reader
+    const wheel = src.slice(
+      src.indexOf('thread.addEventListener("wheel"'),
+      src.indexOf('thread.addEventListener("pointerdown"'),
+    );
+    expect(wheel).toContain("claimResumeEra();");
+    const pointer = src.slice(
+      src.indexOf('thread.addEventListener("pointerdown"'),
+      src.indexOf('thread.addEventListener("scroll"'),
+    );
+    expect(pointer).not.toContain("claimResumeEra"); // a press is contact
+    const touch = src.slice(
+      src.indexOf('thread.addEventListener(\n    "touchstart"'),
+      src.indexOf("const endPeek = () =>"),
+    );
+    expect(touch).toContain("if (!peeking) {\n"); // the direction verdict's own branch
+    expect(touch.match(/claimResumeEra\(\);/g)?.length).toBe(1); // in that branch alone
+    const seam = src.slice(
+      src.indexOf("function springHandleScroll()"),
+      src.indexOf("function armSpring("),
+    );
+    expect(seam).toMatch(/if \(springCreditsReader\(run\)\) \{[\s\S]*?claimResumeEra\(\);/);
+    expect(src.match(/claimResumeEra\(\);/g)?.length).toBe(3);
     const openWin = src.slice(
       src.indexOf("function openResumeWindow()"),
       src.indexOf("function closeResumeWindow()"),
     );
-    expect(openWin).toContain("resumeClaimed = threadTouching;"); // a finger already down owns it
+    expect(openWin).toContain("resumeClaimed = false;"); // a finger down is not a claim
     // the two boundaries where a claim could go stale with no new era to reset
     // it: the page going away, and a shell rebuilt under an open window
     const hiddenAt = src.indexOf("function resumeHidden()");
