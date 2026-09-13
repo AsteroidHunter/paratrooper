@@ -128,6 +128,56 @@ def wants_spotify_tool(spotify_creds: tuple[str, str] | None) -> bool:
     return spotify_creds is not None
 
 
+def spotify_handler(creds: tuple[str, str] | None):
+    """The ``resolve_spotify`` tool, built once here for both profiles.
+
+    It is the one custom tool a plain session can have, and it needs nothing
+    except the credential pair: no checkout, no changelog, no pin stages. Written
+    as a module-level factory rather than inside :func:`build_tool_server` so the
+    plain server registers the same implementation instead of a second copy of
+    it that could drift.
+    """
+
+    @tool("resolve_spotify", "Resolve a Spotify track link or song name to an embed URL. "
+          "Args: query, optional is_link(bool).", {"query": str, "is_link": bool})
+    async def resolve_spotify_tool(args: dict) -> dict:
+        query = args["query"]
+        is_link = bool(args.get("is_link", "open.spotify.com" in query))
+
+        def _run() -> dict:
+            if is_link:
+                r = spotify.resolve_link(query)
+            else:
+                if not creds:
+                    raise RuntimeError("Spotify credentials not configured for name search")
+                r = spotify.resolve_name(query, *creds)
+            return {"embed": r.embed, "track_id": r.track_id, "title": r.title, "artist": r.artist}
+
+        try:
+            return _ok(await anyio.to_thread.run_sync(_run))
+        except Exception as exc:
+            return _err(f"resolve_spotify failed: {exc}")
+
+    return resolve_spotify_tool
+
+
+def build_plain_tool_server(spotify_creds: tuple[str, str] | None):
+    """The plain profile's custom tools: Spotify when it is configured, and
+    nothing else ever.
+
+    Returns ``(None, [])`` when there is no credential, because a server with no
+    tools on it is a server the session would declare and the CLI would start for
+    no reason. Nothing here builds a :class:`ToolContext`: the pinboard handlers
+    need a site root, a changelog and a pin layout, and a plain deployment has
+    none of the three, so it must not be constructing objects that require them.
+    """
+    if not wants_spotify_tool(spotify_creds):
+        return None, []
+    handler = spotify_handler(spotify_creds)
+    server = create_sdk_mcp_server(name=SERVER_NAME, version="0.1.0", tools=[handler])
+    return server, [f"mcp__{SERVER_NAME}__{handler.name}"]
+
+
 def build_tool_server(ctx: ToolContext):
     """Construct the in-process MCP server + the ``allowed_tools`` names.
 
@@ -218,25 +268,8 @@ def build_tool_server(ctx: ToolContext):
         except Exception as exc:
             return _err(f"process_image failed: {exc}")
 
-    @tool("resolve_spotify", "Resolve a Spotify track link or song name to an embed URL. "
-          "Args: query, optional is_link(bool).", {"query": str, "is_link": bool})
-    async def resolve_spotify_tool(args: dict) -> dict:
-        query = args["query"]
-        is_link = bool(args.get("is_link", "open.spotify.com" in query))
-
-        def _run() -> dict:
-            if is_link:
-                r = spotify.resolve_link(query)
-            else:
-                if not ctx.spotify_creds:
-                    raise RuntimeError("Spotify credentials not configured for name search")
-                r = spotify.resolve_name(query, *ctx.spotify_creds)
-            return {"embed": r.embed, "track_id": r.track_id, "title": r.title, "artist": r.artist}
-
-        try:
-            return _ok(await anyio.to_thread.run_sync(_run))
-        except Exception as exc:
-            return _err(f"resolve_spotify failed: {exc}")
+    # the one tool both profiles can have, from the one factory above
+    resolve_spotify_tool = spotify_handler(ctx.spotify_creds)
 
     @tool("move_pin", "Move a pin folder between stages. Archive = to='off-display'; "
           "publish a staged pin = to='on-display' (then place_pin + update its JSON). "

@@ -61,12 +61,13 @@ SITE_ROOT_VAR = "PARATROOPER_SITE_ROOT"
 
 SCHEMA_VERSION = 1
 PINBOARD, PLAIN = "pinboard", "plain"
+# Both words run. The pinboard profile is the full deployment; the plain profile
+# is a chat with photos, web search and page reading, and its whole source is
+# the shared settings above the profile line. There was a third name here while
+# the plain session did not exist yet — a gate that refused the word rather than
+# booting a worker with no tools behind it — and it is gone now that the session
+# is written.
 PROFILES = (PINBOARD, PLAIN)
-# Phase 1 ships the pinboard refactor only. The plain profile is a described
-# shape with no session behind it yet, and a source that asks for one would boot
-# a worker with no tools rather than fail, so it is refused by name until the
-# code that runs it exists.
-IMPLEMENTED_PROFILES = (PINBOARD,)
 # A photo only has to survive until the worker picks it up; never infinite.
 TTL_HOURS_MIN, TTL_HOURS_MAX = 1, 168
 
@@ -503,12 +504,11 @@ def validate_config(raw: dict, *, source: str = CONFIG_VAR) -> Config:
         raise ConfigError(f"{source}: the configuration must be a TOML table")
     # refused by name rather than as "unknown", because a [plain] table is the
     # mistake someone makes by symmetry with [pinboard] and deserves the reason
-    if "plain" in raw:
+    if PLAIN in raw:
         raise ConfigError(
             f"{source}: there is no '[plain]' table. The plain profile is the "
             "shared settings and nothing else; write profile = \"plain\" and stop."
         )
-    _reject_unknown(raw, _TOP_LEVEL_KEYS | {PINBOARD}, source=source, name="")
 
     schema = _required(raw, "schema", source=source, name="")
     if isinstance(schema, bool) or not isinstance(schema, int):
@@ -525,11 +525,22 @@ def validate_config(raw: dict, *, source: str = CONFIG_VAR) -> Config:
             f"{source}: 'profile' must be one of {' or '.join(repr(p) for p in PROFILES)} "
             f"(got {profile!r})"
         )
-    if profile not in IMPLEMENTED_PROFILES:
+    # The profile is read before the unknown-key sweep so a pinboard key written
+    # at the top level can be answered with the profile it belongs to. Loose at
+    # the top it is not "unknown" in any useful sense: it is a key in the wrong
+    # place, or a key on the wrong deployment, and those want different fixes.
+    stray = sorted((set(raw) - _TOP_LEVEL_KEYS - {PINBOARD}) & _PINBOARD_KEYS)
+    if stray:
         raise ConfigError(
-            f"{source}: 'profile' is {profile!r}, which this build cannot run yet. "
-            f"Only {', '.join(repr(p) for p in IMPLEMENTED_PROFILES)} is implemented."
+            f"{source}: {stray[0]!r} is a '[pinboard]' key, not a shared one"
+            + (
+                f", and this source says profile = {profile!r}, which has no site, "
+                "no repository and no pin stages"
+                if profile != PINBOARD
+                else ": write it under the '[pinboard]' table"
+            )
         )
+    _reject_unknown(raw, _TOP_LEVEL_KEYS | {PINBOARD}, source=source, name="")
 
     isolation = raw.get("shell_isolation", False)
     if not isinstance(isolation, bool):

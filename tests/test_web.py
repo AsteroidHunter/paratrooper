@@ -10,7 +10,7 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from confighelpers import example_config, pinboard_config
+from confighelpers import example_config, pinboard_config, plain_config
 from paratrooper.agent.config import Uploads
 from paratrooper.web import ThreadCoordinator, ThreadStore, is_stop_word, push
 from paratrooper.web.app import AppState, create_app
@@ -24,6 +24,7 @@ from paratrooper.web.publish import (
     parse_pr_number,
 )
 from paratrooper.web.uploads import delete_staged, save_upload
+from paratrooper.web.worker_runner import Worker
 
 
 async def _noop_async(*args, **kwargs):
@@ -1147,6 +1148,36 @@ def test_publish_route_shows_the_refusal_on_the_phone(client, monkeypatch):
     assert "not one of Paratrooper's own branches" in r.json()["detail"]
 
 
+def test_the_pinboard_publish_route_still_merges(client, monkeypatch):
+    """The other half of making the route conditional: on the profile that has
+    one, a tap still merges the agent's own branch and still writes the published
+    row the phone flips its button from."""
+    import paratrooper.web.app as app_mod
+
+    monkeypatch.setenv("PARATROOPER_GITHUB_TOKEN", "tok")
+    merged: list = []
+    monkeypatch.setattr(
+        app_mod, "get_pull_request",
+        lambda *a, **kw: _pr(ref="paratrooper/new-photo", full_name="AsteroidHunter/webpage"),
+    )
+
+    def fake_merge(owner, repo, number, *, token, sha):
+        merged.append((owner, repo, number, sha))
+        return {"sha": "merge-sha"}
+
+    monkeypatch.setattr(app_mod, "merge_pull_request", fake_merge)
+
+    auth = {"Authorization": "Bearer tok"}
+    answer = client.post("/api/publish", headers=auth,
+                         json={"thread_id": "d", "pr": "https://github.com/o/r/pull/7"})
+    assert answer.status_code == 200
+    assert answer.json() == {"merged": True, "sha": "merge-sha"}
+    assert merged == [("AsteroidHunter", "webpage", 7, "head1")]
+    rows = client.get("/api/thread/d", headers=auth).json()["messages"]
+    assert [r["kind"] for r in rows] == ["published"]
+    assert "published PR #7" in rows[0]["payload"]
+
+
 # --- push (6.1) ---------------------------------------------------------------
 
 def test_push_config_off_when_unset(monkeypatch):
@@ -1734,6 +1765,190 @@ def test_config_route_says_null_when_no_remote_is_configured(client):
     state = client.app.state.app_state
     state.config = dataclasses.replace(state.config, pinboard=None)
     assert client.get("/api/config", headers=auth).json() == {"repo_url": None}
+
+
+# --- the plain profile's web service -----------------------------------------
+
+
+@pytest.fixture
+def plain_client(tmp_path, monkeypatch):
+    """The same injected-state harness, on a plain deployment."""
+    monkeypatch.setenv("PARATROOPER_APP_TOKEN", "tok")
+    state = AppState(
+        config=plain_config(tmp_path),
+        store=ThreadStore(tmp_path / "threads.sqlite"),
+        queue=object(),
+        coordinator=_FakeCoordinator(),
+        inbox=DiskInbox(tmp_path / "inbox"),
+    )
+    app = create_app(injected=state)
+    with TestClient(app) as c:
+        yield c
+
+
+def test_publish_is_not_registered_at_all_on_plain(plain_client, client):
+    """Not a handler that refuses: an address the service does not have.
+
+    A plain deployment has no site to merge into, so the route is never built.
+    What a tap gets back is whatever the router says about an address with no
+    route on it, which is the same answer as any other unknown api path: 404
+    bare, or 405 on a service that also serves the built phone app, because the
+    static mount at "/" then matches the path and refuses the method. Either way
+    nothing checked a token, nothing read the merge credential and nothing
+    reached GitHub, which is the part that matters.
+    """
+    auth = {"Authorization": "Bearer tok"}
+    body = {"thread_id": "d", "pr": "1"}
+    answer = plain_client.post("/api/publish", headers=auth, json=body)
+    unknown = plain_client.post("/api/no-such-route", headers=auth, json=body)
+    assert answer.status_code == unknown.status_code
+    assert answer.status_code in (404, 405)
+    # and an unauthenticated request gets exactly the same answer: there is no
+    # dependency to run, because there is no route to depend on anything
+    assert plain_client.post("/api/publish", json=body).status_code == answer.status_code
+    assert "/api/publish" not in {route.path for route in plain_client.app.routes}
+    # and the full deployment still has it, one profile over
+    assert "/api/publish" in {route.path for route in client.app.routes}
+
+
+def test_health_names_the_plain_profile(plain_client):
+    body = plain_client.get("/api/health").json()
+    assert body["profile"] == "plain"
+    assert set(body) == {"ok", "version", "profile"}
+
+
+def test_the_config_route_reports_no_repository_on_plain(plain_client):
+    """Registered on both profiles, authenticated on both, and explicit: a plain
+    deployment has no repository, so the phone is told to link nothing."""
+    assert plain_client.get("/api/config").status_code == 401
+    body = plain_client.get("/api/config", headers={"Authorization": "Bearer tok"}).json()
+    assert body == {"repo_url": None}
+
+
+def test_plain_push_wording_is_the_two_shared_texts_only(tmp_path):
+    """A plain deployment has no board preview and no pull request, so it has no
+    wording for either, and no wording means no banner rather than a banner
+    reading None."""
+    cfg = plain_config(tmp_path)
+    state = AppState(
+        config=cfg,
+        store=ThreadStore(tmp_path / "t.sqlite"),
+        queue=object(),
+        coordinator=_FakeCoordinator(),
+        inbox=DiskInbox(tmp_path / "inbox"),
+    )
+    texts = state.notification_texts
+    assert (texts.reply, texts.error) == (cfg.notifications.reply, cfg.notifications.error)
+    assert texts.screenshot is None and texts.pr is None
+    assert push.notification_text("done", texts, None) == cfg.notifications.reply
+    assert push.notification_text("error", texts, None) == cfg.notifications.error
+    for artifact in ("screenshot", "pr"):
+        assert push.notification_text(artifact, texts, "anything") is None
+    state.store.close()
+
+
+def test_a_plain_send_and_history_round_trip_unchanged(plain_client):
+    """The chat itself is the same chat: the send path, the stored frame and the
+    history read do not know which profile they are on."""
+    auth = {"Authorization": "Bearer tok"}
+    sent = plain_client.post(
+        "/api/send", headers=auth, json={"thread_id": "d", "text": "hello there"}
+    )
+    assert sent.status_code == 200
+    body = sent.json()
+    assert body["payload"] == "hello there" and body["seq"] >= 1
+    rows = plain_client.get("/api/thread/d", headers=auth).json()["messages"]
+    assert [r["payload"] for r in rows] == ["hello there"]
+
+
+def test_the_plain_worker_runs_a_job_without_touching_github(tmp_path, monkeypatch):
+    """The worker loop on plain: no boot clone, no installation token, no App
+    read, and the local scratch copy of each photo still deleted while the shared
+    blob is left to its own expiry."""
+    from paratrooper.web import worker_runner
+    from paratrooper.web.models import JobMessage
+
+    published: list = []
+    shared: dict[str, bytes] = {}
+
+    class _Queue:
+        def __init__(self):
+            self.r = _FakeRedis()
+
+        async def publish_result(self, thread_id, result):
+            published.append(result)
+
+    def _forbidden(name):
+        def boom(*args, **kwargs):
+            raise AssertionError(f"the plain worker reached for {name}")
+
+        return boom
+
+    monkeypatch.setattr(worker_runner, "installation_token", _forbidden("installation_token"))
+    monkeypatch.setattr(worker_runner, "SiteRepo", _forbidden("SiteRepo"))
+
+    ran: list = []
+
+    async def fake_run_job(job, *, config, auth_mode=None, on_event=None):
+        ran.append((job.job_id, config.profile, list(job.attachments)))
+        await on_event({"job_id": job.job_id, "kind": "done", "payload": "hi back"})
+        return None
+
+    monkeypatch.setattr(worker_runner, "run_job", fake_run_job)
+
+    cfg = plain_config(tmp_path)
+    worker = Worker(_Queue(), config=cfg)
+    key = new_key("p.png")
+    shared[key] = b"\x89PNG\r\n\x1a\npretend"
+    _run(worker.inbox.put(key, shared[key]))
+
+    # the boot: a plain worker never clones, so run()'s first step is skipped
+    assert cfg.is_pinboard is False
+    _run(worker._run_one(JobMessage(job_id="j1", thread_id="d", text="look",
+                                    attachments=[key])))
+
+    assert ran == [("j1", "plain", [key])]
+    assert [r.kind for r in published] == ["working", "done"]
+    # the local materialized copy is gone, and the shared blob is not
+    assert not (cfg.require_inbox() / key).exists()
+    assert _run(worker.inbox.get(key)) == shared[key]
+
+
+def test_the_plain_worker_boot_skips_the_clone_and_still_serves(tmp_path, monkeypatch):
+    """`Worker.run()` opens with the boot clone on pinboard. On plain that call
+    must not happen at all, rather than happen and fail."""
+    from paratrooper.web.worker_runner import Worker
+
+    class _Queue:
+        def __init__(self):
+            self.r = _FakeRedis()
+            self.asked = 0
+            self.worker = None
+
+        async def dequeue(self, timeout=5):
+            self.asked += 1
+            await asyncio.sleep(0)  # a real dequeue yields; a busy loop would not
+            if self.asked >= 3:  # idle three times, then ask the loop to stop
+                self.worker._shutting_down = True
+            return None
+
+        async def subscribe_interrupts(self):
+            await asyncio.sleep(3600)  # nothing interrupts in this scenario
+            if False:
+                yield
+
+        async def requeue_front(self, msg):
+            raise AssertionError("nothing was in flight")
+
+    queue = _Queue()
+    worker = Worker(queue, config=plain_config(tmp_path))
+    queue.worker = worker
+    worker._bootstrap_checkout = lambda: (_ for _ in ()).throw(
+        AssertionError("a plain worker tried to clone a repository")
+    )
+
+    _run(worker.run(idle_timeout=0))
+    assert queue.asked >= 3  # the loop really ran, without the clone
 
 
 def test_auth_required(client):

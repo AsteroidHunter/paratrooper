@@ -78,9 +78,20 @@ def pinboard_config(
 
 def plain_table() -> dict[str, Any]:
     """The shared half of the example and nothing else: what a plain source
-    looks like. Phase 1 refuses it at the profile check; the rejections that
-    surround it are still worth stating."""
+    looks like. No profile table, and no key from the other profile."""
     table = example_table()
     table.pop("pinboard", None)
     table["profile"] = "plain"
     return table
+
+
+def plain_config(tmp_path: Path | None = None, **overrides: Any) -> Config:
+    """A validated plain config, optionally with its one machine path bound.
+
+    A plain deployment has exactly one machine path, its own inbox: there is no
+    checkout to stand in and no site root to bind. Built through the real
+    validator from the example's shared half, like every other config here."""
+    config = validate_config(plain_table(), source="the plain example")
+    if tmp_path is not None:
+        overrides.setdefault("inbox", tmp_path / "inbox")
+    return dataclasses.replace(config, **overrides) if overrides else config

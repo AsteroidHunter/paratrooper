@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
-import jwt
 
 from .config import Config, ConfigError, GitHubApp, take_github_app
 from .github import GITHUB_API, GitHubError, owner_repo
@@ -59,6 +58,14 @@ def build_jwt(app: GitHubApp, *, issued_at: int | None = None) -> str:
     """The App's own assertion, signed with its private key. It authenticates
     the App to GitHub just long enough to ask for an installation token; it is
     not a repository credential and cannot touch one."""
+    # imported here, not at the top, for the same reason `cryptography` is
+    # imported inside config._github_app_key: PyJWT arrives with the pinboard
+    # worker's own dependency extra, and the plain worker installs neither it nor
+    # a GitHub App to use it with. The plain worker still imports this module
+    # transitively (worker_runner reaches it for the boot clone it never makes),
+    # so the import has to be where the signing is rather than at the door.
+    import jwt
+
     moment = int(issued_at if issued_at is not None else time.time())
     try:
         return jwt.encode(

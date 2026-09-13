@@ -24,13 +24,18 @@
 
 schema = 1                                   # the only version this build accepts
 model = "claude-opus-4-8"                     # the model id the worker runs
+# A plain deployment usually runs a smaller model, e.g.
+#   model = "claude-sonnet-5"
+# Either profile takes either id: this is configuration, not a profile rule.
 
 # Push bodies both profiles use.
 notifications.reply = "Paratrooper replied."  # a reply with no text of its own
 notifications.error = "Paratrooper hit a problem."
 
 # How long a staged photo lives in the shared store, in whole hours, 1 to 168.
-# A photo only has to outlive the queue wait. Never infinite.
+# A photo only has to outlive the queue wait. Never infinite. On a free Key Value
+# tier, where the whole store is small, one hour is the sensible plain setting:
+#   uploads.ttl_hours = 1
 uploads.ttl_hours = 24
 
 # OPTIONAL, both profiles, absent means false. Ask the agent's CLI to strip
@@ -46,6 +51,18 @@ profile = "pinboard"                          # "pinboard" or "plain"
 # ---------------------------------------------------------------------------
 # Present only under profile = "pinboard". A plain source is the shared lines
 # above and nothing else: no [pinboard] table, and there is no [plain] table.
+# A whole plain source is this short:
+#
+#   schema = 1
+#   model = "claude-sonnet-5"
+#   notifications.reply = "Paratrooper replied."
+#   notifications.error = "Paratrooper hit a problem."
+#   uploads.ttl_hours = 1
+#   profile = "plain"
+#
+# It runs a chat with photos, web search and page reading, plus the Spotify tool
+# when SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are set. No shell, no file
+# tools, no repository and no GitHub credential of any kind.
 # ---------------------------------------------------------------------------
 [pinboard]
 owner = "Your Name"                           # prompt, two tool descriptions, two denials

@@ -1,10 +1,21 @@
-"""The agent's system prompt (Paratrooper persona) + per-session assembly.
+"""The agent's system prompts (Paratrooper persona) + per-session assembly.
 
-A fully custom persona (string form, not Claude Code's preset). The worker
-prepends the hot memory digest (recent changelog entries) so the agent starts
-each request aware of recent history, and fills the deployment's own values into
-the template: who it is talking to, which address it maintains, the three stage
-folders and the branch prefix the PreToolUse guard allows.
+Two prompts, one per profile. A fully custom persona either way (string form,
+not Claude Code's preset).
+
+The pinboard prompt is the long one: the worker prepends the hot memory digest
+(recent changelog entries) so the agent starts each request aware of recent
+history, and fills the deployment's own values into the template: who it is
+talking to, which address it maintains, the three stage folders and the branch
+prefix the PreToolUse guard allows.
+
+The plain prompt is about half as long and has no slots at all. It keeps the
+conversation, the recent-thread memory, the voice and the conduct, and drops
+everything about a site: no pins, no stages, no git, no pull requests, no
+screenshots, no changelog and no inbox keys, because a plain session has none of
+those tools and a prompt describing tools that are not there is a prompt that
+makes the agent try them. It names nobody: a plain deployment has no configured
+owner, and the person it is talking to introduces themselves or does not.
 
 **Why plain replacement and never ``str.format``.** The prompt quotes the pin
 schema, and that schema's own braces (``{x,y}``, ``{w,h}``) are literal text the
@@ -39,11 +50,12 @@ SLOTS = (
     _PINS_SLOT, _ARCHIVE_SLOT, _LATER_SLOT,
 )
 
-# Region markers for the optional screenshot text. Square brackets rather than
-# braces so they cannot be confused with a slot or with the schema's own braces,
-# and doubled so nothing in ordinary prose collides with them.
-_SCREENSHOT_OPEN = "[[screenshot]]"
-_SCREENSHOT_CLOSE = "[[/screenshot]]"
+# Region markers for optional text. Square brackets rather than braces so they
+# cannot be confused with a slot or with the schema's own braces, and doubled so
+# nothing in ordinary prose collides with them. One pair per optional thing: the
+# pinboard screenshot tool, and the Spotify tool on either profile.
+_SCREENSHOT_REGION = "screenshot"
+_SPOTIFY_REGION = "spotify"
 
 _PINBOARD_TEMPLATE = """\
 You are Paratrooper, the agent that maintains {owner}'s polaroid pinboard at \
@@ -196,26 +208,27 @@ screenshot to {owner} automatically[[/screenshot]].\
 """
 
 
-def _apply_screenshot_regions(text: str, *, enabled: bool) -> str:
-    """Keep or drop every marked screenshot region, then remove the markers.
+def _apply_regions(text: str, region: str, *, enabled: bool) -> str:
+    """Keep or drop every marked region of one name, then remove the markers.
 
     An unbalanced marker is a bug in the template rather than a configuration
     problem, so it raises here instead of shipping a prompt with ``[[screenshot]]``
     visible in it."""
+    opener, closer = f"[[{region}]]", f"[[/{region}]]"
     if enabled:
-        return text.replace(_SCREENSHOT_OPEN, "").replace(_SCREENSHOT_CLOSE, "")
+        return text.replace(opener, "").replace(closer, "")
     kept: list[str] = []
     rest = text
     while True:
-        head, opened, tail = rest.partition(_SCREENSHOT_OPEN)
+        head, opened, tail = rest.partition(opener)
         kept.append(head)
         if not opened:
             break
-        _dropped, closed, rest = tail.partition(_SCREENSHOT_CLOSE)
+        _dropped, closed, rest = tail.partition(closer)
         if not closed:
             raise ConfigError(
-                "the prompt template has an unclosed screenshot region: every "
-                f"{_SCREENSHOT_OPEN} needs a matching {_SCREENSHOT_CLOSE}"
+                f"the prompt template has an unclosed {region} region: every "
+                f"{opener} needs a matching {closer}"
             )
     return "".join(kept)
 
@@ -229,8 +242,8 @@ def render_system_prompt(pinboard: PinboardConfig) -> str:
     prompt is describing a layout inside the checkout, and the web service holds
     the same values without ever having a checkout.
     """
-    rendered = _apply_screenshot_regions(
-        _PINBOARD_TEMPLATE, enabled=pinboard.screenshot is not None
+    rendered = _apply_regions(
+        _PINBOARD_TEMPLATE, _SCREENSHOT_REGION, enabled=pinboard.screenshot is not None
     )
     for slot, value in (
         (_OWNER_SLOT, pinboard.owner),
@@ -245,9 +258,94 @@ def render_system_prompt(pinboard: PinboardConfig) -> str:
     return rendered
 
 
-def build_system_prompt(config: Config, digest_text: str | None = None) -> str:
-    """Full system prompt for one session, optionally with the recent-updates
-    digest appended as session context."""
+_PLAIN_TEMPLATE = """\
+You are Paratrooper. You are talking with one person over a messaging app on \
+their phone. Every message you send is read on that phone, in a chat.
+
+WHAT YOU CAN DO
+- Search the web with `WebSearch` when the answer turns on something current, \
+something after your training, or anything you would otherwise be guessing at.
+- Read a specific page with `WebFetch` when you have its address, or when a \
+search result is worth opening properly.
+- Look at the photos that arrive in the message. They are already in front of \
+you, so there is nothing to open.
+[[spotify]]- Turn a Spotify link or a song name into a player link with \
+`resolve_spotify`.
+[[/spotify]]- That is the whole set. You have no shell, you cannot read or \
+write files, and there is nothing else to reach for: if a request needs \
+something you do not have, say so in one line.
+
+THE RECENT THREAD IS YOUR SHORT TERM MEMORY
+- Each message starts a fresh session; the [recent thread] block is what just \
+happened. Read it. If it holds a request that was never answered or acted on, \
+deal with THAT (or ask about it), rather than starting as though nothing \
+happened.
+
+BEHAVIOR
+- Conversational. Follow the thread of what the person actually wants, and let \
+their corrections override your defaults.
+- Ambiguous request (which one? what exactly?) means ask, do not guess. At most \
+one question, then get on with it.
+- Answer the question that was asked. Smallest useful answer, and stop.
+
+VOICE, you are texting rather than writing documents
+- This is a messaging app. Write like you would text a friend: short and \
+casual, but start every sentence with a capital letter, the way a phone would. \
+One to three short sentences almost always; if a draft runs longer, cut detail, \
+not clarity. They will ask when they want more.
+- PLAIN TEXT ONLY. No markdown of any kind: no **bold**, no headers, no bullet \
+lists, no code blocks, no tables. They render as literal symbols here.
+- ABSOLUTELY NO EM DASHES OR EN DASHES, ever. Use a comma or a period instead. \
+No "I'd be happy to", no "Certainly!", no restating the request back, no sign \
+offs.
+- Do not narrate your steps or your tools. Do the work, then one line on the \
+outcome.
+
+HOW YOU CARRY YOURSELF
+- Warm and direct, and honest before agreeable. If you think something is \
+wrong, say so plainly and say why; do not soften it into nothing.
+- Say when you are unsure, and say when something may have changed since your \
+training. Search instead of guessing on anything current, and never invent an \
+address, a number or a quotation.
+- Caveats are one clause, not a paragraph. No emoji unless the person uses them.
+- Own a mistake in one line and move on. No apologising twice, no grovelling.
+- Decline what would cause real harm, briefly, and without a lecture.
+- On legal, medical and money questions, give the facts and the shape of the \
+decision, and say plainly that a professional is the one who can advise.
+- Care about the person without diagnosing them.
+- On contested political questions, give the honest range of views rather than \
+picking one.
+- When the conversation is over, let it be over. No new question just to keep \
+it going.\
+"""
+
+# The plain prompt with no Spotify tool registered — the common case, and what
+# the module-level constant means. ``plain_system_prompt(spotify=True)`` is the
+# same text plus its one line.
+PLAIN_SYSTEM_PROMPT = _apply_regions(_PLAIN_TEMPLATE, _SPOTIFY_REGION, enabled=False)
+
+
+def plain_system_prompt(*, spotify: bool = False) -> str:
+    """The plain persona, with the Spotify line only when the tool is registered.
+
+    Same rule as the pinboard prompt's screenshot block: a line describing a
+    tool the session does not declare is a line that makes the agent call
+    something that is not there."""
+    return _apply_regions(_PLAIN_TEMPLATE, _SPOTIFY_REGION, enabled=spotify)
+
+
+def build_system_prompt(
+    config: Config, digest_text: str | None = None, *, spotify: bool = False
+) -> str:
+    """Full system prompt for one session, on whichever profile this is.
+
+    The digest is a pinboard thing: it is the changelog's recent entries, and a
+    plain deployment has no changelog to read. ``spotify`` is shared, and it
+    means "the tool is registered on this session", which is the only reason to
+    mention it.
+    """
+    if not config.is_pinboard:
+        return plain_system_prompt(spotify=spotify)
     prompt = render_system_prompt(config.require_pinboard())
     if not digest_text:
         return prompt

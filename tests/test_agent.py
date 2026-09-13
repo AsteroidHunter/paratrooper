@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import dataclasses
 import json
 import logging
 import os
 import re
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -29,6 +29,7 @@ from confighelpers import (
     example_table,
     example_text,
     pinboard_config,
+    plain_config,
     plain_table,
 )
 from paratrooper.agent import images, memory, pins, spotify
@@ -926,6 +927,103 @@ def test_the_screenshot_block_follows_the_screenshot_table():
         assert kept in without
 
 
+# --- the plain prompt: the same voice, none of the site ----------------------
+
+# Every word a plain session must never be told it has. A plain deployment has
+# no repository, no stages and no board capture, and a prompt that mentions one
+# is a prompt that makes the agent reach for a tool it was not given.
+_PLAIN_ABSENCE_LIST = (
+    "pin", "pins", "board", "boards", "site", "folder", "folders", "stage",
+    "git", "github", "commit", "branch", "pull request", "publish", "published",
+    "screenshot", "changelog", "inbox", "polaroid", "cloth", "merge",
+)
+
+
+def test_the_plain_prompt_says_what_a_plain_session_actually_has():
+    """The presence half of the list: the product name, the two web tools, the
+    recent-thread marker, and the two voice rules that matter most on a phone."""
+    plain = prompt_mod.PLAIN_SYSTEM_PROMPT
+    assert "Paratrooper" in plain
+    assert "`WebSearch`" in plain and "`WebFetch`" in plain
+    assert "[recent thread]" in plain
+    assert "PLAIN TEXT ONLY" in plain
+    assert "NO EM DASHES" in plain
+    assert "photos that arrive in the message" in plain
+    # and it says plainly that there is nothing else, so an absent tool reads as
+    # a boundary rather than as something to hunt for
+    assert "no shell" in plain and "cannot read or write files" in plain
+
+
+@pytest.mark.parametrize("word", _PLAIN_ABSENCE_LIST)
+def test_the_plain_prompt_carries_no_pinboard_vocabulary(word):
+    """Whole words, both spellings of the prompt (with and without Spotify).
+
+    Whole words on purpose: a substring rule would fail on 'keyboard' and
+    'opposite' and teach the next reader to weaken the test rather than the
+    prompt. Nothing in these prompts contains one of these words as a part,
+    which the assertion below states rather than assumes."""
+    for text in (prompt_mod.PLAIN_SYSTEM_PROMPT, prompt_mod.plain_system_prompt(spotify=True)):
+        assert not re.search(rf"\b{word}\b", text, flags=re.IGNORECASE), word
+        assert word.lower() not in text.lower(), f"{word} appears as part of another word"
+
+
+def test_the_plain_prompt_names_nobody_and_has_no_unfilled_slot():
+    """No slots at all: there is no configured owner and no site to fill in, so
+    a brace left in the text could only be a template bug."""
+    for text in (prompt_mod.PLAIN_SYSTEM_PROMPT, prompt_mod.plain_system_prompt(spotify=True)):
+        assert "{" not in text and "}" not in text
+        assert "[[" not in text and "]]" not in text  # every region marker resolved
+        for slot in prompt_mod.SLOTS:
+            assert slot not in text
+        # and the example's placeholder owner/site never reach it either
+        assert example_config().pinboard.owner not in text
+        assert example_config().pinboard.site not in text
+
+
+def test_no_dash_appears_in_the_plain_prompt_text():
+    """The prompt forbids em and en dashes, so it cannot contain one itself, and
+    the rule states the ban in words rather than by printing the characters. The
+    only hyphen allowed is the bullet marker at the start of a line."""
+    for text in (prompt_mod.PLAIN_SYSTEM_PROMPT, prompt_mod.plain_system_prompt(spotify=True)):
+        for dash in ("—", "–", "‒", "−", "‐", "‑"):
+            assert dash not in text, repr(dash)
+        for line in text.splitlines():
+            body = line[2:] if line.startswith("- ") else line
+            assert "-" not in body, line
+
+
+def test_the_spotify_line_appears_only_when_the_tool_is_registered():
+    """Same rule as the screenshot block: the optional line is present exactly
+    when the session declares the tool, and its removal leaves prose."""
+    without = prompt_mod.plain_system_prompt(spotify=False)
+    with_tool = prompt_mod.plain_system_prompt(spotify=True)
+
+    assert "`resolve_spotify`" in with_tool and "Spotify" in with_tool
+    assert "resolve_spotify" not in without and "Spotify" not in without
+    assert without == prompt_mod.PLAIN_SYSTEM_PROMPT  # the constant is the common case
+    assert len(without) < len(with_tool)
+    for text in (without, with_tool):
+        assert "\n\n\n" not in text
+        assert "- That is the whole set." in text
+
+
+def test_build_system_prompt_dispatches_on_the_profile(tmp_path):
+    """One call site in the worker, two prompts. The digest is a pinboard thing:
+    it is the changelog's recent entries, and plain has no changelog."""
+    plain = plain_config(tmp_path)
+    assert build_system_prompt(plain) == prompt_mod.PLAIN_SYSTEM_PROMPT
+    assert build_system_prompt(plain, spotify=True) == prompt_mod.plain_system_prompt(
+        spotify=True
+    )
+    # a digest handed to a plain session is not appended: there is nothing on a
+    # plain deployment that produces one, and the prompt never mentions it
+    assert build_system_prompt(plain, "ignored digest") == prompt_mod.PLAIN_SYSTEM_PROMPT
+
+    pinboard = pinboard_config(tmp_path)
+    assert build_system_prompt(pinboard) == render_system_prompt(pinboard.pinboard)
+    assert "Paratrooper" in build_system_prompt(pinboard)
+
+
 # --- auth (3.2): manual mode, no fallback ------------------------------------
 
 def test_auth_subscription_requires_token_and_clears_api_key(monkeypatch):
@@ -1244,42 +1342,78 @@ def test_the_profile_word_is_one_of_two():
     _reject(lambda t: t.update(profile=""), "profile")
 
 
-def test_plain_is_named_as_not_yet_runnable_rather_than_invalid():
-    """The schema knows the word; this build has no session behind it. A worker
-    booted on it would have no tools rather than fail, so it is refused here."""
-    table = plain_table()
-    with pytest.raises(ConfigError) as err:
-        validate_config(table, source="under test")
-    assert "plain" in str(err.value)
-    assert "pinboard" in str(err.value)
+def test_a_plain_source_is_the_shared_settings_and_nothing_else():
+    """Both words run now. A plain source is the shared half of the example with
+    one word changed: every shared value is there, and the pinboard block is not
+    merely empty but absent, so nothing downstream can reach for a site."""
+    cfg = validate_config(plain_table(), source="under test")
+    assert cfg.profile == "plain" and not cfg.is_pinboard
+    assert cfg.pinboard is None
+    # the shared values are exactly the example's, still required, still typed
+    example = example_config()
+    assert cfg.model == example.model
+    assert cfg.notifications == example.notifications
+    assert cfg.uploads.ttl_hours == example.uploads.ttl_hours
+    assert cfg.shell_isolation is False
+    # and the code paths that only exist on pinboard say so in one sentence
+    with pytest.raises(ConfigError, match="plain"):
+        cfg.require_pinboard()
+
+
+def test_a_plain_source_still_needs_every_shared_key():
+    """Dropping the profile table does not make the shared half optional."""
+    for key in ("schema", "model", "notifications", "uploads", "profile"):
+        table = plain_table()
+        table.pop(key)
+        with pytest.raises(ConfigError, match=key):
+            validate_config(table, source="under test")
 
 
 def test_a_plain_table_is_never_part_of_a_source():
     _reject(lambda t: t.update(plain={"anything": 1}), r"\[plain\]")
+    table = plain_table()
+    table["plain"] = {"model": "claude-sonnet-5"}
+    with pytest.raises(ConfigError, match=r"\[plain\]"):
+        validate_config(table, source="under test")
 
 
 def test_a_pinboard_table_belongs_to_the_pinboard_profile():
-    """Checked directly, since the profile gate above would otherwise mask it."""
-    from paratrooper.agent import config as config_mod
-
     table = plain_table()
     table["pinboard"] = example_table()["pinboard"]
-    with pytest.raises(ConfigError, match=r"\[pinboard\]"):
-        with _allowing_plain(config_mod):
-            validate_config(table, source="under test")
+    with pytest.raises(ConfigError) as err:
+        validate_config(table, source="under test")
+    assert "[pinboard]" in str(err.value)
+    assert "plain" in str(err.value)  # the refusal names the profile that has none
 
 
-@contextlib.contextmanager
-def _allowing_plain(config_mod):
-    """Phase 1 refuses `profile = "plain"` by name. The cross-profile rejections
-    still have to be right for the phase that accepts it, so they are exercised
-    with that one gate lifted and nothing else changed."""
-    original = config_mod.IMPLEMENTED_PROFILES
-    config_mod.IMPLEMENTED_PROFILES = config_mod.PROFILES
-    try:
-        yield
-    finally:
-        config_mod.IMPLEMENTED_PROFILES = original
+@pytest.mark.parametrize("key", ["owner", "site", "remote", "branch_prefix", "pins_dir"])
+def test_a_loose_pinboard_key_names_the_key_and_the_profile(key):
+    """A pinboard value written at the top level is in the wrong place on
+    pinboard and on the wrong deployment on plain, and those are two different
+    fixes, so the message says which one this is."""
+    table = plain_table()
+    table[key] = "something"
+    with pytest.raises(ConfigError) as err:
+        validate_config(table, source="under test")
+    assert key in str(err.value) and "plain" in str(err.value)
+
+    table = example_table()
+    table[key] = "something"
+    with pytest.raises(ConfigError) as err:
+        validate_config(table, source="under test")
+    assert key in str(err.value) and "[pinboard]" in str(err.value)
+
+
+def test_a_plain_source_needs_no_site_root_at_runtime(tmp_path, monkeypatch):
+    """The one machine path a plain deployment has is its own inbox. Asking for
+    a site root would be asking for a checkout of a repository it does not have,
+    on both services."""
+    _set_env(monkeypatch, plain_table(), inbox=tmp_path / "inbox")
+    monkeypatch.delenv(SITE_ROOT_VAR, raising=False)
+    for require in (False, True):
+        cfg = load_config(require_site_root=require)
+        assert cfg.profile == "plain" and cfg.pinboard is None
+        assert cfg.inbox == (tmp_path / "inbox").resolve()
 
 
 @pytest.mark.parametrize("bad", [0, 169, 1000, -5, 24.5, "24", True])
@@ -3150,7 +3284,6 @@ def test_the_worker_boot_reads_the_github_app_on_pinboard_only(tmp_path, monkeyp
     """GitHub is a pinboard mechanism entirely. The App read is guarded by
     profile rather than by catching what a profile without one would fail with,
     so a deployment that has no App is not a deployment missing one."""
-    from paratrooper.agent import config as config_mod
     from paratrooper.web import worker_runner
 
     _fresh_secret_state(monkeypatch)
@@ -3179,19 +3312,15 @@ def test_the_worker_boot_reads_the_github_app_on_pinboard_only(tmp_path, monkeyp
     # handoff, config (no marker: it is the load itself), spotify, App, queue, loop
     assert order == ["handoff", "spotify", "app", "queue", "worker:pinboard"]
 
-    # and with that one gate lifted, a plain source takes the same road without
-    # ever reaching for the App
+    # and a plain source takes the same road without ever reaching for the App
     order.clear()
-    plain = plain_table()
-    original = config_mod.IMPLEMENTED_PROFILES
-    config_mod.IMPLEMENTED_PROFILES = config_mod.PROFILES
-    try:
-        _set_env(monkeypatch, plain, inbox=tmp_path / "inbox")
-        worker_runner.main()
-    finally:
-        config_mod.IMPLEMENTED_PROFILES = original
+    _set_env(monkeypatch, plain_table(), inbox=tmp_path / "inbox")
+    worker_runner.main()
     assert order == ["handoff", "spotify", "queue", "worker:plain"]
     assert "app" not in order
+    # the App's own values are still exactly where the wrapper left them: a plain
+    # boot does not read them, so it cannot take them out of the environment
+    assert os.environ.get("PARATROOPER_GITHUB_APP_ID") == "12345"
 
 
 def test_spotify_stays_optional_when_it_is_not_configured(monkeypatch):
@@ -3437,6 +3566,435 @@ def test_run_job_closes_the_secret_files_to_the_file_tools(tmp_path, monkeypatch
     for matcher in matchers[1:]:
         deny = _call_file_hook(matcher.hooks[0], matcher.matcher, realistic[matcher.matcher])
         assert deny["hookSpecificOutput"]["permissionDecision"] == "deny", matcher.matcher
+
+
+# --- the plain session: two web tools, photos in the message, nothing else ----
+
+
+def _plain_photo(path: Path, size=(64, 48), colour=(30, 90, 160), mode="RGB") -> Path:
+    """A throwaway photo on disk, the way a materialized attachment arrives."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new(mode, size, colour if mode == "RGB" else (*colour, 0)).save(path)
+    return path
+
+
+def _plain_run(monkeypatch, cfg, job, *, spotify=None):
+    """Run one plain job against a fake session and hand back what it declared.
+
+    Records the assembled options and the streamed user message, and fails the
+    test if the plain path reaches for the GitHub App, an installation token, a
+    checkout refresh or the pinboard tool server."""
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {"events": []}
+
+    async def fake_query(*, prompt, options):
+        captured["options"] = options
+        captured["messages"] = [m async for m in prompt] if not isinstance(prompt, str) else prompt
+        if False:
+            yield
+
+    def _forbidden(name):
+        def boom(*args, **kwargs):
+            raise AssertionError(f"a plain job reached for {name}")
+
+        return boom
+
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
+    monkeypatch.setattr(worker_mod, "installation_token", _forbidden("installation_token"))
+    monkeypatch.setattr(worker_mod, "build_tool_server", _forbidden("build_tool_server"))
+    monkeypatch.setattr(worker_mod, "_refresh_checkout", _forbidden("_refresh_checkout"))
+    monkeypatch.setattr(worker_mod, "SiteRepo", _forbidden("SiteRepo"))
+    monkeypatch.setattr(worker_mod, "spotify_credentials", lambda: spotify or _no_spotify())
+
+    captured["result"] = asyncio.run(
+        worker_mod.run_job(job, config=cfg, on_event=captured["events"].append)
+    )
+    return captured
+
+
+def _no_spotify():
+    raise ConfigError("Spotify is not configured")
+
+
+def test_the_plain_session_declares_exactly_the_two_web_tools(tmp_path, monkeypatch):
+    """The whole tool posture of a plain deployment, in one assertion set: the
+    base set is the two web built-ins, the shell and the file tools are refused
+    by name as well as absent, no hook is registered because there is nothing for
+    one to guard, and the session still answers permission questions from its own
+    list."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    import paratrooper.agent.worker as worker_mod
+
+    cfg = plain_config(tmp_path)
+    job = worker_mod.Job(job_id="p1", thread_id="t1", text="what is the weather like")
+    run = _plain_run(monkeypatch, cfg, job)
+    options = run["options"]
+
+    assert options.tools == ["WebSearch", "WebFetch"]
+    assert options.allowed_tools == ["WebSearch", "WebFetch"]  # no Spotify configured
+    assert options.disallowed_tools == [
+        "Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep", "Task",
+    ]
+    assert not options.hooks  # no shell, no file tool: nothing to fence
+    assert options.mcp_servers == {}
+    assert options.model == cfg.model
+    assert options.permission_mode == "dontAsk"
+    assert options.include_partial_messages is True
+    assert options.max_buffer_size == 10 * 1024 * 1024
+    # the session sits in its own inbox, never in a repository, and the folder
+    # exists because the CLI is started with it as its working directory
+    assert options.cwd == str(cfg.require_inbox())
+    assert cfg.require_inbox().is_dir()
+    # and the gate answers from that same list: the two run, everything else is
+    # refused with a sentence about THIS deployment
+    gate = options.can_use_tool
+    for named in options.allowed_tools:
+        assert isinstance(asyncio.run(gate(named, {}, None)), PermissionResultAllow), named
+    for stranger in ("Bash", "Read", "Write", "Task", "mcp__paratrooper__place_pin"):
+        deny = asyncio.run(gate(stranger, {}, None))
+        assert isinstance(deny, PermissionResultDeny), stranger
+        assert stranger in deny.message
+        assert "pinboard" not in deny.message  # it is not that deployment
+        assert "web search" in deny.message
+    assert run["result"].status == "done"
+
+
+def test_the_plain_session_keeps_claude_auth_and_no_worker_secret(tmp_path, monkeypatch):
+    """``env`` is an override merged over the inherited environment, so the CLI
+    still finds Claude's own credential, which it needs. What must not be there
+    is everything the boot already took out of ``os.environ``: the App trio, the
+    Spotify pair and the queue address."""
+    import paratrooper.agent.worker as worker_mod
+
+    job = worker_mod.Job(job_id="p2", thread_id="t1", text="hello")
+    run = _plain_run(monkeypatch, plain_config(tmp_path), job)
+    env = run["options"].env
+
+    assert set(env) == {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "GIT_TERMINAL_PROMPT"}
+    assert not [k for k in env if k.startswith(("SPOTIFY_", "PARATROOPER_GITHUB"))]
+    assert "REDIS_URL" not in env
+    # nothing here removes or replaces the inherited environment: the SDK merges
+    # this dict on top of it, which is why the boot is where secrets are removed
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env and "ANTHROPIC_API_KEY" not in env
+
+
+@pytest.mark.parametrize("isolation,expected", [(False, "0"), (True, "1")])
+def test_the_plain_session_writes_the_shared_isolation_switch(
+    tmp_path, monkeypatch, isolation, expected
+):
+    """The same deployer setting, on the newcomer's deployment too, written
+    explicitly either way. Nothing rewrites an explicit opt-in back to off."""
+    import paratrooper.agent.worker as worker_mod
+
+    cfg = dataclasses.replace(plain_config(tmp_path), shell_isolation=isolation)
+    job = worker_mod.Job(job_id="p3", thread_id="t1", text="hello")
+    run = _plain_run(monkeypatch, cfg, job)
+    assert run["options"].env[worker_mod.SCRUB_VAR] == expected
+
+
+def test_the_plain_session_registers_spotify_only_when_it_is_configured(tmp_path, monkeypatch):
+    """The one custom tool a plain session can have. With credentials it is
+    registered, named in the allowed list and mentioned in the prompt; without
+    them there is no server at all rather than a server with nothing on it."""
+    import paratrooper.agent.worker as worker_mod
+    from paratrooper.agent import prompt as prompt_module
+
+    cfg = plain_config(tmp_path)
+    job = worker_mod.Job(job_id="p4", thread_id="t1", text="play me something")
+
+    without = _plain_run(monkeypatch, cfg, job)
+    assert without["options"].mcp_servers == {}
+    assert "resolve_spotify" not in "".join(without["options"].allowed_tools)
+    assert without["options"].system_prompt == prompt_module.PLAIN_SYSTEM_PROMPT
+
+    with_creds = _plain_run(monkeypatch, cfg, job, spotify=("id", "secret"))
+    assert set(with_creds["options"].mcp_servers) == {"paratrooper"}
+    assert with_creds["options"].allowed_tools == [
+        "WebSearch", "WebFetch", "mcp__paratrooper__resolve_spotify",
+    ]
+    assert with_creds["options"].system_prompt == prompt_module.plain_system_prompt(spotify=True)
+    # the prompt and the tool come from the one fact, so the agent is never told
+    # about a tool the session did not declare
+    assert "resolve_spotify" in with_creds["options"].system_prompt
+
+
+def test_the_plain_tool_server_builds_no_pinboard_state():
+    """Plain construction is separate construction. The pinboard handlers need a
+    site root, a changelog and three stage folders; building them on a profile
+    that has none would be a dispatch bug wearing an AttributeError."""
+    from paratrooper.agent.tools import build_plain_tool_server
+
+    server, names = build_plain_tool_server(None)
+    assert server is None and names == []
+
+    server, names = build_plain_tool_server(("id", "secret"))
+    assert server is not None
+    assert names == ["mcp__paratrooper__resolve_spotify"]
+
+
+def test_a_plain_turn_sends_the_photos_first_then_one_text_block(tmp_path, monkeypatch):
+    """One user message: every image block, then exactly one text block carrying
+    the message and the recent thread. No inbox key line: on plain the photo is
+    in the message, so a key would name a file this session cannot open."""
+    import paratrooper.agent.worker as worker_mod
+
+    cfg = plain_config(tmp_path)
+    inbox = cfg.require_inbox()
+    _plain_photo(inbox / "one.jpg")
+    _plain_photo(inbox / "two.png", mode="RGBA")
+
+    job = worker_mod.Job(
+        job_id="p5", thread_id="t1", text="what are these",
+        attachments=["one.jpg", "two.png"],
+        context=["you: earlier message", "paratrooper: earlier reply"],
+    )
+    run = _plain_run(monkeypatch, cfg, job)
+
+    assert len(run["messages"]) == 1  # one message, one reply
+    message = run["messages"][0]
+    assert message["type"] == "user" and message["message"]["role"] == "user"
+    content = message["message"]["content"]
+    assert [part["type"] for part in content] == ["image", "image", "text"]
+    assert [part["source"]["media_type"] for part in content[:2]] == ["image/jpeg", "image/png"]
+    for part in content[:2]:
+        assert part["source"]["type"] == "base64"
+        base64.b64decode(part["source"]["data"], validate=True)  # real base64, not a path
+    text = content[-1]["text"]
+    assert text.startswith("what are these")
+    assert "[recent thread]" in text and "earlier reply" in text
+    assert "one.jpg" not in text and "inbox" not in text.lower()
+
+
+def test_a_plain_turn_with_no_photo_is_one_text_block(tmp_path, monkeypatch):
+    import paratrooper.agent.worker as worker_mod
+
+    job = worker_mod.Job(job_id="p6", thread_id="t1", text="just talking")
+    run = _plain_run(monkeypatch, plain_config(tmp_path), job)
+    content = run["messages"][0]["message"]["content"]
+    assert [part["type"] for part in content] == ["text"]
+    assert content[0]["text"] == "just talking"
+
+
+def test_vision_preprocessing_caps_the_long_edge_and_keeps_transparency(tmp_path):
+    """The bounds of the plain image pipeline, on real pixels: EXIF baked in
+    first, the long edge capped, never upscaled, alpha kept as PNG."""
+    from paratrooper.agent.images import VISION_MAX_DIM, for_vision
+
+    big = tmp_path / "big.jpg"
+    Image.new("RGB", (4000, 2000), (120, 40, 80)).save(big)
+    shot = for_vision(big)
+    assert max(shot.width, shot.height) == VISION_MAX_DIM
+    assert shot.width / shot.height == pytest.approx(2.0, abs=0.01)
+    assert shot.media_type == "image/jpeg"
+
+    small = tmp_path / "small.jpg"
+    Image.new("RGB", (200, 100), (10, 10, 10)).save(small)
+    kept = for_vision(small)
+    assert (kept.width, kept.height) == (200, 100)  # never upscaled
+
+    cutout = tmp_path / "cutout.png"
+    Image.new("RGBA", (300, 300), (0, 0, 0, 0)).save(cutout)
+    assert for_vision(cutout).media_type == "image/png"
+
+    # EXIF orientation is baked into the pixels, so what the agent sees is what
+    # the person saw: a sideways 6 means the long edge swaps
+    sideways = tmp_path / "sideways.jpg"
+    exif = Image.Exif()
+    exif[274] = 6  # Orientation: rotate 90
+    Image.new("RGB", (400, 200), (5, 5, 5)).save(sideways, exif=exif)
+    turned = for_vision(sideways)
+    assert (turned.width, turned.height) == (200, 400)
+
+
+def test_vision_preprocessing_stays_inside_its_encoded_budget(tmp_path):
+    """The ceiling is measured on the base64 text, because that is what crosses
+    the session's stdin inside one JSON line."""
+    from paratrooper.agent.images import for_vision
+
+    noisy = tmp_path / "noisy.png"
+    rng = np.random.default_rng(7)
+    Image.fromarray(rng.integers(0, 255, (2000, 2000, 3), dtype=np.uint8)).save(noisy)
+
+    generous = for_vision(noisy)
+    assert len(generous.data) <= 3 * 1024 * 1024
+
+    tight = for_vision(noisy, max_base64=120_000)
+    assert len(tight.data) <= 120_000
+    assert max(tight.width, tight.height) < max(generous.width, generous.height)
+
+
+def test_a_plain_turn_shares_one_image_budget_between_its_photos(tmp_path, monkeypatch):
+    """The turn's input budget is divided rather than paid per photo."""
+    import paratrooper.agent.worker as worker_mod
+
+    cfg = plain_config(tmp_path)
+    inbox = cfg.require_inbox()
+    inbox.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(11)
+    keys = []
+    for n in range(4):
+        key = f"noise{n}.png"
+        Image.fromarray(rng.integers(0, 255, (1800, 1800, 3), dtype=np.uint8)).save(inbox / key)
+        keys.append(key)
+
+    job = worker_mod.Job(job_id="p7", thread_id="t1", text="look", attachments=keys)
+    run = _plain_run(monkeypatch, cfg, job)
+    blocks = [p for p in run["messages"][0]["message"]["content"] if p["type"] == "image"]
+    assert len(blocks) == 4
+    total = sum(len(p["source"]["data"]) for p in blocks)
+    assert total <= worker_mod.PLAIN_VISION_BASE64_BUDGET
+
+
+@pytest.mark.parametrize("mode", ["RGB", "RGBA"])
+def test_vision_refuses_oversized_photos_at_the_dimension_floor(tmp_path, mode):
+    from paratrooper.agent.images import VisionBudgetError, for_vision
+
+    channels = 4 if mode == "RGBA" else 3
+    pixels = np.random.default_rng(17).integers(
+        0, 256, (256, 256, channels), dtype=np.uint8,
+    )
+    photo = tmp_path / "noise.png"
+    Image.fromarray(pixels).save(photo)
+    with pytest.raises(VisionBudgetError):
+        for_vision(photo, max_base64=1024)
+
+
+def test_a_plain_turn_refuses_a_photo_batch_that_exceeds_its_budget(tmp_path, monkeypatch):
+    import paratrooper.agent.worker as worker_mod
+
+    cfg = plain_config(tmp_path)
+    keys = [f"photo{n}.jpg" for n in range(4)]
+    for key in keys:
+        _plain_photo(cfg.require_inbox() / key)
+    monkeypatch.setattr(worker_mod, "PLAIN_VISION_BASE64_BUDGET", 1000)
+    job = worker_mod.Job(job_id="large-batch", thread_id="t1", text="look", attachments=keys)
+    run = _plain_run(monkeypatch, cfg, job)
+
+    assert run["result"].status == "error"
+    assert "options" not in run
+    assert "fewer or smaller photos" in run["result"].error
+    assert [event["kind"] for event in run["events"]] == ["error"]
+
+
+def test_a_photo_that_cannot_be_read_fails_the_job_in_the_persons_words(tmp_path, monkeypatch):
+    """A broken attachment is the person's photo. They hear one plain sentence,
+    the log keeps the real cause, and the session is never started."""
+    import paratrooper.agent.worker as worker_mod
+
+    cfg = plain_config(tmp_path)
+    inbox = cfg.require_inbox()
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "broken.jpg").write_bytes(b"this is not a photo")
+
+    job = worker_mod.Job(job_id="p8", thread_id="t1", text="what is this",
+                         attachments=["broken.jpg"])
+    run = _plain_run(monkeypatch, cfg, job)
+
+    assert run["result"].status == "error"
+    assert "options" not in run  # the turn never started
+    message = run["result"].error
+    assert "photo" in message and "again" in message
+    for leak in ("Traceback", "PIL", "UnidentifiedImageError", str(inbox)):
+        assert leak not in message
+    assert [e["kind"] for e in run["events"]] == ["error"]
+
+
+def test_a_plain_job_reports_one_reply_and_no_pinboard_artifact(tmp_path, monkeypatch):
+    """A plain job is one reply. There is no branch, no pull request and no board
+    preview on this profile, so the result carries none and the events are the
+    two the phone already understands."""
+    from claude_agent_sdk import ResultMessage, StreamEvent
+
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {"events": []}
+
+    async def fake_query(*, prompt, options):
+        # the real message types, so the worker's own isinstance dispatch runs
+        async for _ in prompt:
+            pass
+        yield StreamEvent(
+            uuid="u1", session_id="s", parent_tool_use_id=None,
+            event={"type": "content_block_delta", "delta": {"type": "text_delta"}},
+        )
+        yield ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id="s", result="sunny and cold",
+        )
+
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
+
+    job = worker_mod.Job(job_id="p9", thread_id="t1", text="weather?")
+    result = asyncio.run(
+        worker_mod.run_job(job, config=plain_config(tmp_path),
+                           on_event=captured["events"].append)
+    )
+    assert result.status == "done" and result.result_text == "sunny and cold"
+    assert result.branch is None and result.pr is None and result.screenshot is None
+    assert [e["kind"] for e in captured["events"]] == ["typing", "done"]
+    assert captured["events"][-1]["payload"] == "sunny and cold"
+
+
+@pytest.mark.parametrize("result_text", ["Service temporarily unavailable", None])
+def test_a_plain_job_reports_an_sdk_error_result_as_failure(tmp_path, monkeypatch, result_text):
+    from claude_agent_sdk import ResultMessage
+
+    import paratrooper.agent.worker as worker_mod
+
+    async def fake_query(*, prompt, options):
+        async for _ in prompt:
+            pass
+        yield ResultMessage(
+            subtype="error_during_execution", duration_ms=1, duration_api_ms=1,
+            is_error=True, num_turns=1, session_id="s", result=result_text,
+        )
+
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
+    events = []
+    result = asyncio.run(worker_mod.run_job(
+        worker_mod.Job(job_id="sdk-error", thread_id="t1", text="hello"),
+        config=plain_config(tmp_path), on_event=events.append,
+    ))
+    assert result.status == "error"
+    assert result.error == (result_text or "I couldn't finish that reply. Please try again.")
+    assert [event["kind"] for event in events] == ["error"]
+    assert events[0]["payload"] == result.error
+
+
+def test_importing_the_worker_needs_no_jwt_and_no_browser():
+    """The plain image carries neither PyJWT nor a browser driver, so importing
+    the worker modules must not need either. Both are made unimportable in a
+    subprocess and the import still has to succeed."""
+    script = (
+        "import builtins, sys\n"
+        "real = builtins.__import__\n"
+        "blocked = ('jwt', 'playwright')\n"
+        "def guard(name, *a, **k):\n"
+        "    if name.split('.')[0] in blocked:\n"
+        "        raise ImportError('blocked for this test: ' + name)\n"
+        "    return real(name, *a, **k)\n"
+        "builtins.__import__ = guard\n"
+        "import paratrooper.agent.worker as w\n"
+        "import paratrooper.web.worker_runner as r\n"
+        "assert w.PLAIN_TOOLS == ['WebSearch', 'WebFetch']\n"
+        "assert r.Worker is not None\n"
+        "from paratrooper.agent.tools import build_plain_tool_server\n"
+        "server, names = build_plain_tool_server(('id', 'secret'))\n"
+        "assert names == ['mcp__paratrooper__resolve_spotify']\n"
+        "print('ok')\n"
+    )
+    root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    done = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, env=env, cwd=root,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip().endswith("ok")
 
 
 # --- the session's control stream, and who answers the CLI -------------------

@@ -719,14 +719,17 @@ async def _result_relay(state: AppState) -> None:
             await pubsub.aclose()
 
 
-def _lifespan(injected: AppState | None):
+def _lifespan(injected: AppState | None, _config: Config | None = None):
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if injected is not None:
             app.state.app_state = injected
             yield
             return
-        config = load_config()
+        # the configuration create_app already read, so this process decodes and
+        # validates the one variable exactly once and cannot end up with a
+        # different answer here than the one its routes were built from
+        config = _config if _config is not None else load_config()
         logger.info(
             "paratrooper web: profile=%s model=%s shell_isolation=%s uploads.ttl_hours=%d",
             config.profile, config.model, config.shell_isolation, config.uploads.ttl_hours,
@@ -795,6 +798,12 @@ _diag = logging.getLogger("paratrooper.holddiag")
 def create_app(injected: AppState | None = None) -> FastAPI:
     install_service_logging()
     install_log_redaction()
+    # The profile has to be known here, not only inside the lifespan, because one
+    # route exists only on one profile and a route is registered when the app is
+    # built. Read once: an injected state brings its own configuration (tests and
+    # local harnesses), and a real boot decodes the one variable here and hands it
+    # to the lifespan rather than reading it twice.
+    config = injected.config if injected is not None else load_config()
     # The interactive docs and the schema they are built from are off. They take
     # no token, so in the deployed service they were an unauthenticated index of
     # every route, its method and its request shape — a map handed to anyone who
@@ -802,7 +811,7 @@ def create_app(injected: AppState | None = None) -> FastAPI:
     # that was written against these routes by hand.
     app = FastAPI(
         title="Paratrooper",
-        lifespan=_lifespan(injected),
+        lifespan=_lifespan(injected, config),
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -938,55 +947,62 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         meta = await asyncio.to_thread(_page_meta, st().store, rows)
         return {"messages": [_frame(seq, m, meta) for seq, m in rows]}
 
-    @app.post("/api/publish", dependencies=[Depends(require_token)])
-    async def publish(req: PublishRequest) -> JSONResponse:
-        state = st()
-        pinboard = state.config.pinboard
-        # Publish merges a pull request into a site repository. A profile with no
-        # site has nothing to merge; registration becomes profile-conditional in
-        # the next phase, and this is the honest answer until then.
-        if pinboard is None:
-            raise HTTPException(status_code=404, detail="not found")
-        remote = pinboard.remote
-        if not remote:
-            raise HTTPException(status_code=400, detail="site remote not configured")
-        try:
-            owner, repo = owner_repo_from_remote(remote)
-            token = merge_token()
-            if req.pr.strip():
-                number = parse_pr_number(req.pr)
-                # only the NUMBER came off the phone, so nothing about the
-                # branch behind it is known until it is read back from GitHub
-                found = await asyncio.to_thread(
-                    get_pull_request, owner, repo, number, token=token
+    # Publish merges a pull request into a site repository, so it exists only
+    # where there is one. On any other profile the route is never registered: no
+    # handler, no token check, no merge credential read, nothing to reach. A
+    # request to it gets whatever the router says about an address with no route
+    # on it, which is a bare 404, or a 405 on a service that also serves the built
+    # phone app, because the static mount below then matches the path and refuses
+    # the method. The feature is unreachable from the other end too: a plain
+    # session has no tool that could produce the pull request a tap would merge.
+    if config.is_pinboard:
+
+        @app.post("/api/publish", dependencies=[Depends(require_token)])
+        async def publish(req: PublishRequest) -> JSONResponse:
+            state = st()
+            # the registration above is the gate; this is the same answer said
+            # once more where the value is actually used
+            pinboard = state.config.require_pinboard()
+            remote = pinboard.remote
+            if not remote:
+                raise HTTPException(status_code=400, detail="site remote not configured")
+            try:
+                owner, repo = owner_repo_from_remote(remote)
+                token = merge_token()
+                if req.pr.strip():
+                    number = parse_pr_number(req.pr)
+                    # only the NUMBER came off the phone, so nothing about the
+                    # branch behind it is known until it is read back from GitHub
+                    found = await asyncio.to_thread(
+                        get_pull_request, owner, repo, number, token=token
+                    )
+                else:
+                    # pr rows persisted before 6da5b3c carry an empty payload —
+                    # resolve the one open agent PR instead of 409ing on it
+                    found = await asyncio.to_thread(
+                        find_open_pr, owner, repo,
+                        token=token, branch_prefix=pinboard.branch_prefix,
+                    )
+                    number = int(found["number"])
+                # the agent's own branch, on the configured repository, at the
+                # commit it is sitting on right now — anything else refuses below
+                head_sha = check_publishable(
+                    found, owner=owner, repo=repo, branch_prefix=pinboard.branch_prefix
                 )
-            else:
-                # pr rows persisted before 6da5b3c carry an empty payload —
-                # resolve the one open agent PR instead of 409ing on it
-                found = await asyncio.to_thread(
-                    find_open_pr, owner, repo,
-                    token=token, branch_prefix=pinboard.branch_prefix,
+                result = await asyncio.to_thread(
+                    merge_pull_request, owner, repo, number, token=token, sha=head_sha
                 )
-                number = int(found["number"])
-            # the agent's own branch, on the configured repository, at the
-            # commit it is sitting on right now — anything else refuses below
-            head_sha = check_publishable(
-                found, owner=owner, repo=repo, branch_prefix=pinboard.branch_prefix
+            except PublishError as exc:
+                # surface WHY (already merged, conflicts, bad PR ref) instead of a 500
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            published = ThreadEvent(
+                thread_id=req.thread_id, role="system",
+                payload=f"published PR #{number}", ts=_now(), kind="published",
             )
-            result = await asyncio.to_thread(
-                merge_pull_request, owner, repo, number, token=token, sha=head_sha
-            )
-        except PublishError as exc:
-            # surface WHY (already merged, conflicts, bad PR ref) instead of a 500
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        published = ThreadEvent(
-            thread_id=req.thread_id, role="system",
-            payload=f"published PR #{number}", ts=_now(), kind="published",
-        )
-        seq = await asyncio.to_thread(state.store.add_message, published)
-        # live confirmation on the phone, not just a row in history
-        await _send_to_sockets(state, req.thread_id, {"seq": seq, **published.model_dump()})
-        return JSONResponse({"merged": True, "sha": result.get("sha")})
+            seq = await asyncio.to_thread(state.store.add_message, published)
+            # live confirmation on the phone, not just a row in history
+            await _send_to_sockets(state, req.thread_id, {"seq": seq, **published.model_dump()})
+            return JSONResponse({"merged": True, "sha": result.get("sha")})
 
     @app.get("/api/config", dependencies=[Depends(require_token)])
     async def site_config() -> dict:

@@ -148,6 +148,7 @@ import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from ".
 import type { OutboxRecord } from "./outbox";
 import {
   CACHE_FRAMES,
+  SCHEMA_VERSION as CACHE_SCHEMA_VERSION,
   createWriteScheduler,
   del as cacheDel,
   get as cacheGet,
@@ -190,10 +191,13 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.147"; // Every deployment-specific value leaves the code for one typed configuration source that reaches both services as a single base64 environment variable, the upload expiry and the notification wording come from it rather than from constants, and the health check now says which deployment shape is answering
+const APP_VERSION = "0.3.148"; // The plain profile runs: a chat with photos, web search and page reading, and the app hides the board artifacts on a deployment that has none
 
 // compose placeholder: one of these, picked at random each time the chat
-// renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
+// renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
+// Nine, not ten: the one that named the board went with the split, because one
+// code base now serves a deployment that has no board to send a telegram to.
+// The other nine are word for word what they were.
 const PROMPTS = [
   "Dispatch for HQ?",
   "Wire your orders …",
@@ -202,7 +206,6 @@ const PROMPTS = [
   "Over the top …",
   "Sortie at dawn …",
   "From the trenches …",
-  "Telegram for the board?",
   "Drop from the biplane …",
   "Signal the aerodrome …",
 ];
@@ -251,6 +254,150 @@ const PROBE_FALLBACK_MS = 5000; // past any believable probe round trip; only a 
 // in place (enrichStored below), because the server heals photo rows on read
 // and the re-delivery may be the only copy carrying the attachment fields.
 const store = new Map<number, ServerMsg>();
+
+// --- which deployment shape is answering, and what it may present ------------
+//
+// One code base serves two deployment shapes. The full one keeps a board: its
+// replies can carry a board preview and a pull request with a Publish button.
+// The plain one is a chat with photos and web search, and never produces either.
+// The phone cannot work out which it is talking to, so the server says so on
+// /api/health, and this block is everything the client does with that word.
+//
+// The timing is the whole difficulty, and it is not optional:
+//   1. bootFromCache() paints saved frames BEFORE the socket opens;
+//   2. the health call starts from ws.onopen and is not awaited;
+//   3. renderInto falls back to renderAgentText for any kind with no renderer,
+//      so removing a renderer would print a screenshot's data URI as text.
+// So a confirmed profile is restored from local storage before the first paint,
+// an unconfirmed one is an explicit unknown that WITHHOLDS the board artifacts
+// rather than guessing, and filtering happens inside renderInto, ahead of that
+// text fallback. Nothing here touches the store, the seq cursors or the replay
+// ledger: a filtered frame is still stored, still counted and still cached, so
+// the profile answering late cannot corrupt a catch-up or cause a redelivery.
+type Profile = "pinboard" | "plain";
+const PROFILE_WORDS: readonly string[] = ["pinboard", "plain"];
+// the kinds only a pinboard deployment can produce
+const PINBOARD_KINDS: readonly string[] = ["pr", "screenshot"];
+const PROFILE_KEY = "paratrooper_profile";
+// bump if the stored record's shape or meaning changes; a record from another
+// era is ignored and the boot behaves as though nothing was remembered
+const PROFILE_RECORD_ERA = 1;
+// null means "not confirmed by this deployment yet", which is a state, not a
+// default: it is why the artifacts wait instead of being painted on a guess.
+let profile: Profile | null = null;
+
+function isProfile(value: unknown): value is Profile {
+  return typeof value === "string" && PROFILE_WORDS.includes(value);
+}
+
+// localStorage is origin-scoped. The record also names its deployment, thread
+// and frame schema so an incompatible cache cannot inherit a confirmed profile.
+function profileRecordScope(): string {
+  return typeof location === "undefined" ? "" : location.host;
+}
+
+function restoreProfile(): Profile | null {
+  try {
+    const raw = localStorage.getItem(PROFILE_KEY);
+    if (!raw) return null;
+    const rec = JSON.parse(raw) as {
+      era?: unknown; host?: unknown; thread?: unknown; cacheSchema?: unknown; profile?: unknown;
+    };
+    if (rec.era !== PROFILE_RECORD_ERA) return null;
+    if (rec.host !== profileRecordScope()) return null;
+    if (rec.thread !== THREAD_ID || rec.cacheSchema !== CACHE_SCHEMA_VERSION) return null;
+    return isProfile(rec.profile) ? rec.profile : null;
+  } catch {
+    return null; // unreadable, unparsable, or storage refused: boot unconfirmed
+  }
+}
+
+function rememberProfile(next: Profile): void {
+  try {
+    localStorage.setItem(
+      PROFILE_KEY,
+      JSON.stringify({
+        era: PROFILE_RECORD_ERA, host: profileRecordScope(),
+        thread: THREAD_ID, cacheSchema: CACHE_SCHEMA_VERSION, profile: next,
+      }),
+    );
+  } catch {
+    /* private mode can refuse storage: the next boot is simply unconfirmed */
+  }
+}
+
+// Would a deployment of this shape draw this kind? Unknown withholds the board
+// artifacts exactly as plain does; the difference is that unknown is temporary.
+function profileShows(shape: Profile | null, kind: string): boolean {
+  return shape === "pinboard" || !PINBOARD_KINDS.includes(kind);
+}
+
+// The render rule, read by renderInto for every frame.
+function rendersKind(kind: string): boolean {
+  return profileShows(profile, kind);
+}
+
+// Health answered (or a later reconnect answered differently). Adopt the word,
+// remember it for the next cold open, and repaint only the kinds whose
+// presentation the change actually moves: unknown to plain changes nothing on
+// screen, and repainting fifty cached frames to draw nothing again would be
+// layout work for no result.
+function adoptProfile(value: unknown): void {
+  if (!isProfile(value)) return; // no word, or a word this build does not know
+  if (profile === value) {
+    rememberProfile(value); // same answer: refresh the record, repaint nothing
+    return;
+  }
+  const was = profile;
+  profile = value;
+  rememberProfile(value);
+  const moved = PINBOARD_KINDS.filter(
+    (kind) => profileShows(was, kind) !== profileShows(value, kind),
+  );
+  if (moved.length) reconcileProfileArtifacts(moved);
+}
+
+// Repaint the affected frames already in the store, in place, from what the
+// client kept. rerender() replaces one wrapper's children with animation
+// suppressed: no frame is re-ingested, no seq moves, and the composer is
+// untouched. Preserve a surviving row at the reader's fold across the whole
+// batch, including stamp changes. At the tail, pin even a PR-only reveal;
+// screenshots retain their existing handling for a later image decode.
+function reconcileProfileArtifacts(kinds: readonly string[]): void {
+  const t = document.getElementById("thread");
+  const following = followTail;
+  let anchor: HTMLElement | null = null;
+  let anchorTop = 0;
+  if (t && !following) {
+    const fold = t.getBoundingClientRect().top;
+    for (const row of t.querySelectorAll<HTMLElement>(".evt > .row")) {
+      const seq = Number(row.parentElement?.dataset.seq);
+      if (kinds.includes(store.get(seq)?.kind ?? "")) continue;
+      const rect = row.getBoundingClientRect();
+      if (rect.height === 0) continue;
+      anchor = row;
+      anchorTop = rect.top;
+      if (rect.bottom > fold) break;
+    }
+  }
+  const prev = suppressAnim;
+  suppressAnim = true;
+  try {
+    for (const [seq, m] of store) {
+      if (kinds.includes(m.kind ?? "")) rerender(seq);
+    }
+    if (t && following) scrollToBottom(true);
+    else if (t && anchor?.isConnected) {
+      const fix = anchor.getBoundingClientRect().top - anchorTop;
+      if (fix !== 0) {
+        t.scrollTop += fix;
+        scrollGhostWrite("profile-view", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
+      }
+    }
+  } finally {
+    suppressAnim = prev;
+  }
+}
 
 // finished-reply hold (hold.ts owns the state machine): a "done" landing while
 // Akash is mid-keystroke parks until 7s of composer quiet, an emptied box, or
@@ -3851,6 +3998,13 @@ function renderInto(wrapper: HTMLElement, m: ServerMsg): void {
   // pickup watermark the receipt derives from
   if (m.kind === "job" || m.kind === "working") return;
   if (role === "system") return renderSystemLine(m, wrapper, at, value);
+  // A board artifact on a deployment that has no board, or on one that has not
+  // said yet: draw nothing. This has to sit ABOVE the fallback below, because
+  // that fallback is what would otherwise print a screenshot's data URI as a
+  // text bubble. The frame itself is already stored and counted; this is only
+  // about what is on screen, and reconcileProfileArtifacts repaints it if the
+  // answer turns out to be pinboard.
+  if (!rendersKind(m.kind ?? "log")) return;
   return (agentRenderers[m.kind ?? "log"] ?? renderAgentText)(m, wrapper, at, value);
 }
 
@@ -4174,11 +4328,22 @@ function maybeSelfRefresh(server: string): void {
 async function checkServerVersion(): Promise<void> {
   try {
     const r = await fetch("/api/health");
-    const v = String((await r.json()).version ?? "");
-    console.log(`paratrooper ui ${__BUILT_AT__} built@${__SERVER_VERSION__} / server ${v}`);
+    const body = (await r.json()) as { version?: unknown; profile?: unknown };
+    const v = String(body.version ?? "");
+    // the deployment shape, from the one place that knows it. Adopted before
+    // the version check, because maybeSelfRefresh can reload the page: the
+    // profile is worth remembering either way, and a reload then boots with it
+    // already confirmed instead of waiting for health a second time.
+    adoptProfile(body.profile);
+    console.log(
+      `paratrooper ui ${__BUILT_AT__} built@${__SERVER_VERSION__} / server ${v} ` +
+        `profile ${profile ?? "unknown"}`,
+    );
     if (v) maybeSelfRefresh(v);
   } catch {
-    /* offline: the cached shell is all there is anyway */
+    /* offline: the cached shell is all there is anyway, and a profile confirmed
+       on an earlier open still stands — it is this deployment's own answer, not
+       a guess, and nothing about it expires while the network is down */
   }
 }
 
@@ -6979,6 +7144,12 @@ function armBootFrameGuard(): void {
 // or unreadable record simply means the old cacheless boot.
 async function bootFromCache(): Promise<void> {
   armBootFrameGuard(); // the settle window opens with the boot, cache or not
+  // FIRST, before a single frame is applied: the profile this deployment
+  // confirmed on an earlier open. The cached thread paints below, and a board
+  // preview in it may only be drawn if this deployment is known to have a board.
+  // Nothing was remembered means the artifacts wait for health, not that they
+  // are gone: reconcileProfileArtifacts paints them when the answer arrives.
+  profile = restoreProfile();
   const t0 = performance.now();
   const cached = await cacheGet<ServerMsg>(THREAD_ID).catch(() => null);
   const readMs = Math.round(performance.now() - t0);

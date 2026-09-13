@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 
 import anyio
@@ -44,9 +44,9 @@ from claude_agent_sdk import (
     StreamEvent,
 )
 
+from . import images
 from .auth import configure_auth
 from .config import (
-    PINBOARD,
     Config,
     ConfigError,
     PinboardConfig,
@@ -59,13 +59,28 @@ from .hooks import make_file_guard_hook, make_main_guard_hook
 from .memory import Changelog, format_digest
 from .prompt import build_system_prompt
 from .siterepo import SiteRepo
-from .tools import SERVER_NAME, ToolContext, build_tool_server
+from .tools import SERVER_NAME, ToolContext, build_plain_tool_server, build_tool_server
 
 logger = logging.getLogger(__name__)
 
 # headless built-ins the agent needs; Bash is gated by the main-guard hook and
 # the three file tools by the file guard
 BUILTIN_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+# The plain profile's whole base tool set, declared as `tools` so it REPLACES the
+# CLI's default set rather than sitting beside it: web search and page reading,
+# and that is all a plain session has. There is no shell to fence and no file
+# tool to guard, so there are no hooks either.
+PLAIN_TOOLS = ["WebSearch", "WebFetch"]
+# Named refusals on top of the short base set. `tools` already leaves these out,
+# so this is the second fence rather than the only one: the CLI refuses a name on
+# this list before anything is asked of the session, whatever a settings file,
+# a preset or a later SDK default might otherwise reintroduce.
+PLAIN_DENIED_TOOLS = [
+    "Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep", "Task",
+]
+# How many bytes of base64 image data one plain turn may carry, shared between
+# its photos. This input policy is separate from the SDK's CLI-output buffer.
+PLAIN_VISION_BASE64_BUDGET = 6 * 1024 * 1024
 # the CLI's own refusal of the two secret-bearing roots, in its permission-rule
 # syntax. The file guard denies the same two; this one does not depend on the
 # hook being reached at all.
@@ -79,6 +94,10 @@ SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
 # set: a plain session refused a tool used to be told it lacked "the pinboard
 # tools", which is a sentence about a deployment it is not.
 _PINBOARD_TOOLS = "the pinboard tools, the shell and the file tools"
+_PLAIN_TOOLS_PHRASE = (
+    "web search and page reading, and on this deployment nothing else: no shell, "
+    "no file tools"
+)
 
 EventCallback = Callable[[dict], Awaitable[None] | None]
 
@@ -120,14 +139,21 @@ def make_tool_gate(session_tools: list[str], *, what_this_session_has: str = _PI
     return gate
 
 
-async def run_session(*, prompt: str, options: ClaudeAgentOptions):
+async def run_session(
+    *, prompt: str | AsyncIterable[dict], options: ClaudeAgentOptions
+):
     """Drive one turn and yield the messages it produces.
 
     A streaming client rather than ``query()``: the control stream carries the
     hook decisions, the in-process tool calls and the permission answers, and it
     has to stay open for as long as the turn is running (see the module
     docstring). ``receive_response()`` ends at the turn's result, and leaving the
-    context closes stdin and the CLI with it."""
+    context closes stdin and the CLI with it.
+
+    ``prompt`` is a string on pinboard and an async stream of user messages on
+    plain. The string is the whole message; the stream is how an image block is
+    attached at all, since single-message input does not take attachments. Both
+    go to the same client call, which accepts either."""
     async with ClaudeSDKClient(options=options) as client:
         await client.query(prompt)
         async for message in client.receive_response():
@@ -172,6 +198,54 @@ def _build_prompt(job: Job) -> str:
     if job.context:
         parts.append("\n[recent thread]\n" + "\n".join(job.context))
     return "\n".join(parts)
+
+
+def _build_plain_text(job: Job) -> str:
+    """The plain turn's text block: the message and the recent thread, nothing else.
+
+    No inbox key line. On pinboard a key is the only way the agent can reach a
+    photo, through a tool that reads it; on plain the photo is already in the
+    message as an image block, so a key would name a file the session cannot open
+    and has no reason to know about."""
+    parts = [job.text.strip()]
+    if job.context:
+        parts.append("\n[recent thread]\n" + "\n".join(job.context))
+    return "\n".join(parts)
+
+
+def _vision_images(job: Job, config: Config) -> list[images.VisionImage]:
+    """Read this job's materialized photos into image data, within one budget.
+
+    The worker has already copied each attachment out of the shared store into
+    its own inbox, so these are local files. The per-photo ceiling is the shared
+    budget divided by however many arrived. If an image cannot fit its share at
+    usable dimensions, preparation fails before starting a model session."""
+    if not job.attachments:
+        return []
+    inbox = config.require_inbox()
+    share = PLAIN_VISION_BASE64_BUDGET // len(job.attachments)
+    budget = min(images.VISION_MAX_BASE64, share)
+    return [images.for_vision(inbox / key, max_base64=budget) for key in job.attachments]
+
+
+def _plain_user_message(job: Job, vision: list[images.VisionImage]) -> dict:
+    """One user message, images first and then the text.
+
+    Images before text is the documented preference, and it is also the honest
+    order: the text usually refers to the photo ("what is this?"), so the photo
+    should already be in front of the model when the sentence arrives."""
+    content: list[dict] = [image.block for image in vision]
+    content.append({"type": "text", "text": _build_plain_text(job)})
+    return {"type": "user", "message": {"role": "user", "content": content}}
+
+
+async def _plain_stream(message: dict) -> AsyncIterator[dict]:
+    """The streamed input for one plain turn: exactly one message.
+
+    Streaming input is the only documented mode that accepts image attachments,
+    which is the whole reason a plain turn is a stream rather than a string. A
+    plain job is still one message and one reply."""
+    yield message
 
 
 async def _emit(cb: EventCallback | None, event: dict) -> None:
@@ -258,13 +332,13 @@ async def run_job(
     to fall back to, so a deployment runs the model its source names.
     """
     configure_auth(auth_mode)  # subscription|api, hard-error if misconfigured
+    # require_site_root is a pinboard question: the loader only asks for one when
+    # the source has a pinboard block, so a plain deployment passes straight
+    # through it rather than being asked for a checkout it has no repository for.
     config = config or load_config(require_site_root=True)
     if config.is_pinboard:
         return await _run_pinboard_job(job, config=config, on_event=on_event)
-    raise ConfigError(
-        f"profile {config.profile!r} has no session in this build: only "
-        f"{PINBOARD!r} runs jobs so far"
-    )
+    return await _run_plain_job(job, config=config, on_event=on_event)
 
 
 async def _run_pinboard_job(
@@ -418,6 +492,123 @@ async def _run_pinboard_job(
         screenshot=ctx.last_screenshot,
         result_text=result_text,
     )
+
+
+async def _run_plain_job(
+    job: Job,
+    *,
+    config: Config,
+    on_event: EventCallback | None = None,
+) -> JobResult:
+    """The plain deployment's turn: a chat with photos, web search and page reading.
+
+    What it declares, and why each line is there rather than left to a default:
+
+    * ``tools`` is the base set, exactly the two web built-ins, so the shell and
+      the file tools are not in the session's context at all;
+    * ``disallowed_tools`` names them anyway, because a refusal the CLI applies
+      before it asks is a fence that does not depend on this list being the only
+      thing that shaped the set;
+    * ``can_use_tool`` is still registered, from this session's own list: the CLI
+      does not always keep the mode a session asked for, and a session that
+      cannot answer a permission question is a broken session rather than a
+      stricter one (see :func:`make_tool_gate`);
+    * ``hooks`` is empty, because there is no shell to fence and no file tool to
+      guard — there is nothing for a PreToolUse matcher to match;
+    * ``cwd`` is this worker's own inbox scratch folder, never a repository,
+      because a plain deployment has no checkout and the CLI still needs a
+      working directory that exists;
+    * ``env`` writes the isolation switch explicitly either way, exactly as the
+      pinboard session does, from the same shared setting.
+
+    Claude's own credential stays reachable for the CLI, deliberately. The GitHub
+    App and the worker-only secrets are not in ``os.environ`` by the time any
+    session exists (the boot took them out), and on plain the App was never read
+    at all.
+    """
+
+    async def emit(kind: str, payload: object) -> None:
+        await _emit(on_event, {"job_id": job.job_id, "kind": kind, "payload": payload})
+
+    try:
+        spotify_creds = spotify_credentials()
+    except ConfigError:
+        spotify_creds = None  # optional on both profiles, exactly as before
+
+    inbox = config.require_inbox()
+    # the CLI is started with this as its working directory, so it has to exist;
+    # the folder is this worker's own scratch space and may be empty
+    inbox.mkdir(parents=True, exist_ok=True)
+
+    try:
+        vision = await anyio.to_thread.run_sync(_vision_images, job, config)
+    except images.VisionBudgetError:
+        logger.warning("job %s photos exceed the image budget", job.job_id)
+        message = (
+            "Those photos are too large to send together. "
+            "Please send fewer or smaller photos."
+        )
+        await emit("error", message)
+        return JobResult(job.job_id, "error", error=message)
+    except Exception:
+        # A photo that cannot be read is the person's photo, so the failure is
+        # theirs to hear about in their own words. The log keeps the real cause.
+        logger.exception("job %s could not prepare its photos", job.job_id)
+        message = (
+            "I couldn't open that photo. Please send it again, or tell me what is in it."
+        )
+        await emit("error", message)
+        return JobResult(job.job_id, "error", error=message)
+    if vision:
+        logger.info(
+            "job %s carries %d photo(s), %d KiB of image data",
+            job.job_id, len(vision), sum(len(v.data) for v in vision) // 1024,
+        )
+
+    server, tool_names = build_plain_tool_server(spotify_creds)
+    # the one list of what this session may run, declared to the CLI AND used as
+    # the permission gate's answer, same as pinboard
+    session_tools = PLAIN_TOOLS + tool_names
+
+    options = ClaudeAgentOptions(
+        model=config.model,
+        system_prompt=build_system_prompt(config, spotify=bool(tool_names)),
+        cwd=str(inbox),
+        env=session_env(config),
+        mcp_servers={SERVER_NAME: server} if server is not None else {},
+        tools=list(PLAIN_TOOLS),
+        allowed_tools=session_tools,
+        disallowed_tools=list(PLAIN_DENIED_TOOLS),
+        permission_mode="dontAsk",
+        can_use_tool=make_tool_gate(session_tools, what_this_session_has=_PLAIN_TOOLS_PHRASE),
+        # no hooks: nothing this session can run opens a shell or a file
+        max_buffer_size=10 * 1024 * 1024,
+        include_partial_messages=True,
+    )
+
+    result_text = ""
+    typing_announced = False
+    try:
+        stream = _plain_stream(_plain_user_message(job, vision))
+        async for message in run_session(prompt=stream, options=options):
+            if isinstance(message, StreamEvent):
+                if not typing_announced and _is_text_delta(message.event):
+                    typing_announced = True  # once per composition
+                    await emit("typing", None)
+            elif isinstance(message, AssistantMessage):
+                typing_announced = False
+            elif isinstance(message, ResultMessage):
+                result_text = getattr(message, "result", "") or ""
+                if message.is_error:
+                    error = result_text or "I couldn't finish that reply. Please try again."
+                    await emit("error", error)
+                    return JobResult(job.job_id, "error", error=error)
+    except Exception as exc:  # SDK/transport error -> visible job failure
+        await emit("error", str(exc))
+        return JobResult(job.job_id, "error", error=str(exc))
+
+    await emit("done", result_text)  # the ONE reply bubble for this job
+    return JobResult(job_id=job.job_id, status="done", result_text=result_text)
 
 
 def main() -> None:
