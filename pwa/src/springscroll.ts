@@ -124,94 +124,75 @@
 //     gesture's first frame, and rides the thread from there. A wheel, which has
 //     no finger, keeps the viewport's middle as before.
 //
-// Changed again after the build with all of that in it (0.3.149) was run on the
-// phone and recorded beside Messages itself (ScreenRecording_09-12-2026
-// 20-42-26_1; 91.5 s, 30 fps, 444x960; Messages for the first 29.5 s, this app
-// from 32 s). The owner's report: every sudden stop shifts everything down at
-// once, sometimes nothing animates at all, and slow scrolling is still ragged.
-// Tracking bubble edges frame by frame in both halves of that recording:
+// Changed again for the braked stop: a finger landing on a stretched thread to
+// stop it was still given a frame or more of drive before the return began, so
+// the stretch went on growing after the scroll was already dead and the melt
+// arrived as a lurch rather than as a decay. Three mechanisms, all of them
+// here, all measured on this module driven through the wiring's own call
+// sequence in a synthetic harness (no device, no browser):
 //
-//   - Of the 13 braked stops this build gives that return cleanly, 12 PEAK
-//     LATER than the first frame the record can see, most of them two or three
-//     frames later, and they carry 37.9 to 101.8 CSS px (median 89.3). Of the 6
-//     Messages gives, 0 peak later: every one is biggest on its first frame and
-//     falls from there at 0.56 a frame, carrying 30.4 to 60.9 (median 43.8).
-//     Much the same size of return; it is the lateness that makes it a lurch.
-//     The scroll stops, a beat passes, and then everything moves.
-//   - This build's thread does not stretch on screen at all. Over 32 braked
-//     stops the space between the top of the screen and the bottom gives back
-//     at most 0.8 px; Messages gives back up to 20.1 px. Per frame, the change
-//     in that span is 0.22 px at the 99th percentile here against 12.27 px
-//     there. The rows move together because they are moving as ONE BLOCK.
-//
-// Three causes for the lateness, all of them here, all measured on this module
-// driven through the wiring's own call sequence with the phone's own delivery
-// rate:
-//
-//   - THE BRAKING FRAME WAS STILL DRIVEN. The phone hands the scroll position
-//     to the main thread a frame after the motion it describes, so the frame a
-//     finger lands on to brake a coast carries a fresh reading of motion that
-//     has already been killed. "Budget zero" did not refuse it, because a
-//     reading stamped this very frame is not stale by any budget: the lag fell
-//     72.95 -> 64.02 on the braking frame where a stop gives 50.40, and the
-//     phase still read "driving". A finger that has landed on a stretched
-//     thread and has not gone anywhere is BRAKING, and a braking frame is now
-//     driven with nothing at all.
-//   - A TRAVELLING FINGER BOUGHT THREE FRAMES. What a travelling finger buys is
-//     a delivery gap, so it now buys a delivery gap (VELOCITY_HOLD_MS) and not
-//     the whole speed window. On a scroll that is pinned while the finger keeps
-//     going, the lag is down to 0.215 of what it caught after six frames, where
-//     the window held it at 0.306.
+//   - THE BRAKING FRAME WAS STILL DRIVEN. A finger resting on the glass owns
+//     the scroller: while it has not travelled, the content is not moving,
+//     whatever position that frame is handed. Delivery is not synchronous with
+//     the frame clock, so a position arriving on the braking frame can still
+//     describe motion the finger has already killed, and a budget of zero does
+//     not refuse it — a reading stamped this very frame is not stale by any
+//     budget. A held finger that has not travelled is therefore BRAKING, and a
+//     braking frame is now driven with nothing at all. That rests on what a
+//     resting finger means, not on any particular delivery lag.
+//   - A TRAVELLING FINGER BOUGHT THE WHOLE SPEED WINDOW. What a travelling
+//     finger evidences is a DELIVERY GAP, so it now buys a delivery gap
+//     (VELOCITY_HOLD_MS) and not VELOCITY_WINDOW_MS. A finger still settling as
+//     it lands used to keep the dead coast's speed alive for the window's whole
+//     length.
 //   - A SETTLE COUNTED AS A DRAG. The park that keeps a catch from teleporting
-//     the vertex is released by the new finger travelling, and ANY change in its
-//     reported position used to count. A hand holding still does not hold still,
-//     and a third of a pixel handed the whole profile to the new finger while
-//     the lag was at a coast's value: 29.0 to 37.0 px of one row on one frame,
-//     which is the very jump the park was added to prevent. It now takes
-//     FINGER_TRAVEL_PX of travel from where the finger landed, measured over the
-//     whole hold rather than between two readings.
+//     the vertex is released by the new finger travelling, and ANY change in
+//     the reported position used to count. A hand holding still does not report
+//     one position twice, so a fraction of a pixel handed the whole profile to
+//     the new finger while the lag was still at a coast's value and every row
+//     moved at once. Release now takes FINGER_TRAVEL_PX of travel FROM WHERE
+//     THE FINGER LANDED, summed over the hold rather than compared between two
+//     readings, so a slow creep still becomes a drag and a settle never does.
 //
-// Together those put the biggest frame of the return back where an exponential
-// has it, on the first, and a settling finger now brakes exactly as a still one.
+// What that establishes, and what it does not. The reference lag falls by
+// exp(-dt/tau) on the braking frame itself and on every frame after it, and a
+// settling finger brakes exactly as a still one. It does NOT make the first
+// frame the biggest one ON SCREEN at every speed: past the strain bound the
+// visible profile is concave in the lag (see GAP_STRAIN_PX), so a large lag is
+// already saturated when the melt starts and the biggest row movement lands a
+// frame or two in — in the harness, on the second frame from about 3 px/ms and
+// the third from about 5. No row's displacement ever grows, at any speed: the
+// return is a melt throughout, and only its peak sits later. Straightening the
+// peak means changing the bounded shape itself, which is a separate decision.
 //
-// Diagnosed and NOT changed, with the numbers, because each needs a decision or
-// a trace rather than a guess:
+// Diagnosed and NOT changed, because each needs a decision or a device trace
+// rather than a guess:
 //
 //   - THE FIELD IS RIGID ONCE THE VERTEX LEAVES THE SCREEN. A content vertex
-//     rides the thread, and a coast carries it off: after the divisor plus a
+//     rides the thread and a coast carries it off: past the divisor plus a
 //     viewport of travel no visible row is within RESISTANCE_DIVISOR of it,
-//     every one saturates, and the field is one number added to every row. 74 of
-//     the 75 frames of an ordinary coast measured here have a lag of 15 to
-//     137 px and a spread of exactly 0.00. Holding the vertex inside the visible
-//     band was tried: it fixes the flatness and then pins the vertex to a SCREEN
-//     position, so the thread flows past it and rows GROW away from their seats
-//     while the lag melts (28.93 px on one frame of a 4.5 px/ms coast). That is
-//     the sawing this vertex exists to stop and the one thing about this build
-//     the owner says is right, so it was not kept. The recording does not force
-//     the question either: Messages slides its whole thread at a braked stop too.
+//     every one saturates, and the field is one number added to every row.
+//     Holding the vertex inside the visible band was tried: it fixes the
+//     flatness and then pins the vertex to a SCREEN position, so the thread
+//     flows past it and rows GROW away from their seats while the lag melts.
+//     That is the sawing this vertex exists to stop, so it was not kept.
 //   - THE STRAIN BOUND MAKES THE FAR FIELD CONCAVE IN THE LAG. Past the
 //     gradient every row carries the chain's total, and that total is a sum of
 //     tanh-bounded pair changes, so while the lag is large the pairs sit on the
-//     flat of the tanh and the total barely moves: measured dT/dL = 0.47 at
-//     L = 72 against 1.06 at L = 24. The return therefore still rises for a
-//     frame before it falls at the highest speeds. Straightening it means either
-//     letting gaps open past GAP_STRAIN_PX or scaling the bound with the lag,
-//     and both are changes to the shape the owner has just said he likes.
+//     flat of the tanh and the total barely moves. That is the late peak above.
+//     Straightening it means either letting gaps open past GAP_STRAIN_PX or
+//     scaling the bound with the lag, and both change the shape itself.
 //   - A REPEATED FINGER READING IS STILL A STOP. One frame whose reported
-//     clientY repeats drops the drive and the lag halves and climbs back
-//     (measured at a steady 0.35 px/ms with the reading repeating on one frame
-//     in two: 8.13 px of ripple around a steady 15.75, and the worst one-frame
-//     move of a row 3.04 px -> 4.01). Allowing the reading to be one frame stale
-//     fixes it and costs the most characteristic number the recording pins: a
-//     third of the displacement gone one frame after the stop becomes 0.04%.
-//     A 30 fps record cannot resolve a 60 Hz repeat either way, so this waits
-//     for a device trace of touchmove against rAF.
-//   - AT FOUR OF THE FASTEST STOPS IN THE RECORDING NOTHING MOVES AT ALL, where
-//     even a rigid field would have slid. Nothing in this module does that; the
-//     wiring's hold-off does (armSpring returns early while the app owns a
-//     motion, and a blocked frame mid-gesture freezes the field and disarms it
-//     for the rest of the gesture), but a screen recording cannot see which of
-//     those states was on.
+//     clientY repeats drops the drive, so the lag dips and climbs back. It is
+//     reproducible synthetically (a 2 px quantised finger at 0.08 px/ms).
+//     Allowing a reading to be one frame stale fixes it and costs the measured
+//     start of the return, so it waits for a device trace of touchmove against
+//     rAF.
+//   - A GESTURE CAN BE FROZEN FROM OUTSIDE THIS MODULE. The wiring's hold-off
+//     (armSpring returning early while the app owns a motion) can block a frame
+//     mid-gesture, which freezes the field and disarms it for the rest of that
+//     gesture. Nothing in here does that, and nothing in here can tell that it
+//     happened.
 //
 // Sign: scrollTop rising (toward newer, content moving up the screen) leaves
 // L positive and the rows displaced DOWN behind the motion; falling (toward
@@ -292,18 +273,24 @@ export const TUNING = {
       finger to ask. Under a finger the finger answers instead (see below), so
       a hold on the glass still melts from the very next frame. */
   VELOCITY_HOLD_MS: 28,
-  /** how far a finger resting on a stretched thread must actually go before it
-      counts as having started a drag of its own, CSS px.
+  /** how far a finger resting on a stretched thread must actually travel from
+      where it landed before it counts as having started a drag of its own,
+      CSS px.
 
       A finger that lands to BRAKE a coast parks the vertex and the old one
-      stands, and what releases the park is the new finger travelling. Any
-      change at all in its reported position used to count, and a hand holding
-      still does not hold still: it settles, and the phone reports that settle.
-      So the park was released by a third of a pixel, the vertex was handed over
-      while the lag was still at a coast's value, and every row moved at once —
-      measured here at 29.0 to 37.0 px on one frame, which is the size of the
-      jump this park was added to prevent. Two px is under a finger's own
-      quantisation and far under any travel a drag makes in a frame. */
+      stands; what releases the park is the new finger travelling. Any change at
+      all in its reported position used to count, and a hand holding still does
+      not report one position twice: it settles, and the phone reports the
+      settle. So the park was released by a fraction of a pixel, the vertex was
+      handed over while the lag was still at a coast's value, and every row
+      moved at once — the very jump the park was added to prevent.
+
+      The travel is summed FROM THE LANDING POINT, not between consecutive
+      readings, so a finger creeping half a pixel a frame still becomes a drag
+      while a settle of the same size never does. Two px is above a finger's own
+      reporting quantum and far below the travel a real drag makes in a frame,
+      and the cost of the threshold is bounded by it: at most this much of a
+      genuine drag is read as braking before the drive resumes. */
   FINGER_TRAVEL_PX: 2,
 } as const;
 
@@ -525,8 +512,7 @@ export function profileFor(
   // profile. That never showed while the vertex was a fixed point in the
   // content, since `split` then never moved; it is there for a wheel, whose
   // vertex is the viewport's middle and crosses a centre on most frames, and it
-  // is there the moment the vertex is held to the screen. Measured at 28.93 px
-  // of every visible row moving on one frame during a 4.5 px/ms coast.
+  // is there the moment the vertex is held to the screen.
   // So: walk from zero, then subtract the chain's own value AT the vertex,
   // interpolated between the two rows it lies between. That value is continuous
   // in the vertex's position, and where no pair is saturated it is exactly
@@ -552,8 +538,7 @@ export function profileFor(
   // continuous by construction — at a crossing the outgoing blend is entirely
   // the row being handed over and the incoming blend is entirely the same row —
   // and where nothing is saturated both terms are raw(split) already, so the
-  // pure profile comes back row for row and every number the recording pinned
-  // is untouched.
+  // pure profile comes back row for row and the fitted shape is untouched.
   let base = raw(split);
   if (split - 1 >= wLo && split <= wHi) {
     const c0 = centre(split - 1);
@@ -700,15 +685,11 @@ export function createSpringField(opts: {
   // RESISTANCE_DIVISOR plus a viewport of travel no visible row is within the
   // divisor of it, every one of them saturates at RESISTANCE_MAX, and the field
   // is one number added to every row — the thread translated bodily, with no
-  // shape on screen at all. Measured here at 74 of the 75 frames of an ordinary
-  // coast. Holding the vertex to the visible band instead was tried and
-  // rejected: it pins the vertex to a screen position, the thread then flows
-  // past it, and rows GROW away from their seats while the lag melts — 28.93 px
-  // on one frame of a 4.5 px/ms coast — which is the sawing this vertex exists
-  // to stop and the one thing about this build the owner says is right. The
-  // recording says the far field is not the fault either: at its own braked
-  // stops Messages slides the whole thread too (30.4 to 60.9 CSS px, against
-  // this build's 71.0 to 101.8). What differs is WHEN, and that is in frame().
+  // shape on screen at all. Holding the vertex to the visible band instead was
+  // tried and rejected: it pins the vertex to a SCREEN position, the thread
+  // then flows past it, and rows GROW away from their seats while the lag melts
+  // — which is the sawing this vertex exists to stop. What was wrong at a
+  // braked stop is WHEN the return starts, and that is in frame().
   let anchorContentY: number | null = null;
   let vertexNeedsSeat = false; // the vertex has been given a screen-Y but no content yet
 
@@ -852,36 +833,29 @@ export function createSpringField(opts: {
     // gap. Under a finger the finger decides: a finger that moved on THIS frame
     // is a scroll still moving, so the gap is bridged; the first frame the
     // finger does not move is a stop, budget zero, and the stretch melts from
-    // that very frame exactly as the recording does. Nothing is granted a grace
-    // period here, which is why the return keeps its measured shape: touchmove
-    // arrives every frame while a finger drags, so "moved this frame" is a live
-    // signal, not a stale one. With no finger — momentum, a wheel — the clock
-    // decides instead.
+    // that very frame. Nothing is granted a grace period here, which is why the
+    // return keeps its measured shape: touchmove arrives every frame while a
+    // finger drags, so "moved this frame" is a live signal, not a stale one.
+    // With no finger — momentum, a wheel — the clock decides instead.
     //
-    // What a travelling finger buys is a DELIVERY GAP, so it buys a delivery
-    // gap and nothing more. It used to buy the whole speed WINDOW, and a window
-    // is three frames: a finger landing to brake a fast coast is travelling for
-    // a frame or two as it settles, and for as long as that lasted the run's
-    // old speed — the coast's, already dead — went on driving the lag.
+    // What a travelling finger evidences is a DELIVERY GAP, so it buys a
+    // delivery gap and nothing more. It used to buy the whole speed WINDOW, and
+    // a window is three frames: a finger landing to brake a fast coast is
+    // travelling for a frame or two as it settles, and for as long as that
+    // lasted the run's old speed — the coast's, already dead — went on driving
+    // the lag.
     const fingerTravelling = held && anchorMovedAt > prevFrameMs;
     const budget = held ? (fingerTravelling ? velHold : 0) : velHold;
-    // A finger that has landed on a stretched thread and has not travelled since
-    // is BRAKING, and the coast it caught is already dead. Whatever the delivery
-    // hands over on this frame describes motion that has already stopped, and on
-    // a phone that is exactly what arrives: the position reaches the main thread
-    // a frame after the motion it describes, so the frame the finger landed on
-    // carried a fresh reading and drove the lag on at the coast's speed. A
-    // budget of zero did not stop it, because a reading stamped this very frame
-    // is not stale by any budget. Measured here: the lag fell 72.95 -> 64.02 on
-    // the braking frame where a stop gives 50.40, and the phase still read
-    // "driving".
-    //
-    // The return then starts late and from a larger lag, and a late return is
-    // not a melt: it is a beat and then a lurch. On the phone, 12 of this
-    // build's 13 clean braked returns peak later than the first recorded frame
-    // and carry 37.9 to 101.8 CSS px; 0 of Messages' 6 do, and they carry 30.4
-    // to 60.9. That difference is the "every sudden stop shifts everything down
-    // abruptly" in his report.
+    // A finger that has landed on a stretched thread and has not travelled
+    // since is BRAKING: it owns the scroller, so the content is not moving,
+    // whatever this frame was handed. Delivery is not synchronous with the
+    // frame clock, so the braking frame can still carry a position describing
+    // motion the finger has already killed, and budget zero does not refuse it
+    // — a reading stamped this very frame is not stale by any budget. Driving
+    // that frame with nothing is what starts the return on it: from here the
+    // reference lag falls by exp(-dt/tau) on the braking frame and on every
+    // frame after it. How much of that fall reaches a ROW on the first frame is
+    // the profile's business, not this one's (see GAP_STRAIN_PX).
     const braking = held && vertexParked && !parkedFingerMoved;
     if (delta !== 0) {
       // a fresh position: it joins the run, and the run keeps only the window
