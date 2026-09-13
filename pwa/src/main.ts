@@ -190,7 +190,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.148"; // Hold the spring's vertex on the content and bound how far one pair may open
+const APP_VERSION = "0.3.149"; // Keep scroll gaps bounded and bubbles settling together
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec
@@ -631,8 +631,6 @@ function renderTokenGate(): void {
         <li>Add to Home Screen</li>
         <li>Add and done!</li>
       </ol>
-      <button type="button" id="share-open">Open Share Sheet</button>
-      <p id="share-note" class="share-note" role="status" aria-live="polite"></p>
       <button type="button" id="use-browser" class="gate-quiet">Use it in the browser instead</button>
     </div>
     <!-- The chat's own centred box, asking the third question. The card is
@@ -655,31 +653,6 @@ function renderTokenGate(): void {
   // the install face's own paint (styles.css .gate.install). The class goes on
   // here because the markup above is the head both faces share.
   app.querySelector<HTMLElement>(".gate")!.classList.add("install");
-  // Call native sharing directly from the click to preserve user activation.
-  // Share only the origin so paths, query parameters and tokens are excluded.
-  const shareOpen = document.getElementById("share-open") as HTMLButtonElement;
-  const shareNote = document.getElementById("share-note") as HTMLParagraphElement;
-  let sheetIsUp = false; // a second tap may not ask for a sheet that is already up
-  shareOpen.addEventListener("click", () => {
-    if (sheetIsUp) return;
-    if (typeof navigator.share !== "function") {
-      shareNote.textContent = "This browser has no share sheet to open.";
-      return;
-    }
-    shareNote.textContent = "";
-    sheetIsUp = true;
-    void navigator
-      .share({ title: "Paratrooper", url: `${location.origin}/` })
-      .then(() => {
-        sheetIsUp = false;
-      })
-      .catch((failure: unknown) => {
-        sheetIsUp = false;
-        // Dismissal is normal; other errors allow another attempt.
-        const why = (failure as { name?: string } | null)?.name ?? "";
-        shareNote.textContent = why === "AbortError" ? "" : "Could not share. Please try again.";
-      });
-  });
   const warn = document.getElementById("browser-warn")!;
   document.getElementById("use-browser")!.addEventListener("click", () => {
     showAlert(warn);
