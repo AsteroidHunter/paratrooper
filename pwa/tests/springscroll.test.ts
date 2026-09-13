@@ -1346,6 +1346,21 @@ describe("main.ts wiring — the pinned inserts tell the springs", () => {
     expect(replay).toContain("if (!isTail) springReseat(t.scrollTop - prevScroll)");
   });
 
+  it("the profile reconcile's own correction is announced, and the tail's pin is not", () => {
+    // the third write of this shape: the board artifacts appearing or leaving
+    // above the fold, compensated so the reader's row stays put. What the
+    // interaction costs when it is NOT announced is measured in
+    // profilescroll.test.ts; this is the inventory of the sites that announce.
+    const fn = src.slice(
+      src.indexOf("function reconcileProfileArtifacts("),
+      src.indexOf("// finished-reply hold"),
+    );
+    expect(fn).toContain("const prevScroll = t.scrollTop");
+    expect(fn).toContain("springReseat(t.scrollTop - prevScroll)");
+    // the tail branch stays with the shared bottom pin: told once, or not at all
+    expect(fn.slice(0, fn.indexOf("else if"))).not.toContain("springReseat");
+  });
+
   it("the helper carries both references and hands the end model's band to the field", () => {
     const fn = src.slice(src.indexOf("function springReseat("), src.indexOf("// The scroll handler's one line"));
     expect(fn).toContain("const band = endSpring.over()");

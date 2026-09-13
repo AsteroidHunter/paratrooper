@@ -163,6 +163,7 @@ function harness(options: HarnessOptions = {}) {
   const asked: string[] = [];
   const logged: string[] = [];
   const scrolls: string[] = [];
+  const reseats: number[] = [];
   let connected = false;
 
   // renderInto's collaborators, stubbed to record rather than draw
@@ -199,6 +200,9 @@ function harness(options: HarnessOptions = {}) {
     isDuplicateAgentText: () => false,
     followTail: true,
     scrollToBottom: () => void scrolls.push("bottom"),
+    // the springs are told when the reconcile corrects the position, so that
+    // write is not read as a finger's (profilescroll.test.ts has the interaction)
+    springReseat: (dy: number) => void reseats.push(dy),
     openLightbox: () => {},
     prUrl: (payload: unknown) =>
       typeof payload === "object" && payload !== null
@@ -264,6 +268,7 @@ function harness(options: HarnessOptions = {}) {
     rerendered,
     asked,
     logged,
+    reseats,
     storage,
     connected: () => connected,
     profile: () => probe(context).profile,
@@ -341,6 +346,7 @@ describe("health answering after the paint", () => {
     h.context.scrollToBottom = (force: boolean) => pins.push(force);
     await h.health();
     expect(pins).toEqual([true]);
+    expect(h.reseats).toEqual([]); // the shared bottom pin owns that position
     expect(h.applied.map(m => m.seq)).toEqual([1, 2]);
     expect(h.context.suppressAnim).toBe(false);
   });
@@ -375,6 +381,7 @@ describe("health answering after the paint", () => {
     await h.health();
     expect(thread.scrollTop).toBe(770);
     expect(row.getBoundingClientRect().top).toBe(before);
+    expect(h.reseats).toEqual([270]); // and the springs heard about that write
     expect(h.rerendered).toEqual([2, 3]);
     expect(h.applied).toHaveLength(4);
     expect(h.context.lastSeq).toBe(9);

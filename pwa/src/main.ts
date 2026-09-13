@@ -361,8 +361,10 @@ function adoptProfile(value: unknown): void {
 // client kept. rerender() replaces one wrapper's children with animation
 // suppressed: no frame is re-ingested, no seq moves, and the composer is
 // untouched. Preserve a surviving row at the reader's fold across the whole
-// batch, including stamp changes. At the tail, pin even a PR-only reveal;
-// screenshots retain their existing handling for a later image decode.
+// batch, including stamp changes, and tell the springs that the correction was
+// not a scroll, so a live gesture is not read as having made it. At the tail,
+// pin even a PR-only reveal; screenshots retain their existing handling for a
+// later image decode.
 function reconcileProfileArtifacts(kinds: readonly string[]): void {
   const t = document.getElementById("thread");
   const following = followTail;
@@ -386,11 +388,25 @@ function reconcileProfileArtifacts(kinds: readonly string[]): void {
     for (const [seq, m] of store) {
       if (kinds.includes(m.kind ?? "")) rerender(seq);
     }
+    // At the tail the position is the shared bottom pin's, the same one every
+    // late height change in the app goes through, and it moves the view to a new
+    // end rather than sliding content under a still reader: nothing for the
+    // springs to be told here, and telling them would be a second account of a
+    // write this path does not own.
     if (t && following) scrollToBottom(true);
     else if (t && anchor?.isConnected) {
       const fix = anchor.getBoundingClientRect().top - anchorTop;
       if (fix !== 0) {
+        // The reader's row does not move across this write, so it is not a
+        // scroll and the springs must not read it as one (drainOlder's pin, the
+        // same rule): a live gesture would take the whole correction as one
+        // frame of finger travel and throw every row on screen. What they are
+        // told is the delta the scroller ACTUALLY took, not the one asked for:
+        // at either end of the range the browser clamps the write, and the
+        // difference is motion that never happened.
+        const prevScroll = t.scrollTop;
         t.scrollTop += fix;
+        springReseat(t.scrollTop - prevScroll);
         scrollGhostWrite("profile-view", t.scrollTop); // TEMP DIAGNOSTIC (scroll-ghost)
       }
     }
