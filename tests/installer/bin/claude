@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Mock Claude Code CLI for offline verification of install.sh.
+set -u
+STATE="${MOCK_STATE_DIR:?MOCK_STATE_DIR must be set}"
+mkdir -p "$STATE"
+
+case "${1:-}" in
+  setup-token)
+    printf 'claude setup-token\n' >>"$STATE/claude.calls"
+    if [ "${MOCK_CLAUDE_FAIL:-0}" = "1" ]; then
+      echo "authorization failed" >&2
+      exit 1
+    fi
+    # The interactive authorize flow would print instructions to the terminal
+    # (stderr); the token is what lands on stdout. Emit an optional noise line to
+    # prove the installer keeps only the last line as the token.
+    if [ "${MOCK_CLAUDE_NOISE:-0}" = "1" ]; then
+      echo "Authorized. Your token:"
+    fi
+    printf '%s\n' "${MOCK_CLAUDE_TOKEN-sk-ant-oat01-MOCKTOKEN0000000000000000}"
+    exit 0
+    ;;
+  *)
+    echo "mock claude: unhandled '$*'" >&2
+    exit 2
+    ;;
+esac

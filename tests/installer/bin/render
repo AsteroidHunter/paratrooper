@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Mock Render CLI for offline verification of install.sh.
+# Records what it was asked to do under $MOCK_STATE_DIR and never echoes a secret
+# value to stdout/stderr (so it cannot leak one into the installer's log), while
+# stashing the values it received in a private file for the test to assert on.
+set -u
+
+STATE="${MOCK_STATE_DIR:?MOCK_STATE_DIR must be set}"
+CALLS="$STATE/render.calls"
+ENVSET="$STATE/env_set.txt"
+mkdir -p "$STATE"
+
+sub="${1:-}"
+sub2="${2:-}"
+
+case "$sub" in
+  login)
+    printf 'render login\n' >>"$CALLS"
+    [ "${MOCK_RENDER_LOGIN_FAIL:-0}" = "1" ] && { echo "login failed" >&2; exit 1; }
+    echo "Opened browser to authenticate. Signed in."
+    exit 0
+    ;;
+  workspace)
+    printf 'render workspace %s\n' "$sub2" >>"$CALLS"
+    [ "${MOCK_WORKSPACE_FAIL:-0}" = "1" ] && { echo "no workspace" >&2; exit 1; }
+    echo "tea-test000000000000000 (Test Workspace)"
+    exit 0
+    ;;
+  blueprints)
+    printf 'render blueprints %s\n' "$sub2" >>"$CALLS"
+    [ "${MOCK_BP_FAIL:-0}" = "1" ] && { echo "blueprint invalid" >&2; exit 1; }
+    echo "render.yaml is valid."
+    exit 0
+    ;;
+  services)
+    if [ "$sub2" = "update" ]; then
+      printf 'render services update %s\n' "${3:-}" >>"$CALLS"
+      [ "${MOCK_UPDATE_FAIL:-0}" = "1" ] && { echo "update failed" >&2; exit 1; }
+      # Record each KEY=VALUE for the test, but print only a benign line.
+      shift 3
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--env-var" ] && [ "$#" -ge 2 ]; then
+          printf '%s\n' "$2" >>"$ENVSET"
+          shift 2
+        else
+          shift
+        fi
+      done
+      echo "Updated service; a new deploy was triggered."
+      exit 0
+    fi
+    # Listing. The installer passes --output json.
+    printf 'render services --output json\n' >>"$CALLS"
+    [ "${MOCK_SERVICES_FAIL:-0}" = "1" ] && { echo "list failed" >&2; exit 1; }
+    if [ -n "${MOCK_SERVICES_JSON:-}" ]; then
+      cat "$MOCK_SERVICES_JSON"
+    else
+      cat <<'JSON'
+[
+  {"service": {"id": "srv-web0000000000000000", "name": "paratrooper-web",
+    "type": "web_service", "serviceDetails": {"url": "https://paratrooper-web.onrender.com"}}},
+  {"service": {"id": "srv-wrk0000000000000000", "name": "paratrooper-worker",
+    "type": "background_worker"}},
+  {"service": {"id": "srv-kv00000000000000000", "name": "paratrooper-kv",
+    "type": "key_value"}}
+]
+JSON
+    fi
+    exit 0
+    ;;
+  deploys)
+    printf 'render deploys %s\n' "$sub2" >>"$CALLS"
+    echo "deploy triggered"
+    exit 0
+    ;;
+  *)
+    printf 'render %s\n' "$*" >>"$CALLS"
+    echo "mock render: unhandled subcommand '$sub'" >&2
+    exit 2
+    ;;
+esac

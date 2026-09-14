@@ -14,14 +14,16 @@
 #   3. Offers idle sleeping: the web service can suspend the worker when the
 #      queue is empty to cut the Render bill. Skip it and the worker stays on,
 #      and no key is needed for that feature.
+#   4. Checks for an existing app, then either confirms keeping its password or
+#      asks for a long passphrase twice with hidden input.
 #   Then, with no more questions:
-#   4. Writes a plain deployment config and a fresh app password, generates the
+#   5. Writes a plain deployment config, generates the
 #      browser-notification (VAPID) keys, and validates the config and the
 #      blueprint before touching Render.
-#   5. Creates the Key Value store, the worker and the web service on Render from
+#   6. Creates the Key Value store, the worker and the web service on Render from
 #      render.yaml, wiring their links, secrets and notification keys, and waits
 #      for the app to answer.
-#   Finally: prints the app address, the password, and the phone Home Screen and
+#   Finally: prints the app address and the phone Home Screen and
 #   notification steps. A deployment that was created but has not answered its
 #   health check yet is reported as such and exits non-zero, without removing
 #   anything.
@@ -33,11 +35,15 @@
 # connection string, the worker id into the web service, and the generated VAPID
 # keys onto the web service). It is idempotent: a resource that already exists is
 # reused only once it is confirmed to be this deployment's own, so a run that
-# stopped halfway is finished by running again, recovering the live password and
-# notification keys from the service rather than keeping them on disk. Changing
+# stopped halfway is finished by running again, preserving the password and
+# notification keys already on the service. Changing
 # the configuration later is `python -m paratrooper.deploy push`, the project's
 # own tool.
 
+# Disable inherited tracing, verbose input and auto-export before collecting any
+# secret, even when invoked with bash -x/-v/-a. Never re-enable them in this script.
+set +xv
+set +a
 set -euo pipefail
 
 LOG="$HOME/.paratrooper-install.log"
@@ -78,13 +84,15 @@ REPO_BRANCH="${PARATROOPER_INSTALL_BRANCH:-}"
 # The provisioner writes a small JSON report here (ids, the web address, whether
 # each resource was created). It carries no secret and is removed on exit.
 REPORT_FILE=""
-# The provisioner writes the live app password here, in a private file, so it is
-# never in the report, an argument, or a log. Read once for the closing message,
-# then removed on exit.
-SECRET_OUT=""
+TERMINAL_STATE=""
+PASSWORD_MODE=""
+EXISTING_WEB_ID=""
 
 # Secrets live only in these shell variables, for the life of this process. They
 # are never written to the log, never echoed back, and never named in an error.
+# Remove inherited export attributes, so input cannot become a child process's
+# environment if the caller happened to export variables with these names.
+unset CLAUDE_TOKEN APP_PASSWORD RENDER_KEY provision_payload
 CLAUDE_TOKEN=""
 APP_PASSWORD=""
 RENDER_KEY=""
@@ -94,14 +102,19 @@ IDLE_SLEEP="no"
 
 err() { printf '%s\n' "$*" >&2; }
 
-# cleanup - remove the transient report and the private password file on the way
-# out. The other secrets are in shell variables, so they leave with the process.
+# cleanup - restore the terminal and remove the non-secret report on the way out.
 cleanup() {
+	if [ -n "$TERMINAL_STATE" ]; then
+		stty "$TERMINAL_STATE" 2>/dev/null || true
+	fi
 	[ -n "$REPORT_FILE" ] && rm -f "$REPORT_FILE" 2>/dev/null
-	[ -n "$SECRET_OUT" ] && rm -f "$SECRET_OUT" 2>/dev/null
+	unset APP_PASSWORD CLAUDE_TOKEN RENDER_KEY provision_payload
 	return 0
 }
 trap cleanup EXIT
+trap 'err ""; err "Installation canceled. Run ./install.sh again when ready."; exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # --- presentation helpers --------------------------------------------------
 # ANSI color only when stdout is a TTY (keeps logs/redirects clean).
@@ -195,8 +208,7 @@ section() {
 # set while <command> runs in the background, then overwrite the line with
 # `✓ <success-msg>`. On non-zero exit, print `⚠ <running-msg> failed. See <log>`
 # and stop. No animation when stdout is redirected, but the command still runs
-# and the outcome is still printed. Safe for a step whose arguments carry a
-# secret: this prints only the messages it is given, never the command line.
+# and the outcome is still printed. Commands must not carry secrets in argv.
 spinner() {
 	local running="$1"
 	local success="$2"
@@ -231,8 +243,8 @@ welcome() {
 	printf 'Paratrooper puts a private, phone-friendly chat with your Claude agent on\n'
 	printf 'the internet, hosted on Render. This script sets it up and links it to\n'
 	printf 'your phone.\n\n'
-	printf 'It asks three things up front: your Render sign in, your Claude Code sign\n'
-	printf 'in, and whether the worker should sleep when idle to save money. After\n'
+	printf 'It asks for your Render and Claude Code sign ins, whether the worker\n'
+	printf 'should sleep when idle, and an app password. Password typing is hidden. After\n'
 	printf 'that it works on its own and prints how to open the app on your phone.\n\n'
 }
 
@@ -265,11 +277,64 @@ prompt_keypress() {
 # a closed stdin as cancel instead of looping on an empty value forever.
 prompt_secret() {
 	local prompt="$1" var="$2" value="" status=0
+	export -n value
+	if [ -t 0 ]; then
+		TERMINAL_STATE="$(stty -g)" || return 1
+		# Hide input before showing the prompt, including immediately typed input.
+		stty -echo || return 1
+	fi
 	printf '%s' "$prompt"
 	IFS= read -rs value || status=1
+	if [ -n "$TERMINAL_STATE" ]; then
+		stty "$TERMINAL_STATE"
+		TERMINAL_STATE=""
+	fi
 	printf '\n'
 	printf -v "$var" '%s' "$value"
 	return "$status"
+}
+
+# Only stdin carries the candidate. Validation prints a fixed rule on failure,
+# never the value; its rules match the phone's existing bearer-token contract.
+check_app_password() {
+	printf '%s' "$APP_PASSWORD" | "$PY" -c '
+import sys
+from paratrooper.provision import ProvisionError, validate_app_password
+try:
+    validate_app_password(sys.stdin.read())
+except ProvisionError as exc:
+    print(exc)
+    raise SystemExit(1)
+'
+}
+
+choose_app_password() {
+	local confirmation=""
+	export -n confirmation
+	printf 'Choose a long passphrase you can remember and type on your phone.\n'
+	printf 'Use at least 20 characters, such as several unrelated words. Internal\n'
+	printf 'spaces and punctuation are welcome; use printable ASCII characters and\n'
+	printf 'leave out spaces at the beginning and end. It will never be displayed.\n'
+	printf 'Press Ctrl-C to cancel.\n\n'
+	while :; do
+		prompt_secret "App password (input hidden): " APP_PASSWORD || return 1
+		if ! check_app_password; then
+			APP_PASSWORD=""
+			continue
+		fi
+		prompt_secret "Confirm app password (input hidden): " confirmation || return 1
+		if [ "$APP_PASSWORD" = "$confirmation" ]; then
+			printf '%s✓%s App password confirmed.\n' "$GREEN" "$RESET"
+			return 0
+		fi
+		APP_PASSWORD="" confirmation=""
+		printf 'The passwords did not match. Try both entries again.\n'
+	done
+}
+
+report_field() {
+	"$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' \
+		"$REPORT_FILE" "$1" 2>/dev/null || true
 }
 
 # need_cmd <command> <hint> - require a command on PATH or stop with the hint.
@@ -601,24 +666,48 @@ else
 	printf '\n%s⊘%s Keeping the worker always on.\n' "$DIM" "$RESET"
 fi
 
+# --- 4. App password -------------------------------------------------------
+
+section "4. App password"
+REPORT_FILE="$(mktemp -t paratrooper-provision.XXXXXX)"
+# This is read-only. Determine whether a password is needed before asking for
+# one, and bind an existing-install confirmation to that exact web service id.
+if ! "$PY" -m paratrooper.provision --inspect-app \
+	--blueprint "$BLUEPRINT" --repo "$REPO_URL" --branch "$REPO_BRANCH" \
+	--report "$REPORT_FILE"; then
+	err "Could not check the existing app. No resources were created."
+	exit 1
+fi
+PASSWORD_MODE="$(report_field password_mode)"
+EXISTING_WEB_ID="$(report_field existing_web_id)"
+case "$PASSWORD_MODE" in
+	new)
+		if ! choose_app_password; then
+			err "No password confirmed, so no resources were created. Run ./install.sh again when ready."
+			exit 1
+		fi
+		;;
+	existing)
+		printf 'An app already exists for this repository in your Render workspace.\n'
+		printf 'Its current password will be kept. Use that same password on your phone.\n'
+		printf 'This installer does not display or reset existing passwords.\n\n'
+		if ! prompt_keypress "yn" "Continue keeping the existing app password? (y / n) " || [ "$REPLY" != "y" ]; then
+			printf 'Canceled. No resources or passwords were changed.\n'
+			exit 1
+		fi
+		;;
+	*) err "Could not determine the app password step. No resources were created."; exit 1 ;;
+esac
+
 # Everything the install needs from you has now been collected. From here on it
 # runs on its own.
 
-# --- 4. Preparing your deployment ------------------------------------------
+# --- 5. Preparing your deployment ------------------------------------------
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
-section "4. Preparing your deployment"
-printf 'Writing your configuration and a fresh app password, then validating both\n'
+section "5. Preparing your deployment"
+printf 'Writing your configuration, then validating both\n'
 printf 'the configuration and the blueprint before anything is sent to Render.\n\n'
-
-# The app password: a strong, URL-safe token. It is the passcode you type once
-# on your phone to sign in. On a fresh install this is the live password; on a
-# re-run the provisioner reads the live one back from the service instead.
-APP_PASSWORD="$("$PY" -c 'import secrets; print(secrets.token_urlsafe(32))')"
-if [ -z "$APP_PASSWORD" ]; then
-	err "Could not generate an app password."
-	exit 1
-fi
 
 # The configuration: the plain profile. It is a chat with photos, web search and
 # page reading, and it needs no site, no repository and no GitHub. Every value
@@ -648,29 +737,28 @@ spinner "Validating configuration ..." "Configuration is valid." \
 spinner "Validating blueprint ..." "Blueprint is valid." \
 	render blueprints validate "$BLUEPRINT"
 
-# --- 5. Provisioning on Render ---------------------------------------------
+# --- 6. Provisioning on Render ---------------------------------------------
 
 SPIN_FRAMES=("${SPIN_CIRCLE[@]}")
-section "5. Provisioning on Render"
+section "6. Provisioning on Render"
 printf 'Creating the Key Value store, the worker and the web service from\n'
 printf 'render.yaml, wiring their links, secrets and notification keys, then\n'
 printf 'waiting for both deploys to go live. Anything already there by name is\n'
 printf 'reused, not rebuilt.\n\n'
 
 # The provisioner reports here: ids, the web address, and whether each resource
-# was created this run. No secret is written to this file. The live app password
-# goes to its own private file instead.
-REPORT_FILE="$(mktemp -t paratrooper-provision.XXXXXX)"
-SECRET_OUT="$(mktemp -t paratrooper-token.XXXXXX)"
-chmod 600 "$SECRET_OUT" 2>/dev/null || true
+# was created this run. No secret is written to this file.
 
 # The secrets the new services need, handed over on stdin so they are in no argv
 # and in no environment: the write to the service is the only place they go. The
 # configuration file is passed by path and is not a secret. The idle-sleeping key
 # is included only when it was chosen, and it is a different key from the one that
 # signs these API calls: this only ever becomes the web service's RENDER_API_KEY.
-provision_payload="PARATROOPER_APP_TOKEN=$APP_PASSWORD
-CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_TOKEN"
+provision_payload="CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_TOKEN"
+if [ "$PASSWORD_MODE" = "new" ]; then
+	provision_payload="$provision_payload
+PARATROOPER_APP_TOKEN=$APP_PASSWORD"
+fi
 if [ "$IDLE_SLEEP" = "yes" ]; then
 	provision_payload="$provision_payload
 RENDER_API_KEY=$RENDER_KEY"
@@ -684,25 +772,21 @@ if ! printf '%s\n' "$provision_payload" | "$PY" -m paratrooper.provision \
 	--repo "$REPO_URL" \
 	--branch "$REPO_BRANCH" \
 	--report "$REPORT_FILE" \
-	--app-token-out "$SECRET_OUT" \
+	--password-mode "$PASSWORD_MODE" \
+	--existing-web-id "$EXISTING_WEB_ID" \
 	--wait-ready; then
 	err ""
 	err "⚠ Provisioning did not finish. Whatever was created is kept and reused,"
 	err "  so once the cause above is fixed you can run ./install.sh again to"
-	err "  finish. Nothing is created twice, and the app password is recovered"
-	err "  from the service on the next run."
+	err "  finish. If the app was created, its password is kept on the next run."
+	err "  Use the password you chose for that installation."
 	exit 1
 fi
 
-# Read the non-secret report (with the venv's python; a system python3 may be
-# absent). Booleans print as True/False.
-report_field() {
-	"$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' \
-		"$REPORT_FILE" "$1" 2>/dev/null || true
-}
+# Release the shell's copies as soon as provisioning has consumed them.
+unset APP_PASSWORD CLAUDE_TOKEN RENDER_KEY provision_payload
 WEB_URL="$(report_field web_url)"
 DEPLOY_DETAIL="$(report_field deploy_detail)"
-APP_TOKEN_KNOWN=no; [ "$(report_field app_token_known)" = "True" ] && APP_TOKEN_KNOWN=yes
 VAPID_ON=no;        [ "$(report_field vapid_configured)" = "True" ] && VAPID_ON=yes
 DEPLOYS_READY=no;   [ "$(report_field deploys_ready)" = "True" ] && DEPLOYS_READY=yes
 
@@ -735,22 +819,11 @@ else
 	printf '  A first deploy can take several minutes. Nothing was removed.\n\n'
 fi
 
-# The app address and the live sign-in password. Both matter whether or not the
-# deployment is confirmed: the resources exist, and the person needs them.
+# The app address is the only sign-in detail displayed, including on failure.
 if [ -n "$WEB_URL" ]; then
 	printf '  %sApp address:%s  %s\n' "$BOLD" "$RESET" "$WEB_URL"
 fi
-if [ "$APP_TOKEN_KNOWN" = "yes" ] && [ -n "$SECRET_OUT" ] && [ -s "$SECRET_OUT" ]; then
-	printf '  %sPassword:%s     %s\n\n' "$BOLD" "$RESET" "$(<"$SECRET_OUT")"
-	printf '  Keep the password somewhere safe. It is the passcode you type once on\n'
-	printf '  your phone. To change it later, set PARATROOPER_APP_TOKEN on the web\n'
-	printf '  service in the Render dashboard.\n\n'
-else
-	printf '  %sPassword:%s     not available here\n\n' "$BOLD" "$RESET"
-	printf '  A web service by this name already existed and its password could not be\n'
-	printf '  read back. Set or rotate PARATROOPER_APP_TOKEN on the web service in the\n'
-	printf '  Render dashboard.\n\n'
-fi
+printf '\n'
 
 printf '%sOn your iPhone:%s\n\n' "$BOLD" "$RESET"
 printf '  %s1.%s Open the app address above in Safari.\n\n' "$BOLD" "$RESET"
@@ -760,7 +833,7 @@ printf '       Share\n'
 printf '       View more\n'
 printf '       Add to Home Screen\n'
 printf '       Add and done!\n\n'
-printf '  %s3.%s Open Paratrooper from the Home Screen and type the password to\n' "$BOLD" "$RESET"
+printf '  %s3.%s Open Paratrooper from the Home Screen and type your app password to\n' "$BOLD" "$RESET"
 printf '     sign in. The connection uses %sHTTPS%s, which the microphone and the\n' "$BOLD" "$RESET"
 printf '     Home Screen install both need.\n\n'
 if [ "$VAPID_ON" = "yes" ]; then

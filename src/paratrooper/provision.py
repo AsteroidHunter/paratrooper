@@ -75,10 +75,8 @@ from .deploy import (
 KEYVALUE_TYPE = "keyvalue"
 API_SERVICE_TYPE = {"web": "web_service", "worker": "background_worker"}
 
-# Secrets on the web service this command reads back rather than reinvents on a
-# reuse: the sign-in password, and the browser-push (VAPID) key pair and contact.
-# Reading them back from a positively identified service is how an interrupted
-# install recovers, without keeping any of it on the laptop's disk afterward.
+# Existing passwords are only checked for presence, never returned to the
+# installer. Browser-push keys are preserved when an interrupted install resumes.
 APP_TOKEN_VAR = "PARATROOPER_APP_TOKEN"
 VAPID_PUBLIC_VAR = "VAPID_PUBLIC_KEY"
 VAPID_PRIVATE_VAR = "VAPID_PRIVATE_KEY"
@@ -244,9 +242,9 @@ class ProvisionClient(RenderClient):
         """One environment variable's current value on a service, or None when it
         is unset. The single-variable endpoint, never the list: this asks for the
         one key by name and reads back only it, and a 404 is the documented answer
-        for 'this service has no such variable', not a failure. Used to recover a
-        live value (the password, the push keys) from a service this run did not
-        create, so an interrupted install finishes without a laptop-side copy."""
+        for 'this service has no such variable', not a failure. Used to check
+        that an existing app has a password, and to preserve its push keys.
+        The password is never returned to the installer or written locally."""
         try:
             body = self._request("GET", f"/services/{service_id}/env-vars/{key}")
         except ApiNotFound:
@@ -254,7 +252,9 @@ class ProvisionClient(RenderClient):
         if not isinstance(body, dict) or body.get("key") != key:
             return None
         value = body.get("value")
-        return None if value is None else str(value)
+        if value is not None and not isinstance(value, str):
+            raise ProvisionError("Render returned an invalid environment variable value.")
+        return value
 
     def set_env_var(self, service_id: str, key: str, value: str) -> None:
         """Set one environment variable, and only it. The single-key PUT, never a
@@ -463,9 +463,24 @@ def _need(table: dict[str, Any], key: str, where: str) -> Any:
 
 def _service_url(service: dict[str, Any]) -> str:
     details = service.get("serviceDetails") if isinstance(service, dict) else None
-    if isinstance(details, dict) and details.get("url"):
-        return str(details["url"])
-    return str(service.get("url") or "") if isinstance(service, dict) else ""
+    value = details.get("url") if isinstance(details, dict) else None
+    if value is None:
+        value = service.get("url", "")
+    if value is not None and not isinstance(value, str):
+        raise ProvisionError("Render returned an invalid web address.")
+    return value or ""
+
+
+def _resource_id(resource: dict[str, Any]) -> str:
+    """Only an actual identifier may enter a report, a URL path or an error.
+
+    Coercing an unexpected object to text could copy an echoed request body,
+    including its password, into subsequent progress or failure output.
+    """
+    value = resource.get("id")
+    if not isinstance(value, str) or not value or any(ch.isspace() for ch in value):
+        raise ProvisionError("Render returned an invalid resource id.")
+    return value
 
 
 def _service_region(service: dict[str, Any]) -> str:
@@ -638,11 +653,9 @@ class ProvisionReport:
     workspace_source: str
     credential_source: str
     resources: list[Resource] = field(default_factory=list)
-    # The web service's live sign-in password: the value this run set on a new
-    # service, or the value read back from an existing one. Held in memory only,
-    # written by main() to a private file for the installer, and NEVER placed in
-    # as_dict(), so it is not in the report file the installer reads for the rest.
-    app_token: str | None = None
+    # Only the fact that a password is configured. No secret in this report,
+    # including its repr, and no password file is written on the laptop.
+    app_token_known: bool = False
     # Whether browser-push (VAPID) keys are configured on the web service after
     # this run. No key material is kept; this is only the fact.
     vapid_configured: bool = False
@@ -677,15 +690,13 @@ class ProvisionReport:
 
     def as_dict(self) -> dict[str, Any]:
         """The JSON the installer reads: ids, the web address and what was made.
-        No secret is in here, by construction. Whether the live password is known
-        is reported as a bare boolean; the password itself travels by a separate
-        private file, never through this."""
+        No secret is in here, by construction."""
         return {
             "ok": True,
             "workspace": self.workspace,
             "web_url": self.web_url,
             "web_created": self.web_created,
-            "app_token_known": self.app_token is not None,
+            "app_token_known": self.app_token_known,
             "vapid_configured": self.vapid_configured,
             "deploys_ready": self.deploys_ready,
             "web_ready": self.web_ready,
@@ -699,6 +710,66 @@ class ProvisionReport:
         }
 
 
+def validate_app_password(value: str) -> None:
+    """A memorable passphrase compatible with the existing bearer-token gate.
+
+    The phone trims surrounding whitespace and sends the value in an HTTP
+    header. Keep internal spaces and punctuation verbatim, but reject edge
+    spaces, controls and non-ASCII characters rather than changing the secret.
+    This remains a shared bearer credential, not a hashed-password login.
+    """
+    if not value:
+        raise ProvisionError("That was empty. Choose a long passphrase.")
+    if len(value) < 20:
+        raise ProvisionError("Use at least 20 characters, such as several unrelated words.")
+    if not all(" " <= ch <= "~" for ch in value):
+        raise ProvisionError("Use printable ASCII letters, spaces or punctuation only.")
+    if value != value.strip():
+        raise ProvisionError("Leave out spaces at the beginning and end.")
+
+
+def inspect_app(
+    client: ProvisionClient, specs: dict[str, dict[str, Any]], *, workspace: str, repo: str
+) -> dict[str, str]:
+    """Read-only password decision before collecting inputs or making resources.
+
+    Identity checks are the same as reuse, including reuse across branches of
+    the same repository. Never return a password or silently repair a missing
+    one. An existing installation keeps its authentication unchanged.
+    """
+    spec = specs["web"]
+    name = str(_need(spec, "name", "web"))
+    existing = client.find_service(name, workspace=workspace)
+    if existing is None:
+        return {"password_mode": "new", "existing_web_id": "", "web_url": ""}
+    _ensure_service_compatible(
+        existing, expected_type=API_SERVICE_TYPE["web"], repo=repo,
+        region=str(spec.get("region") or ""), name=name,
+    )
+    web_id = _resource_id(existing)
+    if not client.read_env_var(web_id, APP_TOKEN_VAR):
+        raise ProvisionError(
+            "The existing app has no configured password. Nothing was changed. "
+            "Restore PARATROOPER_APP_TOKEN on that web service and deploy it before retrying."
+        )
+    return {
+        "password_mode": "existing", "existing_web_id": web_id,
+        "web_url": _service_url(existing),
+    }
+
+
+def _check_password_mode(
+    state: dict[str, str], *, password_mode: str, existing_web_id: str
+) -> None:
+    if state["password_mode"] != password_mode or (
+        password_mode == "existing" and state["existing_web_id"] != existing_web_id
+    ):
+        raise ProvisionError(
+            "The app changed since the password step. No password was set or replaced. "
+            "Run ./install.sh again to check the installation before continuing."
+        )
+
+
 def provision(
     *,
     client: ProvisionClient,
@@ -707,6 +778,8 @@ def provision(
     repo: str,
     branch: str,
     values: dict[str, str],
+    password_mode: str = "new",
+    existing_web_id: str = "",
     workspace_source: str = "caller",
     announce: Callable[[Resource], None] | None = None,
 ) -> ProvisionReport:
@@ -725,6 +798,20 @@ def provision(
         credential_source=client.credential.source,
     )
 
+    # Fail before ANY write if the selected password would be ignored, if the
+    # reused app changed, or if a resume would create an app without a password.
+    if password_mode == "new":
+        validate_app_password(values.get(APP_TOKEN_VAR, ""))
+    elif password_mode == "existing":
+        if APP_TOKEN_VAR in values:
+            raise ProvisionError("An existing app keeps its password; do not supply a new one.")
+    else:
+        raise ProvisionError("Choose new or existing for the password mode.")
+    _check_password_mode(
+        inspect_app(client, specs, workspace=workspace, repo=repo),
+        password_mode=password_mode, existing_web_id=existing_web_id,
+    )
+
     def record(resource: Resource) -> None:
         report.resources.append(resource)
         if announce is not None:
@@ -737,15 +824,11 @@ def provision(
     existing_kv = client.find_key_value(kv_name, workspace=workspace)
     if existing_kv is not None:
         _ensure_key_value_compatible(existing_kv, region=kv_region, name=kv_name)
-        kv_id = str(existing_kv.get("id") or "")
-        if not kv_id:
-            raise ProvisionError(f"the existing Key Value {kv_name!r} has no id to reuse")
+        kv_id = _resource_id(existing_kv)
         record(Resource("keyvalue", kv_name, kv_id, "", "reused"))
     else:
         created = client.create_key_value(key_value_body(kv_spec, workspace))
-        kv_id = str(created.get("id") or "")
-        if not kv_id:
-            raise ProvisionError("Render did not return an id for the new Key Value store")
+        kv_id = _resource_id(created)
         record(Resource("keyvalue", kv_name, kv_id, "", "created"))
     redis_url = client.key_value_connection(kv_id)
 
@@ -761,18 +844,14 @@ def provision(
             existing_worker, expected_type=API_SERVICE_TYPE["worker"],
             repo=repo, region=worker_region, name=worker_name,
         )
-        worker_id = str(existing_worker.get("id") or "")
-        if not worker_id:
-            raise ProvisionError(f"the existing worker {worker_name!r} has no id to reuse")
+        worker_id = _resource_id(existing_worker)
         record(Resource("worker", worker_name, worker_id, "", "reused"))
     else:
         env = resolve_env_vars(worker_spec.get("envVars"), values, redis_url)
         created = client.create_service(
             service_body(worker_spec, workspace, repo=repo, branch=branch, env_vars=env)
         )
-        worker_id = str(created.get("id") or "")
-        if not worker_id:
-            raise ProvisionError("Render did not return an id for the new worker")
+        worker_id = _resource_id(created)
         record(Resource("worker", worker_name, worker_id, "", "created"))
 
     # 3. Web. Idle sleeping needs the pair; when it is off, neither is set and the
@@ -784,20 +863,22 @@ def provision(
     web_name = str(_need(web_spec, "name", "web"))
     web_region = str(web_spec.get("region") or "")
     existing_web = client.find_service(web_name, workspace=workspace)
+    # Check again at the web write boundary: another install may have completed
+    # while the store and worker were being created. Never discard a chosen
+    # password or turn a confirmed reuse into a new installation.
+    _check_password_mode(
+        {"password_mode": "existing" if existing_web is not None else "new",
+         "existing_web_id": _resource_id(existing_web) if existing_web is not None else ""},
+        password_mode=password_mode, existing_web_id=existing_web_id,
+    )
     if existing_web is not None:
         _ensure_service_compatible(
             existing_web, expected_type=API_SERVICE_TYPE["web"],
             repo=repo, region=web_region, name=web_name,
         )
-        web_id = str(existing_web.get("id") or "")
-        if not web_id:
-            raise ProvisionError(f"the existing web service {web_name!r} has no id to reuse")
+        web_id = _resource_id(existing_web)
         web_url = _service_url(existing_web)
-        # Recover the live sign-in password from the identified service, so a
-        # create whose response was lost is not answered on the next run with a
-        # fresh unused password; and make browser-push keys certain. Nothing is
-        # kept on this laptop's disk.
-        report.app_token = client.read_env_var(web_id, APP_TOKEN_VAR)
+        report.app_token_known = True
         _ensure_web_push(client, web_id, web_url, report)
         record(Resource("web", web_name, web_id, web_url, "reused"))
     else:
@@ -815,11 +896,9 @@ def provision(
         created = client.create_service(
             service_body(web_spec, workspace, repo=repo, branch=branch, env_vars=env)
         )
-        web_id = str(created.get("id") or "")
-        if not web_id:
-            raise ProvisionError("Render did not return an id for the new web service")
+        web_id = _resource_id(created)
         web_url = _service_url(created)
-        report.app_token = web_values.get(APP_TOKEN_VAR)
+        report.app_token_known = True
         report.vapid_configured = True
         record(Resource("web", web_name, web_id, web_url, "created"))
 
@@ -925,17 +1004,6 @@ def _write_report(path: str, report: ProvisionReport) -> None:
     Path(path).write_text(json.dumps(report.as_dict(), indent=2) + "\n", encoding="utf-8")
 
 
-def _write_private(path: str, value: str) -> None:
-    """Write a secret to a file only its owner can read. The installer passes a
-    path it created and removes; this narrows the mode before writing in case the
-    file did not already exist, so the value is never briefly world-readable."""
-    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(handle, value.encode("utf-8"))
-    finally:
-        os.close(handle)
-
-
 def _announce(resource: Resource) -> None:
     where = f" -> {resource.url}" if resource.url else ""
     print(f"  {resource.action} {resource.kind} {resource.name}{where}")
@@ -966,15 +1034,13 @@ def main(argv: list[str] | None = None) -> int:
         description="Create a fresh Paratrooper deployment on Render from render.yaml.",
     )
     parser.add_argument("--blueprint", required=True, help="path to render.yaml")
-    parser.add_argument("--config", required=True, help="path to the TOML configuration source")
+    parser.add_argument("--config", default="", help="path to the TOML configuration source")
     parser.add_argument("--repo", required=True, help="the service's Git repository URL")
     parser.add_argument("--branch", required=True, help="the branch Render builds from")
     parser.add_argument("--report", default="", help="path to write the JSON report to")
-    parser.add_argument(
-        "--app-token-out",
-        default="",
-        help="path to write the live app sign-in password to (private; the report never carries it)",
-    )
+    parser.add_argument("--inspect-app", action="store_true", help="read-only password preflight")
+    parser.add_argument("--password-mode", choices=("new", "existing"), default="new")
+    parser.add_argument("--existing-web-id", default="", help="web service confirmed for reuse")
     parser.add_argument("--workspace", default=None, help="Render workspace (owner) id")
     parser.add_argument(
         "--wait-ready",
@@ -984,6 +1050,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        specs = load_specs(args.blueprint)
+        workspace, workspace_source = resolve_workspace(args.workspace)
+        client = open_client(resolve_credential())
+        if args.inspect_app:
+            state = inspect_app(client, specs, workspace=workspace, repo=args.repo)
+            if args.report:
+                Path(args.report).write_text(json.dumps(state) + "\n", encoding="utf-8")
+            return 0
+        if not args.config:
+            raise ProvisionError("--config is required when provisioning")
         # Secrets first, from stdin. The configuration file is not a secret; it is
         # validated (the service's own validator) and encoded here so a source
         # that could not boot never reaches a new service.
@@ -991,9 +1067,6 @@ def main(argv: list[str] | None = None) -> int:
         _config, _text, encoded = read_source(args.config)
         values[CONFIG_KEY] = encoded
 
-        specs = load_specs(args.blueprint)
-        workspace, workspace_source = resolve_workspace(args.workspace)
-        client = open_client(resolve_credential())
         report = provision(
             client=client,
             specs=specs,
@@ -1001,6 +1074,8 @@ def main(argv: list[str] | None = None) -> int:
             repo=args.repo,
             branch=args.branch,
             values=values,
+            password_mode=args.password_mode,
+            existing_web_id=args.existing_web_id,
             workspace_source=workspace_source,
             announce=_announce,
         )
@@ -1028,10 +1103,6 @@ def main(argv: list[str] | None = None) -> int:
                 report.deploy_statuses = statuses
         if args.report:
             _write_report(args.report, report)
-        # The live password travels by its own private file, not the report, and
-        # only when it is known. The installer reads it once and removes it.
-        if args.app_token_out and report.app_token:
-            _write_private(args.app_token_out, report.app_token)
         return 0
     except DeployError as exc:
         print(f"error: {exc}", file=sys.stderr)
