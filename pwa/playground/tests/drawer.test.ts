@@ -95,9 +95,19 @@ describe("the layout the drawer lives in", () => {
     expect(css).toContain("@media (max-width: 900px), (display-mode: standalone) {");
   });
 
-  it("fills the screen with the transcript: no frame, no page scroll, dvh", () => {
+  it("fills the screen with the transcript: no frame, no page scroll, pinned like the app", () => {
     const phone = css.slice(css.indexOf("@media (max-width: 900px), (display-mode: standalone) {"));
-    expect(phone).toContain("height: 100dvh;");
+    // The shell is pinned by its edges the way the app pins #app, so iOS
+    // standalone's dvh / innerHeight misreport can't leave a strip under the
+    // composer; the root is the app's 100vh, never the 100dvh the app calls
+    // wrong on cold start nor the 100% that letterboxes a bar under
+    // viewport-fit=cover. (src/styles.css: "Fixed app shell pinned by inset
+    // alone" and "100vh, NOT 100% or 100dvh".)
+    const shell = phone.slice(phone.indexOf(".shell {"), phone.indexOf(".stage,"));
+    expect(shell).toContain("position: fixed;");
+    expect(shell).toContain("inset: 0;");
+    expect(phone).toContain("height: 100vh;");
+    expect(phone).not.toContain("height: 100dvh");
     expect(phone).toContain("overflow: hidden; /* only the thread scrolls */");
     expect(phone).toContain("overscroll-behavior: none;");
     expect(phone).toContain("border: 0;");

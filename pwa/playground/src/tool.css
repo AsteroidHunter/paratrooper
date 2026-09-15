@@ -480,15 +480,23 @@ details.note li { margin-bottom: 3px; }
 @media (max-width: 900px), (display-mode: standalone) {
   html,
   body {
-    height: 100%;
+    /* 100vh, not 100%: in iOS standalone height:100% defeats viewport-fit=cover
+       and the webview letterboxes a light bar under the app. Standalone has no
+       toolbar, so 100vh is exact. This is the app's own html/body rule
+       (src/styles.css, the "100vh, NOT 100% or 100dvh" note). */
+    height: 100vh;
     overflow: hidden; /* only the thread scrolls */
     overscroll-behavior: none; /* and the page itself never rubber-bands */
   }
   .shell {
     display: block;
-    /* dynamic, so the canvas is the height the browser is ACTUALLY showing
-       rather than the tall one it promises while its bars are retracting */
-    height: 100dvh;
+    /* Pinned by its edges, not sized by a height, exactly as the app pins #app
+       (src/styles.css, "Fixed app shell pinned by inset alone"): with top and
+       bottom both 0 there is no viewport height to measure, so iOS standalone's
+       dvh / innerHeight misreport cannot leave a strip under the composer. The
+       100dvh this replaces trusted a figure the app says is wrong on cold start. */
+    position: fixed;
+    inset: 0;
   }
   .stage,
   .stage[data-frame="fill"] {
