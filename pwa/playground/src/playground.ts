@@ -28,6 +28,7 @@ import { buildThread, laidOutRows } from "./thread";
 import { createTunedSpringField } from "./springfield";
 import { createEndSpring } from "./vendor/endspring";
 import { createTravellingSettle } from "./travelsettle";
+import { createRipple } from "./ripple";
 import { createCarry } from "./carry";
 import { openGesture, takesScrollBack } from "./gesture";
 import type { ScrollReading } from "./gesture";
@@ -66,6 +67,7 @@ const tuning = defaultTuning();
 function applyTuning(next: Tuning): void {
   Object.assign(tuning.field, next.field);
   Object.assign(tuning.travel, next.travel);
+  Object.assign(tuning.ripple, next.ripple);
   tuning.config = next.config;
 }
 
@@ -108,6 +110,7 @@ function save(): void {
 // half.
 const liveField = createTunedSpringField(() => tuning.field);
 const travel = createTravellingSettle();
+const ripple = createRipple();
 let engine: SpringEngine = liveField;
 let endSpring: EndModel = createEndSpring();
 /** the numbers the current engine was BUILT with, so a change can be spotted */
@@ -141,6 +144,7 @@ function buildEngine(): void {
     endSpring = createHistoryEnd(entry);
   }
   travel.reset();
+  ripple.reset();
   engine.measure(rowBoxes);
 }
 
@@ -263,6 +267,7 @@ function needsFrames(): boolean {
     engine.active() ||
     endSpring.active() ||
     travel.active() ||
+    ripple.active() ||
     carry.active() ||
     coast !== null ||
     script !== null
@@ -303,10 +308,15 @@ function step(now: number): void {
   // buttons blend rather than restart. A historical build has no vertex and no
   // window to give it, and the settle is an experiment ON the current field, so
   // it is stood down rather than fed something it was not built for.
+  // The two experiments both ride ON the current field, so both are advanced on
+  // EVERY current-field frame, whichever is showing, and they stay in step with
+  // the drive rather than restarting when the reader turns to one. A historical
+  // build has no vertex and no window to give them, so they are stood down.
   let travelled: Map<number, number> | null = null;
+  let rippled: Map<number, number> | null = null;
   if (onCurrentField()) {
     const win = liveField.window();
-    travelled = travel.frame({
+    const common = {
       nowMs: now,
       dt,
       fieldLag: liveField.lag(),
@@ -317,12 +327,21 @@ function step(now: number): void {
       rows: rowBoxes,
       lo: win ? win.lo : 0,
       hi: win ? win.hi : -1,
-      tune: tuning.travel,
-      field: tuning.field,
-    });
-  } else if (travel.active()) travel.reset();
+    };
+    travelled = travel.frame({ ...common, tune: tuning.travel, field: tuning.field });
+    rippled = ripple.frame({ ...common, tune: tuning.ripple, field: tuning.field });
+  } else {
+    if (travel.active()) travel.reset();
+    if (ripple.active()) ripple.reset();
+  }
 
-  applyDisplacements(carry.blend(travelled !== null && tuning.config === "travelling" ? travelled : placed, dt));
+  const shown =
+    tuning.config === "travelling" && travelled !== null
+      ? travelled
+      : tuning.config === "ripple" && rippled !== null
+        ? rippled
+        : placed;
+  applyDisplacements(carry.blend(shown, dt));
 
   if (now - lastReadout > 90) {
     lastReadout = now;
@@ -337,21 +356,25 @@ function step(now: number): void {
 
 function paintReadout(): void {
   const entry = configFor(tuning.config);
-  const travelling = tuning.config === "travelling";
+  // the two experiments both report a released/waiting front; a built-in build
+  // reports its own phase and reference lag. `staged` is whichever experiment is
+  // on screen, or null for a real build.
+  const staged =
+    tuning.config === "travelling" ? travel : tuning.config === "ripple" ? ripple : null;
   // the bar's version line, where the app puts APP_VERSION: the build actually
   // running, so the shell never says 0.3.151 over 0.3.121's springs
-  appVer.textContent = entry.experimental ? "travelling settle" : `v${entry.version}`;
+  appVer.textContent = entry.experimental ? entry.label.toLowerCase() : `v${entry.version}`;
   const moving = applied.size;
   const name = entry.experimental ? entry.label.toLowerCase() : `v${entry.version}`;
-  const phase = travelling ? travel.state() : engine.phase();
-  const lag = travelling ? travel.signal() : engine.lag();
-  const named = !travelling && hasReferenceLag(entry);
-  const front = travel.front();
+  const phase = staged ? staged.state() : engine.phase();
+  const lag = staged ? staged.signal() : engine.lag();
+  const named = staged === null && hasReferenceLag(entry);
+  const front = staged ? staged.front() : { released: 0, total: 0 };
   panel.readout(
     `${name} · ${phase} · ` +
       `${named ? "reference lag" : "largest offset"} ${lag.toFixed(1)} px · ` +
-      (travelling
-        ? `${front.released}/${front.total} rows released, ${Math.round(travel.spread().max)} ms still to wait`
+      (staged
+        ? `${front.released}/${front.total} rows released, ${Math.round(staged.spread().max)} ms still to wait`
         : named
           ? "one reference for every row"
           : "a spring of its own for every row") +
@@ -442,6 +465,7 @@ function freezeAll(): void {
   engine.freeze();
   endSpring.freeze();
   travel.reset();
+  ripple.reset();
   carry.reset();
   recent = [];
   applyDisplacements(new Map());

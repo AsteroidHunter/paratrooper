@@ -181,13 +181,18 @@ export function mountControls(root: HTMLElement, hooks: ControlHooks): ControlPa
     "While scrolling",
     "These settings control how the bubbles trail behind the scroll. A dimmed slider is not used by the selected build.",
   );
+  const rippleGroup = group(
+    "Ripple return",
+    "This setting controls the experimental ripple after scrolling stops. It works only while Ripple from the finger is selected.",
+  );
   const travelGroup = group(
     "Travelling return",
     "These settings control the experimental wave after scrolling stops. They work only while Travelling is selected.",
   );
 
   for (const knob of KNOBS) {
-    const host = knob.group === "shared" ? shared : travelGroup;
+    const host =
+      knob.group === "shared" ? shared : knob.group === "ripple" ? rippleGroup : travelGroup;
     const row = el("div", "knob");
     const head = el("div", "knobhead");
     const label = el("label", "knoblabel", knob.label);
@@ -332,6 +337,7 @@ export function mountControls(root: HTMLElement, hooks: ControlHooks): ControlPa
     if (shares.length > 0) also.push(`same modules as ${shares.map((s) => s.label).join(", ")}`);
     alsoLine.textContent = also.length > 0 ? `${c.summary} (${also.join("; ")})` : c.summary;
     for (const o of originButtons) o.btn.classList.toggle("on", o.origin === t.travel.origin);
+    rippleGroup.classList.toggle("dim", t.config !== "ripple");
     travelGroup.classList.toggle("dim", t.config !== "travelling");
     for (const r of rows) {
       const live = knobLive(t, r.knob.key);

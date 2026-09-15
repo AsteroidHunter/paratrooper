@@ -47,6 +47,8 @@ import type { KnobKey } from "./tuning";
 export type ConfigId =
   /** the field this tool was built to reproduce: v0.3.151, 4c865ac */
   | "live"
+  /** the experiment: the live field's drive with a no-hold ripple out from the finger */
+  | "ripple"
   /** the experiment: the live field's drive with an ordered release */
   | "travelling"
   | "h-per-row"
@@ -138,11 +140,18 @@ const LIVE_NUMBERS = {
   FINGER_TRAVEL_PX: 2,
 } as const;
 
+// The ripple experiment defaults its trail and return to 33 ms, which is what
+// the LIVE app runs today - the frozen 0.3.151 baseline above it uses the 45 ms
+// that version documented, and the app has since moved to 33. Everything else is
+// the live build's own.
+const RIPPLE_NUMBERS = { ...LIVE_NUMBERS, LAG_TAU_MS: 33 } as const;
+
 const TAU_REACH: readonly KnobKey[] = ["field.tau", "field.divisor"];
 const TAU_REACH_STRAIN: readonly KnobKey[] = ["field.tau", "field.divisor", "field.strain"];
 const REACH_ONLY: readonly KnobKey[] = ["field.divisor"];
 const V45_500 = { "field.tau": 45, "field.divisor": 500 } as const;
 const V45_500_12 = { "field.tau": 45, "field.divisor": 500, "field.strain": 12 } as const;
+const V33_500_12 = { "field.tau": 33, "field.divisor": 500, "field.strain": 12 } as const;
 
 export const CONFIGS: readonly ConfigEntry[] = [
   {
@@ -169,6 +178,25 @@ export const CONFIGS: readonly ConfigEntry[] = [
     knobs: TAU_REACH_STRAIN,
     values: V45_500_12,
     constants: LIVE_NUMBERS,
+    endConstants: END_NUMBERS,
+  },
+  {
+    id: "ripple",
+    label: "Ripple from the finger",
+    family: "first-order-immediate-brake",
+    state: "first-order-immediate-brake-v1 + finger-out ripple",
+    version: "",
+    commit: "",
+    snapshot: "",
+    summary:
+      "Experimental, not a shipped build. The live build's drive exactly, defaulting to the 33 ms trail and return the live app uses, then a no-hold release: the instant the scroll stops the bubble under the finger starts home, and the release ripples outward from there, each bubble a little farther waiting a little longer, all on the live return curve.",
+    experimental: true,
+    spring: "current",
+    end: "end-reseat",
+    aliases: [],
+    knobs: TAU_REACH_STRAIN,
+    values: V33_500_12,
+    constants: RIPPLE_NUMBERS,
     endConstants: END_NUMBERS,
   },
   {

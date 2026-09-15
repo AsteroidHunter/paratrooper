@@ -19,6 +19,8 @@ import { defaultFieldTunables } from "./springfield";
 import type { FieldTunables } from "./springfield";
 import { defaultTravelTuning } from "./travelsettle";
 import type { TravelTuning, WaveOrigin } from "./travelsettle";
+import { defaultRippleTuning } from "./ripple";
+import type { RippleTuning } from "./ripple";
 import { CONFIGS, configFor, isConfigId } from "./presets";
 import type { ConfigId } from "./presets";
 
@@ -27,6 +29,7 @@ export interface Tuning {
   config: ConfigId;
   field: FieldTunables;
   travel: TravelTuning;
+  ripple: RippleTuning;
 }
 
 export function defaultTuning(): Tuning {
@@ -34,6 +37,7 @@ export function defaultTuning(): Tuning {
     config: "travelling",
     field: defaultFieldTunables(),
     travel: defaultTravelTuning(),
+    ripple: defaultRippleTuning(),
   };
   loadConfigValues(t, t.config);
   return t;
@@ -49,8 +53,8 @@ export interface Knob {
   step: number;
   unit: string;
   /** shared knobs drive whichever build is selected; travel knobs only the
-      experimental settle */
-  group: "shared" | "travel";
+      travelling settle; ripple knobs only the ripple */
+  group: "shared" | "travel" | "ripple";
 }
 
 export type KnobKey =
@@ -61,7 +65,8 @@ export type KnobKey =
   | "travel.downDelayRatio"
   | "travel.maxDelayMs"
   | "travel.returnMs"
-  | "travel.bounce";
+  | "travel.bounce"
+  | "ripple.waveMs";
 
 export const KNOBS: readonly Knob[] = [
   {
@@ -145,6 +150,16 @@ export const KNOBS: readonly Knob[] = [
     unit: "",
     group: "travel",
   },
+  {
+    key: "ripple.waveMs",
+    label: "Wave speed",
+    hint: "Higher makes the return crawl outward from the finger, so bubbles farther away hold their stretch noticeably longer before they let go and the wave is easy to see. Lower brings the whole thread home closer together; 0 releases every bubble at once, which is the baseline. Used only by Ripple from the finger.",
+    min: 0,
+    max: 60,
+    step: 1,
+    unit: "ms/100px",
+    group: "ripple",
+  },
 ];
 
 export function readKnob(t: Tuning, key: KnobKey): number {
@@ -165,6 +180,8 @@ export function readKnob(t: Tuning, key: KnobKey): number {
       return t.travel.returnMs;
     case "travel.bounce":
       return t.travel.bounce;
+    case "ripple.waveMs":
+      return t.ripple.waveMsPer100px;
   }
 }
 
@@ -194,6 +211,9 @@ export function writeKnob(t: Tuning, key: KnobKey, v: number): void {
     case "travel.bounce":
       t.travel.bounce = v;
       break;
+    case "ripple.waveMs":
+      t.ripple.waveMsPer100px = v;
+      break;
   }
 }
 
@@ -201,6 +221,7 @@ export function writeKnob(t: Tuning, key: KnobKey, v: number): void {
 export function knobLive(t: Tuning, key: KnobKey): boolean {
   const c = configFor(t.config);
   if (key.startsWith("travel.")) return t.config === "travelling";
+  if (key.startsWith("ripple.")) return t.config === "ripple";
   return c.knobs.includes(key);
 }
 
@@ -296,6 +317,9 @@ export function exportTuning(t: Tuning): string {
       bounce: t.travel.bounce,
     };
   }
+  if (t.config === "ripple") {
+    body.ripple = { waveMsPer100px: t.ripple.waveMsPer100px };
+  }
   return JSON.stringify(body, null, 2);
 }
 
@@ -311,6 +335,7 @@ export function importTuning(text: string): Tuning | null {
   const o = raw as Record<string, unknown>;
   const shared = (o.shared ?? {}) as Record<string, unknown>;
   const travel = (o.travel ?? {}) as Record<string, unknown>;
+  const ripple = (o.ripple ?? {}) as Record<string, unknown>;
   const num = (v: unknown, fallback: number): number =>
     typeof v === "number" && Number.isFinite(v) ? v : fallback;
   const base = defaultTuning();
@@ -337,6 +362,9 @@ export function importTuning(text: string): Tuning | null {
       origin: travel.origin === "bottom" ? "bottom" : "finger",
       returnMs: num(travel.returnMs, base.travel.returnMs),
       bounce: num(travel.bounce, base.travel.bounce),
+    },
+    ripple: {
+      waveMsPer100px: num(ripple.waveMsPer100px, base.ripple.waveMsPer100px),
     },
   });
 }
