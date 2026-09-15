@@ -10,6 +10,11 @@
 // Tables in the wiki agent notes. The pure model is unit-tested directly; the
 // main.ts seam is source-pinned like springscroll.test.ts, because main.ts boots
 // a real shell at import and cannot load under node.
+//
+// THE APP SHIPS WITH THIS TURNED OFF (main.ts SPRING_ENABLED, the owner's call
+// on 2026-09-15): the ends no longer bounce the rows at all. The module here is
+// untouched and still holds the model; the seam pins below are the SHAPE of the
+// wiring, which the switch holds off, and springoff.test.ts drives what ships.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
@@ -664,6 +669,14 @@ describe("what the model hands the lag — a bounce is ordinary scrolling to it"
 });
 
 describe("main.ts seam — one line in the pump, and every hold-off kept", () => {
+  it("the seam is switched off, so none of the shape below runs in the app", () => {
+    expect(src).toMatch(/^const SPRING_ENABLED = false;$/m);
+    for (const fn of ["springPump", "armSpring", "springFinger", "liftSpring", "springFreeze"]) {
+      const first = src.slice(src.indexOf(`function ${fn}(`)).split("\n")[1];
+      expect(first.trim().replace(/\s*\/\/.*$/, ""), fn).toBe("if (!SPRING_ENABLED) return;");
+    }
+  });
+
   it("the pump adds the modelled overscroll to the position the field reads", () => {
     const pump = src.slice(src.indexOf("function springPump()"), src.indexOf("function springFreeze"));
     expect(pump).toContain("const st = t.scrollTop + endSpring.frame(now, t.scrollTop, springMaxScroll, springClientH)");
@@ -691,7 +704,7 @@ describe("main.ts seam — one line in the pump, and every hold-off kept", () =>
     expect(arm).toContain("if (springBlocked()) return;");
   });
 
-  it("touch events reach the model: the gesture opens it, moves feed the pull, the lift bounces it", () => {
+  it("the wiring's touch path: the gesture opens the model, moves feed the pull, the lift bounces it", () => {
     const arm = src.slice(src.indexOf("function armSpring("), src.indexOf("function springFinger"));
     expect(arm).toContain("endSpring.begin(fingerDown, touchY)");
     const fin = src.slice(src.indexOf("function springFinger("), src.indexOf("function liftSpring"));

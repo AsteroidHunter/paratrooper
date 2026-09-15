@@ -43,6 +43,14 @@ import { padShift } from "../src/viewport";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 
+// The seam's switch, read out of the file the seam is cut from. main.ts ships
+// with the transcript spring OFF (the owner's call on 2026-09-15), and the last
+// case in this file drives both pins exactly as they ship: they still hold the
+// reader's row still, and no row is translated for them. Every other case forces
+// the switch ON, because what they are about is what a content-preserving pin
+// owes an armed field, which is the machinery the switch holds off.
+const SHIPPED_SPRING = /^const SPRING_ENABLED = (true|false);$/m.exec(main)?.[1] === "true";
+
 function sourceBetween(start: string, end: string): string {
   const at = main.indexOf(start);
   const until = main.indexOf(end, at + start.length);
@@ -152,6 +160,9 @@ interface HarnessOptions {
   deaf?: boolean;
   /** the row table left stale after the pin: what an un-invalidated pin left */
   stale?: boolean;
+  /** the seam's own switch, ON unless a case says otherwise: these cases drive
+      the machinery main.ts holds off. Pass SHIPPED_SPRING to drive what ships. */
+  springEnabled?: boolean;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -247,6 +258,7 @@ function harness(options: HarnessOptions = {}) {
       },
     },
     // --- the spring seam's collaborators
+    SPRING_ENABLED: options.springEnabled ?? true,
     lastGestureAt: 0,
     threadTouching: false,
     lastScrollAt: 0,
@@ -584,5 +596,55 @@ describe("the keyboard's reachability padding", () => {
     h.tick();
     // and the difference is not injected as motion either: the lag relaxes
     expect(h.field().lag()).toBeCloseTo(relaxLag(steady, 0, FRAME), 6);
+  });
+});
+
+// --- and what actually ships --------------------------------------------------
+describe("both pins as main.ts ships them: the switch is off", () => {
+  it("the photo's box still holds the reader's row still, and no row is translated", () => {
+    expect(SHIPPED_SPRING).toBe(false);
+    const h = harness({ springEnabled: SHIPPED_SPRING });
+    h.park(1400);
+    drag(h, 8, 0.5);
+    const anchor = h.atFold();
+    const seenBefore = h.seen(anchor);
+    const scrollBefore = h.thread.scrollTop;
+
+    h.photoDecoded();
+    h.scrolled();
+    h.tick();
+
+    // the pin itself is untouched by the switch: that is the feature next door
+    expect(h.thread.scrollTop).toBe(scrollBefore + GREW);
+    expect(h.seen(anchor)).toBe(seenBefore);
+    expect(h.ghosts.at(-1)).toEqual(["keep-view", scrollBefore + GREW]);
+    // the springs are simply not in it any more
+    expect(h.reseats).toEqual([]);
+    expect(h.field().armed()).toBe(false);
+    expect(h.worstRow()).toBe(0);
+    expect(h.translated()).toBe(0);
+  });
+
+  it("the keyboard's padding still holds it still, and no row is translated", () => {
+    const h = harness({ springEnabled: SHIPPED_SPRING });
+    h.keyboard(true);
+    h.liftPad(LIFT_PAD);
+    h.park(1400);
+    h.keyboard(false);
+    drag(h, 8, 0.5);
+    const anchor = h.atFold();
+    const seenBefore = h.seen(anchor);
+    const scrollBefore = h.thread.scrollTop;
+
+    h.liftPad(0); // the close's landing: the padding comes off
+    h.scrolled();
+    h.tick();
+
+    expect(h.thread.scrollTop).toBe(scrollBefore - LIFT_PAD);
+    expect(h.seen(anchor)).toBe(seenBefore);
+    expect(h.reseats).toEqual([]);
+    expect(h.field().armed()).toBe(false);
+    expect(h.worstRow()).toBe(0);
+    expect(h.translated()).toBe(0);
   });
 });

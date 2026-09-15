@@ -34,6 +34,16 @@ import type { SpringField } from "../src/springscroll";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 
+// The seam's switch, read out of the file the seam is cut from. main.ts ships
+// with the transcript spring OFF (the owner's call on 2026-09-15), and the last
+// case in this file drives the seam exactly as it ships: nothing moves. Every
+// other case forces the switch ON, the way keepArmed forces its counterfactual
+// below, because what they are about is the machinery the switch holds off and
+// would hand back the day it is turned on again: whose motion a scroll event is,
+// what buys the reader's claim on a resume era, and what an app-owned instant
+// pin does inside that window. That bookkeeping is live code either way.
+const SHIPPED_SPRING = /^const SPRING_ENABLED = (true|false);$/m.exec(main)?.[1] === "true";
+
 function sourceBetween(start: string, end: string): string {
   const at = main.indexOf(start);
   const until = main.indexOf(end, at + start.length);
@@ -142,6 +152,9 @@ interface HarnessOptions {
   /** the field refuses to be dropped: what an app write in a claimed window
       reached before this change */
   keepArmed?: boolean;
+  /** the seam's own switch, ON unless a case says otherwise: these cases drive
+      the machinery main.ts holds off. Pass SHIPPED_SPRING to drive what ships. */
+  springEnabled?: boolean;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -214,6 +227,7 @@ function harness(options: HarnessOptions = {}) {
     clearTimeout: (id: number) => void timers.delete(id),
     performance: { now: () => now },
     // --- the seam's collaborators
+    SPRING_ENABLED: options.springEnabled ?? true,
     createSpringField: field,
     createEndSpring,
     springCreditsReader,
@@ -720,5 +734,38 @@ describe("an app-owned instant tail pin inside a claimed window", () => {
 
     expect(h.rides).toEqual(["glide"]); // the ordinary landing, which blocks
     expect(h.ghosts.at(-1)?.[0]).not.toBe("bottom");
+  });
+});
+
+// --- and what actually ships --------------------------------------------------
+describe("the seam as main.ts ships it: the switch is off", () => {
+  it("the claim is still bought and still made, and no row moves for it", () => {
+    expect(SHIPPED_SPRING).toBe(false);
+    const h = harness({ springEnabled: SHIPPED_SPRING });
+    h.park(1400);
+    h.openWindow();
+
+    // the same travel that takes the era back above: the bookkeeping is live
+    drag(h, 10, 0.5);
+    expect(h.claimed()).toBe(true);
+    expect(h.blocked()).toBe(false);
+
+    // ... and the rows it used to stretch sit exactly where they were laid out
+    expect(h.field().armed()).toBe(false);
+    expect(h.movingRows()).toBe(0);
+    expect(h.worstRow()).toBe(0);
+    expect(h.rows.every((row) => row.style.translate === undefined)).toBe(true);
+
+    // the lift, its momentum and the frames after it are the same nothing
+    h.touching(false);
+    h.lift();
+    for (let i = 0; i < 30; i++) {
+      h.thread.scrollTop += 6;
+      h.scrolled();
+      h.tick();
+    }
+    expect(h.field().armed()).toBe(false);
+    expect(h.worstRow()).toBe(0);
+    expect(h.rows.every((row) => row.style.translate === undefined)).toBe(true);
   });
 });

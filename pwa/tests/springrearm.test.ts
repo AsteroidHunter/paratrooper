@@ -11,6 +11,13 @@
 // travel that passed while the springs read zero is never injected as one frame
 // of scrolling.
 //
+// THE HAND-BACK IS SWITCHED OFF WITH THE REST OF IT (main.ts SPRING_ENABLED,
+// the owner's call on 2026-09-15): nothing arms, so nothing has to be handed
+// back. The field contract below is the module's own and is untouched; the
+// wiring pins are the shape the switch holds off, except the ownership
+// bookkeeping at the foot of this file, which is live code either way and is
+// pinned as such. springoff.test.ts drives what ships.
+//
 // Two halves, because main.ts boots a real shell at import and cannot load
 // under node (springscroll.test.ts says the same): the field contract the
 // hand-back leans on is driven directly, and the wiring is source-pinned the
@@ -209,11 +216,16 @@ describe("the field contract the hand-back leans on", () => {
 // decision actually does to the rows is tested against the shipped helper and
 // the shipped field in springown.test.ts, and end to end in a local browser
 // against synthetic fixtures, outside this suite.
-describe("main.ts wiring: the finger takes its own drag back", () => {
+describe("main.ts wiring: the finger takes its own drag back, when the seam is on", () => {
   const finger = src.slice(
     src.indexOf("function springFinger("),
     src.indexOf("function liftSpring("),
   );
+
+  it("the seam ships off, so this path returns before any of it", () => {
+    expect(src).toMatch(/^const SPRING_ENABLED = false;$/m);
+    expect(finger.split("\n")[1].trim().replace(/\s*\/\/.*$/, "")).toBe("if (!SPRING_ENABLED) return;");
+  });
 
   it("a touchmove re-opens the gesture when the hold-off has let go, before it re-anchors", () => {
     expect(finger).toContain("if (!springField.armed() && !springBlocked()) armSpring(touchY, true);");

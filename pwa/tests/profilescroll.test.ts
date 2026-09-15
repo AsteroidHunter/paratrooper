@@ -28,6 +28,14 @@ import type { SpringField } from "../src/springscroll";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 
+// The seam's switch, read out of the file the seam is cut from. main.ts ships
+// with the transcript spring OFF (the owner's call on 2026-09-15), and the last
+// case in this file drives the reconcile exactly as it ships: it still holds the
+// reader's row still, and nothing of the spring runs at all. Every other case
+// forces the switch ON, because what they are about is what the correction owes
+// an armed field, which is the machinery the switch holds off.
+const SHIPPED_SPRING = /^const SPRING_ENABLED = (true|false);$/m.exec(main)?.[1] === "true";
+
 function sourceBetween(start: string, end: string): string {
   const at = main.indexOf(start);
   const until = main.indexOf(end, at + start.length);
@@ -146,6 +154,9 @@ interface HarnessOptions {
   deaf?: boolean;
   /** the resume landing owns the thread's scroll (springBlocked) */
   resumeOwns?: boolean;
+  /** the seam's own switch, ON unless a case says otherwise: these cases drive
+      the machinery main.ts holds off. Pass SHIPPED_SPRING to drive what ships. */
+  springEnabled?: boolean;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -266,6 +277,7 @@ function harness(options: HarnessOptions = {}) {
     },
     scrollGhostWrite: (tag: string, at: number) => void ghosts.push([tag, at]),
     // --- the spring seam's collaborators
+    SPRING_ENABLED: options.springEnabled ?? true,
     createSpringField: field,
     createEndSpring,
     laidOutRows: () => laidOut(),
@@ -705,5 +717,56 @@ describe("a profile reconcile with no finger and no momentum anywhere", () => {
     expect(h.field().armed()).toBe(true); // taken back on his coast
     expect(h.worstRow()).toBeGreaterThan(1);
     expect(h.reseats).toEqual([]); // nothing announced: this is a real scroll
+  });
+});
+
+// --- and what actually ships --------------------------------------------------
+describe("the reconcile as main.ts ships it: the switch is off", () => {
+  it("still holds the reader's row still, with no field, no frame and no translate", () => {
+    expect(SHIPPED_SPRING).toBe(false);
+    const h = harness({ springEnabled: SHIPPED_SPRING });
+    h.park(900);
+    const finger = drag(h, 8, 0.5); // a real drag, through the real handlers
+    const anchor = h.atFold();
+    const seenBefore = h.seen(anchor);
+    const scrollBefore = h.thread.scrollTop;
+
+    h.adopt("pinboard"); // health answers, mid-drag
+    h.scrolled();
+    h.tick();
+
+    // the correction is the feature next door and is untouched
+    expect(h.profile()).toBe("pinboard");
+    expect(h.thread.scrollTop).toBe(scrollBefore + ARTIFACT_HEIGHT);
+    expect(h.seen(anchor)).toBe(seenBefore);
+    // the spring is simply not there: nothing armed, nothing scheduled, nothing
+    // written, and the announcement itself has nothing left to announce to
+    expect(h.reseats).toEqual([]);
+    expect(h.field().armed()).toBe(false);
+    expect(h.field().lag()).toBe(0);
+    expect(h.worstRow()).toBe(0);
+    expect(h.translated()).toBe(0);
+    expect(h.scheduled()).toBe(0);
+
+    // and the rest of the drag, the lift and its momentum are the same nothing
+    let y = finger;
+    for (let i = 0; i < 6; i++) {
+      h.thread.scrollTop += 0.5 * FRAME;
+      y -= 0.5 * FRAME;
+      h.finger(y);
+      h.scrolled();
+      h.tick();
+    }
+    h.touching(false);
+    h.lift();
+    for (let i = 0; i < 20; i++) {
+      h.thread.scrollTop += 0.5 * FRAME;
+      h.scrolled();
+      h.tick();
+    }
+    expect(h.field().armed()).toBe(false);
+    expect(h.worstRow()).toBe(0);
+    expect(h.translated()).toBe(0);
+    expect(h.scheduled()).toBe(0);
   });
 });

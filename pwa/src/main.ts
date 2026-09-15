@@ -193,7 +193,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.154"; // The playground picker gains a no-hold ripple that releases the bubbles outward from the finger
+const APP_VERSION = "0.3.155"; // The transcript spring is off: the bubbles sit still in the thread and the thread scrolls natively
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
@@ -2018,7 +2018,30 @@ function fitBubblesNow(root: ParentNode | null): void {
   if (els.length) fitBubbles(els.map(fitTarget));
 }
 
+// --- the transcript spring, OFF ----------------------------------------------
+// The owner turned it off on 2026-09-15: "turn spring animation for message
+// bubbles completely off". The bubbles sit still in the thread now and the
+// thread scrolls the way the browser scrolls it. Nothing trails the finger,
+// nothing eases back when the finger stops, the ends do not bounce the rows,
+// and no row is ever written a displacement at all.
+//
+// This switch is the whole of it. Every entry point of the seam below returns on
+// it: the field is never armed, the frame pump never wakes, and applySpring,
+// the one place a row's translate is ever written, writes nothing. What stays
+// live beside them is the bookkeeping that was never the effect: which motion on
+// this thread is the reader's, and the resume era his travel claims. The physics
+// (springscroll.ts, endspring.ts) and this seam are left whole and still tested,
+// so turning it back on is this one word.
+//
+// Declared one line ABOVE the seam because the harnesses lift the seam out of
+// this file by the comment below and run it (springclaim.test.ts,
+// springpins.test.ts, profilescroll.test.ts): the switch reaches them as their
+// own, so they can go on exercising the machinery it holds off. What ships is
+// pinned in springoff.test.ts.
+const SPRING_ENABLED = false;
+
 // --- springy transcript (springscroll.ts owns the physics) --------------------
+// What the switch above holds off, kept whole. As written:
 // The bubbles trail the scroll by their distance from the finger and, from the
 // very next frame after the scroll stops, ease back into their seats — 90% of
 // the way home in 76 ms at the 33 ms trail and return time this build was asked
@@ -2144,6 +2167,7 @@ function springBlocked(): boolean {
 // independent, so this one read serves the whole gesture and its momentum with
 // no further layout reads until the content changes.
 function measureSpring(): void {
+  if (!SPRING_ENABLED) return; // off: no geometry is read, and none is wanted
   const t = document.getElementById("thread");
   if (!t) return;
   springEls = laidOutRows(t) as HTMLElement[];
@@ -2173,6 +2197,7 @@ function measureSpring(): void {
 // for several frames, so a slow scroll writes about one row a frame where it
 // used to write every participating row on every frame.
 function applySpring(): void {
+  if (!SPRING_ENABLED) return; // off: no row is ever written a translate by this app
   const disp = springField.displacements();
   for (const [i, dy] of disp) {
     const el = springEls[i];
@@ -2198,6 +2223,7 @@ function applySpring(): void {
 // read, no layout — drives the field, writes the translates, and ends itself
 // the moment the field is idle, so a settled thread schedules no frames.
 function springPump(): void {
+  if (!SPRING_ENABLED) return; // off: no frame is ever scheduled for this
   if (springRaf) return;
   const step = (now: number): void => {
     springRaf = 0;
@@ -2225,6 +2251,7 @@ function springPump(): void {
 // state is entered, so the rects those passes read are the true seats. Drops
 // the gesture too: the next finger down opens a fresh one.
 function springFreeze(): void {
+  if (!SPRING_ENABLED) return; // off: nothing to zero, no frame to cancel
   if (springRaf) cancelAnimationFrame(springRaf);
   springRaf = 0;
   springField.freeze();
@@ -2246,6 +2273,7 @@ function springFreeze(): void {
 // relaxing, and no seat, gesture or transform is touched.
 function springReseat(dy: number): void {
   noteSpringAppWrite(true); // the app moved this scroller, and carries the reference
+  if (!SPRING_ENABLED) return; // off: the note above is all of it, there is no reference to carry
   if (!dy) return;
   const band = endSpring.over();
   endSpring.reseat(dy);
@@ -2255,6 +2283,11 @@ function springReseat(dy: number): void {
 // The scroll handler's one line. Blocked, freeze — the app's own ride is never
 // a drag. Armed, wake the pump: the frame reads the position. Otherwise
 // nothing: an app write or an idle drift with no gesture live is not a drag.
+//
+// With the switch off every one of those is a no-op, and what this still does is
+// the bookkeeping: whose motion this event is, and the resume era a reader's
+// travel claims. That answer is read elsewhere and is not the effect, so it is
+// left exactly as it was.
 function springHandleScroll(): void {
   // Whose event this is, decided FIRST and from the clocks as they stand before
   // it. Two orderings matter here and both are deliberate.
@@ -2308,6 +2341,7 @@ function springHandleScroll(): void {
 // gesture already live (a wheel's next tick, a finger catching a coasting
 // thread) keeps its geometry and its lag.
 function armSpring(touchY: number | null, fingerDown: boolean): void {
+  if (!SPRING_ENABLED) return; // off: no gesture ever opens on the field
   // The anchor this gesture belongs to, recorded BEFORE the hold-off's refusal
   // and for a null as readily as for a number. A wheel and the viewport-centre
   // pointer say "no finger", and that answer has to be able to REPLACE the last
@@ -2326,6 +2360,7 @@ function armSpring(touchY: number | null, fingerDown: boolean): void {
 
 // The finger moved: the field re-centres on it, and a parked pump wakes.
 function springFinger(touchY: number): void {
+  if (!SPRING_ENABLED) return; // off: the finger moves the scroller and nothing else
   // A finger travelling on the glass IS a live drag, whatever happened before
   // it. The hold-off can open and close INSIDE one gesture (a seat move, the
   // receipt crossfade, a landing, a keyboard edge) and its freeze drops the
@@ -2344,6 +2379,7 @@ function springFinger(touchY: number): void {
 // The finger left the glass: momentum, if any, is still the gesture; the field
 // drops the arm itself once the scroll has stopped and the rows are home.
 function liftSpring(): void {
+  if (!SPRING_ENABLED) return; // off: a lift leaves nothing behind to settle
   endSpring.lift(); // END-SPRING SEAM: a pull past the end becomes its bounce
   springField.lift();
   // A finger that pulled past the end and then held still lets the lag melt, so

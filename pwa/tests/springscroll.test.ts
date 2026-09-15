@@ -10,6 +10,12 @@
 // unit-tested directly; the main.ts wiring is source-pinned like
 // flight.test.ts / shift.test.ts, because main.ts boots a real shell at import
 // and cannot load under node.
+//
+// THE APP SHIPS WITH THIS TURNED OFF (main.ts SPRING_ENABLED, the owner's call
+// on 2026-09-15). The module below is untouched and still holds the physics; the
+// wiring pins at the foot of this file are the SHAPE of the seam, which the
+// switch holds off, and each of those sections says so. What the app actually
+// does now is springoff.test.ts: no trail, no return, no transform, no frames.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
@@ -1155,6 +1161,22 @@ describe("createSpringField — freeze is the hold-off, measure never snaps", ()
 });
 
 // --- the wiring, source-pinned (main.ts boots a shell at import) ----------------
+// Every pin from here down describes the SHAPE of the seam in main.ts, and the
+// seam is switched off: none of it runs in the app. The case below is the state
+// that governs the rest, and springoff.test.ts drives what ships.
+describe("main.ts wiring — the switch above the seam, and what it holds off", () => {
+  it("the seam ships off: every way into it returns on the switch", () => {
+    expect(src).toMatch(/^const SPRING_ENABLED = false;$/m);
+    for (const fn of [
+      "measureSpring", "applySpring", "springPump", "springFreeze",
+      "armSpring", "springFinger", "liftSpring",
+    ]) {
+      const first = src.slice(src.indexOf(`function ${fn}(`)).split("\n")[1];
+      expect(first.trim().replace(/\s*\/\/.*$/, ""), fn).toBe("if (!SPRING_ENABLED) return;");
+    }
+  });
+});
+
 describe("main.ts wiring — held off through every motion the app owns", () => {
   const blocked = src.slice(
     src.indexOf("function springBlocked()"),
@@ -1228,7 +1250,7 @@ describe("main.ts wiring — driven per frame from the scroll position, not from
     expect(body).not.toMatch(/scrollTop\s*=/); // the effect is transform-only
   });
 
-  it("touch events own the gesture: start with the finger as anchor, move re-anchors, end lifts", () => {
+  it("the touch handlers still call the seam: start anchors, move re-anchors, end lifts", () => {
     expect(src).toContain("armSpring(e.touches[0].clientY, true)"); // touchstart
     expect(src).toContain("springFinger(e.touches[0].clientY)"); // touchmove
     const end = src.slice(src.indexOf("const endPeek = () =>"), src.indexOf('thread.addEventListener("touchend", endPeek)'));
@@ -1245,7 +1267,7 @@ describe("main.ts wiring — driven per frame from the scroll position, not from
 });
 
 describe("main.ts wiring — compositor-only, geometry once per gesture", () => {
-  it("the effect is applied as the translate longhand and cleared at rest", () => {
+  it("the one place an effect could be written is the translate longhand, cleared at rest", () => {
     const apply = src.slice(src.indexOf("function applySpring()"), src.indexOf("function springPump"));
     expect(apply).toContain("el.style.translate = px");
     expect(apply).toContain('el.style.removeProperty("translate")');
