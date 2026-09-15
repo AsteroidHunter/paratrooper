@@ -5,24 +5,26 @@
 #   ./install.sh
 #
 # What it does, in order:
-#   0. Prepares an isolated local environment with the project and its
-#      dependencies, so a fresh clone works and nothing lands in global Python
-#      (built once, reused after).
-#   1. Signs you in to Render (opens the browser; the CLI saves the session).
-#   2. Signs you in to Claude Code and mints a worker token with
-#      claude setup-token. Claude Code itself is a prerequisite.
-#   3. Offers idle sleeping: the web service can suspend the worker when the
+#   0. Python: builds an isolated local environment with uv, holding the project
+#      and its dependencies, so a fresh clone works and nothing lands in your
+#      global Python (built once, reused after).
+#   1. Render: makes sure the Render CLI is present, offering to install it into a
+#      per-user cache if it is missing, then signs you in (opens the browser; the
+#      CLI saves the session).
+#   2. Claude Code: makes sure Claude Code is present, offering to install it if
+#      it is missing, then mints a worker token with claude setup-token.
+#   3. Idle sleeping: offers to let the web service suspend the worker when the
 #      queue is empty to cut the Render bill. Skip it and the worker stays on,
 #      and no key is needed for that feature.
-#   4. Checks for an existing app, then either confirms keeping its password or
-#      asks for a long passphrase twice with hidden input.
-#   Then, with no more questions:
-#   5. Writes a plain deployment config, generates the
+#   4. App password: checks for an existing app, then either confirms keeping its
+#      password or asks for a long passphrase twice with hidden input.
+#   Then, with no more questions, two headed sections that ask nothing:
+#   Preparing your deployment: writes a plain deployment config, generates the
 #      browser-notification (VAPID) keys, and validates the config and the
-#      blueprint before touching Render.
-#   6. Creates the Key Value store, the worker and the web service on Render from
-#      render.yaml, wiring their links, secrets and notification keys, and waits
-#      for the app to answer.
+#      blueprint before touching Render; a failed gate stops here.
+#   Provisioning on Render: creates the Key Value store, the worker and the web
+#      service from render.yaml, wiring their links, secrets and notification
+#      keys, and waits for the app to answer.
 #   Finally: prints the app address and the phone Home Screen and
 #   notification steps. A deployment that was created but has not answered its
 #   health check yet is reported as such and exits non-zero, without removing
@@ -55,13 +57,13 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 # system install.
 CACHE="$HOME/.cache/paratrooper"
 # The isolated environment the project's laptop tools run in, and its Python.
-# Built in preflight so a fresh clone works; reused if already present.
+# Built by step 0 with uv so a fresh clone works; reused if already present.
 VENVDIR="${PARATROOPER_INSTALL_VENV:-$CACHE/venv}"
 PY="$VENVDIR/bin/python"
-# The interpreter used to build the venv: an existing python3 (>= 3.12) if there
-# is one, otherwise a standalone Python obtained into the cache. Set by
-# ensure_python before the venv is built.
-PY_BOOT="python3"
+# How step 0 asks uv to build the environment: reuse an existing python3
+# (>= 3.12) when there is one, otherwise let uv provide a managed Python kept in
+# uv's own cache. Set by step 0 before the venv is built; never the global Python.
+UV_VENV_ARGS=(--python 3.12)
 # Air-gapped installs point this at a directory holding the dependencies, so the
 # environment is built without the network. Empty means fetch them normally.
 OFFLINE_DEPS="${PARATROOPER_INSTALL_OFFLINE_DEPS:-}"
@@ -243,9 +245,11 @@ welcome() {
 	printf 'Paratrooper puts a private, phone-friendly chat with your Claude agent on\n'
 	printf 'the internet, hosted on Render. This script sets it up and links it to\n'
 	printf 'your phone.\n\n'
-	printf 'It asks for your Render and Claude Code sign ins, whether the worker\n'
-	printf 'should sleep when idle, and an app password. Password typing is hidden. After\n'
-	printf 'that it works on its own and prints how to open the app on your phone.\n\n'
+	printf 'It sets up an isolated Python with uv, signs you in to Render and Claude\n'
+	printf 'Code (offering to install either tool first if it is missing), and asks\n'
+	printf 'whether the worker should sleep when idle and for an app password. Password\n'
+	printf 'typing is hidden. After that it works on its own and prints how to open the\n'
+	printf 'app on your phone.\n\n'
 }
 
 # prompt_keypress <valid-chars> <prompt-text>
@@ -337,19 +341,6 @@ report_field() {
 		"$REPORT_FILE" "$1" 2>/dev/null || true
 }
 
-# need_cmd <command> <hint> - require a command on PATH or stop with the hint.
-need_cmd() {
-	local cmd="$1" hint="$2"
-	if command -v "$cmd" >/dev/null 2>&1; then
-		printf '%s✓%s %s found.\n' "$GREEN" "$RESET" "$cmd"
-	else
-		err ""
-		err "⚠ $cmd is required but is not on your PATH."
-		err "  $hint"
-		exit 1
-	fi
-}
-
 # wait_for_health <base-url> - poll <base-url><HEALTH_PATH> until it answers or
 # the attempts run out. Animates on a TTY; silent when redirected. The poll
 # count and gap are overridable so a test can drive it without waiting. Returns
@@ -381,15 +372,17 @@ venv_ready() {
 	[ -x "$PY" ] && "$PY" -c 'import paratrooper.provision, httpx, yaml' >/dev/null 2>&1
 }
 
-# build_venv - create the isolated environment and put the project and its
-# dependencies in it, without touching the global Python. An air-gapped install
+# build_venv - create the isolated environment with uv and put the project and
+# its dependencies in it, without touching the global Python. uv supplies the
+# interpreter (an existing python3 reused, or a managed one in uv's own cache,
+# per UV_VENV_ARGS) and creates the environment. An air-gapped install
 # (OFFLINE_DEPS set) makes a vendored dependency directory and this clone
-# importable in the venv; otherwise pip installs the project and the deploy
+# importable in the venv; otherwise uv installs the project and the deploy
 # extra. Runs under the spinner, so its output goes to the log.
 build_venv() {
 	rm -rf "$VENVDIR"
 	mkdir -p "$(dirname "$VENVDIR")"
-	"$PY_BOOT" -m venv "$VENVDIR"
+	uv venv "${UV_VENV_ARGS[@]}" "$VENVDIR"
 	if [ -n "$OFFLINE_DEPS" ]; then
 		"$PY" - "$OFFLINE_DEPS" "$REPO/src" <<'PY'
 import os, site, sys
@@ -399,7 +392,7 @@ with open(os.path.join(site_dir, "paratrooper_install.pth"), "w") as handle:
         handle.write(path + "\n")
 PY
 	else
-		"$PY" -m pip install --disable-pip-version-check -e "${REPO}[deploy]"
+		uv pip install --python "$PY" -e "${REPO}[deploy]"
 	fi
 }
 
@@ -409,60 +402,54 @@ usable_python3() {
 		python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 12) else 1)' >/dev/null 2>&1
 }
 
-# _download_standalone_python <dest> - the real mechanism for obtaining a Python
-# runtime: the astral-sh/python-build-standalone prebuilt "install_only" builds,
-# extracted into <dest>, touching no global Python. The pinned version and asset
-# naming are documented values to confirm at a real install; the offline tests
-# exercise the obtain path through PARATROOPER_INSTALL_PYTHON_INSTALLER instead of
-# the network, so this is not run there.
-_download_standalone_python() {
-	local dest="$1" os arch ver="3.12.7" tag="20241016"
+# _download_uv <dest> - the real mechanism for obtaining uv: the official
+# astral-sh/uv GitHub releases, extracted into place. The asset naming is a
+# documented value to confirm at a real install; the offline tests exercise the
+# obtain path through PARATROOPER_INSTALL_UV_INSTALLER instead of the network, so
+# this is not run there.
+_download_uv() {
+	local dest="$1" os arch
 	case "$(uname -s)" in
 		Darwin) os="apple-darwin" ;;
 		Linux)  os="unknown-linux-gnu" ;;
-		*) err "No automatic Python build for $(uname -s)."; return 1 ;;
+		*) err "No automatic uv build for $(uname -s)."; return 1 ;;
 	esac
 	case "$(uname -m)" in
 		arm64|aarch64) arch="aarch64" ;;
 		x86_64|amd64)  arch="x86_64" ;;
-		*) err "No automatic Python build for $(uname -m)."; return 1 ;;
+		*) err "No automatic uv build for $(uname -m)."; return 1 ;;
 	esac
-	local url="https://github.com/astral-sh/python-build-standalone/releases/download/${tag}/cpython-${ver}+${tag}-${arch}-${os}-install_only.tar.gz"
-	curl -fsSL "$url" -o "$dest/python.tar.gz"
-	tar -xzf "$dest/python.tar.gz" -C "$dest" --strip-components=1
-	rm -f "$dest/python.tar.gz"
+	local url="https://github.com/astral-sh/uv/releases/latest/download/uv-${arch}-${os}.tar.gz"
+	curl -fsSL "$url" -o "$dest.tar.gz"
+	tar -xzf "$dest.tar.gz" -C "$(dirname "$dest")" --strip-components=1 "uv-${arch}-${os}/uv" 2>/dev/null ||
+		tar -xzf "$dest.tar.gz" -C "$(dirname "$dest")"
+	rm -f "$dest.tar.gz"
 }
 
-# obtain_python <dest> - install a standalone Python into <dest>. Offline tests
-# supply PARATROOPER_INSTALL_PYTHON_INSTALLER, which is handed <dest> and must
-# leave a working <dest>/bin/python3.
-obtain_python() {
-	local dest="$1"
-	rm -rf "$dest"
-	mkdir -p "$dest"
-	if [ -n "${PARATROOPER_INSTALL_PYTHON_INSTALLER:-}" ]; then
-		"$PARATROOPER_INSTALL_PYTHON_INSTALLER" "$dest"
+# ensure_uv - make uv available, obtaining it into the per-user cache and onto
+# PATH if missing. uv is how step 0 provides Python: it supplies the interpreter
+# and builds the isolated environment, both in per-user caches, never in the
+# global Python. Offline tests supply PARATROOPER_INSTALL_UV_INSTALLER, which is
+# handed the destination path and must leave a working uv there.
+ensure_uv() {
+	if [ -n "${PARATROOPER_INSTALL_UV_INSTALLER:-}" ]; then
+		mkdir -p "$CACHE/bin"
+		spinner "Obtaining uv ..." "uv ready." \
+			"$PARATROOPER_INSTALL_UV_INSTALLER" "$CACHE/bin/uv"
+		chmod +x "$CACHE/bin/uv" 2>/dev/null || true
+		export PATH="$CACHE/bin:$PATH"
+	elif command -v uv >/dev/null 2>&1; then
+		printf '%s✓%s uv found.\n' "$GREEN" "$RESET"
 	else
-		_download_standalone_python "$dest"
+		mkdir -p "$CACHE/bin"
+		spinner "Obtaining uv ..." "uv ready." _download_uv "$CACHE/bin/uv"
+		chmod +x "$CACHE/bin/uv" 2>/dev/null || true
+		export PATH="$CACHE/bin:$PATH"
 	fi
-}
-
-# ensure_python - set PY_BOOT to a supported interpreter, obtaining a standalone
-# one when the system has none new enough. Never modifies the global Python.
-ensure_python() {
-	if [ -n "${PARATROOPER_INSTALL_PYTHON_INSTALLER:-}" ]; then
-		spinner "Obtaining a Python runtime ..." "Python runtime ready." obtain_python "$CACHE/python"
-		PY_BOOT="$CACHE/python/bin/python3"
-	elif usable_python3; then
-		PY_BOOT="python3"
-		printf '%s✓%s python3 found.\n' "$GREEN" "$RESET"
-	else
-		spinner "Obtaining a Python runtime ..." "Python runtime ready." obtain_python "$CACHE/python"
-		PY_BOOT="$CACHE/python/bin/python3"
-	fi
-	if ! "$PY_BOOT" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 12) else 1)' >>"$LOG" 2>&1; then
+	if ! command -v uv >/dev/null 2>&1; then
 		err ""
-		err "⚠ Could not get a working Python 3.12+ runtime. See $LOG for details."
+		err "⚠ Could not get uv. See $LOG for details, or install it from"
+		err "  https://docs.astral.sh/uv/getting-started/installation/ and re-run."
 		exit 1
 	fi
 }
@@ -490,23 +477,19 @@ _download_render_cli() {
 	rm -f "$dest.tar.gz"
 }
 
-# ensure_render - make the Render CLI available, obtaining it into the cache and
-# onto PATH if missing. Only Claude Code is assumed already installed.
-ensure_render() {
+# obtain_render - download the Render CLI into the per-user cache and onto PATH.
+# Offline tests supply PARATROOPER_INSTALL_RENDER_INSTALLER, handed the
+# destination path. Stops the run if the CLI still is not callable afterwards.
+obtain_render() {
+	mkdir -p "$CACHE/bin"
 	if [ -n "${PARATROOPER_INSTALL_RENDER_INSTALLER:-}" ]; then
-		mkdir -p "$CACHE/bin"
 		spinner "Obtaining the Render CLI ..." "Render CLI ready." \
 			"$PARATROOPER_INSTALL_RENDER_INSTALLER" "$CACHE/bin/render"
-		chmod +x "$CACHE/bin/render" 2>/dev/null || true
-		export PATH="$CACHE/bin:$PATH"
-	elif command -v render >/dev/null 2>&1; then
-		printf '%s✓%s render found.\n' "$GREEN" "$RESET"
 	else
-		mkdir -p "$CACHE/bin"
 		spinner "Obtaining the Render CLI ..." "Render CLI ready." _download_render_cli "$CACHE/bin/render"
-		chmod +x "$CACHE/bin/render" 2>/dev/null || true
-		export PATH="$CACHE/bin:$PATH"
 	fi
+	chmod +x "$CACHE/bin/render" 2>/dev/null || true
+	export PATH="$CACHE/bin:$PATH"
 	if ! command -v render >/dev/null 2>&1; then
 		err ""
 		err "⚠ Could not get the Render CLI. See $LOG for details, or install it from"
@@ -515,7 +498,74 @@ ensure_render() {
 	fi
 }
 
-# --- 0. preflight ----------------------------------------------------------
+# ensure_render - step 1's Render CLI check. If it is already on PATH, say so. If
+# not, explain in one sentence, then ask to install it: y downloads it into the
+# per-user cache, n (or a closed stdin) stops politely with the manual link.
+ensure_render() {
+	if command -v render >/dev/null 2>&1; then
+		printf '%s✓%s render found.\n' "$GREEN" "$RESET"
+		return 0
+	fi
+	printf 'The Render command line tool is not installed. It can be downloaded into a\n'
+	printf 'per-user cache, without touching your system directories.\n\n'
+	if ! prompt_keypress "yn" "Download and install the Render CLI now? (y / n) " || [ "$REPLY" != "y" ]; then
+		printf '\nNo problem. Install the Render CLI from https://render.com/docs/cli, then\n'
+		printf 'run ./install.sh again when ready.\n'
+		exit 0
+	fi
+	printf '\n'
+	obtain_render
+}
+
+# _install_claude_code - the real mechanism for installing Claude Code: its
+# official native installer, which places the binary under ~/.local/bin. The
+# command is the documented one; it could not be confirmed with a read-only GET
+# from this build's environment (see the delivery REPORT.txt). Offline tests
+# supply PARATROOPER_INSTALL_CLAUDE_INSTALLER instead, so this is not run there.
+_install_claude_code() {
+	curl -fsSL https://claude.ai/install.sh | bash
+}
+
+# obtain_claude - install Claude Code, then add ~/.local/bin (where its native
+# installer puts the binary) to this run's PATH and re-check. Stops the run if
+# claude still is not callable afterwards.
+obtain_claude() {
+	if [ -n "${PARATROOPER_INSTALL_CLAUDE_INSTALLER:-}" ]; then
+		spinner "Installing Claude Code ..." "Claude Code installed." \
+			"$PARATROOPER_INSTALL_CLAUDE_INSTALLER"
+	else
+		spinner "Installing Claude Code ..." "Claude Code installed." _install_claude_code
+	fi
+	export PATH="$HOME/.local/bin:$PATH"
+	if ! command -v claude >/dev/null 2>&1; then
+		err ""
+		err "⚠ Could not install Claude Code. See $LOG for details, or install it from"
+		err "  https://docs.claude.com/en/docs/claude-code/setup and re-run."
+		exit 1
+	fi
+}
+
+# ensure_claude - step 2's Claude Code check. If it is already on PATH, say so.
+# If not, explain in one sentence, then ask to install it: y runs the official
+# installer, n (or a closed stdin) stops politely with the setup link.
+ensure_claude() {
+	if command -v claude >/dev/null 2>&1; then
+		printf '%s✓%s claude found.\n' "$GREEN" "$RESET"
+		return 0
+	fi
+	printf 'Claude Code is not installed. Its official installer places it under\n'
+	printf '~/.local/bin, without touching your system directories.\n\n'
+	if ! prompt_keypress "yn" "Download and install Claude Code now? (y / n) " || [ "$REPLY" != "y" ]; then
+		printf '\nNo problem. Install Claude Code from\n'
+		printf 'https://docs.claude.com/en/docs/claude-code/setup, then run ./install.sh\n'
+		printf 'again when ready.\n'
+		exit 0
+	fi
+	printf '\n'
+	obtain_claude
+}
+
+# --- start-up --------------------------------------------------------------
 
 if [ ! -f "$BLUEPRINT" ] || [ ! -f "$REPO/pyproject.toml" ]; then
 	err "This does not look like the Paratrooper repo (no render.yaml / pyproject.toml)."
@@ -531,20 +581,18 @@ if ! prompt_keypress "yn" "Ready to begin? (y / n) " || [ "$REPLY" != "y" ]; the
 	exit 0
 fi
 
-printf '\nChecking your command line tools ...\n\n'
-# Only Claude Code is assumed already installed. A supported Python runtime and
-# the Render CLI are obtained automatically when missing, into a per-user cache,
-# never into the global Python. This runs after the Ready prompt, so it happens
-# only with consent.
-ensure_python
-ensure_render
-need_cmd claude  "Install Claude Code: https://docs.claude.com/en/docs/claude-code/setup"
-
 # Where Render should build from. Taken from this clone's own `origin` remote,
 # unless both were passed in (the tests do that so no git call is made). git is
-# only required when something is missing and has to be read from the clone.
+# only needed to read a value from the clone; this stays silent and adds no step.
+# Each tool check now lives inside its own numbered step below.
 if [ -z "$REPO_URL" ] || [ -z "$REPO_BRANCH" ]; then
-	need_cmd git "Install Git: https://git-scm.com/downloads"
+	if ! command -v git >/dev/null 2>&1; then
+		err ""
+		err "⚠ git is required to read this clone's repository URL, but is not on PATH."
+		err "  Install Git (https://git-scm.com/downloads) and re-run, or set"
+		err "  PARATROOPER_INSTALL_REPO_URL and PARATROOPER_INSTALL_BRANCH."
+		exit 1
+	fi
 fi
 if [ -z "$REPO_URL" ]; then
 	REPO_URL="$(git -C "$REPO" remote get-url origin 2>/dev/null || true)"
@@ -563,13 +611,29 @@ if [ -z "$REPO_URL" ]; then
 	exit 1
 fi
 
-# An isolated environment holding the project and its dependencies, built with
-# the runtime ensured above so a fresh clone works without anything installed
-# into the global Python. Built once and reused on later runs. A slow first build
-# is the dependencies installing, so it runs under a spinner.
+# --- 0. Python -------------------------------------------------------------
+
+SPIN_FRAMES=("${SPIN_HEAVY[@]}")
+section "0. Python"
+printf "Paratrooper's laptop tools run in an isolated environment. It is built with\n"
+printf 'uv and kept in a per-user cache, so nothing lands in your global Python.\n\n'
+
+# An environment a previous run already built is reused as is: no uv, no
+# interpreter search, just the fast path. Otherwise uv provides the interpreter
+# (an existing python3 >= 3.12 is reused, else uv fetches a managed one into its
+# own cache) and builds the environment. A slow first build is the dependencies
+# installing, so it runs under a spinner.
 if venv_ready; then
 	printf '%s✓%s Local environment ready.\n' "$GREEN" "$RESET"
 else
+	ensure_uv
+	if usable_python3; then
+		UV_VENV_ARGS=(--python "$(command -v python3)")
+		printf '%s✓%s python3 found.\n' "$GREEN" "$RESET"
+	else
+		UV_VENV_ARGS=(--python-preference only-managed --python 3.12)
+		printf '%s✓%s uv will provide a managed Python in its own cache.\n' "$GREEN" "$RESET"
+	fi
 	spinner "Preparing a local environment (first run can take a few minutes) ..." \
 		"Local environment ready." build_venv
 fi
@@ -580,12 +644,17 @@ if ! "$PY" -c 'import paratrooper.provision, paratrooper.deploy, httpx, yaml' >>
 	exit 1
 fi
 
-# --- 1. Render sign in -----------------------------------------------------
+# --- 1. Render -------------------------------------------------------------
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
-section "1. Render sign in"
-printf 'Paratrooper runs on Render. This opens your browser to sign in; the Render\n'
-printf 'CLI then saves the session for the rest of the install.\n\n'
+section "1. Render"
+printf 'Paratrooper runs on Render. This step makes sure the Render command line\n'
+printf 'tool is available, then opens your browser to sign in; the Render CLI saves\n'
+printf 'the session for the rest of the install.\n\n'
+
+# The Render CLI check lives in this step: present is announced, missing offers a
+# y/n install into the per-user cache before the sign in.
+ensure_render
 
 if ! render login; then
 	err ""
@@ -603,13 +672,18 @@ if ! render workspace current >>"$LOG" 2>&1; then
 fi
 printf '%s✓%s Signed in to Render.\n' "$GREEN" "$RESET"
 
-# --- 2. Claude Code sign in ------------------------------------------------
+# --- 2. Claude Code --------------------------------------------------------
 
 SPIN_FRAMES=("${SPIN_CIRCLE[@]}")
-section "2. Claude Code sign in"
-printf 'The worker talks to Claude on your subscription. `claude setup-token` opens\n'
-printf 'the browser to authorize, then hands back a long-lived token the worker\n'
-printf 'will use. The token is captured quietly and never shown.\n\n'
+section "2. Claude Code"
+printf 'The worker talks to Claude on your subscription. This step makes sure Claude\n'
+printf 'Code is available, then `claude setup-token` opens the browser to authorize\n'
+printf 'and hands back a long-lived token the worker will use. The token is captured\n'
+printf 'quietly and never shown.\n\n'
+
+# The Claude Code check lives in this step: present is announced, missing offers a
+# y/n install through its official installer before the sign in.
+ensure_claude
 
 # Capture stdout (the token); the interactive authorize flow uses the terminal.
 # Take the last non-empty line so a stray banner line cannot end up in the value.
@@ -702,10 +776,10 @@ esac
 # Everything the install needs from you has now been collected. From here on it
 # runs on its own.
 
-# --- 5. Preparing your deployment ------------------------------------------
+# --- Preparing your deployment (unnumbered: asks nothing) ------------------
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
-section "5. Preparing your deployment"
+section "Preparing your deployment"
 printf 'Writing your configuration, then validating both\n'
 printf 'the configuration and the blueprint before anything is sent to Render.\n\n'
 
@@ -737,10 +811,10 @@ spinner "Validating configuration ..." "Configuration is valid." \
 spinner "Validating blueprint ..." "Blueprint is valid." \
 	render blueprints validate "$BLUEPRINT"
 
-# --- 6. Provisioning on Render ---------------------------------------------
+# --- Provisioning on Render (unnumbered: asks nothing) ---------------------
 
 SPIN_FRAMES=("${SPIN_CIRCLE[@]}")
-section "6. Provisioning on Render"
+section "Provisioning on Render"
 printf 'Creating the Key Value store, the worker and the web service from\n'
 printf 'render.yaml, wiring their links, secrets and notification keys, then\n'
 printf 'waiting for both deploys to go live. Anything already there by name is\n'

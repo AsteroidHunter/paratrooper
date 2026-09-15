@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
 # End-to-end offline tests for install.sh.
 #
-# Runs the real installer with the Render and Claude CLIs mocked on PATH, an
-# isolated venv built from the packet's vendored dependencies (no network), the
-# real paratrooper from source/src, the Render network mocked at the httpx
-# boundary (mock_render_api via the PARATROOPER_PROVISION_MOCK seam), and the
-# runtime/CLI download boundaries mocked with installer hooks. No socket, no
+# Runs the real installer with uv, the Render CLI and Claude Code mocked on PATH,
+# an isolated venv built with the fake uv from the packet's vendored dependencies
+# (no network), the real paratrooper from source/src, the Render network mocked
+# at the httpx boundary (mock_render_api via the PARATROOPER_PROVISION_MOCK seam),
+# and the uv/CLI download boundaries mocked with installer hooks. No socket, no
 # account, no real service, no real download.
 #
-# Exercised: the three interactions and input order; optional-key and skipped-key
-# paths; cancellation; EOF at the idle choice; failed Claude sign in runs
-# setup-token once and leaks no token; a pre-provision validation failure; secret
+# Flow: step 0 Python (uv), step 1 Render, step 2 Claude Code, step 3 idle
+# sleeping, step 4 app password, then the unnumbered "Preparing your deployment"
+# and "Provisioning on Render" sections.
+#
+# Exercised: the interactions and input order; step 0 building with uv present
+# and with uv obtained through the hook, and a uv obtain failure stopping before
+# any cloud creation; step 1 offering to install a missing Render CLI, with y
+# (obtained) and n (stops before sign in, exit 0); step 2 offering to install a
+# missing Claude Code, with y (installed, then found) and n (stops before sign
+# in, exit 0); optional-key and skipped-key paths; cancellation; EOF at the idle
+# choice; failed Claude sign in runs setup-token once and leaks no token; a
+# pre-provision validation gate failure stopping the unnumbered section; secret
 # hiding; idempotent re-runs; partial-failure resume; create/response-lost
-# password recovery; obtaining a missing Python runtime and Render CLI; a setup
-# failure before any cloud creation; readiness gated on BOTH the web and worker
-# deploys plus the web health check, with failed/pending worker cases. Prints
-# PASS/FAIL per scenario and exits non-zero if any fail.
+# password recovery; readiness gated on BOTH the web and worker deploys plus the
+# web health check, with failed/pending worker cases. Prints PASS/FAIL per
+# scenario and exits non-zero if any fail.
 set -u
 
 VERIFY="$(cd "$(dirname "$0")" && pwd)"
@@ -40,30 +48,39 @@ WORKSPACE="tea-e2eworkspace000000001"
 REPO_URL="https://github.com/example/paratrooper.git"
 
 # One isolated venv, built by the first run from the vendored deps and reused by
-# the rest (except the obtain-runtime scenarios, which get their own).
+# the rest (except the build scenarios below, which get their own fresh venv).
 SHARED_VENV="$(mktemp -d -t ptp-venv.XXXXXX)"
 
-# Installer hooks that stand in for the real download/install boundary.
+# Installer hooks that stand in for the real download/install boundary. uv is the
+# runtime boundary now: the uv hook drops the fake uv where install.sh expects
+# the obtained binary; the fake uv then builds the venv with the python3 on PATH.
+# The claude hook mimics the native installer, which places claude under
+# ~/.local/bin. All are offline; none touch the network or a real installer.
 HOOKS="$(mktemp -d -t ptp-hooks.XXXXXX)"
-cat > "$HOOKS/python_installer.sh" <<EOF
+cat > "$HOOKS/uv_installer.sh" <<EOF
 #!/usr/bin/env bash
-mkdir -p "\$1/bin"
-ln -sf "$REAL_PYTHON3" "\$1/bin/python3"
+cp "$VERIFY/bin/uv" "\$1"
 EOF
 cat > "$HOOKS/render_installer.sh" <<EOF
 #!/usr/bin/env bash
 cp "$VERIFY/bin/render" "\$1"
 EOF
+cat > "$HOOKS/claude_installer.sh" <<EOF
+#!/usr/bin/env bash
+mkdir -p "\$HOME/.local/bin"
+cp "$VERIFY/bin/claude" "\$HOME/.local/bin/claude"
+chmod +x "\$HOME/.local/bin/claude"
+EOF
 cat > "$HOOKS/fail_installer.sh" <<'EOF'
 #!/usr/bin/env bash
-echo "mock: obtaining the runtime failed" >&2
+echo "mock: obtaining the tool failed" >&2
 exit 1
 EOF
 chmod +x "$HOOKS"/*.sh
 
 # A curated bin dir with the tools install.sh needs, optionally excluding one, so
-# a scenario can present a PATH with no python3 or no render.
-make_bin() {  # make_bin <dest> <exclude:python3|render|none>
+# a scenario can present a PATH with no uv, no render or no claude.
+make_bin() {  # make_bin <dest> <exclude:python3|render|claude|uv|none>
 	local dest="$1" exclude="$2" t src
 	mkdir -p "$dest"
 	for t in bash sh env mktemp rm mkdir rmdir chmod cat sleep awk tar ln cp mv \
@@ -71,12 +88,13 @@ make_bin() {  # make_bin <dest> <exclude:python3|render|none>
 		src="$(command -v "$t" 2>/dev/null)" && [ -n "$src" ] && ln -sf "$src" "$dest/$t"
 	done
 	[ "$exclude" = python3 ] || ln -sf "$REAL_PYTHON3" "$dest/python3"
-	for t in render claude curl; do
+	for t in render claude curl uv; do
 		[ "$exclude" = "$t" ] || ln -sf "$VERIFY/bin/$t" "$dest/$t"
 	done
 }
-NOPY_BIN="$(mktemp -d -t ptp-nopy.XXXXXX)";  make_bin "$NOPY_BIN" python3
-NOREN_BIN="$(mktemp -d -t ptp-noren.XXXXXX)"; make_bin "$NOREN_BIN" render
+NOREN_BIN="$(mktemp -d -t ptp-noren.XXXXXX)";   make_bin "$NOREN_BIN" render
+NOCLAUDE_BIN="$(mktemp -d -t ptp-nocla.XXXXXX)"; make_bin "$NOCLAUDE_BIN" claude
+NOUV_BIN="$(mktemp -d -t ptp-nouv.XXXXXX)";      make_bin "$NOUV_BIN" uv
 
 FAILURES=0
 
@@ -216,39 +234,84 @@ assert_absent "$OUT" "$CLAUDE_TOKEN" $NAME "token on stdout after failure"
 [ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "provisioned despite auth failure"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-# --- 6. pre-provision validation failure ------------------------------------
+# --- 6. failed blueprint gate stops the unnumbered prepare section ----------
 run 0 validate_fail "$NEW_INPUT" MOCK_BP_FAIL=1; NAME=validate_fail; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+assert_contains "$OUT" "Preparing your deployment" $NAME "reached prepare section"
+assert_absent "$OUT" "5. Preparing your deployment" $NAME "prepare section still numbered"
 assert_contains "$OUT" "Validating blueprint" $NAME "reached blueprint gate"
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "provisioned despite validation failure"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-# --- 7. no usable Python: obtain it, then proceed --------------------------
-FRESHV1="$(mktemp -d -t ptp-v1.XXXXXX)"
-run 0 no_python "$NEW_INPUT" PATH="$NOPY_BIN" PARATROOPER_INSTALL_PYTHON_INSTALLER="$HOOKS/python_installer.sh" PARATROOPER_INSTALL_VENV="$FRESHV1"; NAME=no_python; FB=$FAILURES
+# --- 7. step 0: uv missing, obtained through the hook, then builds ----------
+FRESHUV1="$(mktemp -d -t ptp-uv1.XXXXXX)"
+run 0 no_uv "$NEW_INPUT" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/uv_installer.sh" PARATROOPER_INSTALL_VENV="$FRESHUV1"; NAME=no_uv; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
-assert_contains "$OUT" "Python runtime ready" $NAME "obtained python"
+assert_contains "$OUT" "uv ready." $NAME "obtained uv"
+assert_contains "$OUT" "Local environment ready." $NAME "built the environment"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-# --- 8. no Render CLI: obtain it, then proceed -----------------------------
-FRESHV2="$(mktemp -d -t ptp-v2.XXXXXX)"
-run 0 no_render "$NEW_INPUT" PATH="$NOREN_BIN" PARATROOPER_INSTALL_RENDER_INSTALLER="$HOOKS/render_installer.sh" PARATROOPER_INSTALL_VENV="$FRESHV2"; NAME=no_render; FB=$FAILURES
+# --- 8. step 0: uv present, reused to build the environment -----------------
+FRESHUV2="$(mktemp -d -t ptp-uv2.XXXXXX)"
+run 0 uv_present "$NEW_INPUT" PARATROOPER_INSTALL_VENV="$FRESHUV2"; NAME=uv_present; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
-assert_contains "$OUT" "Render CLI ready" $NAME "obtained render"
+assert_contains "$OUT" "uv found." $NAME "reused uv on PATH"
+assert_absent "$OUT" "uv ready." $NAME "did not obtain uv when present"
+assert_contains "$OUT" "Local environment ready." $NAME "built the environment"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-# --- 9. runtime setup failure stops before any cloud creation --------------
-run 0 obtain_fail "$NEW_INPUT" PARATROOPER_INSTALL_PYTHON_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_VENV="$(mktemp -d -t ptp-v3.XXXXXX)"; NAME=obtain_fail; FB=$FAILURES
-[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on setup failure"
-[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created resources despite setup failure"
-[ "$(state_count "$STATE" key_values)" = 0 ] || fail $NAME "created a store despite setup failure"
+# --- 9. step 0: uv obtain failure stops before any cloud creation ----------
+run 0 uv_fail "$NEW_INPUT" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_VENV="$(mktemp -d -t ptp-uv3.XXXXXX)"; NAME=uv_fail; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on uv obtain failure"
+[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created resources despite uv failure"
+[ "$(state_count "$STATE" key_values)" = 0 ] || fail $NAME "created a store despite uv failure"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-# --- 10. health never ready: accurate status, non-zero exit, nothing removed
+# --- 10. step 1: Render CLI missing, y installs it, then signs in -----------
+run 0 no_render "yyn$APP_PASSWORD
+$APP_PASSWORD" PATH="$NOREN_BIN" PARATROOPER_INSTALL_RENDER_INSTALLER="$HOOKS/render_installer.sh"; NAME=no_render; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "Download and install the Render CLI now?" $NAME "offered render install"
+assert_contains "$OUT" "Render CLI ready." $NAME "obtained render"
+assert_contains "$OUT" "Signed in to Render." $NAME "signed in after install"
+assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
+[ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 11. step 1: Render CLI missing, n stops before sign in, exit 0 ---------
+run 0 no_render_no "yn" PATH="$NOREN_BIN"; NAME=no_render_decline; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0 on decline)"
+assert_contains "$OUT" "Download and install the Render CLI now?" $NAME "offered render install"
+assert_contains "$OUT" "Install the Render CLI from https://render.com/docs/cli" $NAME "manual link"
+assert_absent "$OUT" "Signed in to Render." $NAME "did not sign in after decline"
+[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services after decline"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 12. step 2: Claude Code missing, y installs it, then signs in ----------
+run 0 no_claude "yyn$APP_PASSWORD
+$APP_PASSWORD" PATH="$NOCLAUDE_BIN" PARATROOPER_INSTALL_CLAUDE_INSTALLER="$HOOKS/claude_installer.sh"; NAME=no_claude; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "Download and install Claude Code now?" $NAME "offered claude install"
+assert_contains "$OUT" "Claude Code installed." $NAME "installed claude"
+assert_contains "$OUT" "Claude Code token captured." $NAME "signed in after install"
+assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
+[ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 13. step 2: Claude Code missing, n stops before sign in, exit 0 --------
+run 0 no_claude_no "yn" PATH="$NOCLAUDE_BIN"; NAME=no_claude_decline; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0 on decline)"
+assert_contains "$OUT" "Download and install Claude Code now?" $NAME "offered claude install"
+assert_contains "$OUT" "Install Claude Code from" $NAME "manual link"
+assert_absent "$OUT" "Claude Code token captured." $NAME "did not sign in after decline"
+[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services after decline"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 14. health never ready: accurate status, non-zero exit, nothing removed
 run 0 health_timeout "$NEW_INPUT" MOCK_HEALTH_FAILS=999; NAME=health_timeout; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on health timeout"
 assert_contains "$OUT" "answered its health check" $NAME "accurate timeout status"
@@ -256,7 +319,7 @@ assert_absent "$OUT" "Paratrooper is ready!" $NAME "no false success"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "resources removed on timeout"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-# --- 11. worker deploy failed: not ready, named, nothing removed -----------
+# --- 15. worker deploy failed: not ready, named, nothing removed -----------
 run 0 worker_failed "$NEW_INPUT" MOCK_DEPLOY_STATUS_WORKER=build_failed; NAME=worker_failed; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on failed worker"
 assert_absent "$OUT" "Paratrooper is ready!" $NAME "no false success"
@@ -265,7 +328,7 @@ assert_contains "$OUT" "build_failed" $NAME "names the failure"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "resources removed on worker failure"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-# --- 12. worker deploy pending: unconfirmed, non-zero, nothing removed ------
+# --- 16. worker deploy pending: unconfirmed, non-zero, nothing removed ------
 run 0 worker_pending "$NEW_INPUT" MOCK_DEPLOY_STATUS_WORKER=build_in_progress; NAME=worker_pending; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on pending worker"
 assert_absent "$OUT" "Paratrooper is ready!" $NAME "no false success"
@@ -273,7 +336,7 @@ assert_contains "$OUT" "confirmed ready yet" $NAME "unconfirmed status"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "resources removed on pending worker"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-# --- 13. idempotent re-run recovers the live password ----------------------
+# --- 17. idempotent re-run recovers the live password ----------------------
 run 0 rerun_first "$NEW_INPUT"; NAME=rerun; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "first run exit $CODE"
 KEEP="$STATE"
@@ -289,7 +352,7 @@ assert_contains "$OUT" "Continue keeping the existing app password?" $NAME "expl
 [ "$(writes_in_calls "$KEEP")" = 0 ] || fail $NAME "second run created or wrote resources"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-# --- 14. create succeeded, response lost: rerun delivers stored password ----
+# --- 18. create succeeded, response lost: rerun delivers stored password ----
 run 0 lost_first "$NEW_INPUT" MOCK_API_LOSE_RESPONSE=paratrooper-web; NAME=response_lost; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected first run to fail on the lost response"
 KEEP="$STATE"
@@ -302,7 +365,7 @@ assert_contains "$OUT" "reused web paratrooper-web" $NAME "web reused on resume"
 assert_absent "$OUT" "$STORED_PW" $NAME "stored password in output"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-# --- 15. partial failure then resume ---------------------------------------
+# --- 19. partial failure then resume ---------------------------------------
 run 0 partial_fail "$NEW_INPUT" MOCK_API_FAIL_SERVICE=paratrooper-web; NAME=partial_resume; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected first run to fail"
 assert_contains "$OUT" "run ./install.sh again" $NAME "resume guidance"
