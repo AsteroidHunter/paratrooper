@@ -2020,8 +2020,10 @@ function fitBubblesNow(root: ParentNode | null): void {
 
 // --- springy transcript (springscroll.ts owns the physics) --------------------
 // The bubbles trail the scroll by their distance from the finger and, from the
-// very next frame after the scroll stops, ease back into their seats over a
-// tenth of a second — the effect Messages has carried since iOS 7, this time
+// very next frame after the scroll stops, ease back into their seats — 90% of
+// the way home in 76 ms at the 33 ms trail and return time this build was asked
+// for (springscroll.ts, LAG_TAU_MS; the recording's own fit, 45 ms, put it at a
+// tenth of a second) — the effect Messages has carried since iOS 7, this time
 // measured off the owner's screen recording of Messages itself (the numbers are
 // in springscroll.ts and the wiki agent notes). The pure field takes row
 // geometry, the scroll position each frame and the finger's screen-Y, and hands

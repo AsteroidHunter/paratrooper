@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   LAG_PER_SPEED_MS,
+  LAG_TAU_MEASURED_MS,
   TUNING,
   atRest,
   createSpringField,
@@ -30,10 +31,15 @@ const FRAME = 1000 / 60;
 const TAU = TUNING.LAG_TAU_MS;
 
 describe("the tunables — measured off the Messages recording, in one place", () => {
-  it("is the measured lag: 500 px per unit of resistance, a 45 ms time constant, resistance clamped to 1", () => {
+  it("is the measured lag: 500 px per unit of resistance, resistance clamped to 1, run at the selected 33 ms", () => {
     expect(TUNING.RESISTANCE_DIVISOR).toBe(500); // fitted 430–500 CSS px
-    expect(TUNING.LAG_TAU_MS).toBe(45); // measured 36–47 ms
     expect(TUNING.RESISTANCE_MAX).toBe(1);
+    // the recording's own fit is untouched and still on the record
+    expect(LAG_TAU_MEASURED_MS).toBe(45); // measured 36–47 ms, 45 at the centre
+    // and this build runs at the trail and return time it was ASKED for, which
+    // is deliberately below that band rather than a new measurement of it
+    expect(TUNING.LAG_TAU_MS).toBe(33);
+    expect(TUNING.LAG_TAU_MS).toBeLessThan(36);
   });
 
   it("the steady lag per unit of scroll speed is the time constant itself (a first-order lag, not a spring)", () => {
@@ -347,9 +353,13 @@ describe("createSpringField — the stretch is speed x tau x resistance, there w
     expect(disp.size).toBeLessThanOrEqual(36); // bounded by the window, not the thread
   });
 
-  it("the ceiling: only a 6.7 px/ms fling reaches STRETCH_CAP_PX of reference lag", () => {
+  it("the ceiling: only a fling past STRETCH_CAP_PX / tau reaches it, and no hand goes that fast", () => {
+    // the speed whose steady stretch IS the ceiling: 6.7 px/ms at the measured
+    // 45 ms, 9.1 px/ms at the 33 ms this build runs
+    const reachesCap = TUNING.STRETCH_CAP_PX / TAU;
+    expect(reachesCap).toBeGreaterThan(3.0); // past the hardest drag in the recording
     const d = grab();
-    drag(d, 8.0, 400, -1);
+    drag(d, reachesCap * 1.2, 400, -1);
     expect(Math.abs(d.f.lag())).toBeCloseTo(TUNING.STRETCH_CAP_PX, 6);
     expect(maxAbs(d.f.displacements())).toBeLessThanOrEqual(TUNING.STRETCH_CAP_PX + 1e-9);
     const finger = grab();
@@ -364,7 +374,9 @@ describe("createSpringField — the sign, against the recording", () => {
     drag(d, 0.5, 300, -1); // scrollTop falls: toward older
     const top = topRowAt(d.rows, d.scrollTop);
     const atStop = d.f.displacements().get(top) ?? 0;
-    expect(atStop).toBeLessThan(-20); // negative translate: above its seat
+    // the drag's own steady stretch: 22.5 px at the measured 45 ms, 16.5 at 33
+    const steady = 0.5 * TAU;
+    expect(atStop).toBeLessThan(-steady * 0.85); // negative translate: above its seat
     const trail = stillFrames(d, 200, top);
     expect(trail[trail.length - 1]).toBeGreaterThan(atStop); // moving down toward 0
     expect(Math.abs(trail[trail.length - 1])).toBeLessThan(Math.abs(atStop) * 0.02);
@@ -514,7 +526,8 @@ describe("createSpringField — the phone delivers scrollTop on three frames in 
     const d = grab();
     sparseDrag(d, 0.06, 400, 4);
     const moving = Math.abs(d.f.lag());
-    expect(moving).toBeGreaterThan(2);
+    const ideal = 0.06 * TAU; // 2.7 px at the measured 45 ms, 2.0 at 33
+    expect(moving).toBeGreaterThan(ideal * 0.9);
     // the finger keeps travelling but the thread has hit its end: scrollTop
     // stops for good, and the stretch melts anyway within the window
     let fingerY = THUMB + 400;
@@ -885,7 +898,9 @@ describe("createSpringField — a fling: the lag tracks the decaying speed and i
     d.f.begin(CLIENT_H, THREAD_TOP, THUMB, true); // the catch
     const top = topRowAt(d.rows, d.scrollTop);
     const held = Math.abs(d.f.displacements().get(top) ?? 0);
-    expect(held).toBeGreaterThan(70); // 1.8 px/ms x 45 = 81px at the top of the viewport
+    // 1.8 px/ms x tau at the top of the viewport: 81 px at the measured 45 ms,
+    // 59 px at the 33 ms this build runs
+    expect(held).toBeGreaterThan(1.8 * TAU * 0.85);
     const trail = stillFrames(d, 200, top);
     expect(Math.abs(trail[0])).toBeLessThan(held * 0.75); // moving on the very next frame
     expect(Math.abs(trail[trail.length - 1])).toBeLessThan(held * 0.02);
@@ -998,13 +1013,26 @@ describe("createSpringField — rows never overlap", () => {
       if (change < -1) closedSome = true;
     }
     expect(closedSome).toBe(true);
-    expect(check(d)).toBeCloseTo(TUNING.GAP_MIN_PX, 6); // the tightest pair sits exactly on the floor
+    // softStrain stays strictly INSIDE its allowance, so the tightest pair comes
+    // arbitrarily close to the floor without ever reaching it, and HOW close
+    // depends on how far past the knee the lag drives it — which is a function
+    // of the trail and return time. Both halves are pinned, and the first of
+    // them is the load-bearing one: rows keep document order.
+    const tightest = check(d);
+    expect(tightest).toBeGreaterThan(TUNING.GAP_MIN_PX); // never reaches it, let alone crosses
+    expect(tightest).toBeCloseTo(TUNING.GAP_MIN_PX, 5); // and sits on it to a millionth of a px
   });
 
   it("an ordinary drag closes the gaps ahead of the finger by a fraction, well clear of the floor", () => {
     const d = grab();
     drag(d, 0.5, 300, 1);
-    // the 12px sender gaps just above the thumb close by ~spacing x 22.5 / 500 = 2.3px
+    // Each pair just above the thumb closes by its own pitch x L / 500, where L
+    // is the drag's steady stretch (0.5 px/ms x tau) and the pitches in this
+    // thread are 44 px (a 4 px continuation gap) and 52 px (a 12 px sender gap).
+    // That is 2.0–2.3 px at the measured 45 ms and 1.5–1.7 px at the 33 ms this
+    // build runs. Every close is inside the strain bound's linear half, so the
+    // profile there is exactly resistance x L and the bracket can be exact.
+    const steady = 0.5 * TAU;
     expect(check(d)).toBeGreaterThan(TUNING.GAP_MIN_PX);
     const disp = d.f.displacements();
     const anchorContent = d.vertex;
@@ -1017,8 +1045,8 @@ describe("createSpringField — rows never overlap", () => {
     }
     expect(closes.length).toBeGreaterThan(3);
     for (const c of closes) {
-      expect(c).toBeGreaterThan(1.5);
-      expect(c).toBeLessThan(5);
+      expect(c).toBeGreaterThan((44 * steady) / 500 * 0.95);
+      expect(c).toBeLessThan((52 * steady) / 500 * 1.05);
     }
   });
 });

@@ -194,6 +194,74 @@
 //     gesture. Nothing in here does that, and nothing in here can tell that it
 //     happened.
 //
+// Changed again, and this one is a SELECTION rather than a fix: the owner asked
+// for the trail and return of the moving-speed build run at 33 ms instead of the
+// 45 the recording's fit centres on, and asked for it without giving back what
+// the builds after that one repaired. Both halves of that are possible, and it
+// is worth being exact about why.
+//
+//   - THE TIME IS THE ONLY THING THAT MOVED. tau is the whole of this law's
+//     time. relaxLag is the exact solution of L' = v - L/tau and is unchanged
+//     here, character for character, from the moving-speed build; so is
+//     speedOver, and so are resistanceFor and windowBounds. Running the current
+//     module at 33 therefore puts the reference lag on the SAME trajectory that
+//     build would have produced at 33 — not an approximation of it — for any
+//     one speed history. The steady stretch is speed x 33 x resistance, 27%
+//     shorter than at 45, and the return is 63% gone at 33 ms and 90% at 76.
+//   - WHAT THE LATER BUILDS CHANGED IS NOT THE TIME. They changed the profile
+//     (GAP_STRAIN_PX and its chain), where the vertex lives (content, read
+//     once), what a landing finger is allowed to take (the park, FINGER_TRAVEL_PX)
+//     and what a braking frame is driven with (nothing). Each of those is a
+//     repair with a recorded symptom behind it, none of them is a clock, and
+//     reverting any of them is reintroducing the symptom rather than recovering
+//     the 33 ms feel. They are all kept.
+//   - A SHORTER TIME MAKES THE BOUNDED PROFILE MORE FAITHFUL, NOT LESS. The one
+//     later change that can be felt against the old shape is the strain bound,
+//     and it bites on the change of GAP a pair takes, which is pitch x L /
+//     RESISTANCE_DIVISOR. Cutting tau cuts L by 27% at every speed, so at 33 a
+//     pair stays under the bound's linear half — where the profile is exactly
+//     resistance x L, the old shape row for row — out to 36% more drag speed
+//     than it did at 45. The old build's own hard 2 px floor is the piece that
+//     stays gone, and that floor is what made rows land at different times.
+//
+// So the trail is shorter and the return is quicker everywhere, at both ends of
+// the thread and through the end model's bounce (which keeps its own constants:
+// they were never this lag's).
+//
+// WHERE THIS DOES NOT LOOK LIKE THE OLD BUILD, AND WHY THAT IS RIGHT. Given the
+// same speed history the two are the same number to the last digit. Where the
+// SCROLL POSITION ARRIVES UNEVENLY they part, and the old build shows the larger
+// trail — up to twice as much, measured both on this module under replayed input
+// and independently in a browser on the same rows of the same fixture (8.65 px
+// here against 17.29 px there, both still driving). Two separate conditions do
+// it, each in its own kind of sequence, and BOTH of the differences are later
+// repairs that are being kept:
+//
+//   - When the finger repeats its position on an interstitial frame, the old
+//     build threw the whole speed run away (its discard was gated on `budget`,
+//     which is zero on such a frame). The next fresh position then had only
+//     itself and one still reading to be a speed over, and on a quantised
+//     delivery that double step read as double the speed. The extra trail is an
+//     OVERSHOOT PAST speed x tau — the lag going to 4.54 px where the speed says
+//     3.60 — not a truer stretch. That is the bug the retained run fixed.
+//   - When the finger travels every frame but the position is late, the old
+//     build let it bridge out to VELOCITY_WINDOW_MS where this one gives it a
+//     delivery gap. Here the old build is NOT overshooting anything: measured
+//     against the ideal, it sits exactly on speed x tau, and it is THIS one that
+//     falls BELOW — to 0.48 to 0.67 of it — because once the shorter bridge
+//     expires the frame is driven as a stop and the lag melts until the next
+//     position lands. Nothing accidental is being left out here. It is the
+//     braked-stop repair above preferring to stop sooner over bridging longer,
+//     and it is kept on purpose, at the cost of that trail.
+//
+// Neither is a clock and neither is undone by one, and neither is restored here
+// — but for DIFFERENT reasons, and the difference matters: the first because
+// reproducing that amplitude would mean putting an accidental over-stretch back,
+// the second because a shorter bridge is a repair judged worth more than the
+// trail it costs. Not all of the old build's extra movement was a bug. Nothing
+// is claimed about how often either condition arises on a real phone: both were
+// reproduced with driven input, not measured on a device.
+//
 // Sign: scrollTop rising (toward newer, content moving up the screen) leaves
 // L positive and the rows displaced DOWN behind the motion; falling (toward
 // older) leaves them displaced UP. Both return toward the seat from the next
@@ -209,11 +277,21 @@ export const TUNING = {
   /** resistance never exceeds 1: a row never trails by more than the scroll
       itself, and rows further than the divisor from the finger trail alike. */
   RESISTANCE_MAX: 1,
-  /** the lag's time constant, ms. Measured 36–47 ms. It sets both the steady
-      stretch (speed x tau x resistance) and the return (63% gone at tau, 90%
-      at 2.3 tau). The speed knob: larger = a longer, softer return AND a
-      bigger stretch for the same drag. */
-  LAG_TAU_MS: 45,
+  /** the lag's time constant, ms — the Trail and return time. It sets both the
+      steady stretch (speed x tau x resistance) and the return (63% gone at tau,
+      90% at 2.3 tau). The speed knob: larger = a longer, softer return AND a
+      bigger stretch for the same drag.
+
+      The recording fitted 36–47 ms and every build up to this one shipped 45,
+      the centre of that fit. This build ships 33 at the owner's own selection:
+      27% quicker than the fit and below its lower edge, so the trail behind the
+      finger is 27% shorter at the same speed and the return is 90% done in
+      76 ms rather than 105. The measurement itself is kept, unmoved, as
+      LAG_TAU_MEASURED_MS below — a selected time never overwrites the number it
+      departs from. Nothing else here moves with it: tau is the whole of the
+      first-order law's time, so every other tunable still means what it
+      measured. */
+  LAG_TAU_MS: 33,
   /** the compress guard: no pair on the closing side ever comes closer than
       this many px (a pair whose rest gap is already smaller keeps its rest
       gap). The recording never closed a gap below 3.3 px or below 63% of
@@ -296,6 +374,13 @@ export const TUNING = {
 
 /** the steady lag of the reference row per px/ms of scroll speed: tau itself */
 export const LAG_PER_SPEED_MS = TUNING.LAG_TAU_MS;
+
+/** the time constant the owner's Messages recording actually fitted, ms: 36–47
+    across the tracked gestures, 45 at its centre, which is what the builds
+    before this one shipped. It is not a tunable and nothing reads it to move a
+    row; it is here so the fit stays on the record next to the time this build
+    was asked to run at (TUNING.LAG_TAU_MS). */
+export const LAG_TAU_MEASURED_MS = 45;
 
 /** clamp helper (kept local; the app has no shared one) */
 function clamp(v: number, lo: number, hi: number): number {
