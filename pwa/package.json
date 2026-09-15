@@ -6,7 +6,9 @@
   "description": "Paratrooper chat PWA — message the pinboard agent from your phone.",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "dev:playground": "vite playground",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p playground/tsconfig.json",
+    "build": "npm run typecheck && vite build && vite build playground",
     "preview": "vite preview",
     "test": "vitest run"
   },

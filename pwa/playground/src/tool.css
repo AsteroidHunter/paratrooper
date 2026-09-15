@@ -1,0 +1,567 @@
+/* The playground's own chrome. None of this is app styling: it is the frame
+   around the transcript and the panel beside it. System fonts only - the tool
+   fetches nothing, so there is no web font, no icon set and no image. */
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--panel);
+  color: var(--text);
+  -webkit-text-size-adjust: 100%;
+}
+
+.shell {
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+}
+
+/* --- the preview ---------------------------------------------------------- */
+.stage {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* flex-start and a scrolling stage, not centred and clipped: the canvas is a
+     LOGICAL 375 x 812 and has to stay that size to be worth measuring, so a
+     window shorter than the phone scrolls rather than squashing it. Centring a
+     flex column that overflows clips the top, which is the one thing that would
+     make the geometry unreadable. */
+  justify-content: flex-start;
+  gap: 14px;
+  padding: 18px;
+  overflow: auto;
+}
+.stage[data-frame="fill"] { overflow: hidden; }
+
+.phone {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--panel-line);
+  border-radius: 28px;
+  box-shadow: 0 10px 40px rgb(0 0 0 / 14%);
+  max-width: 100%;
+}
+/* iPhone 13 mini, as a LOGICAL canvas: 375 x 812 CSS px, unscaled, which is
+   Playwright's own screen figure for that device. Its device pixel ratio of 3
+   is a rendering scale and not a request for a 1125 px box, and the 1080 x 2340
+   panel Apple publishes is hardware pixels rather than CSS ones, so neither
+   number belongs here. The 390 x 844 option is the size the tool shipped with
+   and is kept so the two can be compared. */
+.stage[data-frame="375"] .phone { width: 375px; height: 812px; }
+.stage[data-frame="390"] .phone { width: 390px; height: 844px; }
+.stage[data-frame="fill"] .phone {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border-radius: 14px;
+}
+
+/* --- the app's own bars, adapted from reference/pwa/src/styles.css ---------
+   The two blocks below are the header (:557-653) and the composer (:1060-1067,
+   :1120, :1240-1260, :1321, :1515-1537) cut down to what a static sample needs:
+   the material, the geometry and the type. The interactive parts - the menu,
+   the file picker, the hold light, the send morph, the keyboard lift - are not
+   here, and neither are the app's motions.
+
+   SAFE AREAS ARE NOT SIMULATED, and that is a fixture decision rather than a
+   measurement. The app writes max(0.5rem, env(safe-area-inset-top)) and
+   max(0.5rem, env(safe-area-inset-bottom)); inside a div on a desktop those
+   env() values are the HOST window's, not this canvas's, so reading them here
+   would be wrong rather than approximate. No verified inset figures for this
+   device were available to substitute, so the two fixture variables below are
+   0 and the padding falls to the 0.5rem the app itself uses on a device with no
+   inset. Nothing reserves the space twice, and no notch or home indicator is
+   drawn. */
+.phone {
+  --fixture-inset-top: 0px;
+  --fixture-inset-bottom: 0px;
+  --pad-b: max(0.5rem, var(--fixture-inset-bottom));
+  --glass-bg: rgba(120, 120, 128, 0.03);
+  --glass-stack-sm:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 0 0 1px var(--hairline),
+    inset 0 0 2px rgba(255, 255, 255, 0.35),
+    0 1px 2px rgba(0, 0, 0, 0.08),
+    0 5px 12px rgba(0, 0, 0, 0.06);
+  --bar-grad-top: rgba(249, 249, 249, 1);
+  --bar-grad-bottom: rgba(249, 249, 249, 0.45);
+}
+@media (prefers-color-scheme: dark) {
+  .phone {
+    --glass-bg: rgba(255, 255, 255, 0.14);
+    --glass-stack-sm:
+      inset 0 1px 0 rgba(255, 255, 255, 0.3),
+      inset 0 0 0 1px var(--hairline),
+      inset 0 0 2px rgba(255, 255, 255, 0.1),
+      0 1px 2px rgba(0, 0, 0, 0.45),
+      0 5px 12px rgba(0, 0, 0, 0.4);
+    --bar-grad-top: rgba(22, 22, 24, 1);
+    --bar-grad-bottom: rgba(22, 22, 24, 0.45);
+  }
+}
+
+.appbar {
+  flex: none;
+  display: grid;
+  grid-template-columns: 2.5rem 1fr 2.5rem;
+  align-items: center;
+  padding: max(0.5rem, var(--fixture-inset-top)) 0.75rem 0.5rem;
+  background: linear-gradient(to bottom, var(--bar-grad-top), var(--bar-grad-bottom));
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  user-select: none;
+}
+.contact {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+.ident {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+/* the bar's own logo, reference/pwa/public/topbar-logo.png copied byte for
+   byte: a cut-out figure, so natural aspect and no crop */
+.avatar {
+  height: 48px;
+  width: auto;
+  display: block;
+}
+.apptitle { font-weight: 600; font-size: 13px; line-height: 1.3; }
+.appver { color: var(--muted); font-weight: 400; font-size: 9px; line-height: 1.2; }
+.settings {
+  grid-column: 3;
+  display: flex;
+  justify-content: flex-end;
+}
+/* the ⋯, drawn as geometry rather than a glyph so it lands dead centre */
+.gearbtn {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background-color: var(--glass-bg);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow: var(--glass-stack-sm);
+  color: var(--muted);
+}
+.gearbtn::before {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: -7px 0 0 currentColor, 7px 0 0 currentColor;
+}
+
+/* the composer: a pill and a ＋ floating on the canvas, no panel behind them */
+.composer {
+  flex: none;
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  padding: 0.5rem 0.75rem var(--pad-b);
+  user-select: none;
+}
+.attach {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background-color: var(--glass-bg);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow: var(--glass-stack-sm);
+  color: var(--text);
+  font-size: 1.25rem;
+  font-weight: 200;
+  /* the bar bottom-aligns its items and the single-line pill is 5px taller
+     than the ＋; half of that puts the ＋ on the pill's optical centreline */
+  margin-bottom: 2.5px;
+}
+.field {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  border-radius: 18px;
+  background-color: var(--glass-bg);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow: var(--glass-stack-sm);
+}
+/* the resting composer, which is what a reader scrolling a transcript sees:
+   the placeholder, and no ↑ - the app only shows the send button once there is
+   something to send. The right inset is the ↑'s reserved column all the same,
+   because that is what sets the pill's text width. */
+.fieldtext {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 40px 8px 14px;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thread { cursor: grab; }
+.thread.grabbing { cursor: grabbing; user-select: none; }
+
+.stagehint {
+  margin: 0;
+  max-width: 44ch;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* --- the panel ------------------------------------------------------------ */
+.panel {
+  flex: none;
+  width: 372px;
+  overflow-y: auto;
+  padding: 18px 18px 40px;
+  background: var(--bg);
+  border-left: 1px solid var(--panel-line);
+}
+
+/* The drawer's own head: a name and the close control, riding the top of the
+   panel while it scrolls. A pointer never sees it, because to a pointer the
+   panel is a column that is already on screen and has nothing to close. */
+.panelbar {
+  display: none;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--panel-line);
+}
+.panelname {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.panelclose {
+  padding: 8px 16px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+/* Behind the drawer and over everything else, so a finger that misses the panel
+   lands here instead of on the transcript. No display of its own: the element
+   carries `hidden` while the drawer is shut, and that is the whole switch. */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  background: rgb(0 0 0 / 22%);
+}
+
+.block {
+  padding: 0 0 16px;
+  margin: 0 0 16px;
+  border-bottom: 1px solid var(--panel-line);
+}
+.block:last-of-type { border-bottom: 0; }
+.block h2 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.note {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.block.dim { opacity: 0.45; }
+
+/* segmented controls */
+.seg {
+  display: flex;
+  gap: 6px;
+}
+.segbtn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.segbtn.on {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.segmain { font-weight: 600; }
+.segsub { color: var(--muted); font-size: 11px; }
+.seg.small .segbtn {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+/* buttons */
+.btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.btn {
+  flex: 1 1 46%;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+
+/* sliders */
+.knob { margin: 0 0 14px; }
+.knob:last-child { margin-bottom: 0; }
+.knobhead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.knoblabel { font-weight: 600; font-size: 13px; }
+.knobvalue {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 12px;
+}
+.knob input[type="range"] {
+  width: 100%;
+  margin: 6px 0 2px;
+  accent-color: var(--accent);
+}
+.hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+/* the build picker and what it has to say about the build it picked */
+.picker {
+  width: 100%;
+  margin: 6px 0 6px;
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+}
+.picker:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.prov {
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 4px;
+}
+/* a historical entry whose sliders have been moved is not that build any more,
+   and the line that carries its version has to be the line that says so */
+.prov.warn { color: var(--accent); font-weight: 600; }
+.knob.dim { opacity: 0.4; }
+.knob.dim input[type="range"] { cursor: not-allowed; }
+.knob.changed .knobvalue { color: var(--accent); }
+details.note { margin-top: 10px; }
+details.note summary { cursor: pointer; }
+details.note ul { margin: 6px 0 0; padding-left: 16px; }
+details.note li { margin-bottom: 3px; }
+
+.dump {
+  width: 100%;
+  margin-top: 10px;
+  padding: 8px;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+  resize: vertical;
+}
+
+.readout {
+  position: sticky;
+  bottom: 0;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  font: 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+}
+
+/* --- the toggle, used only by a pointer on a narrow window ---------------- */
+.paneltoggle {
+  display: none;
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 3;
+  padding: 10px 14px;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 0;
+  border-radius: 999px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 28%);
+  cursor: pointer;
+}
+
+/* --- the phone -------------------------------------------------------------
+   A narrow screen, or the page opened from the Home Screen at any width. Then
+   the canvas stops being a preview inside a page and becomes the page: no
+   frame, no shadow, no hint under it, nothing but the transcript from the top
+   of the screen to the bottom of it, and every control behind the drawer that a
+   leftward swipe pulls in from the right edge.
+
+   These are the two conditions src/drawer.ts names in DRAWER_MEDIA, and they
+   have to stay the same two: the gesture is not armed in a layout where the
+   panel is already a column on screen.
+
+   THE SAFE AREAS ARE READ HERE, and only here. On the desktop preview the two
+   fixture variables are 0 because env() inside a box on a laptop reports that
+   WINDOW's insets and would be wrong rather than approximate (the block at the
+   top of this file). On the device there is no such confusion: the canvas is
+   the viewport, so env() is the phone's own notch and home indicator, and the
+   app's own padding rule - max(0.5rem, inset) on the bar and the composer -
+   does the rest without reserving the space twice. */
+@media (max-width: 900px), (display-mode: standalone) {
+  html,
+  body {
+    height: 100%;
+    overflow: hidden; /* only the thread scrolls */
+    overscroll-behavior: none; /* and the page itself never rubber-bands */
+  }
+  .shell {
+    display: block;
+    /* dynamic, so the canvas is the height the browser is ACTUALLY showing
+       rather than the tall one it promises while its bars are retracting */
+    height: 100dvh;
+  }
+  .stage,
+  .stage[data-frame="fill"] {
+    height: 100%;
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+  }
+  .stage .phone,
+  .stage[data-frame="375"] .phone,
+  .stage[data-frame="390"] .phone,
+  .stage[data-frame="fill"] .phone {
+    --fixture-inset-top: env(safe-area-inset-top, 0px);
+    --fixture-inset-bottom: env(safe-area-inset-bottom, 0px);
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .stagehint { display: none; }
+  .paneltoggle { display: block; }
+
+  /* the drawer */
+  .panel {
+    position: fixed;
+    inset: 0 0 0 auto;
+    z-index: 4;
+    width: min(360px, 88vw);
+    max-width: 100%;
+    padding: 0;
+    border-left: 1px solid var(--panel-line);
+    box-shadow: -8px 0 28px rgb(0 0 0 / 22%);
+    transform: translateX(100%);
+    transition: transform 0.24s ease;
+    /* a scroll that reaches the drawer's end stops there: the transcript
+       underneath must not inherit the rest of the flick */
+    overscroll-behavior: contain;
+    /* vertical panning is the browser's; a sideways finger is the drawer's */
+    touch-action: pan-y;
+  }
+  body.panelopen .panel { transform: none; }
+  .panelbar {
+    display: flex;
+    padding: max(10px, env(safe-area-inset-top, 0px)) max(14px, env(safe-area-inset-right, 0px))
+      10px 16px;
+  }
+  .panelbody {
+    padding: 14px max(16px, env(safe-area-inset-right, 0px))
+      calc(28px + env(safe-area-inset-bottom, 0px)) 16px;
+  }
+  /* the readout sits above the home indicator rather than under it */
+  .readout { bottom: env(safe-area-inset-bottom, 0px); }
+
+  /* finger-sized controls. The range inputs keep their native thumb and their
+     accent colour; what grows is the box the thumb is dragged inside, which is
+     the part a thumb has to hit. */
+  .knob input[type="range"] {
+    height: 34px;
+    margin: 2px 0;
+  }
+  .btn,
+  .segbtn,
+  .picker,
+  .panelclose { min-height: 44px; }
+  .seg.small .segbtn { min-height: 40px; }
+}
+
+/* A finger has the swipe and the drawer's own close control, so the floating
+   button is one more thing sitting on a transcript that is meant to fill the
+   screen. It stays for the one case that has neither: a pointer on a window
+   narrow enough to be in the layout above. */
+@media (pointer: coarse), (display-mode: standalone) {
+  .paneltoggle { display: none; }
+}

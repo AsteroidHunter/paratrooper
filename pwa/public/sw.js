@@ -4,7 +4,7 @@
 // safe because the page compares its build against /api/health and runs the
 // update flow (overlay -> cache clear -> warm refetch -> reload) on mismatch.
 // Assets cache on first fetch; hashed filenames make new bundles cache-miss.
-const SHELL = "paratrooper-shell-v2";
+const SHELL = "paratrooper-shell-v3";
 
 self.addEventListener("install", () => self.skipWaiting());
 
@@ -19,9 +19,17 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const { request } = event;
-  // never intercept API/socket traffic
+  // never intercept API/socket traffic, and never the bubble playground: it is
+  // a separate page under /playground with a worker of its own at that scope,
+  // and the shell answer below would hand a phone that has this app installed
+  // the chat app instead of the page it asked for
   const url = new URL(request.url);
-  if (url.pathname.startsWith("/api") || url.pathname.startsWith("/ws")) return;
+  if (
+    url.pathname.startsWith("/api") ||
+    url.pathname.startsWith("/ws") ||
+    url.pathname.startsWith("/playground")
+  )
+    return;
   if (request.method !== "GET") return;
 
   if (request.mode === "navigate") {

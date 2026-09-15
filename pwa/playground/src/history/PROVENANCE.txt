@@ -1,0 +1,79 @@
+app/src/history - where these files came from
+=============================================
+
+Nine of the files in this directory are not this tool's work. They are the
+springscroll.ts and endspring.ts of eight commits pushed to the public build-v0
+branch of the paratrooper repository, copied here byte for byte so that Vite can
+serve them to the playground without exposing reference/ over http (the tool's
+vite.config.ts denies everything above app/ on purpose).
+
+They are IMMUTABLE. Nothing in them is edited, retuned, reformatted or
+modernised, including the comments, which are the original authors' account of
+what was measured and why. Every one of them is checked on every test run
+against reference/history/manifest.json, which the history preparation worker
+produced and which carries the Git blob id and SHA-256 of each file as it stands
+in the repository: app/tests/historysource.test.ts fails if any copy drifts by a
+byte. Do not edit them. If one is wrong, it is wrong upstream.
+
+adapters.ts is the ONLY authored file here. It constructs each field with the
+constants that build documented and gives 0.3.121 the gesture-shaped interface
+the later builds export. It changes no number and papers over no behaviour.
+
+THE COPIES
+----------
+
+  file                     SHA-256 (first 16)  from snapshot         version commit
+  spring-0-3-121.ts        4e60b3655c882fd9    0.3.121-15c40a0       0.3.121 15c40a0
+  spring-0-3-123.ts        0b401ef2d5e4a45f    0.3.123-57087ce       0.3.123 57087ce
+  spring-0-3-124.ts        baba7027614f2f7b    0.3.124-af9a455       0.3.124 af9a455
+  spring-0-3-132.ts        ee948ad7816c645e    0.3.132-299e90b       0.3.132 299e90b
+  spring-0-3-134.ts        1fab52aaa679d87f    0.3.134-8bb06a7       0.3.134 8bb06a7
+  spring-0-3-140.ts        c2d3e0c6d620e2ea    0.3.140-0bec0ec       0.3.140 0bec0ec
+  spring-0-3-141.ts        3a98c200a7cf0ad1    0.3.141-b644dd9       0.3.141 b644dd9
+  spring-0-3-148.ts        d9d5804945081000    0.3.148-418188c       0.3.148 418188c
+  end-initial.ts           f4050f2da02ac018    0.3.132-a94ab0a       0.3.132 a94ab0a
+  end-catch.ts             8162e291a494aad2    0.3.132-299e90b       0.3.132 299e90b
+
+Two more modules the picker uses are NOT copied here, because the tool already
+had them and they are the same bytes:
+
+  ../vendor/springscroll.ts  793369f0430d6079  0.3.151-4c865ac       0.3.151 4c865ac
+  ../vendor/endspring.ts     b426e05fb9feb705  0.3.151-4c865ac       0.3.151 4c865ac
+
+That identity is the reason the picker lists the live baseline once rather than
+offering "v0.3.151" as though it were a different build from the one already on
+screen. historysource.test.ts asserts it rather than trusting this note.
+
+WHAT IS AND IS NOT REPRODUCED
+-----------------------------
+
+Reproduced: that commit's spring behaviour, and the end-of-thread behaviour that
+was pushed with it, driven by this tool's wiring on this tool's transcript.
+
+Not reproduced: the app. Only these two modules of each commit are here. The
+transcript, the layout, the send flights, the hold-off, the scroll-ownership
+rules and everything else main.ts owns are this tool's and are the same for
+every entry. Nothing boots, authenticates, fetches or registers a worker.
+
+Seven pushed changes touched only main.ts's wiring - blocker release, lift
+order, pin reseat reporting, gesture-era hand-off, ownership clocks, write
+carry, resume claims. They are named in ../presets.ts (CONTROLLER_ONLY) and in
+the panel, and they are deliberately not selectable: they are about motions the
+app owns, and this transcript never sends, pins or resumes.
+
+PUSHED, NOT PROVEN DEPLOYED
+---------------------------
+
+Every commit above is a verified ancestor of the public tip
+4c865acad5a5685b1e2a9dbd319bfaa5e52205f9, so the code was pushed. No evidence
+was collected that any particular intermediate version was ever deployed to a
+device, and every label in the tool says "deployment not verified" for exactly
+that reason. pwa/package.json carries 0.1.0 throughout and is NOT the frontend
+version; the version labels come from each commit's own APP_VERSION and need the
+commit SHA with them, because the labels repeat.
+
+Full records: reference/history/manifest.json (per-file blob and hash, ancestry
+check), reference/history/preset-map.json (the eleven physics states, their
+numeric defaults and all forty-eight commit aliases),
+reference/history/integration-map.json (the controller spans these adapters were
+written against).

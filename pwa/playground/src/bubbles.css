@@ -1,0 +1,147 @@
+/* The bubble styling, ADAPTED from reference/pwa/src/styles.css.
+   Every rule below is the baseline's own, copied and then cut down to what a
+   transcript that only scrolls actually needs. What was taken:
+
+     :root / dark scheme   only the tokens these rules read
+     .thread               the scroller
+     .evt                  display: contents, so the rows are the flex items
+     .row / .row.cont      the 10px / 2px margins and the time rail
+     .stamp                the day stamps
+     .msg + .msg.user/.agent + .msg.tail::after   the bubbles and the tail
+
+   What was dropped, and why: the swipe-to-peek transform, the send flight, the
+   arrival morph, photos, receipts, typing dots, the composer, the header, the
+   alert cards, the sign-in box and everything else in a 2000 line sheet that no
+   bubble needs to sit still or to move. The geometry that the spring measures -
+   pitch, gaps, bubble heights - is untouched, which is the only part that has
+   to be faithful.
+
+   One thing here IS load-bearing for the effect: the field writes the
+   `translate` LONGHAND, never `transform`. Keeping the two apart is what lets a
+   transform-based effect (the peek in the real app) coexist with the spring
+   without either overwriting the other, and it keeps the write on the
+   compositor. Nothing in this sheet may take `translate` on .row. */
+
+:root {
+  --bg: #ffffff;
+  --hairline: #c7c7cc;
+  --received: #e9e9eb;
+  --received-text: #111111;
+  --sent-text: #ffffff;
+  --text: #000000;
+  --muted: #8e8e93;
+  --accent: #432bff; /* sent bubbles */
+  --panel: #f7f7f9;
+  --panel-line: #e2e2e7;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000;
+    --hairline: #38383a;
+    --received: #3b3b3d;
+    --received-text: #ffffff;
+    --text: #ffffff;
+    --muted: #98989f;
+    --panel: #161618;
+    --panel-line: #2c2c2e;
+    color-scheme: dark;
+  }
+}
+
+/* --- thread --- */
+.thread {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden; /* the time rail lives past the right edge - never a bar */
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  touch-action: pan-y;
+  overscroll-behavior: contain; /* a thread overscroll must never chain to a page pan */
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* each chat event renders inside one .evt wrapper; display:contents keeps its
+   rows/stamps direct flex items of the thread (layout-invisible grouping) */
+.evt { display: contents; }
+
+/* one full-width row per bubble; the timestamp sits just past the row's right
+   edge, clipped by the thread */
+.row {
+  position: relative;
+  display: flex;
+  margin-top: 10px; /* between senders; runs tighten via .cont */
+}
+/* Measured on the owner's Messages thread (runs.ts): 4px between two bubbles
+   of one run, 13 to 15px between runs. With the thread's own 2px gap these two
+   margins give 4px and 12px. */
+.row.cont { margin-top: 2px; }
+.row.user { justify-content: flex-end; }
+.row[data-time]::after {
+  content: attr(data-time);
+  position: absolute;
+  left: 100%;
+  padding-left: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* centered "Today 2:31 PM" gap stamps */
+.stamp {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 10px 0 2px;
+}
+.stamp b { font-weight: 600; }
+
+/* --- bubbles (iMessage geometry; rows own alignment and spacing) ---
+   Every bubble is fully rounded on all four corners, radius 18px; the run's
+   last bubble carries the tail as a hook hung UNDER its rounded corner. */
+.msg {
+  position: relative; /* the tail is the bubble's own box, hung off its corner */
+  max-width: 75%;
+  padding: 10px 16px;
+  font-size: 17px;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  border-radius: 18px;
+}
+.msg.user {
+  --fill: var(--accent); /* the tail's paint: the same token as the fill below */
+  --tail-mask: var(--tail-user);
+  --tail-x: right;
+  background: var(--accent);
+  color: var(--sent-text);
+}
+.msg.agent {
+  --fill: var(--received);
+  --tail-mask: var(--tail-agent);
+  --tail-x: left;
+  background: var(--received);
+  color: var(--received-text);
+}
+
+/* The tail. A MASK over the bubble's own fill, never the page colour painted
+   over a squared corner, so it is right over any background and under any
+   transform. The two masks are written onto <html> at start-up from
+   vendor/runs.ts (installTailMasks), which is where the measured path lives. */
+.msg.tail::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -7px;
+  height: 25px;
+  background: var(--fill);
+  pointer-events: none;
+  -webkit-mask: var(--tail-mask) var(--tail-x) 0 / 24px 25px no-repeat;
+  mask: var(--tail-mask) var(--tail-x) 0 / 24px 25px no-repeat;
+}

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- The app's own viewport line, not the tool's. viewport-fit=cover is what
+         lets the canvas reach under the notch and the home indicator, and the
+         fixed scale is what stops a stray pinch resizing a surface whose whole
+         point is that it is the phone's real size. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <!-- Home Screen. Its own app, beside the chat app and not inside it: its own
+         name, its own start URL and its own scope, and the app's icons. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Playground" />
+    <meta name="theme-color" content="#f7f7f5" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0b0b0c" media="(prefers-color-scheme: dark)" />
+    <link rel="manifest" href="/playground/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <title>Bubble settle playground</title>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="stage" id="stage" data-frame="375">
+        <!-- The phone canvas. The bar above and the composer below are the
+             app's own, adapted from reference/pwa (main.ts renderChat and
+             styles.css) into static markup: nothing here is a control, nothing
+             is focusable, nothing sends anything, and the composer shows the
+             resting state a reader scrolling a transcript actually sees. The
+             thread between them is the only thing that scrolls, and it takes
+             whatever height the two bars leave. -->
+        <div class="phone">
+          <header class="appbar">
+            <div class="contact">
+              <img class="avatar" src="/topbar-logo.png" alt="" />
+              <div class="ident">
+                <span class="apptitle">Paratrooper</span>
+                <span class="appver" id="appver">v0.3.151</span>
+              </div>
+            </div>
+            <div class="settings"><span class="gearbtn" aria-hidden="true"></span></div>
+          </header>
+          <div class="thread" id="thread"></div>
+          <div class="composer" aria-hidden="true">
+            <span class="attach">＋</span>
+            <div class="field"><span class="fieldtext">Message</span></div>
+          </div>
+        </div>
+        <p class="stagehint">
+          Drag the transcript with the mouse, throw it and let it coast, or use the wheel. On a
+          phone just scroll it. Stop suddenly and watch where the settle starts.
+        </p>
+      </section>
+      <!-- Only a pointer ever sees this. On a touch screen, and in the installed
+           app, the controls are behind the leftward swipe and the button would
+           be one more thing sitting on top of a transcript that is meant to fill
+           the screen (src/drawer.ts owns the gesture). -->
+      <button class="paneltoggle" id="paneltoggle" type="button" aria-expanded="false">
+        Controls
+      </button>
+      <!-- Under the panel and over everything else while it is open: it is what
+           stops a finger reaching the transcript behind the drawer, and a tap on
+           it closes. -->
+      <div class="scrim" id="scrim" hidden></div>
+      <aside class="panel" id="panel" aria-label="Settings">
+        <div class="panelbar">
+          <span class="panelname">Settings</span>
+          <button class="panelclose" id="panelclose" type="button">Close</button>
+        </div>
+        <div class="panelbody" id="panelbody"></div>
+      </aside>
+    </main>
+    <script type="module" src="/src/playground.ts"></script>
+  </body>
+</html>
