@@ -195,7 +195,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.157"; // A browser tab opens on the home-screen steps as a run of messages Paratrooper types out, closed by the line to the browser
+const APP_VERSION = "0.3.158"; // The accent is now #4538ff everywhere, replacing the old blue-purple
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.

@@ -30,7 +30,7 @@
   --sent-text: #ffffff;
   --text: #000000;
   --muted: #8e8e93;
-  --accent: #432bff; /* the tool's own accent (selected chrome, focus rings) */
+  --accent: #4538ff; /* the tool's own accent (selected chrome, focus rings) */
   --sent: var(--accent); /* the sent bubbles' fill; the playground retunes it live */
   --panel: #f7f7f9;
   --panel-line: #e2e2e7;

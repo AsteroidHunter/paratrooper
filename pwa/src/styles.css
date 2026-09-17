@@ -66,7 +66,7 @@
   --bar-grad-top: rgba(249, 249, 249, 1);
   --bar-grad-bottom: rgba(249, 249, 249, 0.45);
   --menu-bg: #f2f2f4; /* fully opaque dropdown / alert card */
-  --accent: #432bff; /* sent bubbles, compose caret, and the ↑ send button */
+  --accent: #4538ff; /* sent bubbles, compose caret, and the ↑ send button */
   /* jump chevron arrow: ONE fixed color per scheme, drawn over the disc's
      translucent glass face (--glass-bg) — never blended with the backdrop */
   --jump-fg: var(--accent);
