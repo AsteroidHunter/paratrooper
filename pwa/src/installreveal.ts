@@ -3,9 +3,11 @@
 // Opened in a browser tab, the sign-in screen is a run of messages from
 // Paratrooper telling you how to put it on the home screen. It does not arrive
 // as a finished page: the head is there, the chat's own typing dots sit where
-// the first message will be, and a second later the five messages land one
-// after another the way a person sends five short lines. Then the line under
-// them fades in.
+// the first message will be, and a second later that message grows out of
+// them. Then the dots come up again under it, hold, and become the second
+// message; and so on down the run, five times, the way five short lines arrive
+// from a person who is typing each one — dots, message, dots, message. Then
+// the line under them fades in.
 //
 // That is a clock and an order, and neither of those is a DOM problem, so
 // neither of them lives in main.ts. This module answers one question — at what
@@ -18,14 +20,20 @@
 // THE NUMBERS. The lead is a full second because the dots are the app saying
 // something is coming, and a second is about how long a held breath is; under
 // it the dots read as a flicker on the way to the content, over it they read
-// as a wait. The cadence is the gap between two short messages: nine tenths of
-// a second, which is long enough for each line to be read as it lands before
-// the next one arrives. It was four tenths, and at that pace the owner saw the
-// five land as one flurry rather than five messages — the run has to be read,
-// not watched, so each message gets its own beat. The close is the same beat
-// again, so the line under the messages reads as the end of the same run
-// rather than as a sixth message that came early. All three are named here and
-// nowhere else, so the pace is one number to move.
+// as a wait. The cadence is the gap from one message landing to the next
+// landing: nine tenths of a second, which is long enough for each line to be
+// read as it lands before the next one arrives. It was four tenths, and at
+// that pace the owner saw the five land as one flurry rather than five
+// messages — the run has to be read, not watched, so each message gets its
+// own beat. Inside that beat the dots have to be seen: the message lands, a
+// short settle passes so its box has finished growing (the morph takes 280ms,
+// arrival.ts ARRIVE_MS, and the settle is just past that), the dots come up
+// under it, and they hold for the rest of the beat before they become the next
+// message — six tenths of the nine, so the dots are the greater part of every
+// gap and the run reads as typed rather than as dealt. The close is the
+// cadence's own beat again, so the line under the messages reads as the end of
+// the same run rather than as a sixth message that came early. All of them are
+// named here and nowhere else, so the pace is one number to move.
 //
 // REDUCED MOTION. The app has no reduced-motion handling anywhere else, on
 // instruction (styles.css says so where the bubble entrance is declared). This
@@ -37,8 +45,20 @@
 
 /** the dots alone, before the first message takes their box */
 export const REVEAL_LEAD_MS = 1000;
-/** one message to the next */
+/** one message landing to the next landing */
 export const REVEAL_CADENCE_MS = 900;
+/**
+ * a message landing to the dots coming up under it for the next one: just past
+ * the morph's own 280ms, so the box has stopped growing before the dots appear
+ */
+export const REVEAL_SETTLE_MS = 300;
+/**
+ * the dots' hold under a landed message before they become the next one — the
+ * rest of the cadence once the settle is taken out of it, and so the greater
+ * part of every gap. Derived, not chosen twice: the cadence is the beat the
+ * owner approved, and the settle is the morph's, so this is what is left.
+ */
+export const REVEAL_HOLD_MS = REVEAL_CADENCE_MS - REVEAL_SETTLE_MS;
 /** the last message to the line under the run: the cadence's own beat again */
 export const REVEAL_CLOSE_MS = 900;
 
@@ -49,20 +69,24 @@ export type RevealPart = "dots" | "message" | "statement";
  * How the piece appears when its moment comes.
  *
  * "morph" is the chat's reply arrival: the dots' own box grows into the
- * message with the dots fading out inside it (arrival.ts). Only the first
- * message can wear it, because only the first message has a box to take over.
- * "pop" is the chat's ordinary bubble entrance, "fade" the closing line's, and
- * "none" is the piece simply being there — which is what the dots do (Messages'
- * indicator has no entrance either) and what everything does under reduced
- * motion.
+ * message with the dots fading out inside it (arrival.ts). Every message wears
+ * it, because every message is preceded by the dots and so has a box to take
+ * over — the same entrance an incoming reply has in the chat, and the only
+ * entrance a message on this face has. "fade" is the closing line's, and
+ * "none" is the piece simply being there — which is what the dots do
+ * (Messages' indicator has no entrance either) and what everything does under
+ * reduced motion.
  */
-export type RevealEntrance = "morph" | "pop" | "fade" | "none";
+export type RevealEntrance = "morph" | "fade" | "none";
 
 export interface RevealStep {
   /** milliseconds from the start of the reveal */
   at: number;
   part: RevealPart;
-  /** which message, 0-based; -1 for the dots and for the closing line */
+  /**
+   * which message, 0-based. For the dots it is the message they come up FOR —
+   * the row they sit in and the one they become; -1 for the closing line.
+   */
   index: number;
   /** the last bubble of the run, and so the one carrying the tail */
   tail: boolean;
@@ -78,20 +102,29 @@ export interface RevealStep {
  */
 export function revealSteps(count: number, reduced = false): RevealStep[] {
   const steps: RevealStep[] = [];
-  // the dots are the reveal's first frame, not a step that waits for one, and
-  // under reduced motion they do not happen at all
-  if (count > 0 && !reduced) {
-    steps.push({ at: 0, part: "dots", index: -1, tail: false, entrance: "none" });
-  }
   for (let i = 0; i < count; i++) {
+    const lands = REVEAL_LEAD_MS + i * REVEAL_CADENCE_MS;
+    // the dots come up before every message and hold until it takes their
+    // box: the lead's whole second before the first, and the hold before each
+    // of the rest. The first pair is the reveal's first frame, not a step that
+    // waits for one. Under reduced motion they do not happen at all.
+    if (!reduced) {
+      steps.push({
+        at: lands - (i === 0 ? REVEAL_LEAD_MS : REVEAL_HOLD_MS),
+        part: "dots",
+        index: i,
+        tail: false,
+        entrance: "none",
+      });
+    }
     steps.push({
-      at: reduced ? 0 : REVEAL_LEAD_MS + i * REVEAL_CADENCE_MS,
+      at: reduced ? 0 : lands,
       part: "message",
       index: i,
       // the run's tail hangs under its last bubble and nowhere else, which is
       // the chat's rule (runs.ts) rather than a decision taken again here
       tail: i === count - 1,
-      entrance: reduced ? "none" : i === 0 ? "morph" : "pop",
+      entrance: reduced ? "none" : "morph",
     });
   }
   const lastMessage = count > 0 ? REVEAL_LEAD_MS + (count - 1) * REVEAL_CADENCE_MS : 0;
