@@ -35,6 +35,7 @@ import type { ScrollReading } from "./gesture";
 import type { SpringRow } from "./vendor/springscroll";
 import { defaultTuning, exportTuning, importTuning } from "./tuning";
 import type { Tuning } from "./tuning";
+import { FALLBACK_SENT, normaliseHex } from "./swatch";
 import { mountControls } from "./controls";
 import type { DemoKind, Frame } from "./controls";
 import { configFor, hasReferenceLag } from "./presets";
@@ -58,11 +59,28 @@ const panelToggle = document.getElementById("paneltoggle") as HTMLButtonElement;
 const panelClose = document.getElementById("panelclose") as HTMLButtonElement;
 const scrim = document.getElementById("scrim") as HTMLElement;
 
+// ---- the accent --------------------------------------------------------------
+// The sent bubbles' DEFAULT colour is the app's accent, and the accent is the
+// stylesheet's to declare: bubbles.css's --accent, read here from the document
+// root once at start-up. Reading it beats copying it - repaint --accent and this
+// control's default, and its reset, move with it, with no literal here to go
+// stale. tuning.ts stays pure and takes the value as an argument instead of
+// reaching for `document` itself.
+//
+// The sheet is already loaded (bubbles.css is imported at the top of this file),
+// and a value that is somehow missing or not a plain hex - no stylesheet at all,
+// a token this tool cannot read - falls back to the same colour bubbles.css
+// declares rather than to nothing.
+const ACCENT: string = ((): string => {
+  const declared = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+  return normaliseHex(declared) ?? FALLBACK_SENT;
+})();
+
 // ---- tuning ------------------------------------------------------------------
 // ONE object for the life of the page. The panel keeps a reference to it, the
 // field and the settle read it every frame, so it is written in place and never
 // replaced - a reset copies values in rather than handing out a new object.
-const tuning = defaultTuning();
+const tuning = defaultTuning(ACCENT);
 
 function applyTuning(next: Tuning): void {
   Object.assign(tuning.field, next.field);
@@ -99,7 +117,7 @@ const stored = (() => {
   }
 })();
 if (stored) {
-  const loaded = importTuning(stored);
+  const loaded = importTuning(stored, ACCENT);
   if (loaded) applyTuning(loaded);
 }
 function save(): void {
@@ -761,6 +779,7 @@ function runScript(now: number): void {
 // ---- panel -------------------------------------------------------------------
 const panel = mountControls(panelRoot, {
   tuning,
+  defaultSent: ACCENT,
   onChange: noteChange,
   onConfig: noteConfig,
   onColour: () => {
@@ -768,7 +787,9 @@ const panel = mountControls(panelRoot, {
     save();
   },
   onReset: () => {
-    applyTuning(defaultTuning());
+    // the same accent the page started with, so reset returns the bubbles to the
+    // stylesheet's colour rather than to a literal kept somewhere else
+    applyTuning(defaultTuning(ACCENT));
     panel.refresh();
     applySentColour(); // the colour resets with everything else
     noteConfig();

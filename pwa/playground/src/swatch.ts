@@ -8,10 +8,20 @@
 // rest of this tool, while controls.ts does the DOM wiring and playground.ts
 // drives the colour onto the thread. Nothing here reaches for `document`.
 
-/** the sent bubbles' colour when nothing has been chosen: the app's own accent,
-    the value bubbles.css gives --accent and, through it, --sent. A reset returns
-    here, the same way every other control resets to its build's own number. */
-export const DEFAULT_SENT = "#432bff";
+/**
+ * The sent bubbles' colour when nothing has been chosen is the app's own accent
+ * - and the accent lives in the STYLESHEET, as bubbles.css's --accent. The
+ * wiring reads the computed value at start-up and hands it in (playground.ts),
+ * so the default follows the sheet rather than a copy of it kept here: when the
+ * accent is repainted, the control's default and its reset move with it, with no
+ * second place to remember.
+ *
+ * This literal is only the stand-in for the case where there is no stylesheet to
+ * read - a node test, or a page whose CSS has not arrived - and it is kept equal
+ * to the accent bubbles.css declares so the stand-in is never a different
+ * colour.
+ */
+export const FALLBACK_SENT = "#4538ff";
 
 /** the class and the aria state that say, quietly, that the field is not yet a
     colour. tool.css paints .hexinput.bad; the attribute is for a screen reader. */
@@ -59,7 +69,7 @@ function mark(hex: HexField, bad: boolean): void {
  * into the hex field, clear any mark, and return the colour to apply.
  */
 export function syncFromPicker(picker: ValueField, hex: HexField): string {
-  const colour = normaliseHex(picker.value) ?? DEFAULT_SENT;
+  const colour = normaliseHex(picker.value) ?? FALLBACK_SENT;
   hex.value = colour;
   mark(hex, false);
   return colour;

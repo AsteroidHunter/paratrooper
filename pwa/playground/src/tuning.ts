@@ -23,7 +23,7 @@ import { defaultRippleTuning } from "./ripple";
 import type { RippleTuning } from "./ripple";
 import { CONFIGS, configFor, isConfigId } from "./presets";
 import type { ConfigId } from "./presets";
-import { DEFAULT_SENT, normaliseHex } from "./swatch";
+import { FALLBACK_SENT, normaliseHex } from "./swatch";
 
 export interface Tuning {
   /** which build, or the experiment, is on screen */
@@ -37,13 +37,23 @@ export interface Tuning {
   sent: string;
 }
 
-export function defaultTuning(): Tuning {
+/**
+ * The defaults.
+ *
+ * `accent` is the sent bubbles' default colour, and it belongs to the
+ * STYLESHEET: the wiring reads bubbles.css's --accent off the document root and
+ * passes it in (playground.ts), so repainting the accent moves this default and
+ * the reset with it. This file stays pure - it never reaches for `document` -
+ * so the argument is how the sheet's value gets here, and FALLBACK_SENT stands
+ * in for a caller with no stylesheet to read, such as a node test.
+ */
+export function defaultTuning(accent: string = FALLBACK_SENT): Tuning {
   const t: Tuning = {
     config: "travelling",
     field: defaultFieldTunables(),
     travel: defaultTravelTuning(),
     ripple: defaultRippleTuning(),
-    sent: DEFAULT_SENT,
+    sent: normaliseHex(accent) ?? FALLBACK_SENT,
   };
   loadConfigValues(t, t.config);
   return t;
@@ -260,9 +270,10 @@ export function customisedKnobs(t: Tuning): KnobKey[] {
 }
 
 /** every knob back inside its own range, and the enums back to something legal:
-    a pasted or stored tuning is not trusted */
-export function sanitise(t: Tuning): Tuning {
-  const out = defaultTuning();
+    a pasted or stored tuning is not trusted. `accent` is the stylesheet's, as in
+    defaultTuning: anything the tuning fails to supply falls back to it. */
+export function sanitise(t: Tuning, accent?: string): Tuning {
+  const out = defaultTuning(accent);
   out.config = isConfigId(t.config) ? t.config : "travelling";
   for (const k of KNOBS) {
     const v = readKnob(t, k.key);
@@ -333,8 +344,10 @@ export function exportTuning(t: Tuning): string {
   return JSON.stringify(body, null, 2);
 }
 
-/** the inverse, for the stored tuning and for anything pasted back in */
-export function importTuning(text: string): Tuning | null {
+/** the inverse, for the stored tuning and for anything pasted back in. `accent`
+    is the stylesheet's, as in defaultTuning: a stored value from before the
+    colour control existed has no colour of its own and loads as the accent. */
+export function importTuning(text: string, accent?: string): Tuning | null {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -348,7 +361,7 @@ export function importTuning(text: string): Tuning | null {
   const ripple = (o.ripple ?? {}) as Record<string, unknown>;
   const num = (v: unknown, fallback: number): number =>
     typeof v === "number" && Number.isFinite(v) ? v : fallback;
-  const base = defaultTuning();
+  const base = defaultTuning(accent);
   // v1 of this file only had `mode`, which named the two current options
   const config: ConfigId = isConfigId(o.config)
     ? o.config
@@ -357,29 +370,32 @@ export function importTuning(text: string): Tuning | null {
       : o.mode === "travel"
         ? "travelling"
         : base.config;
-  return sanitise({
-    config,
-    field: {
-      ...base.field,
-      tau: num(shared.tauMs, base.field.tau),
-      divisor: num(shared.divisorPx, base.field.divisor),
-      strain: num(shared.strainPx, base.field.strain),
+  return sanitise(
+    {
+      config,
+      field: {
+        ...base.field,
+        tau: num(shared.tauMs, base.field.tau),
+        divisor: num(shared.divisorPx, base.field.divisor),
+        strain: num(shared.strainPx, base.field.strain),
+      },
+      travel: {
+        upDelayPerPx: num(travel.upDelayPerPx, base.travel.upDelayPerPx),
+        downDelayRatio: num(travel.downDelayRatio, base.travel.downDelayRatio),
+        maxDelayMs: num(travel.maxDelayMs, base.travel.maxDelayMs),
+        origin: travel.origin === "bottom" ? "bottom" : "finger",
+        returnMs: num(travel.returnMs, base.travel.returnMs),
+        bounce: num(travel.bounce, base.travel.bounce),
+      },
+      ripple: {
+        waveMsPer100px: num(ripple.waveMsPer100px, base.ripple.waveMsPer100px),
+      },
+      // a value stored before this control existed simply has no sentBubble, and
+      // sanitise turns anything that is not a whole hex back into the accent
+      sent: typeof o.sentBubble === "string" ? o.sentBubble : base.sent,
     },
-    travel: {
-      upDelayPerPx: num(travel.upDelayPerPx, base.travel.upDelayPerPx),
-      downDelayRatio: num(travel.downDelayRatio, base.travel.downDelayRatio),
-      maxDelayMs: num(travel.maxDelayMs, base.travel.maxDelayMs),
-      origin: travel.origin === "bottom" ? "bottom" : "finger",
-      returnMs: num(travel.returnMs, base.travel.returnMs),
-      bounce: num(travel.bounce, base.travel.bounce),
-    },
-    ripple: {
-      waveMsPer100px: num(ripple.waveMsPer100px, base.ripple.waveMsPer100px),
-    },
-    // a value stored before this control existed simply has no sentBubble, and
-    // sanitise turns anything that is not a whole hex back into the default
-    sent: typeof o.sentBubble === "string" ? o.sentBubble : base.sent,
-  });
+    accent,
+  );
 }
 
 /** the picker's contents, in the order it shows them */

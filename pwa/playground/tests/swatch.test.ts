@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   BAD_CLASS,
-  DEFAULT_SENT,
+  FALLBACK_SENT,
   commitHex,
   normaliseHex,
   syncFromHexInput,
@@ -27,13 +27,15 @@ const controls = readFileSync(new URL("../src/controls.ts", import.meta.url), "u
 const wiring = readFileSync(new URL("../src/playground.ts", import.meta.url), "utf8");
 const bubbles = readFileSync(new URL("../src/bubbles.css", import.meta.url), "utf8");
 const tool = readFileSync(new URL("../src/tool.css", import.meta.url), "utf8");
+const swatch = readFileSync(new URL("../src/swatch.ts", import.meta.url), "utf8");
+const tuningSrc = readFileSync(new URL("../src/tuning.ts", import.meta.url), "utf8");
 
 describe("reading a typed hex value", () => {
   it("takes six digits, with or without the hash, in either case", () => {
-    expect(normaliseHex("#432bff")).toBe("#432bff");
-    expect(normaliseHex("432bff")).toBe("#432bff");
-    expect(normaliseHex("#432BFF")).toBe("#432bff");
-    expect(normaliseHex("432BFF")).toBe("#432bff");
+    expect(normaliseHex("#4538ff")).toBe("#4538ff");
+    expect(normaliseHex("4538ff")).toBe("#4538ff");
+    expect(normaliseHex("#4538FF")).toBe("#4538ff");
+    expect(normaliseHex("4538FF")).toBe("#4538ff");
   });
 
   it("expands three digits into six", () => {
@@ -57,7 +59,7 @@ describe("reading a typed hex value", () => {
     expect(normaliseHex("12345")).toBeNull(); // five digits
     expect(normaliseHex("1234567")).toBeNull(); // seven digits
     expect(normaliseHex("#12345g")).toBeNull(); // g is not hex
-    expect(normaliseHex("#432bff;")).toBeNull(); // a stray character
+    expect(normaliseHex("#4538ff;")).toBeNull(); // a stray character
     expect(normaliseHex("rebeccapurple")).toBeNull(); // names are not accepted
     // the property is typed string, but a stored value could be anything
     expect(normaliseHex(undefined as unknown as string)).toBeNull();
@@ -104,7 +106,7 @@ describe("the swatch, the picker and the hex field stay in step", () => {
   });
 
   it("a whole value typed into the hex field applies live and moves the picker", () => {
-    const picker = fieldStub("#432bff");
+    const picker = fieldStub("#4538ff");
     const hex = hexStub("f0a");
     const applied = syncFromHexInput(hex, picker);
     expect(applied).toBe("#ff00aa"); // the colour applied is normalised
@@ -114,11 +116,11 @@ describe("the swatch, the picker and the hex field stay in step", () => {
   });
 
   it("a part-typed value applies nothing, disturbs neither, and is marked", () => {
-    const picker = fieldStub("#432bff");
+    const picker = fieldStub("#4538ff");
     const hex = hexStub("#12");
     const applied = syncFromHexInput(hex, picker);
     expect(applied).toBeNull(); // nothing to apply
-    expect(picker.value).toBe("#432bff"); // the colour in force is untouched
+    expect(picker.value).toBe("#4538ff"); // the colour in force is untouched
     expect(hex.value).toBe("#12"); // what was typed stays for the reader to finish
     expect(hex.has(BAD_CLASS)).toBe(true);
     expect(hex.attr("aria-invalid")).toBe("true");
@@ -148,7 +150,7 @@ describe("the swatch, the picker and the hex field stay in step", () => {
   });
 
   it("a full round of typing: bad, then good, then blur, ends normalised and clean", () => {
-    const picker = fieldStub(DEFAULT_SENT);
+    const picker = fieldStub(FALLBACK_SENT);
     const hex = hexStub("");
     hex.value = "#ab";
     expect(syncFromHexInput(hex, picker)).toBeNull();
@@ -163,9 +165,18 @@ describe("the swatch, the picker and the hex field stay in step", () => {
 });
 
 describe("the colour persists and resets the way the other settings do", () => {
-  it("the default is the app's own accent", () => {
-    expect(defaultTuning().sent).toBe("#432bff");
-    expect(DEFAULT_SENT).toBe("#432bff");
+  it("the default is the accent it is handed, not a colour of its own", () => {
+    // whatever the stylesheet says --accent is, that is the default and that is
+    // what a reset restores: the literal below is only a stand-in
+    expect(defaultTuning("#4538ff").sent).toBe("#4538ff");
+    expect(defaultTuning("#ff8a00").sent).toBe("#ff8a00");
+    expect(defaultTuning("#ABC").sent).toBe("#aabbcc"); // normalised on the way in
+  });
+
+  it("falls back only when there is no stylesheet to read, and to the accent's value", () => {
+    expect(defaultTuning().sent).toBe(FALLBACK_SENT); // a node test, no DOM
+    expect(defaultTuning("not-a-colour").sent).toBe(FALLBACK_SENT);
+    expect(FALLBACK_SENT).toBe("#4538ff"); // the same colour bubbles.css declares
   });
 
   it("it rides in the same exported JSON that carries every other setting", () => {
@@ -183,15 +194,16 @@ describe("the colour persists and resets the way the other settings do", () => {
     expect((back as Tuning).sent).toBe("#12ab34");
   });
 
-  it("a stored value from before this control existed loads as the default", () => {
-    const back = importTuning('{"tool":"bubble-animation-tool","config":"live"}');
-    expect((back as Tuning).sent).toBe("#432bff");
+  it("a stored value from before this control existed loads as the accent", () => {
+    const old = '{"tool":"bubble-animation-tool","config":"live"}';
+    expect((importTuning(old, "#ff8a00") as Tuning).sent).toBe("#ff8a00");
+    expect((importTuning(old) as Tuning).sent).toBe(FALLBACK_SENT);
   });
 
-  it("a stored value is not trusted: a shorthand is expanded, junk falls to default", () => {
+  it("a stored value is not trusted: a shorthand is expanded, junk falls to the accent", () => {
     expect(sanitise({ ...defaultTuning(), sent: "#ABC" }).sent).toBe("#aabbcc");
-    expect(sanitise({ ...defaultTuning(), sent: "not-a-colour" }).sent).toBe("#432bff");
-    expect(sanitise({ ...defaultTuning(), sent: "" }).sent).toBe("#432bff");
+    expect(sanitise({ ...defaultTuning(), sent: "not-a-colour" }, "#ff8a00").sent).toBe("#ff8a00");
+    expect(sanitise({ ...defaultTuning(), sent: "" }).sent).toBe(FALLBACK_SENT);
   });
 });
 
@@ -255,5 +267,30 @@ describe("the control is built, wired and painted the tool's own way", () => {
     // and the not-accepted mark is the quiet one, not an alarm
     expect(tool).toContain(".hexinput.bad {");
     expect(tool).toContain("border-style: dashed;");
+  });
+
+  it("takes its default from the stylesheet's accent, read once at start-up", () => {
+    expect(wiring).toContain(
+      'getComputedStyle(document.documentElement).getPropertyValue("--accent")',
+    );
+    expect(wiring).toContain("normaliseHex(declared) ?? FALLBACK_SENT");
+    // the value read is what the tuning starts with, what a stored tuning with no
+    // colour of its own loads as, and what a reset restores - one value, not three
+    expect(wiring).toContain("defaultTuning(ACCENT)");
+    expect(wiring).toContain("importTuning(stored, ACCENT)");
+    expect(wiring).toContain("applyTuning(defaultTuning(ACCENT));");
+    // and the panel is told the same value rather than naming one of its own
+    expect(wiring).toContain("defaultSent: ACCENT,");
+    expect(controls).toContain("hexInput.placeholder = hooks.defaultSent;");
+    expect(controls).toContain("Reset to defaults returns it to ${hooks.defaultSent}");
+  });
+
+  it("keeps no copy of the old accent anywhere in the control", () => {
+    // the point of reading the sheet: when --accent is repainted there is no
+    // literal here to go stale. bubbles.css is the sheet itself and owns the
+    // accent's value; these modules must not hold one.
+    for (const src of [swatch, tuningSrc, controls, wiring]) {
+      expect(src).not.toContain("432bff");
+    }
   });
 });

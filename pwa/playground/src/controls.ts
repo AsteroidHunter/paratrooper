@@ -20,13 +20,18 @@ import {
 import type { Knob, Tuning } from "./tuning";
 import { CONTROLLER_ONLY, configFor, provenanceOf, sharesCodeWith } from "./presets";
 import type { ConfigId } from "./presets";
-import { BAD_CLASS, DEFAULT_SENT, commitHex, syncFromHexInput, syncFromPicker } from "./swatch";
+import { BAD_CLASS, commitHex, syncFromHexInput, syncFromPicker } from "./swatch";
 
 export type DemoKind = "up" | "down" | "catch" | "reverse";
 export type Frame = "375" | "390" | "fill";
 
 export interface ControlHooks {
   tuning: Tuning;
+  /** the sent bubbles' default colour - the stylesheet's accent, read from the
+      document root by the wiring. The panel only SAYS it (the placeholder and
+      the hint that names what reset returns to), so the one value the wiring
+      resets with is also the one the reader is told about. */
+  defaultSent: string;
   /** a knob or the wave origin moved */
   onChange(): void;
   /** the selected build changed: the wiring has to build its field */
@@ -287,7 +292,7 @@ export function mountControls(root: HTMLElement, hooks: ControlHooks): ControlPa
   hexInput.setAttribute("autocorrect", "off");
   hexInput.spellcheck = false;
   hexInput.maxLength = 7; // "#rrggbb"
-  hexInput.placeholder = DEFAULT_SENT;
+  hexInput.placeholder = hooks.defaultSent;
   swatchRow.append(swatch, colourInput, hexInput);
   colourRow.append(
     colourHead,
@@ -295,7 +300,7 @@ export function mountControls(root: HTMLElement, hooks: ControlHooks): ControlPa
     el(
       "p",
       "hint",
-      `Pick from the well, or type a hex value — three or six digits, with or without the #, either case. A part-typed or unknown value changes nothing until it is a whole colour. Reset to defaults returns it to ${DEFAULT_SENT}.`,
+      `Pick from the well, or type a hex value — three or six digits, with or without the #, either case. A part-typed or unknown value changes nothing until it is a whole colour. Reset to defaults returns it to ${hooks.defaultSent}, the app's accent.`,
     ),
   );
   colourBlock.append(colourRow);
