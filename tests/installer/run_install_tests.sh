@@ -18,12 +18,16 @@
 # (obtained) and n (stops before sign in, exit 0); step 2 offering to install a
 # missing Claude Code, with y (installed, then found) and n (stops before sign
 # in, exit 0); optional-key and skipped-key paths; cancellation; EOF at the idle
-# choice; failed Claude sign in runs setup-token once and leaks no token; a
-# pre-provision validation gate failure stopping the unnumbered section; secret
-# hiding; idempotent re-runs; partial-failure resume; create/response-lost
-# password recovery; readiness gated on BOTH the web and worker deploys plus the
-# web health check, with failed/pending worker cases. Prints PASS/FAIL per
-# scenario and exits non-zero if any fail.
+# choice; a failed Claude sign in and a Claude that hands back no token, both
+# stopping with the one sign-in-failure message, setup-token run once, no token
+# leaked; a Git-missing start-up stop whose message names no PARATROOPER_INSTALL_*
+# variable while those variables still take effect everywhere else; a pre-provision
+# validation gate failure stopping the unnumbered section; secret hiding; idempotent
+# re-runs; partial-failure resume; create/response-lost password recovery; the
+# per-resource and poll-by-poll provisioning progress kept in the install log and
+# off the screen; readiness gated on BOTH the web and worker deploys plus the web
+# health check, with failed/pending worker cases. Prints PASS/FAIL per scenario and
+# exits non-zero if any fail.
 set -u
 
 VERIFY="$(cd "$(dirname "$0")" && pwd)"
@@ -185,14 +189,19 @@ run 0 happy_off "$NEW_INPUT"; NAME=happy_off; FB=$FAILURES
 assert_contains "$OUT" "Local environment ready." $NAME "environment prepared"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "ready banner"
 assert_contains "$OUT" "https://paratrooper-web.onrender.com" $NAME "app URL"
-assert_contains "$OUT" "created web paratrooper-web" $NAME "web created"
+# The per-resource progress no longer prints on screen; it lands in the install log.
+assert_absent "$OUT" "created web paratrooper-web" $NAME "progress chatter on screen"
+assert_contains "$LOGFILE" "created web paratrooper-web" $NAME "progress kept in log"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "expected 2 services"
 [ "$APP_PASSWORD" = "$(state_env "$STATE" paratrooper-web PARATROOPER_APP_TOKEN)" ] || fail $NAME "selected password != provisioned"
 assert_absent "$OUT" "$APP_PASSWORD" $NAME "password in output"
 assert_absent "$LOGFILE" "$APP_PASSWORD" $NAME "password in log"
 [ -n "$(state_env "$STATE" paratrooper-web VAPID_PUBLIC_KEY)" ] || fail $NAME "no VAPID public key"
 [ "$(state_env "$STATE" paratrooper-web VAPID_SUBJECT)" = "https://paratrooper-web.onrender.com" ] || fail $NAME "VAPID subject not the app URL"
-assert_contains "$OUT" "already configured" $NAME "notifications message"
+# Step 4 is one line now, printed unconditionally (no keys-not-configured variant).
+assert_contains "$OUT" "Allow notifications when Paratrooper asks." $NAME "single step 4"
+assert_absent "$OUT" "already configured" $NAME "old keys-configured wording"
+assert_absent "$OUT" "were not configured this run" $NAME "keys-not-configured variant"
 VAPID_PRIV="$(state_env "$STATE" paratrooper-web VAPID_PRIVATE_KEY)"
 assert_absent "$OUT" "$CLAUDE_TOKEN" $NAME "claude token on stdout"
 assert_absent "$LOGFILE" "$CLAUDE_TOKEN" $NAME "claude token in log"
@@ -222,7 +231,7 @@ assert_contains "$OUT" "No problem" $NAME "cancel message"
 # --- 4. EOF at the idle choice cancels before provisioning ------------------
 run 0 eof_idle "y"; NAME=eof_idle; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on EOF"
-assert_contains "$OUT" "No answer received" $NAME "EOF cancel message"
+assert_contains "$OUT" "No answer, so nothing was set up" $NAME "EOF cancel message"
 [ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "provisioned despite EOF"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
@@ -231,7 +240,15 @@ run 0 claude_fail "y" MOCK_CLAUDE_FAIL=1; NAME=claude_fail; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
 [ "$(claude_calls "$STATE")" = 1 ] || fail $NAME "setup-token ran $(claude_calls "$STATE") times, expected 1"
 assert_absent "$OUT" "$CLAUDE_TOKEN" $NAME "token on stdout after failure"
+assert_contains "$OUT" "Claude Code sign in did not complete" $NAME "single sign-in failure message"
 [ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "provisioned despite auth failure"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 5b. Claude hands back no token: the SAME single sign-in failure message -
+run 0 claude_notoken "y" MOCK_CLAUDE_TOKEN=; NAME=claude_notoken; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+assert_contains "$OUT" "Claude Code sign in did not complete" $NAME "same message on the no-token path"
+[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "provisioned despite missing token"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 6. failed blueprint gate stops the unnumbered prepare section ----------
@@ -314,7 +331,8 @@ assert_absent "$OUT" "Claude Code token captured." $NAME "did not sign in after 
 # --- 14. health never ready: accurate status, non-zero exit, nothing removed
 run 0 health_timeout "$NEW_INPUT" MOCK_HEALTH_FAILS=999; NAME=health_timeout; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on health timeout"
-assert_contains "$OUT" "answered its health check" $NAME "accurate timeout status"
+assert_contains "$OUT" "Status: Everything is running, but the app has not answered yet." $NAME "accurate timeout status"
+assert_contains "$OUT" "not ready yet" $NAME "not-ready heading"
 assert_absent "$OUT" "Paratrooper is ready!" $NAME "no false success"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "resources removed on timeout"
 [ "$FAILURES" = "$FB" ] && pass $NAME
@@ -323,6 +341,7 @@ assert_absent "$OUT" "Paratrooper is ready!" $NAME "no false success"
 run 0 worker_failed "$NEW_INPUT" MOCK_DEPLOY_STATUS_WORKER=build_failed; NAME=worker_failed; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on failed worker"
 assert_absent "$OUT" "Paratrooper is ready!" $NAME "no false success"
+assert_contains "$OUT" "Part of your app did not deploy" $NAME "reworded partial-failure status"
 assert_contains "$OUT" "worker" $NAME "names the worker"
 assert_contains "$OUT" "build_failed" $NAME "names the failure"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "resources removed on worker failure"
@@ -332,7 +351,11 @@ assert_contains "$OUT" "build_failed" $NAME "names the failure"
 run 0 worker_pending "$NEW_INPUT" MOCK_DEPLOY_STATUS_WORKER=build_in_progress; NAME=worker_pending; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on pending worker"
 assert_absent "$OUT" "Paratrooper is ready!" $NAME "no false success"
-assert_contains "$OUT" "confirmed ready yet" $NAME "unconfirmed status"
+assert_contains "$OUT" "not ready yet" $NAME "unconfirmed status heading"
+assert_contains "$OUT" "did not come up in time" $NAME "reworded timeout status"
+# The poll-by-poll waiting lines are log-only now, never on screen.
+assert_absent "$OUT" "waiting for the deploy to finish" $NAME "no wait chatter on screen"
+assert_contains "$LOGFILE" "waiting for the deploy to finish" $NAME "wait chatter kept in log"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "resources removed on pending worker"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
@@ -344,7 +367,8 @@ LIVE_PW="$(state_env "$KEEP" paratrooper-web PARATROOPER_APP_TOKEN)"
 rm -f "$KEEP/api_calls.jsonl"
 run 1 rerun_second "yny"
 [ "$CODE" = 0 ] || fail $NAME "second run exit $CODE"
-assert_contains "$OUT" "reused web paratrooper-web" $NAME "web reused"
+assert_absent "$OUT" "reused web paratrooper-web" $NAME "progress chatter on screen"
+assert_contains "$LOGFILE" "reused web paratrooper-web" $NAME "web reused (in log)"
 [ "$(state_env "$KEEP" paratrooper-web PARATROOPER_APP_TOKEN)" = "$LIVE_PW" ] || fail $NAME "re-run changed the live password"
 assert_absent "$OUT" "$LIVE_PW" $NAME "existing password in output"
 assert_absent "$OUT" "App password (input hidden):" $NAME "asked for an unused password"
@@ -360,7 +384,8 @@ STORED_PW="$(state_env "$KEEP" paratrooper-web PARATROOPER_APP_TOKEN)"
 [ -n "$STORED_PW" ] || fail $NAME "web not created on the server before the lost response"
 run 1 lost_second "yny"
 [ "$CODE" = 0 ] || fail $NAME "resume run exit $CODE"
-assert_contains "$OUT" "reused web paratrooper-web" $NAME "web reused on resume"
+assert_absent "$OUT" "reused web paratrooper-web" $NAME "progress chatter on screen"
+assert_contains "$LOGFILE" "reused web paratrooper-web" $NAME "web reused on resume (in log)"
 [ "$(state_env "$KEEP" paratrooper-web PARATROOPER_APP_TOKEN)" = "$STORED_PW" ] || fail $NAME "resume changed the stored password"
 assert_absent "$OUT" "$STORED_PW" $NAME "stored password in output"
 [ "$FAILURES" = "$FB" ] && pass $NAME
@@ -369,11 +394,28 @@ assert_absent "$OUT" "$STORED_PW" $NAME "stored password in output"
 run 0 partial_fail "$NEW_INPUT" MOCK_API_FAIL_SERVICE=paratrooper-web; NAME=partial_resume; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected first run to fail"
 assert_contains "$OUT" "run ./install.sh again" $NAME "resume guidance"
+# The provisioner's own "error:" line is held off the spinner but still reaches the
+# screen on a failure, above the guidance (it is the "problem above" that is referenced).
+assert_contains "$OUT" "error:" $NAME "provisioner error line kept on screen"
 [ "$(state_count "$STATE" services)" = 1 ] || fail $NAME "worker not created before failure"
 run 1 partial_resume "$NEW_INPUT"
 [ "$CODE" = 0 ] || fail $NAME "resume run exit $CODE"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "web not created on resume"
-assert_contains "$OUT" "created web paratrooper-web" $NAME "web created on resume"
+assert_absent "$OUT" "created web paratrooper-web" $NAME "progress chatter on screen"
+assert_contains "$LOGFILE" "created web paratrooper-web" $NAME "web created on resume (in log)"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 20. Git missing at start-up: shorter message, no variable names --------
+# The repository URL/branch env vars still take effect everywhere else (every
+# scenario above relies on them); here they are cleared and Git is off PATH, so
+# the start-up resolution needs Git, cannot find it, and stops with the reworded
+# message that no longer names the PARATROOPER_INSTALL_* variables.
+run 0 git_missing "y" PATH="$NOUV_BIN" PARATROOPER_INSTALL_REPO_URL= PARATROOPER_INSTALL_BRANCH=; NAME=git_missing; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit when Git is missing"
+assert_contains "$OUT" "Paratrooper needs Git, but it is not installed." $NAME "reworded Git-missing message"
+assert_absent "$OUT" "PARATROOPER_INSTALL_REPO_URL" $NAME "no variable name in Git message"
+assert_absent "$OUT" "PARATROOPER_INSTALL_BRANCH" $NAME "no variable name in Git message"
+[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created resources despite missing Git"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- Password entry and explicit reuse regressions -------------------------
@@ -396,13 +438,13 @@ assert_contains "$OUT" "That was empty" $NAME "blank rejected"
 
 run 0 eof_password "yn"; NAME=eof_password; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected cancellation"
-assert_contains "$OUT" "No password confirmed" $NAME "EOF canceled"
+assert_contains "$OUT" "No password, so nothing was set up" $NAME "EOF canceled"
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "write before password confirmation"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 run 0 eof_confirmation "yn$APP_PASSWORD"; NAME=eof_confirmation; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected cancellation"
-assert_contains "$OUT" "No password confirmed" $NAME "EOF at confirmation canceled"
+assert_contains "$OUT" "No password, so nothing was set up" $NAME "EOF at confirmation canceled"
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "write before password confirmation"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 

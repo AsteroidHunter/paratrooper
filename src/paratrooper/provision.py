@@ -719,7 +719,7 @@ def validate_app_password(value: str) -> None:
     This remains a shared bearer credential, not a hashed-password login.
     """
     if not value:
-        raise ProvisionError("That was empty. Choose a long passphrase.")
+        raise ProvisionError("That was empty. Choose a strong passphrase.")
     if len(value) < 20:
         raise ProvisionError("Use at least 20 characters, such as several unrelated words.")
     if not all(" " <= ch <= "~" for ch in value):
@@ -961,7 +961,7 @@ def wait_until_ready(
                 status = client.latest_deploy_status(service_id) or "unknown"
             statuses[kind] = status
             if status in DEPLOY_FAILED:
-                return False, statuses, f"the {kind} service's deploy {status} ({name})"
+                return False, statuses, f"Part of your app did not deploy: {name} ({status})."
             if status not in DEPLOY_LIVE:
                 pending.append(f"{kind} {status}")
         if not pending:
@@ -971,7 +971,7 @@ def wait_until_ready(
         if attempt + 1 < tries:
             naptime(interval)
     trailing = ", ".join(f"{kind} {status}" for kind, status in statuses.items())
-    return False, statuses, f"the deploys did not all go live in time ({trailing})"
+    return False, statuses, f"Your app did not come up in time ({trailing})."
 
 
 # --- secrets on stdin ----------------------------------------------------------
@@ -1087,10 +1087,7 @@ def main(argv: list[str] | None = None) -> int:
                 # its readiness cannot be confirmed. An older live deploy must not
                 # stand in for it: stay unconfirmed.
                 report.deploys_ready = False
-                report.deploy_detail = (
-                    "the web notification-activation deploy was requested but the Render API "
-                    "returned no deploy id, so it cannot be confirmed live"
-                )
+                report.deploy_detail = "Render did not confirm the restart that turns on notifications."
             else:
                 ready, statuses, detail = wait_until_ready(
                     client, readiness_targets(report), tries=tries, interval=interval,

@@ -86,6 +86,9 @@ REPO_BRANCH="${PARATROOPER_INSTALL_BRANCH:-}"
 # The provisioner writes a small JSON report here (ids, the web address, whether
 # each resource was created). It carries no secret and is removed on exit.
 REPORT_FILE=""
+# Holds the provisioner's stderr (its "error: ..." line) while the provisioning
+# spinner animates, so a failure prints it cleanly once the spinner is erased.
+PROVISION_ERR=""
 TERMINAL_STATE=""
 PASSWORD_MODE=""
 EXISTING_WEB_ID=""
@@ -110,6 +113,7 @@ cleanup() {
 		stty "$TERMINAL_STATE" 2>/dev/null || true
 	fi
 	[ -n "$REPORT_FILE" ] && rm -f "$REPORT_FILE" 2>/dev/null
+	[ -n "$PROVISION_ERR" ] && rm -f "$PROVISION_ERR" 2>/dev/null
 	unset APP_PASSWORD CLAUDE_TOKEN RENDER_KEY provision_payload
 	return 0
 }
@@ -238,18 +242,27 @@ spinner() {
 	fi
 }
 
+# spin_pid <pid> <running-msg> - animate the active frame set while the process
+# <pid> runs, then erase the line. Unlike spinner(), it leaves no success line of
+# its own, for work whose result is printed separately (provisioning, then the
+# readiness result). No animation when stdout is redirected; the caller still
+# waits on the process for its exit status.
+spin_pid() {
+	local pid="$1" running="$2" i=0 n=${#SPIN_FRAMES[@]}
+	[ -t 1 ] || return 0
+	while kill -0 "$pid" 2>/dev/null; do
+		printf '\r%s%s%s %s' "$GREEN" "${SPIN_FRAMES[i % n]}" "$RESET" "$running"
+		i=$((i+1))
+		sleep 0.08
+	done
+	printf '\r\033[K'
+}
+
 # welcome - the ☼ note that opens the installer. No signature and no contact
 # block: it says what the app is and what it will ask, and nothing personal.
 welcome() {
 	printf '%s☼%s %sBefore we start%s\n\n' "$RESET" "$RESET" "$BOLD" "$RESET"
-	printf 'Paratrooper puts a private, phone-friendly chat with your Claude agent on\n'
-	printf 'the internet, hosted on Render. This script sets it up and links it to\n'
-	printf 'your phone.\n\n'
-	printf 'It sets up an isolated Python with uv, signs you in to Render and Claude\n'
-	printf 'Code (offering to install either tool first if it is missing), and asks\n'
-	printf 'whether the worker should sleep when idle and for an app password. Password\n'
-	printf 'typing is hidden. After that it works on its own and prints how to open the\n'
-	printf 'app on your phone.\n\n'
+	printf 'Paratrooper allows you to interact with your agent on the cloud using an iMessage-like interface on your phone. This install script sets up a basic\n\n'
 }
 
 # prompt_keypress <valid-chars> <prompt-text>
@@ -315,11 +328,7 @@ except ProvisionError as exc:
 choose_app_password() {
 	local confirmation=""
 	export -n confirmation
-	printf 'Choose a long passphrase you can remember and type on your phone.\n'
-	printf 'Use at least 20 characters, such as several unrelated words. Internal\n'
-	printf 'spaces and punctuation are welcome; use printable ASCII characters and\n'
-	printf 'leave out spaces at the beginning and end. It will never be displayed.\n'
-	printf 'Press Ctrl-C to cancel.\n\n'
+	printf 'Choose a strong password to log into your Paratrooper instance.\n\n'
 	while :; do
 		prompt_secret "App password (input hidden): " APP_PASSWORD || return 1
 		if ! check_app_password; then
@@ -448,7 +457,7 @@ ensure_uv() {
 	fi
 	if ! command -v uv >/dev/null 2>&1; then
 		err ""
-		err "⚠ Could not get uv. See $LOG for details, or install it from"
+		err "⚠ Could not download uv. See $LOG for details, or install it from"
 		err "  https://docs.astral.sh/uv/getting-started/installation/ and re-run."
 		exit 1
 	fi
@@ -492,8 +501,8 @@ obtain_render() {
 	export PATH="$CACHE/bin:$PATH"
 	if ! command -v render >/dev/null 2>&1; then
 		err ""
-		err "⚠ Could not get the Render CLI. See $LOG for details, or install it from"
-		err "  https://render.com/docs/cli and re-run."
+		err "⚠ Could not download the Render CLI. See $LOG for details, or install"
+		err "  it from https://render.com/docs/cli and re-run."
 		exit 1
 	fi
 }
@@ -568,8 +577,8 @@ ensure_claude() {
 # --- start-up --------------------------------------------------------------
 
 if [ ! -f "$BLUEPRINT" ] || [ ! -f "$REPO/pyproject.toml" ]; then
-	err "This does not look like the Paratrooper repo (no render.yaml / pyproject.toml)."
-	err "Clone the repo and run ./install.sh from inside it."
+	err "This does not look like the Paratrooper repo."
+	err "Clone it and run ./install.sh from inside it."
 	exit 1
 fi
 
@@ -588,9 +597,8 @@ fi
 if [ -z "$REPO_URL" ] || [ -z "$REPO_BRANCH" ]; then
 	if ! command -v git >/dev/null 2>&1; then
 		err ""
-		err "⚠ git is required to read this clone's repository URL, but is not on PATH."
-		err "  Install Git (https://git-scm.com/downloads) and re-run, or set"
-		err "  PARATROOPER_INSTALL_REPO_URL and PARATROOPER_INSTALL_BRANCH."
+		err "⚠ Paratrooper needs Git, but it is not installed."
+		err "  Install it from https://git-scm.com/downloads and run ./install.sh again."
 		exit 1
 	fi
 fi
@@ -605,9 +613,8 @@ if [ -z "$REPO_BRANCH" ] || [ "$REPO_BRANCH" = "HEAD" ]; then
 fi
 if [ -z "$REPO_URL" ]; then
 	err ""
-	err "⚠ Could not work out this clone's Git repository URL."
-	err "  Run the installer from a clone that has an 'origin' remote, or set"
-	err "  PARATROOPER_INSTALL_REPO_URL to the repository Render should build from."
+	err "⚠ Could not work out where this copy of Paratrooper came from."
+	err "  Run the installer from a clone of the repo, not a downloaded copy."
 	exit 1
 fi
 
@@ -615,8 +622,7 @@ fi
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
 section "0. Python"
-printf "Paratrooper's laptop tools run in an isolated environment. It is built with\n"
-printf 'uv and kept in a per-user cache, so nothing lands in your global Python.\n\n'
+printf 'Setup needs a few Python tools. It puts them in a private folder using uv, so it never touches existing Python installation you may have on your computer.\n\n'
 
 # An environment a previous run already built is reused as is: no uv, no
 # interpreter search, just the fast path. Otherwise uv provides the interpreter
@@ -639,8 +645,8 @@ else
 fi
 if ! "$PY" -c 'import paratrooper.provision, paratrooper.deploy, httpx, yaml' >>"$LOG" 2>&1; then
 	err ""
-	err "⚠ The local environment is missing Paratrooper or its dependencies."
-	err "  Remove $VENVDIR and re-run, or see $LOG for details."
+	err "⚠ The Python tools did not install properly."
+	err "  Delete $VENVDIR and re-run, or see $LOG for details."
 	exit 1
 fi
 
@@ -689,13 +695,13 @@ ensure_claude
 # Take the last non-empty line so a stray banner line cannot end up in the value.
 if ! CLAUDE_TOKEN="$(claude setup-token | awk 'NF{last=$0} END{print last}')"; then
 	err ""
-	err "⚠ \`claude setup-token\` did not complete. Try it on its own, then re-run."
+	err "⚠ Claude Code sign in did not complete. Run \`claude setup-token\` and try again."
 	exit 1
 fi
 CLAUDE_TOKEN="${CLAUDE_TOKEN//[[:space:]]/}"
 if [ -z "$CLAUDE_TOKEN" ]; then
 	err ""
-	err "⚠ No token came back from \`claude setup-token\`. Try it on its own, then re-run."
+	err "⚠ Claude Code sign in did not complete. Run \`claude setup-token\` and try again."
 	exit 1
 fi
 printf '%s✓%s Claude Code token captured.\n' "$GREEN" "$RESET"
@@ -704,9 +710,10 @@ printf '%s✓%s Claude Code token captured.\n' "$GREEN" "$RESET"
 
 SPIN_FRAMES=("${SPIN_CLASSIC[@]}")
 section "3. Idle sleeping"
-printf 'A Render worker bills whenever it is awake. Paratrooper can let the web\n'
-printf 'service suspend the worker when the queue is empty and wake it when a\n'
-printf 'message arrives, so you pay for the worker only while it is thinking.\n\n'
+printf 'Render bills you whenever the worker on the server is awake.\n'
+printf 'Paratrooper can let the web service suspend the worker and\n'
+printf 'wake it only when a new message arrives, so you pay for\n'
+printf 'the worker only while it is thinking.\n\n'
 printf '  y - yes, sleep the worker when idle (needs a Render API key)\n'
 printf '  n - no, keep the worker always on (no key needed)\n\n'
 
@@ -715,7 +722,7 @@ printf '  n - no, keep the worker always on (no key needed)\n\n'
 # anything is provisioned. An explicit "n" is the real always-on choice.
 if ! prompt_keypress "yn" "answer: "; then
 	err ""
-	err "⚠ No answer received, so nothing was created. Run ./install.sh again when ready."
+	err "⚠ No answer, so nothing was set up. Run ./install.sh again when ready."
 	exit 1
 fi
 if [ "$REPLY" = "y" ]; then
@@ -725,7 +732,7 @@ if [ "$REPLY" = "y" ]; then
 	while :; do
 		if ! prompt_secret "Render API key (input hidden): " RENDER_KEY; then
 			err ""
-			err "⚠ No key received, so nothing was created. Run ./install.sh again when ready."
+			err "⚠ No key, so nothing was set up. Run ./install.sh again when ready."
 			exit 1
 		fi
 		if [ -n "$RENDER_KEY" ]; then
@@ -749,7 +756,7 @@ REPORT_FILE="$(mktemp -t paratrooper-provision.XXXXXX)"
 if ! "$PY" -m paratrooper.provision --inspect-app \
 	--blueprint "$BLUEPRINT" --repo "$REPO_URL" --branch "$REPO_BRANCH" \
 	--report "$REPORT_FILE"; then
-	err "Could not check the existing app. No resources were created."
+	err "Could not check your existing app. Nothing was set up."
 	exit 1
 fi
 PASSWORD_MODE="$(report_field password_mode)"
@@ -757,7 +764,7 @@ EXISTING_WEB_ID="$(report_field existing_web_id)"
 case "$PASSWORD_MODE" in
 	new)
 		if ! choose_app_password; then
-			err "No password confirmed, so no resources were created. Run ./install.sh again when ready."
+			err "No password, so nothing was set up. Run ./install.sh again when ready."
 			exit 1
 		fi
 		;;
@@ -770,7 +777,7 @@ case "$PASSWORD_MODE" in
 			exit 1
 		fi
 		;;
-	*) err "Could not determine the app password step. No resources were created."; exit 1 ;;
+	*) err "Could not tell whether this is a new app or an existing one. Nothing was set up."; exit 1 ;;
 esac
 
 # Everything the install needs from you has now been collected. From here on it
@@ -780,8 +787,8 @@ esac
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
 section "Preparing your deployment"
-printf 'Writing your configuration, then validating both\n'
-printf 'the configuration and the blueprint before anything is sent to Render.\n\n'
+printf 'Writing your configuration, then validating both the config\n'
+printf 'and the blueprint before anything is sent to Render.\n\n'
 
 # The configuration: the plain profile. It is a chat with photos, web search and
 # page reading, and it needs no site, no repository and no GitHub. Every value
@@ -815,10 +822,8 @@ spinner "Validating blueprint ..." "Blueprint is valid." \
 
 SPIN_FRAMES=("${SPIN_CIRCLE[@]}")
 section "Provisioning on Render"
-printf 'Creating the Key Value store, the worker and the web service from\n'
-printf 'render.yaml, wiring their links, secrets and notification keys, then\n'
-printf 'waiting for both deploys to go live. Anything already there by name is\n'
-printf 'reused, not rebuilt.\n\n'
+printf 'Setting up your app on Render and waiting for it to go live.\n'
+printf 'This can take a few minutes. Anything already set up is reused.\n\n'
 
 # The provisioner reports here: ids, the web address, and whether each resource
 # was created this run. No secret is written to this file.
@@ -838,30 +843,45 @@ if [ "$IDLE_SLEEP" = "yes" ]; then
 RENDER_API_KEY=$RENDER_KEY"
 fi
 
-# Run it directly (not under the spinner) so its one line per resource shows as
-# it goes. Its progress and errors name resources and never a secret.
-if ! printf '%s\n' "$provision_payload" | "$PY" -m paratrooper.provision \
-	--blueprint "$BLUEPRINT" \
-	--config "$CONFIG_FILE" \
-	--repo "$REPO_URL" \
-	--branch "$REPO_BRANCH" \
-	--report "$REPORT_FILE" \
-	--password-mode "$PASSWORD_MODE" \
-	--existing-web-id "$EXISTING_WEB_ID" \
-	--wait-ready; then
+# Run the provisioner with its per-resource progress and its poll-by-poll
+# "waiting for the deploy" lines going to the log, not the screen: only the two
+# lines above, the wait spinner and the result are shown. Its own "error: ..."
+# line (stderr) is held in a file so a failure prints it cleanly once the spinner
+# is erased, above the guidance below. Secrets travel on stdin, in no argv and no
+# environment; printf is a builtin, so the payload never reaches the process table.
+run_provisioner() {
+	printf '%s\n' "$provision_payload" | "$PY" -m paratrooper.provision \
+		--blueprint "$BLUEPRINT" \
+		--config "$CONFIG_FILE" \
+		--repo "$REPO_URL" \
+		--branch "$REPO_BRANCH" \
+		--report "$REPORT_FILE" \
+		--password-mode "$PASSWORD_MODE" \
+		--existing-web-id "$EXISTING_WEB_ID" \
+		--wait-ready >>"$LOG" 2>>"$PROVISION_ERR"
+}
+PROVISION_ERR="$(mktemp -t paratrooper-provision-err.XXXXXX)"
+provision_status=0
+run_provisioner &
+provision_pid=$!
+spin_pid "$provision_pid" "Setting up your app on Render and waiting for it to go live."
+wait "$provision_pid" || provision_status=$?
+if [ "$provision_status" -ne 0 ]; then
+	if [ -s "$PROVISION_ERR" ]; then
+		cat "$PROVISION_ERR" >&2
+	fi
 	err ""
-	err "⚠ Provisioning did not finish. Whatever was created is kept and reused,"
-	err "  so once the cause above is fixed you can run ./install.sh again to"
-	err "  finish. If the app was created, its password is kept on the next run."
-	err "  Use the password you chose for that installation."
+	err "⚠ Setup did not finish. Fix the problem above and run ./install.sh again."
+	err "  Nothing is lost, and if your app was created, keep using the password"
+	err "  you chose."
 	exit 1
 fi
+cat "$PROVISION_ERR" >>"$LOG"
 
 # Release the shell's copies as soon as provisioning has consumed them.
 unset APP_PASSWORD CLAUDE_TOKEN RENDER_KEY provision_payload
 WEB_URL="$(report_field web_url)"
 DEPLOY_DETAIL="$(report_field deploy_detail)"
-VAPID_ON=no;        [ "$(report_field vapid_configured)" = "True" ] && VAPID_ON=yes
 DEPLOYS_READY=no;   [ "$(report_field deploys_ready)" = "True" ] && DEPLOYS_READY=yes
 
 # Readiness has two parts, and neither alone is enough: BOTH deploys must be live
@@ -869,15 +889,14 @@ DEPLOYS_READY=no;   [ "$(report_field deploys_ready)" = "True" ] && DEPLOYS_READ
 # signal it started), and then the web must answer its health check.
 READY=0
 STATUS=""
-printf '\n'
 if [ "$DEPLOYS_READY" = "yes" ]; then
 	if [ -n "$WEB_URL" ] && wait_for_health "$WEB_URL"; then
 		READY=1
 	else
-		STATUS="the web and worker deploys are live, but the app has not answered its health check yet"
+		STATUS="Everything is running, but the app has not answered yet."
 	fi
 else
-	STATUS="${DEPLOY_DETAIL:-the web and worker deploys are not both live yet}"
+	STATUS="${DEPLOY_DETAIL:-Your app is not running yet.}"
 fi
 
 # --- done ------------------------------------------------------------------
@@ -887,10 +906,8 @@ fi
 if [ "$READY" = 1 ]; then
 	printf '\n%s✦%s Paratrooper is ready!\n\n' "$GREEN" "$RESET"
 else
-	printf '\n%s⚠%s Your Paratrooper resources were created, but the deployment is not\n' "$BOLD" "$RESET"
-	printf '  confirmed ready yet:\n'
-	printf '    %s.\n' "$STATUS"
-	printf '  A first deploy can take several minutes. Nothing was removed.\n\n'
+	printf '\n%s⚠%s Your Paratrooper resources were created, but the deployment is not ready yet.\n' "$BOLD" "$RESET"
+	printf '\n  Status: %s\n\n' "$STATUS"
 fi
 
 # The app address is the only sign-in detail displayed, including on failure.
@@ -901,29 +918,14 @@ printf '\n'
 
 printf '%sOn your iPhone:%s\n\n' "$BOLD" "$RESET"
 printf '  %s1.%s Open the app address above in Safari.\n\n' "$BOLD" "$RESET"
-printf '  %s2.%s Add it to your Home Screen:\n\n' "$BOLD" "$RESET"
-printf '       Click the share button (the … / box-with-arrow)\n'
-printf '       Share\n'
-printf '       View more\n'
-printf '       Add to Home Screen\n'
-printf '       Add and done!\n\n'
-printf '  %s3.%s Open Paratrooper from the Home Screen and type your app password to\n' "$BOLD" "$RESET"
-printf '     sign in. The connection uses %sHTTPS%s, which the microphone and the\n' "$BOLD" "$RESET"
-printf '     Home Screen install both need.\n\n'
-if [ "$VAPID_ON" = "yes" ]; then
-	printf '  %s4.%s Allow notifications when Paratrooper asks, once it is on your Home\n' "$BOLD" "$RESET"
-	printf '     Screen (an iPhone will not notify a browser tab). The notification\n'
-	printf '     keys are already configured, so allowing them is all that is left.\n\n'
-else
-	printf '  %s4.%s Notifications work once the app is on your Home Screen. The\n' "$BOLD" "$RESET"
-	printf '     notification keys were not configured this run; set VAPID_PUBLIC_KEY,\n'
-	printf '     VAPID_PRIVATE_KEY and VAPID_SUBJECT on the web service to enable them.\n\n'
-fi
+printf '  %s2.%s Add it to your Home Screen\n\n' "$BOLD" "$RESET"
+printf '  %s3.%s Open Paratrooper from the Home Screen and sign in with your app password.\n\n' "$BOLD" "$RESET"
+printf '  %s4.%s Allow notifications when Paratrooper asks.\n\n' "$BOLD" "$RESET"
 
 # A created-but-unconfirmed deployment is an incomplete install: exit non-zero so
 # a caller can tell, after pointing the way to finish. Nothing is removed.
 if [ "$READY" != 1 ]; then
-	printf '  Give it a few minutes, then check the web and worker services in the\n'
-	printf '  Render dashboard. Run ./install.sh again to retry; nothing is created twice.\n'
+	printf '  Give it a few minutes, then check your app in the Render dashboard.\n'
+	printf '  Run ./install.sh again to retry; nothing is created twice.\n'
 	exit 1
 fi

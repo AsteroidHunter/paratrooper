@@ -508,7 +508,7 @@ def test_readiness_worker_failed_is_caught():
         os.environ.pop("MOCK_DEPLOY_STATUS_WORKER", None)
     assert ready is False
     assert statuses["worker"] == "build_failed"
-    assert "worker" in detail and "build_failed" in detail
+    assert detail == "Part of your app did not deploy: paratrooper-worker (build_failed)."
 
 
 def test_readiness_worker_pending_times_out():
@@ -523,7 +523,7 @@ def test_readiness_worker_pending_times_out():
         os.environ.pop("MOCK_DEPLOY_STATUS_WORKER", None)
     assert ready is False
     assert statuses["worker"] == "build_in_progress"
-    assert "did not all go live" in detail
+    assert "did not come up in time" in detail
 
 
 def test_activation_deploy_pending_is_not_accepted_over_older_live():
@@ -545,7 +545,7 @@ def test_activation_deploy_pending_is_not_accepted_over_older_live():
         os.environ.pop("MOCK_DEPLOY_ACTIVATION_STATUS", None)
     assert ready is False                          # not accepted despite the live listing
     assert statuses["web"] == "build_in_progress"  # the specific deploy, not the listing
-    assert "did not all go live" in detail
+    assert "did not come up in time" in detail
 
 
 def test_activation_deploy_reaching_live_succeeds():

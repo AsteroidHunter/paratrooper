@@ -206,6 +206,12 @@ def exercise():
     run.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
     output = run.finish(0)
     assert "Paratrooper is ready!" in output and "App address:" in output
+    # The per-resource progress is log-only now; the screen shows the single step 4.
+    log = (run.case / "home" / ".paratrooper-install.log").read_text()
+    assert "created web paratrooper-web" not in output, "progress chatter reached the screen"
+    assert "created web paratrooper-web" in log, "progress not kept in the log"
+    assert "Allow notifications when Paratrooper asks." in output, "single step 4 missing"
+    assert "already configured" not in output, "old keys-configured wording still shown"
     state = json.loads((run.state / "api_state.json").read_text())
     assert state["services"]["paratrooper-web"]["_envVars"]["PARATROOPER_APP_TOKEN"] == PASSWORD
     prior = state["services"]["paratrooper-web"]["_envVars"]
