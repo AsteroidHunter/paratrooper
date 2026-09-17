@@ -18,14 +18,13 @@
 // THE NUMBERS. The lead is a full second because the dots are the app saying
 // something is coming, and a second is about how long a held breath is; under
 // it the dots read as a flicker on the way to the content, over it they read
-// as a wait. The cadence is the gap between two short messages: nine tenths of
-// a second, which is long enough for each line to be read as it lands before
-// the next one arrives. It was four tenths, and at that pace the owner saw the
-// five land as one flurry rather than five messages — the run has to be read,
-// not watched, so each message gets its own beat. The close is the same beat
-// again, so the line under the messages reads as the end of the same run
-// rather than as a sixth message that came early. All three are named here and
-// nowhere else, so the pace is one number to move.
+// as a wait. The cadence is the gap between two short messages: 0.56 seconds,
+// the owner's own number. It was four tenths, and at that pace the owner saw
+// the five land as one flurry rather than five messages; then nine tenths; the
+// owner then asked for 0.56 exactly. The close is nine tenths, longer than the
+// cadence, so the line under the messages reads as the end of the run rather
+// than as a sixth message. All three are named here and nowhere else, so the
+// pace is one number to move.
 //
 // REDUCED MOTION. The app has no reduced-motion handling anywhere else, on
 // instruction (styles.css says so where the bubble entrance is declared). This
@@ -38,8 +37,8 @@
 /** the dots alone, before the first message takes their box */
 export const REVEAL_LEAD_MS = 1000;
 /** one message to the next */
-export const REVEAL_CADENCE_MS = 900;
-/** the last message to the line under the run: the cadence's own beat again */
+export const REVEAL_CADENCE_MS = 560;
+/** the last message to the line under the run: a longer beat than the cadence */
 export const REVEAL_CLOSE_MS = 900;
 
 /** which piece of the face a step is about */

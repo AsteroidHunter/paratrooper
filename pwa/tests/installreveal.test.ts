@@ -68,11 +68,10 @@ describe("the clock", () => {
       REVEAL_CADENCE_MS,
       REVEAL_CADENCE_MS,
     ]);
-    // the beat the owner asked for after seeing four tenths: nine tenths of a
-    // second between messages, so each one is read as it lands rather than
-    // the five arriving as one flurry. Pinned to the number, because the
-    // number is the complaint that was answered.
-    expect(REVEAL_CADENCE_MS).toBe(900);
+    // the owner's own number: 0.56 seconds between messages, asked for after
+    // four tenths (the five as one flurry) and then nine tenths. Pinned to the
+    // number, because the number is what was asked for.
+    expect(REVEAL_CADENCE_MS).toBe(560);
   });
 
   it("the closing line comes a beat after the last message, not with it", () => {
@@ -80,15 +79,17 @@ describe("the clock", () => {
     const last = steps.filter((s) => s.part === "message").pop()!;
     const statement = steps[steps.length - 1];
     expect(statement.at - last.at).toBe(REVEAL_CLOSE_MS);
-    // and that beat is the cadence's own, so the line reads as the end of the
-    // same run rather than as a sixth message that came early
-    expect(REVEAL_CLOSE_MS).toBe(REVEAL_CADENCE_MS);
+    // and that beat is longer than the cadence, so the line reads as the end
+    // of the run rather than as a sixth message. It stayed at nine tenths when
+    // the cadence moved to 0.56: the owner's words were about the gap between
+    // messages, not this one.
+    expect(REVEAL_CLOSE_MS).toBeGreaterThan(REVEAL_CADENCE_MS);
     expect(REVEAL_CLOSE_MS).toBe(900);
   });
 
-  it("the whole thing is in at five and a half seconds", () => {
-    // one second of dots, four gaps of the cadence, one close: 1000 + 4 * 900 + 900
-    expect(at().pop()).toBe(5500);
+  it("the whole thing is in at a little over four seconds", () => {
+    // one second of dots, four gaps of the cadence, one close: 1000 + 4 * 560 + 900
+    expect(at().pop()).toBe(4140);
     expect(at().pop()).toBe(REVEAL_LEAD_MS + (FIVE - 1) * REVEAL_CADENCE_MS + REVEAL_CLOSE_MS);
   });
 });

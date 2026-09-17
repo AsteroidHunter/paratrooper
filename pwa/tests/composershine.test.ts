@@ -348,7 +348,7 @@ describe("the gesture hook owns the glow and its origin, and forces no layout", 
     expect(main).not.toMatch(/textEl\.addEventListener\("(?:pointer|touch|mouse)/);
   });
 
-  it("ships as 0.3.161", () => {
-    expect(main).toMatch(/^const APP_VERSION = "0\.3\.161"; \/\/ \S/m);
+  it("ships as 0.3.162", () => {
+    expect(main).toMatch(/^const APP_VERSION = "0\.3\.162"; \/\/ \S/m);
   });
 });
