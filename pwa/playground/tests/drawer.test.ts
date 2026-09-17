@@ -15,6 +15,7 @@ const drawer = readFileSync(new URL("../src/drawer.ts", import.meta.url), "utf8"
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const css = readFileSync(new URL("../src/tool.css", import.meta.url), "utf8");
 const wiring = readFileSync(new URL("../src/playground.ts", import.meta.url), "utf8");
+const controls = readFileSync(new URL("../src/controls.ts", import.meta.url), "utf8");
 
 describe("the numbers the swipe is decided by", () => {
   it("are the ones the panel was designed around", () => {
@@ -153,6 +154,56 @@ describe("the layout the drawer lives in", () => {
     expect(desktop).toContain("width: 372px;");
     expect(desktop).toContain("border-left: 1px solid var(--panel-line);");
     expect(desktop).not.toContain("position: fixed");
+  });
+});
+
+describe("the live readout is docked at the panel foot, not floated over it", () => {
+  // The bug it fixes: the readout was a `position: sticky; bottom: 0` last child
+  // of the scrolling body, so as the panel scrolled it pinned itself to the
+  // bottom edge and slid up over the hint paragraphs, hiding their text behind
+  // its opaque box. The fix docks it as a row of its own in the panel's flex
+  // column, outside the one scroll, where it reserves its space and cannot move.
+  const ruleAt = (source: string, name: string): string => {
+    const start = source.indexOf(name);
+    return source.slice(start, source.indexOf("}", start) + 1);
+  };
+
+  it("is not positioned to float: no sticky, fixed or absolute, and no bottom offset", () => {
+    const readout = ruleAt(css, ".readout {");
+    expect(readout).not.toMatch(/position:\s*(sticky|fixed|absolute)/);
+    expect(readout).not.toMatch(/\bbottom:/);
+    // it holds a fixed row in the flex column instead of riding the scroll
+    expect(readout).toContain("flex: none;");
+  });
+
+  it("the panel is a flex column that does not itself scroll", () => {
+    const panel = css.slice(css.indexOf(".panel {"), css.indexOf(".panelbar {"));
+    expect(panel).toContain("display: flex;");
+    expect(panel).toContain("flex-direction: column;");
+    // a scrolling panel is what let the sticky readout ride the scroll: the body
+    // owns the only scroll now, so the panel must not carry one
+    expect(panel).not.toContain("overflow-y: auto");
+  });
+
+  it("the body is the one scroll, and it grows so the readout's space is reserved", () => {
+    const body = ruleAt(css, ".panelbody {");
+    expect(body).toContain("overflow-y: auto;");
+    expect(body).toMatch(/flex:\s*1/);
+    expect(body).toContain("min-height: 0;");
+  });
+
+  it("the readout is built into the panel, a sibling of the scrolling body not its last child", () => {
+    // controls.ts appends it to the body's parent (the panel), so it sits beside
+    // the scroll region rather than inside it where a sticky child could float
+    expect(controls).toContain("(root.parentElement ?? root).append(line)");
+  });
+
+  it("on the phone it clears the home indicator with its own margin, not a sticky offset", () => {
+    const phone = css.slice(css.indexOf("@media (max-width: 900px), (display-mode: standalone) {"));
+    const readout = ruleAt(phone, ".readout {");
+    expect(readout).toContain("env(safe-area-inset-bottom, 0px)");
+    expect(readout).toContain("margin:");
+    expect(readout).not.toContain("bottom:");
   });
 });
 

@@ -436,8 +436,15 @@ export function mountControls(root: HTMLElement, hooks: ControlHooks): ControlPa
     paint();
   }
 
+  // The live readout docks at the foot of the panel, OUTSIDE the scrolling body,
+  // so it stays in view while the thread is dragged and can never float up over
+  // the controls the way a sticky last child of the body did. It rides the
+  // panel's flex column as a row of its own; tool.css gives the body the grow
+  // and the scroll, so the body reserves the readout's space and nothing scrolls
+  // beneath it. The fallback keeps it attached even if the body is ever mounted
+  // without its panel wrapper.
   const line = el("p", "readout", "");
-  root.append(line);
+  (root.parentElement ?? root).append(line);
 
   paint();
   paintFrame("375");

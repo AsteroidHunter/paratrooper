@@ -239,8 +239,14 @@ body {
 .panel {
   flex: none;
   width: 372px;
-  overflow-y: auto;
-  padding: 18px 18px 40px;
+  /* A flex column: a scrolling body that grows to fill the height, and the live
+     readout docked as a row of its own beneath it. The panel itself does not
+     scroll, so the readout holds the foot of the column and reserves its own
+     space rather than floating over the controls as a sticky last child did. */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
   background: var(--bg);
   border-left: 1px solid var(--panel-line);
 }
@@ -276,6 +282,16 @@ body {
   border: 1px solid var(--panel-line);
   border-radius: 999px;
   cursor: pointer;
+}
+
+/* The scrolling half of the panel. It grows to fill the column and owns the only
+   scroll in the panel; the docked readout below it does not move, so the body
+   reserves that space and no control ever slides under the readout. */
+.panelbody {
+  flex: 1 1 auto;
+  min-height: 0; /* a flex child scrolls only if it may shrink below its content */
+  overflow-y: auto;
+  padding: 18px 18px 24px;
 }
 
 /* Behind the drawer and over everything else, so a finger that misses the panel
@@ -478,9 +494,11 @@ details.note li { margin-bottom: 3px; }
 }
 
 .readout {
-  position: sticky;
-  bottom: 0;
-  margin: 8px 0 0;
+  /* Docked at the foot of the panel's flex column, never positioned to float:
+     the scrolling body above reserves its space, so it can neither scroll out of
+     view while the thread is dragged nor land on top of the controls. */
+  flex: none;
+  margin: 8px 18px 18px;
   padding: 8px 10px;
   font: 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--muted);
@@ -594,11 +612,16 @@ details.note li { margin-bottom: 3px; }
       10px 16px;
   }
   .panelbody {
-    padding: 14px max(16px, env(safe-area-inset-right, 0px))
-      calc(28px + env(safe-area-inset-bottom, 0px)) 16px;
+    /* the readout is a docked row of its own now, so the body no longer reserves
+       the tall bottom band the floating readout used to need under it */
+    padding: 14px max(16px, env(safe-area-inset-right, 0px)) 16px 16px;
   }
-  /* the readout sits above the home indicator rather than under it */
-  .readout { bottom: env(safe-area-inset-bottom, 0px); }
+  /* the docked readout aligns with the body and sits above the home indicator
+     rather than under it, clearing the inset with its own bottom margin */
+  .readout {
+    margin: 8px max(16px, env(safe-area-inset-right, 0px))
+      calc(12px + env(safe-area-inset-bottom, 0px)) 16px;
+  }
 
   /* finger-sized controls. The range inputs keep their native thumb and their
      accent colour; what grows is the box the thumb is dragged inside, which is
