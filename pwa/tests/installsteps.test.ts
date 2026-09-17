@@ -4,15 +4,14 @@
 // token first. It says what the app is missing there (notifications on an
 // iPhone, and the bars the browser keeps for itself), by asking for the home
 // screen — and it asks the way the app will talk to you once you are in: five
-// messages from Paratrooper, in the chat's own received bubbles, each one
-// typed out after the chat's own dots and grown out of them the way a reply
-// arrives in the chat, with the tail under the last of them. The run is
+// messages from Paratrooper, in the chat's own received bubbles, typed out
+// after the chat's own dots, with the tail under the last of them. The run is
 // one block, as wide as its widest message, centred on the screen with every
 // bubble on the block's left edge. Under it, one sentence offers the other
-// way over three lines, and the words that take it are the link, in the app's
-// accent. That link opens the chat's own centred box, and only Yes brings the
-// passcode card back. Opened from the home screen none of that happens: the
-// passcode card IS the screen, exactly as it always was.
+// way over three lines, and the words that take it are the link.
+// That link opens the chat's own centred box, and only Yes brings the passcode
+// card back. Opened from the home screen none of that happens: the passcode
+// card IS the screen, exactly as it always was.
 //
 // Two kinds of pin below. The copy and the look are read off the source, like
 // the other presentation pins, because the words are the owner's and the
@@ -379,13 +378,7 @@ describe("the steps are messages, in the chat's own bubbles", () => {
     const row = rule(".gate .install-row");
     expect(row).toMatch(/display:\s*flex;/); // so each bubble is its own words wide
     expect(row).not.toMatch(/justify-content:|align-items:|margin-left:|margin-right:/);
-    // the gap inside one run is the column's, not a margin on each row: the
-    // morph moves a row's top margin from the dots' to the row's own, and
-    // with both of those nought there is nothing on that leg to move (the
-    // dots' nought is pinned with the dots, below)
-    expect(thread).toMatch(/gap:\s*4px;/);
-    expect(row).not.toMatch(/margin-top:/);
-    expect(sheet).not.toContain(".install-row:first-child"); // no first-row exception left over
+    expect(row).toMatch(/margin-top:\s*4px;/); // the gap inside one run
     // and the bubbles stay bubbles, sized to their words: nothing stretches
     // them to the block's width, which is the widest one's alone
     const bubble = rule(".gate .install-msg");
@@ -403,66 +396,35 @@ describe("the steps are messages, in the chat's own bubbles", () => {
     // the visibility flip and nothing else
     expect(rule(".gate .install-row")).toMatch(/display:\s*flex;/);
     expect(rule(".gate .install-row.shown")).not.toMatch(/display:/);
-    // and the message under the dots keeps its box too — visibility again,
-    // never display — so a row is the message's height with the dots in it
-    // and without, and the block is the same shape from the first frame to
-    // the last
-    expect(sheet).toMatch(/\.gate \.install-row:has\(\.typing\) \.install-msg \{ visibility: hidden; \}/);
-    expect(sheet).not.toMatch(/\.install-row:has\(\.typing\) \.install-msg \{[^}]*display/);
   });
 });
 
-describe("the dots are the chat's dots, in every message's seat in turn", () => {
-  it("ship with the card, once, wearing the thread's own typing classes", () => {
+describe("the dots are the chat's dots, in the first message's seat", () => {
+  it("ship with the card, wearing the thread's own typing classes", () => {
     expect(installMarkup).toContain(
       '<div id="install-dots" class="msg agent typing install-dots" aria-hidden="true">' +
         "<span></span><span></span><span></span></div>",
     );
-    expect(installMarkup.match(/id="install-dots"/g)).toHaveLength(1); // one element, moved
     // the same three-span box showTyping builds for the thread
     expect(main).toContain('el.className = "msg agent typing"');
   });
 
-  it("start in the first row, before the message they become", () => {
+  it("share the first row with the message they become", () => {
     const firstRow = installMarkup.slice(
       installMarkup.indexOf('<div class="install-row">'),
       installMarkup.indexOf('<div class="install-row">') + 400,
     );
     expect(firstRow.indexOf("install-dots")).toBeLessThan(firstRow.indexOf("install-msg"));
+    // and while they are in it, the message behind them is not drawn
+    expect(sheet).toMatch(/\.gate \.install-row:has\(\.typing\) \.install-msg \{ display: none; \}/);
   });
 
-  it("stand over the message's own box, on the row's top-left corner, with no gap of their own", () => {
-    // out of the flow and on the corner: the box the dots are read from at
-    // the handover is exactly the seat the message grows in, and the dots add
-    // no height to a row that is already the message's height
-    const dots = rule(".gate .install-dots");
-    expect(dots).toMatch(/position:\s*absolute;/);
-    expect(dots).toMatch(/top:\s*0;/);
-    expect(dots).toMatch(/left:\s*0;/);
-    expect(rule(".gate .install-row")).toMatch(/position:\s*relative;/); // the corner is the row's
-    // the thread's 6px is the gap to whatever the dots follow; here the gap
-    // is the column's, so theirs goes — and with the row's margin gone too
-    // the morph's margin leg has nothing to travel
-    expect(dots).toMatch(/margin-top:\s*0;/);
+  it("carry no gap of their own here: they sit where the message will sit", () => {
     // stated on this face's own class rather than on the thread's .typing:
     // that rule is the chat's and is read by name elsewhere (runs.test.ts),
-    // and the dots take this face's class only for what differs here
+    // and the dots take this face's class only for the one thing that differs
+    expect(sheet).toMatch(/\.gate \.install-dots \{ margin-top: 0; \}/);
     expect(rule(".typing")).toMatch(/margin-top:\s*6px;/); // the chat's own, untouched
-    expect(rule(".typing")).not.toMatch(/position:/);
-  });
-
-  it("go where the chat's dots go: under the last message, and become the next", () => {
-    const wiring = main.slice(main.indexOf("function playRevealStep"), main.indexOf("function revealInstallSteps"));
-    // the row a dots step names is the next message's row, and the dots are
-    // moved into it (the first time they are already there)
-    expect(wiring).toContain("const row = rows[step.index];");
-    expect(wiring).toContain("if (dots && dots.parentElement !== row) row.prepend(dots);");
-    // and at the handover only the dots in THIS row can be the seat
-    expect(wiring).toContain("const inRow = dots && dots.parentElement === row ? dots : null;");
-    // the one element is found once, by the wiring, and handed to every step
-    const arm = main.slice(main.indexOf("function revealInstallSteps"));
-    expect(arm.slice(0, arm.indexOf("\n}"))).toContain('card.querySelector<HTMLElement>(".install-dots")');
-    expect(arm.slice(0, arm.indexOf("\n}"))).toMatch(/playRevealStep\(step, rows, statement, dots\)/);
   });
 });
 
@@ -554,60 +516,10 @@ describe("the card hands itself to the reveal", () => {
     expect(main).toContain('window.matchMedia("(prefers-reduced-motion: reduce)").matches');
   });
 
-  it("every message takes the dots' box over through the chat's own morph", () => {
-    const play = main.slice(main.indexOf("function playRevealStep"), main.indexOf("function revealInstallSteps"));
-    // the one arrival, the chat's, and nothing of its own beside it
-    expect(play).toContain("runArrival(row, bubble, seat, {");
-    expect(play).toContain("dotsSeat(inRow)"); // read before anything is written
-    expect(play.indexOf("dotsSeat(inRow)")).toBeLessThan(play.indexOf("inRow?.remove()"));
-    expect(play).toContain('bubble.classList.add("arriving")');
-    // no message wears the pop: the pop is the second entrance the morph
-    // replaces, and a box that grows does not also pop
-    expect(play).not.toContain('"anim"');
-    expect(play).not.toContain("pop");
-    // and no message is singled out: the seat is whichever row the dots are in
-    expect(play).not.toMatch(/step\.index === 0/);
-    expect(play).not.toContain('getElementById("install-dots")');
-  });
-
-  it("the morph is the chat's, not a copy: one runArrival, called from two places", () => {
-    expect(main).toContain('import { arrivalOffered, arrivalShape, runArrival } from "./arrival";');
-    expect(main.match(/runArrival\(/g)).toHaveLength(2); // the thread's replies, and this face
-    expect(main).not.toMatch(/function runArrival|function installArrival|function growBubble/);
-  });
-
-  it("holds the row's box for the morph's beat, so the centred group does not walk", () => {
-    // the morph writes the bubble's height from the dots' box up to its own;
-    // a row that followed it would shrink the block and re-centre the group
-    // once per message. The row's height is read BEFORE the dots go — while
-    // the message stands in it hidden — and held for exactly the morph
-    const play = main.slice(main.indexOf("function playRevealStep"), main.indexOf("function revealInstallSteps"));
-    expect(play).toContain("const held = row.getBoundingClientRect().height;");
-    expect(play.indexOf("const held")).toBeLessThan(play.indexOf("inRow?.remove()"));
-    expect(play).toContain("row.style.minHeight = `${held}px`;");
-    expect(play.indexOf("row.style.minHeight")).toBeLessThan(play.indexOf("runArrival("));
-    // and let go of when the morph hands the bubble back, leaving no empty
-    // style attribute behind the way the morph itself leaves none
-    const done = play.slice(play.indexOf("done: () => {"));
-    expect(done).toContain('row.style.removeProperty("min-height");');
-    expect(done).toContain('if (!row.getAttribute("style")) row.removeAttribute("style");');
-    // under reduced motion there is no morph and so no hold: nothing is
-    // written when there is no seat
-    expect(play).toContain("if (!seat) return;");
-    expect(play.indexOf("if (!seat) return;")).toBeLessThan(play.indexOf("row.style.minHeight"));
-  });
-
-  it("the morph carries the message's own bold and glyph, because it carries nodes", () => {
-    // three of the five bubbles are not plain text (a bold word, a drawn
-    // symbol), and the chat's morph used to lay out and hand back a STRING;
-    // it now moves the bubble's own nodes into its layer and back, so what
-    // the box grows to show is what the bubble holds (arrival.test.ts pins
-    // the mechanics; this pins that the face relies on it)
-    const arrival = readFileSync(new URL("../src/arrival.ts", import.meta.url), "utf8");
-    expect(arrival).toContain("ink.append(...bubble.childNodes);");
-    expect(arrival).toContain("bubble.replaceChildren(...ink.childNodes);");
-    expect(arrival).not.toContain("textContent = text");
-    expect(MESSAGES.filter((m) => /<b>|\$\{[A-Z_]+_GLYPH\}/.test(m))).toHaveLength(3);
+  it("the first message takes the dots' box over through the chat's own morph", () => {
+    const wiring = main.slice(main.indexOf("function playRevealStep"));
+    expect(wiring.slice(0, wiring.indexOf("\n}"))).toContain("runArrival(");
+    expect(wiring).toContain("dotsSeat(dots)"); // read before anything is written
   });
 });
 

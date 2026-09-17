@@ -550,59 +550,46 @@ html, body {
    max-width keeps the block inside the card on a screen too narrow for the
    longest message, where that message wraps rather than the block leaking.
    text-align is set here rather than inherited away from the card: the card
-   centres its own line underneath, and the bubbles must not.
-   The 4px between two bubbles is the gap the thread gives one run (.row.cont's
-   2px margin plus the thread's own 2px gap, measured off the owner's Messages
-   thread — runs.ts holds where the figure came from), and it is the column's
-   gap rather than a margin on each row: the morph moves a row's top margin
-   from the dots' to the row's own (arrival.ts), and with both of those nought
-   there is nothing on that leg to move. */
+   centres its own line underneath, and the bubbles must not. */
 .gate .install-thread {
   display: flex;
   flex-direction: column;
-  gap: 4px;
   width: fit-content;
   max-width: 100%;
   margin: 2.5rem auto 1.75rem;
   text-align: left;
 }
-/* Hidden by VISIBILITY, not by display: every row keeps its box from the first
+/* 4px between two bubbles of one run, which is the gap the thread gives them
+   (.row.cont's 2px margin plus the thread's own 2px gap, measured off the
+   owner's Messages thread — runs.ts holds where the figure came from).
+   Hidden by VISIBILITY, not by display: every row keeps its box from the first
    frame, so the card is its final height before the first message lands and
    the group, which is centred on the screen, cannot walk up the page as the
    run arrives. main.ts adds .shown a row at a time (installreveal.ts owns the
-   clock). Positioned, because the dots sit over the row (below). */
+   clock). */
 .gate .install-row {
   display: flex;
-  position: relative;
+  margin-top: 4px;
   visibility: hidden;
 }
+.gate .install-row:first-child { margin-top: 0; }
 .gate .install-row.shown { visibility: visible; }
 /* The bubbles take the card's whole measure rather than the thread's 75%: that
    cap exists so a bubble in a chat cannot span the screen and look like a page,
    and here the card IS the measure the run was written to fit. */
 .gate .install-msg { max-width: 100%; }
-/* The dots and the message they become share one row and one seat, for every
-   message in the run: the dots come up in the row the next message will land
-   in, over that message's own box, and BECOME it (arrival.ts, the same morph
-   the chat's replies arrive with; main.ts moves the one dots element from row
-   to row). While the dots are in a row the message under them is not drawn but
-   its box stays in the layout — visibility, not display, so the row is the
-   message's height with the dots in it and without, and the block never
-   changes shape as the run arrives. The dots are taken out of the flow and
-   laid on the row's top-left corner, which is exactly where the message will
-   stand: so the dots' box, read at the handover, is the seat the message
-   grows in, and the box grows in place. Their own 6px top margin is the gap
-   to whatever they follow in a thread; here the gap is the column's, so it
-   goes. All of that is stated on a class of this face's own: the dots keep
-   the thread's three classes for their whole look and take one more for what
-   differs here. */
-.gate .install-row:has(.typing) .install-msg { visibility: hidden; }
-.gate .install-dots {
-  position: absolute;
-  top: 0;
-  left: 0;
-  margin-top: 0;
-}
+/* The dots and the first message share one row and one seat, because the dots
+   BECOME that message (arrival.ts, the same morph the chat's replies arrive
+   with). While the dots are in the row the message behind them is not drawn;
+   main.ts takes the dots out at the handover and the bubble it grows into is
+   already in their place. The dots' own 6px top margin is the gap to whatever
+   they follow in a thread, and here they follow nothing, so it goes: they
+   appear exactly where the message they turn into will sit. That gap is the
+   one thing about them this face states, so it is stated on a class of this
+   face's own: the dots keep the thread's three classes for their whole look
+   and take one more for the one difference. */
+.gate .install-row:has(.typing) .install-msg { display: none; }
+.gate .install-dots { margin-top: 0; }
 /* The two Safari symbols, drawn (main.ts SHARE_GLYPH/ADD_GLYPH hold the
    strokes and the reason they are strokes). One em square so they scale with
    the message they are read in, outlined in the bubble's own ink so they are

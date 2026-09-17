@@ -256,20 +256,6 @@ describe("the stylesheet", () => {
     expect(arrival).toContain("bubble.replaceChildren(clip, veil)");
   });
 
-  it("the box grows to show the bubble's OWN nodes, moved and moved back, never a string", () => {
-    // a chat reply is one text node and comes back as that node; the install
-    // face's steps carry a bold word and a drawn glyph through the same morph
-    // (installsteps.test.ts). Nothing is read out as text and written again,
-    // and nothing is ever parsed as markup on the way through.
-    expect(arrival).toContain("ink.append(...bubble.childNodes);");
-    expect(arrival).toContain("bubble.replaceChildren(...ink.childNodes);");
-    expect(arrival).not.toContain("ink.textContent");
-    expect(arrival).not.toContain("innerHTML");
-    expect(arrival).toMatch(/export function runArrival\(\n\s*row: HTMLElement,\n\s*bubble: HTMLElement,\n\s*seat: DotsSeat,/);
-    // the chat's call hands no text either
-    expect(fnBody("startArrival")).toContain("runArrival(row, bubble, seat, {");
-  });
-
   it("the dots' inset is stated once and read by both boxes", () => {
     expect(sheet).toContain(".typing, .msg.arriving { --dots-pad-x: 14px; --dots-pad-y: 12px; }");
     expect(sheet).toContain("padding: var(--dots-pad-y) var(--dots-pad-x)");

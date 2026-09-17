@@ -195,7 +195,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.160"; // Every set-up message now grows out of the typing dots the way a reply does, with the link under them in the app's accent
+const APP_VERSION = "0.3.161"; // The set-up messages pop in again as before, and the browser link keeps the app's accent
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
@@ -736,12 +736,11 @@ holdDiagAuth(authHeaders);
 // back, which is the whole of the memory this version has.
 //
 // And the steps are not a list any more: they are a run of messages from
-// Paratrooper, in the chat's own received bubbles, each one typed out after
-// the chat's own dots and grown out of them the way a reply is (installreveal.ts
-// holds the clock, revealInstallSteps below is the wiring). The first thing
-// this screen ever says is therefore said the way everything else it will ever
-// say is said, which is the whole argument for it — somebody who has not
-// signed in yet is being shown the app by the app.
+// Paratrooper, in the chat's own received bubbles, typed out after the chat's
+// own dots (installreveal.ts holds the clock, revealInstallSteps below is the
+// wiring). The first thing this screen ever says is therefore said the way
+// everything else it will ever say is said, which is the whole argument for
+// it — somebody who has not signed in yet is being shown the app by the app.
 
 // The two symbols Safari's own flow is read off, DRAWN rather than typed.
 //
@@ -896,41 +895,20 @@ function renderTokenGate(): void {
 // --- the install face typing itself out (the DOM half) ------------------------
 //
 // installreveal.ts holds the whole of the decision — the order, the second the
-// dots keep to themselves, the cadence between the messages, the settle and
-// the hold inside each of those beats, the beat before the line under them,
-// and the collapse when the phone asks for less motion. Nothing below decides
-// anything: it arms one timer per step and plays what it is handed.
-//
-// Every message arrives the way a reply arrives in the chat: the dots are up,
-// and the dots' box becomes the message (arrival.ts, the same runArrival the
-// thread's replies come through, not a second copy of it). There is ONE dots
-// element, the one the markup ships in the first row, and it goes where the
-// chat's dots go — under the last message — by being moved into the row the
-// next message will land in, where it stands over that message's own box until
-// the message takes it. So the dots are read from the very seat the message
-// stands in, and the box grows in place.
+// dots keep to themselves, the cadence between the messages, the beat before
+// the line under them, and the collapse when the phone asks for less motion.
+// Nothing below decides anything: it arms one timer per step and plays what it
+// is handed.
 //
 // The face ships whole and hidden rather than being built piece by piece. Every
 // row is in the markup from the first frame with its own space reserved
-// (styles.css .install-row is visibility: hidden, which keeps its box; the
-// dots are positioned over the box, not laid in it), so the card's height is
-// settled before the first message lands and the group, which is centred on
-// the screen, does not walk up the page as the run grows. The morph writes the
-// bubble's height from the dots' box up to its own, and a row that followed
-// that height down and back would shrink the block and re-centre the group
-// once per message; so for the morph's beat the row holds the box it has held
-// since the first frame, and lets go of it when the bubble is a plain bubble
-// again. The chat's thread has no such hold because it grows from the bottom
-// and is pinned there; this block is centred, and nothing on it may move but
-// the box that is growing.
+// (styles.css .install-row is visibility: hidden, which keeps its box), so the
+// card's height is settled before the first message lands and the group, which
+// is centred on the screen, does not walk up the page as the run grows. The
+// only box that changes size is the first one, and that is the morph itself.
 
 /** one step, played onto the card that is on screen */
-function playRevealStep(
-  step: RevealStep,
-  rows: HTMLElement[],
-  statement: HTMLElement,
-  dots: HTMLElement | null,
-): void {
+function playRevealStep(step: RevealStep, rows: HTMLElement[], statement: HTMLElement): void {
   if (step.part === "statement") {
     // under reduced motion the line is simply there, so the fade it would
     // otherwise ride is taken off it in the same frame it is shown
@@ -938,58 +916,44 @@ function playRevealStep(
     statement.classList.add("shown");
     return;
   }
-  const row = rows[step.index];
+  const row = rows[step.part === "dots" ? 0 : step.index];
   if (!row) return;
   if (step.part === "dots") {
-    // into the row the next message will land in — under the last landed
-    // message, as the chat's dots sit under its last bubble — and the sheet
-    // hides that message while they are in there, so showing the row shows
-    // the dots and only them. The first time they are already in it.
-    if (dots && dots.parentElement !== row) row.prepend(dots);
+    // the dots share the first message's row and the sheet hides the message
+    // while they are in it, so showing the row shows the dots and only them
     row.classList.add("shown");
     return;
   }
   const bubble = row.querySelector<HTMLElement>(".install-msg");
   if (!bubble) return;
-  const inRow = dots && dots.parentElement === row ? dots : null;
+  const dots = step.index === 0 ? document.getElementById("install-dots") : null;
   // the dots exactly as they stand, read before anything is written, because
   // the message is about to be laid out in their place
-  const seat = inRow && step.entrance === "morph" ? dotsSeat(inRow) : null;
-  // and the row's box as it has stood since the first frame, read before the
-  // dots go for the same reason
-  const held = row.getBoundingClientRect().height;
-  inRow?.remove(); // and the row's own rule stops hiding the bubble behind them
+  const seat = dots && step.entrance === "morph" ? dotsSeat(dots) : null;
+  dots?.remove(); // and the row's own rule stops hiding the bubble behind them
   row.classList.add("shown");
-  if (!seat) return; // no dots to grow out of: the message is simply there
+  if (!seat) {
+    if (step.entrance === "pop") bubble.classList.add("anim"); // the chat's entrance
+    return;
+  }
   // the chat's reply arrival, on this card: ONE box from the first dot to the
   // last word, the dots fading out inside the message as it grows (arrival.ts
-  // owns the reasoning). Nothing here scrolls, so the pin port — which exists
-  // to keep the thread on its own bottom — has nothing to do; the row's hold
-  // (above) is the one thing this face adds around the morph, and it comes
-  // off when the morph has handed the bubble back.
-  row.style.minHeight = `${held}px`;
+  // owns the reasoning). Nothing here scrolls, so both of the morph's ports —
+  // which exist to keep the thread pinned to its own bottom — have nothing to
+  // do, and the growth is the whole of it.
   bubble.classList.add("arriving");
-  runArrival(row, bubble, seat, {
-    pin: () => {},
-    done: () => {
-      row.style.removeProperty("min-height");
-      if (!row.getAttribute("style")) row.removeAttribute("style");
-    },
-  });
+  runArrival(row, bubble, bubble.textContent ?? "", seat, { pin: () => {}, done: () => {} });
 }
 
 function revealInstallSteps(card: HTMLElement): void {
   const rows = Array.from(card.querySelectorAll<HTMLElement>(".install-row"));
   const statement = card.querySelector<HTMLElement>(".install-switch");
-  // the one dots element, held here because it leaves the DOM at every
-  // handover and comes back for the next message
-  const dots = card.querySelector<HTMLElement>(".install-dots");
   if (!rows.length || !statement) return;
   // asked once, and answered by the schedule rather than re-asked per step
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   for (const step of revealSteps(rows.length, reduced)) {
     if (step.at === 0) {
-      playRevealStep(step, rows, statement, dots);
+      playRevealStep(step, rows, statement);
       continue;
     }
     setTimeout(() => {
@@ -997,7 +961,7 @@ function revealInstallSteps(card: HTMLElement): void {
       // warning box builds the passcode card over it. A step landing after
       // that has nothing to play and must not write into a card nobody is
       // looking at.
-      if (card.isConnected) playRevealStep(step, rows, statement, dots);
+      if (card.isConnected) playRevealStep(step, rows, statement);
     }, step.at);
   }
 }
@@ -4691,7 +4655,7 @@ function startArrival(wrapper: HTMLElement, seat: DotsSeat): void {
   if (!bubble || !row) return;
   fitBubblesNow(wrapper); // the seat must be final before the morph measures it
   arrival?.cancel();
-  arrival = runArrival(row, bubble, seat, {
+  arrival = runArrival(row, bubble, bubble.textContent ?? "", seat, {
     // The bottom, re-taken in the SAME frame as the height that moved it. This
     // is the whole scroll story of an arrival now: no correction, no ride, and
     // nothing left over at the end for one to do. force, because a ride here

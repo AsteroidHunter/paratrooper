@@ -150,7 +150,7 @@ export interface DotsSeat {
 
 /**
  * Grow `bubble` from the dots' box to its own, with the dots fading out inside
- * it and its content fading in.
+ * it and `text` fading in.
  *
  * The element is ALREADY the message: main.ts handed the dots' own div to
  * rowEl, so by the time this runs the box is sitting in its final seat with
@@ -161,7 +161,7 @@ export interface DotsSeat {
  * paint of the new seat is the DOTS' size and not the message's — a frame of
  * the finished box would be the pop this exists to remove.
  *
- * The content is laid out at the width it will END at, inside a clip layer the
+ * The text is laid out at the width it will END at, inside a clip layer the
  * growing box uncovers. That is what stops the words re-wrapping line by line
  * as the box widens: the wrap the reader finally reads is the only one ever
  * drawn. The clip is the layer's own, sized each frame to the box's inner
@@ -170,13 +170,6 @@ export interface DotsSeat {
  * cut it off for the whole morph. Sizing the layer, not merely clipping its
  * paint, also keeps the laid-out text from counting as the thread's
  * scrollable overflow while it is wider and taller than the box.
- *
- * The content is the bubble's OWN nodes, moved into the layer and moved back
- * at the landing, never read out as a string and written again. A chat reply
- * is one text node and comes back as that one node; the install face's steps
- * carry a bold word and a drawn glyph (main.ts renderTokenGate), and those
- * ride the morph too, because what the box grows to show is whatever the
- * bubble holds. Nothing is ever parsed as markup on the way through.
  *
  * Two tails cross inside the box as well. The dots' bubble wore Messages'
  * thought trail (two small circles under its corner; styles.css .typing) and
@@ -187,6 +180,7 @@ export interface DotsSeat {
 export function runArrival(
   row: HTMLElement,
   bubble: HTMLElement,
+  text: string,
   seat: DotsSeat,
   ports: ArrivalPorts,
 ): Arrival {
@@ -212,7 +206,7 @@ export function runArrival(
   ink.className = "arrive-ink";
   ink.style.width = `${Math.max(0, inner)}px`;
   ink.style.opacity = "0";
-  ink.append(...bubble.childNodes); // the message's own content, moved, not copied
+  ink.textContent = text;
   clip.appendChild(ink);
   const veil = document.createElement("span");
   veil.className = "arrive-dots";
@@ -245,11 +239,9 @@ export function runArrival(
     ended = true;
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
-    // handed back exactly as its renderer left it: the same nodes it held
-    // before the morph (renderAgentText's one text node, or the install face's
-    // words with their bold and their glyph), no layer, no inline geometry,
-    // nothing of the morph still on it. The fit's max-width is the
-    // stylesheet's business and stays.
+    // handed back exactly as renderAgentText would have left it: one text
+    // node, no layer, no inline geometry, nothing of the morph still on it.
+    // The fit's max-width is the stylesheet's business and stays.
     bubble.classList.remove("arriving");
     bubble.style.removeProperty("width");
     bubble.style.removeProperty("height");
@@ -261,7 +253,7 @@ export function runArrival(
     // writes its own max-width onto whatever is there
     if (!bubble.getAttribute("style")) bubble.removeAttribute("style");
     if (!row.getAttribute("style")) row.removeAttribute("style");
-    bubble.replaceChildren(...ink.childNodes);
+    bubble.textContent = text;
     ports.done();
   };
 
