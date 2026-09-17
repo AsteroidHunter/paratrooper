@@ -490,67 +490,143 @@ html, body {
 }
 
 /* --- the sign-in card's other face: the home-screen steps ------------------
-   The same card, with the steps where the box goes: same badge, same measure,
-   same centring, so the two faces are one card showing one of two things
-   rather than two screens. main.ts renderTokenGate puts this class on when the
-   app is opened in a browser tab and nothing is signed in.
+   The same card, with a conversation where the box goes: same badge, same
+   centring, so the two faces are one card showing one of two things rather
+   than two screens. main.ts renderTokenGate puts this class on when the app is
+   opened in a browser tab and nothing is signed in.
    It is painted white on purpose, and in BOTH appearances: the card is asking
    for a place on the home screen, and the flow it walks through is Safari's
    own, which is drawn on white. The ink comes with the paint, because a card
    that kept the page's own --text would be white letters on a white sheet the
    moment the phone is in dark mode. Rather than restate the badge's rules for
-   this face, the card declares the two colour tokens the light appearance
-   already resolves to and lets them inherit: --text is what the card and the
-   title write in, --muted is what the version line under the name is faded to,
-   and neither declaration can be seen by anything outside this card, because a
-   custom property only ever travels downwards. So the face is exactly the card
-   a light phone already shows, and there is no second copy of the badge's
+   this face, the card declares the colour tokens the light appearance already
+   resolves to and lets them inherit: --text is what the card writes in,
+   --muted is what the version line under the name is faded to, and the
+   received pair is what the bubbles below are painted and written with — the
+   same two names the thread's own agent bubbles read, so this face borrows the
+   chat's rule instead of copying its paint into a second rule. None of those
+   declarations can be seen by anything outside this card, because a custom
+   property only ever travels downwards. So the face is exactly the card a
+   light phone already shows, and there is no second copy of the badge's
    colours anywhere. The radius is what turns a white block on a black canvas
-   into a sheet; on white it is invisible and costs nothing. */
+   into a sheet; on white it is invisible and costs nothing.
+   The face is wider and less inset than the passcode card, because what it
+   holds is bubbles rather than one field: the run has to sit on five single
+   lines at a phone's width, and the padding is the margin Messages itself
+   keeps beside a bubble.
+   And it rides a little high. The card is centred in the LARGE viewport, which
+   is the whole screen including the strip Safari's own bottom bar is drawn
+   over, so a card centred there sits low behind that bar by about half its
+   height. This is that half, taken back — it is why the group reads as upper
+   middle with the bar's room left under it, and it is a relative offset rather
+   than a transform because the keyboard lift owns this card's transform. */
 .gate.install {
   --text: #000000;
   --muted: #8e8e93;
+  --received: #eaeaeb;
+  --received-text: #111111;
+  /* the one colour on this face that is nobody else's: the link, in iOS's own
+     link blue rather than the app's accent, which is the sent bubble's violet
+     and would read as a button here */
+  --install-link: #1b96fe;
   background: #ffffff;
   color: var(--text);
   border-radius: 20px;
+  max-width: 24rem;
+  padding: 2rem 1rem;
+  top: -2.5rem;
 }
-/* The one sentence this face says, in the voice the other face asks its
-   question in: the ask's own type, inherited from .gate p above, so the card
-   speaks the same way whichever thing it is showing. Only the gaps are its
-   own, and they are the pair rule read the other way round: the sentence still
-   breaks from the badge, and it sits a clear step above the steps, because
-   what follows it is a list rather than the single field it introduces. */
-.gate .install-title {
-  margin: 2.5rem 0 1.25rem;
-}
-/* The five steps, numbered, because the order IS the instruction. The block is
-   seated by the card's own centring (auto margins on a max-content box) while
-   the lines inside it stay left aligned to each other, so the eye runs down one
-   column of numbers instead of down a ragged middle. The markers sit inside the
-   content box, which is what lets the block be exactly as wide as its longest
-   line and still be centred; markers outside would hang into the card's padding
-   and pull the whole list off centre. */
-.gate .install-steps {
-  width: max-content;
-  max-width: 100%;
-  margin: 0 auto 1.75rem;
-  padding: 0;
-  list-style: decimal inside;
+/* The run itself: one column of received bubbles, left aligned to each other
+   and to the card's own text edge, which is what makes it read as messages
+   rather than as a list that happens to be in boxes. The column is the card's
+   full measure and every row is a flex line, so each bubble is as wide as its
+   own words (a flex item shrinks to fit) and no wider — the shape of a real
+   thread, where the column is the screen and the bubbles are whatever length
+   they are. text-align is set here rather than inherited away from the card:
+   the card centres its own line underneath, and the bubbles must not. */
+.gate .install-thread {
+  display: flex;
+  flex-direction: column;
+  margin: 2.5rem 0 1.75rem;
   text-align: left;
 }
-.gate .install-steps li {
-  margin: 0.4rem 0;
+/* 4px between two bubbles of one run, which is the gap the thread gives them
+   (.row.cont's 2px margin plus the thread's own 2px gap, measured off the
+   owner's Messages thread — runs.ts holds where the figure came from).
+   Hidden by VISIBILITY, not by display: every row keeps its box from the first
+   frame, so the card is its final height before the first message lands and
+   the group, which is centred on the screen, cannot walk up the page as the
+   run arrives. main.ts adds .shown a row at a time (installreveal.ts owns the
+   clock). */
+.gate .install-row {
+  display: flex;
+  margin-top: 4px;
+  visibility: hidden;
 }
-/* The other way out of this card, said quietly. The card is asking for the home
-   screen, so the browser is not what it is offering: this is the app's accent
-   as a plain text button, the way iOS writes the answer it is not asking for,
-   rather than the filled pill Connect wears on the other face. It is the same
-   pill rule underneath and only re-paints it, so the shape, the padding and the
-   dim under a finger are the ones the card already had. */
-.gate button.gate-quiet {
-  background: none;
-  color: var(--accent);
-  font-weight: 500;
+.gate .install-row:first-child { margin-top: 0; }
+.gate .install-row.shown { visibility: visible; }
+/* The bubbles take the card's whole measure rather than the thread's 75%: that
+   cap exists so a bubble in a chat cannot span the screen and look like a page,
+   and here the card IS the measure the run was written to fit. */
+.gate .install-msg { max-width: 100%; }
+/* The dots and the first message share one row and one seat, because the dots
+   BECOME that message (arrival.ts, the same morph the chat's replies arrive
+   with). While the dots are in the row the message behind them is not drawn;
+   main.ts takes the dots out at the handover and the bubble it grows into is
+   already in their place. The dots' own 6px top margin is the gap to whatever
+   they follow in a thread, and here they follow nothing, so it goes: they
+   appear exactly where the message they turn into will sit. That gap is the
+   one thing about them this face states, so it is stated on a class of this
+   face's own: the dots keep the thread's three classes for their whole look
+   and take one more for the one difference. */
+.gate .install-row:has(.typing) .install-msg { display: none; }
+.gate .install-dots { margin-top: 0; }
+/* The two Safari symbols, drawn (main.ts SHARE_GLYPH/ADD_GLYPH hold the
+   strokes and the reason they are strokes). One em square so they scale with
+   the message they are read in, outlined in the bubble's own ink so they are
+   right in either appearance, and dropped a fraction below the baseline, which
+   is where iOS seats them beside a line of text. The weight is stated in the
+   20-unit space the paths are drawn in, so it is one figure for both. */
+.gate .install-glyph {
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.14em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* The other way out of this card, said once, in the card's own voice and at a
+   size that is plainly an aside to the run above it. It is centred under the
+   column and balanced: text-wrap: balance spreads the words evenly over the
+   lines it takes rather than filling the first and orphaning the rest, and the
+   measure is set so that at a phone's width those lines are two — the sentence
+   is one breath, and three ragged lines read as a paragraph. A browser without
+   balance still wraps it, at the same measure, to the same two lines.
+   It ships faded out and comes in last (main.ts), which is the only motion on
+   it; under reduced motion .instant takes even that away. */
+.gate .install-switch {
+  max-width: 19.5rem;
+  margin: 0 auto;
+  font-size: 0.85rem;
+  font-weight: 400;
+  line-height: 1.4;
+  text-wrap: balance;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.gate .install-switch.shown { opacity: 1; }
+.gate .install-switch.instant { transition: none; }
+/* The link inside that sentence. An anchor rather than a button: WebKit draws
+   a button as one atomic inline box, so a button could not break across the
+   two lines the sentence is balanced onto, and half the link is on each line.
+   It carries no underline because the colour is the affordance here, the way
+   iOS writes a link in running text. */
+.gate .install-link {
+  color: var(--install-link);
+  text-decoration: none;
+  cursor: pointer;
 }
 
 /* --- nav bar (frosted, centered title, hairline) --- */

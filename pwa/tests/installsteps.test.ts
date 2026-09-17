@@ -3,8 +3,11 @@
 // Opened in a browser tab with nothing signed in, the card no longer asks for a
 // token first. It says what the app is missing there (notifications on an
 // iPhone, and the bars the browser keeps for itself), by asking for the home
-// screen: the title, the five steps, and one quiet button for the other way.
-// The button opens the chat's own centred box, and only Yes brings the passcode
+// screen — and it asks the way the app will talk to you once you are in: five
+// messages from Paratrooper, in the chat's own received bubbles, typed out
+// after the chat's own dots, with the tail under the last of them. Under the
+// run, one line offers the other way, and the words that take it are the link.
+// That link opens the chat's own centred box, and only Yes brings the passcode
 // card back. Opened from the home screen none of that happens: the passcode
 // card IS the screen, exactly as it always was.
 //
@@ -16,6 +19,9 @@
 // leaves the steps up" and "Yes builds the working passcode card" are claims
 // about what the code does rather than about what it looks like it does. The
 // controller the rebuilt card is wired to is the real one out of tokengate.ts.
+// The reveal's own clock is not pinned here at all — it is arithmetic and it is
+// pinned as arithmetic, in installreveal.test.ts; this file pins that the card
+// hands itself to it.
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -34,41 +40,82 @@ const gate = /function renderTokenGate\(\)[\s\S]*?\n\}/.exec(main)?.[0] ?? "";
 /** The card's markup on the browser face: everything the else-branch writes. */
 const installMarkup = gate.slice(gate.lastIndexOf("app.innerHTML = `"));
 
-/** The steps, in the order the card lists them. */
-const STEPS = ["Click …", "Share", "View more", "Add to Home Screen", "Add and done!"];
-const TITLE = "Paratrooper feels better as an app on the home screen.";
-const BUTTON = "Use it in the browser instead";
+/** The two drawn symbols, as main.ts declares them. */
+const glyphSource = /const SHARE_GLYPH =[\s\S]*?;\nconst ADD_GLYPH =[\s\S]*?;\n/.exec(main)?.[0] ?? "";
+const SHARE_SRC = /const SHARE_GLYPH =([\s\S]*?);\n/.exec(glyphSource)?.[1] ?? "";
+const ADD_SRC = /const ADD_GLYPH =([\s\S]*?);\n/.exec(glyphSource)?.[1] ?? "";
+
+/** The run, as the card sends it: the bubbles' own markup, in order. */
+const MESSAGES = [
+  "1. Tap ••• in Safari's toolbar",
+  "2. Click <b>Share</b> ${SHARE_GLYPH}",
+  "3. Open <b>View More</b>",
+  "4. Tap <b>Add to Home Screen</b> ${ADD_GLYPH}",
+  "Once added, use it like a regular app!",
+];
+/** the line under the run: the plain half, and the half that is the link */
+const ASIDE = "Or, if you prefer an inferior interface, ";
+const LINK = "click here to use it within this browser's tab window";
 const WARNING =
   "In a browser you get no notifications on an iPhone, and the browser's bars " +
   "take part of the screen. Still want to proceed?";
+/** the sentence the face used to open with, and no longer says at all */
+const OLD_TITLE = "Paratrooper feels better as an app on the home screen.";
+
+/** every bubble in the run, as it is written: the class list and the contents */
+const bubbles = [...installMarkup.matchAll(/<div class="(msg agent install-msg[^"]*)">([\s\S]*?)<\/div>/g)];
 
 // --- the words ----------------------------------------------------------------
 
 describe("the card says what it was given to say", () => {
-  it("leads with the title, under the badge it already had", () => {
+  it("opens on the badge and goes straight into the run: no sentence between", () => {
     expect(gate, "renderTokenGate not found").not.toBe("");
-    expect(installMarkup).toContain(`<p class="install-title">${TITLE}</p>`);
     // the badge is above it: the head is written once and both faces open with
     // it, so the version is on screen on this face too
     expect(gate.match(/\$\{head\}/g), "both faces render the one head").toHaveLength(2);
-    expect(gate.indexOf("${head}")).toBeLessThan(gate.indexOf(TITLE));
+    expect(gate.indexOf("${head}")).toBeLessThan(gate.indexOf(MESSAGES[0]));
+    // and the line the face used to lead with is gone, with the list it led
+    expect(main).not.toContain(OLD_TITLE);
+    expect(main).not.toContain("install-title");
+    expect(installMarkup).not.toMatch(/<\/?(?:ol|ul|li)\b/);
   });
 
-  it("lists the five steps, in the order they are done in", () => {
-    const items = [...installMarkup.matchAll(/<li>([^<]*)<\/li>/g)].map((m) => m[1]);
-    expect(items).toEqual(STEPS);
-    // the first step is the button Safari draws, which is one character and not
+  it("sends the five messages, in the order the steps are done in", () => {
+    expect(bubbles.map((b) => b[2])).toEqual(MESSAGES);
+    // the first step is the button Safari draws, which is three bullets and not
     // three full stops: a typed-out "..." would be a different glyph on screen
-    expect(items[0]).toContain("…");
+    expect(MESSAGES[0]).toContain("•••");
     expect(installMarkup).not.toContain("...");
+    // Click, not Choose: it is what Safari's own menu says
+    expect(MESSAGES[1]).toContain("Click");
+    expect(installMarkup).not.toContain("Choose");
   });
 
-  it("offers the other way in one button, and says it is the other way", () => {
-    expect(installMarkup).toContain(`>${BUTTON}</button>`);
-    const labels = [...installMarkup.matchAll(/<button[^>]*>([^<]+)<\/button>/g)].map((m) =>
-      m[1].trim(),
+  it("emphasises the four words Safari itself shows, and nothing else", () => {
+    const bold = [...installMarkup.matchAll(/<b>([^<]+)<\/b>/g)].map((m) => m[1]);
+    expect(bold).toEqual(["Share", "View More", "Add to Home Screen"]);
+  });
+
+  it("closes with a line that is not a step, so it is not numbered", () => {
+    const numbered = MESSAGES.filter((m) => /^\d\. /.test(m));
+    expect(numbered).toHaveLength(4); // the four things to do
+    expect(MESSAGES[4]).toBe("Once added, use it like a regular app!");
+    expect(MESSAGES[4]).not.toMatch(/^\d/);
+    // and the step the reference had in its place is gone
+    expect(main).not.toContain("Finish with");
+  });
+
+  it("offers the other way in one line, with the words that take it as the link", () => {
+    expect(installMarkup).toContain(
+      `<p class="install-switch">${ASIDE}` +
+        `<a id="use-browser" class="install-link" role="button" href="#">${LINK}</a></p>`,
     );
-    expect(labels).toEqual([BUTTON, "No", "Yes"]); // the card's button, then the box's two
+    // the aside is said once, and the two halves are one sentence
+    expect(installMarkup.match(/install-switch/g)).toHaveLength(1);
+    // the quiet pill this replaced is gone, and so is its rule
+    expect(main).not.toContain("gate-quiet");
+    expect(css).not.toContain("gate-quiet");
+    expect(installMarkup).not.toContain("Use it in the browser instead");
   });
 
   it("warns before it takes it, in the box's one sentence and two answers", () => {
@@ -77,11 +124,64 @@ describe("the card says what it was given to say", () => {
     // asking about: the same way round as Cancel beside Log Out
     expect(installMarkup).toContain('id="browser-warn-no" class="alert-quiet">No<');
     expect(installMarkup).toContain('id="browser-warn-yes" class="alert-action">Yes<');
+    // and they are the only buttons on this face now
+    const labels = [...installMarkup.matchAll(/<button[^>]*>([^<]+)<\/button>/g)].map((m) =>
+      m[1].trim(),
+    );
+    expect(labels).toEqual(["No", "Yes"]);
   });
 
   it("says nothing about a gif, a video or a picture of any of it", () => {
-    // the steps are words for this version, by instruction
+    // the steps are words and two drawn symbols, by instruction
     expect(installMarkup).not.toMatch(/<(?:img|video|source|canvas)\b/);
+  });
+});
+
+// --- the two symbols ----------------------------------------------------------
+
+describe("Safari's two symbols are drawn, not typed", () => {
+  it("both are inline strokes in a 20-unit square, sized to the text", () => {
+    for (const src of [SHARE_SRC, ADD_SRC]) {
+      expect(src, "a glyph constant is missing").not.toBe("");
+      expect(src).toContain('<svg class="install-glyph"');
+      expect(src).toContain('viewBox="0 0 20 20"');
+      expect(src).toContain('aria-hidden="true"'); // the word beside it is the label
+      expect(src).toContain("</svg>");
+    }
+    const glyph = rule(".gate .install-glyph");
+    expect(glyph).toMatch(/width:\s*1em;/); // one em, so it grows with the message
+    expect(glyph).toMatch(/height:\s*1em;/);
+    expect(glyph).toMatch(/vertical-align:/); // and seated on the line, not floating
+    expect(glyph).toMatch(/stroke:\s*currentColor;/); // the bubble's own ink
+  });
+
+  it("the share symbol is a tray with an arrow going up out of it", () => {
+    expect(SHARE_SRC).toContain('<path d="M6.6 8.2H4.6a2.1 2.1 0 0 0-2.1 2.1'); // the open tray
+    expect(SHARE_SRC).toContain('<path d="M10 12.6V2.3"/>'); // the shaft, upward
+    expect(SHARE_SRC).toContain('d="m6.7 5.5 3.3-3.3 3.3 3.3"'); // the head on top of it
+  });
+
+  it("the add symbol is a plus inside a rounded square", () => {
+    expect(ADD_SRC).toContain('<rect x="2.5" y="2.5" width="15" height="15" rx="3.6"/>');
+    expect(ADD_SRC).toContain('d="M10 6.3v7.4"'); // the upright
+    expect(ADD_SRC).toContain('d="M6.3 10h7.4"'); // the crossbar
+  });
+
+  it("neither reaches for a font, a file or a colour of its own", () => {
+    for (const src of [SHARE_SRC, ADD_SRC]) {
+      expect(src).not.toContain("url("); // nothing is fetched to draw the card
+      expect(src).not.toMatch(/<(?:image|text|use)\b/); // no font, no bitmap
+      expect(src).not.toMatch(/#[0-9a-fA-F]{3,8}|rgb\(/); // no paint of its own
+    }
+    // and the two are not Unicode lookalikes smuggled in beside the drawing
+    expect(installMarkup).not.toMatch(/[↩↪⊞⬆]/);
+  });
+
+  it("each sits in the message whose step it belongs to", () => {
+    expect(MESSAGES[1]).toContain("${SHARE_GLYPH}");
+    expect(MESSAGES[3]).toContain("${ADD_GLYPH}");
+    expect(installMarkup.match(/\$\{SHARE_GLYPH\}/g)).toHaveLength(1);
+    expect(installMarkup.match(/\$\{ADD_GLYPH\}/g)).toHaveLength(1);
   });
 });
 
@@ -112,6 +212,13 @@ describe("the warning is the chat's centred box, wearing other words", () => {
     expect(wiring.match(/hideAlert\(warn/g)).toHaveLength(3);
     expect(wiring).not.toMatch(/warn\.classList/); // no second mechanism
     expect(wiring).toContain("hideAlert(warn, askForToken)");
+  });
+
+  it("the link that opens it refuses its own navigation first", () => {
+    // an anchor, because a button cannot break across the sentence's two lines
+    // in WebKit; so the one thing it must not do is follow itself
+    const wiring = gate.slice(gate.indexOf('getElementById("use-browser")'));
+    expect(wiring.slice(0, wiring.indexOf("});"))).toContain("event.preventDefault()");
   });
 
   it("sits outside the card, because the card holds a layer of its own", () => {
@@ -161,21 +268,21 @@ describe("home screen or browser tab is one question with one answer", () => {
 
 // --- the look -----------------------------------------------------------------
 
-describe("the install face is a white sheet, in both appearances", () => {
-  /** One rule's body, by its whole selector. */
-  function rule(selector: string): string {
-    const m = new RegExp(`(?:^|\\})\\s*${selector.replace(/\./g, "\\.")} \\{([^}]*)\\}`).exec(
-      sheet,
-    );
-    expect(m, `missing rule ${selector}`).not.toBeNull();
-    return m![1];
-  }
+/** One rule's body, by its whole selector. */
+function rule(selector: string): string {
+  const m = new RegExp(
+    `(?:^|\\})\\s*${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{([^}]*)\\}`,
+  ).exec(sheet);
+  expect(m, `missing rule ${selector}`).not.toBeNull();
+  return m![1];
+}
 
+describe("the install face is a white sheet, in both appearances", () => {
   it("is white, and carries the ink that keeps it readable", () => {
     const face = rule(".gate.install");
     expect(face).toMatch(/background:\s*#ffffff;/);
     // a card that kept the page's --text would be white on white in dark mode,
-    // so the face declares the two colours it needs and they inherit downwards
+    // so the face declares the colours it needs and they inherit downwards
     expect(face).toMatch(/--text:\s*#000000;/);
     expect(face).toMatch(/--muted:\s*#8e8e93;/);
     expect(face).toMatch(/color:\s*var\(--text\);/);
@@ -185,7 +292,16 @@ describe("the install face is a white sheet, in both appearances", () => {
     // nothing this face is made of may be re-stated inside an appearance block:
     // white was asked for, and white is what both appearances get
     expect(sheet).toContain("@media (prefers-color-scheme: dark)"); // the guard bites
-    for (const selector of [".gate.install", ".install-steps", ".gate-quiet"]) {
+    for (const selector of [
+      ".gate.install",
+      ".install-thread",
+      ".install-row",
+      ".install-dots",
+      ".install-msg",
+      ".install-glyph",
+      ".install-switch",
+      ".install-link",
+    ]) {
       const spots = [...sheet.matchAll(new RegExp(selector.replace(/\./g, "\\."), "g"))];
       expect(spots.length, `${selector} is not in the sheet at all`).toBeGreaterThan(0);
       for (const spot of spots) {
@@ -197,21 +313,146 @@ describe("the install face is a white sheet, in both appearances", () => {
     }
   });
 
-  it("puts the steps in a numbered list the card seats as one block", () => {
-    const steps = rule(".gate .install-steps");
-    expect(steps).toMatch(/list-style:\s*decimal inside;/); // the order, shown
-    expect(steps).toMatch(/text-align:\s*left;/); // the lines, aligned to each other
-    expect(steps).toMatch(/margin:\s*0 auto/); // the block, centred by the card
-    expect(steps).toMatch(/width:\s*max-content;/);
-    expect(installMarkup).toContain('<ol class="install-steps">'); // ordered, in the markup too
+  it("sits in the upper middle, with the room Safari's bar takes left under it", () => {
+    // the card is centred in the large viewport, which includes the strip the
+    // browser draws its bottom bar over; this is the half of that strip taken
+    // back, and it is an offset rather than a transform because the keyboard
+    // lift owns this card's transform
+    expect(rule(".gate.install")).toMatch(/top:\s*-[\d.]+rem;/);
+    expect(rule(".gate.install")).not.toMatch(/transform:/);
+  });
+});
+
+describe("the steps are messages, in the chat's own bubbles", () => {
+  it("every one is an agent bubble, and the last one alone carries the tail", () => {
+    expect(bubbles).toHaveLength(5);
+    expect(bubbles.map((b) => b[1])).toEqual([
+      "msg agent install-msg",
+      "msg agent install-msg",
+      "msg agent install-msg",
+      "msg agent install-msg",
+      "msg agent install-msg tail", // the run's last bubble, and the only hook
+    ]);
+    // and the tail is the chat's own: the mask hung under the run's last
+    // bubble, painted with the bubble's fill (styles.css .msg.tail::after)
+    expect(sheet).toMatch(/\.msg\.tail:not\(:has\(img\.waiting\)\)::after \{/);
   });
 
-  it("says the other way quietly: the accent, not the pill Connect wears", () => {
-    const quiet = rule(".gate button.gate-quiet");
-    expect(quiet).toMatch(/background:\s*none;/);
-    expect(quiet).toMatch(/color:\s*var\(--accent\);/);
-    expect(quiet).not.toMatch(/#[0-9a-fA-F]{3,8}|rgb\(|hsl\(/); // no colour of its own
-    expect(installMarkup).toContain('id="use-browser" class="gate-quiet"');
+  it("takes its shape and its paint from the thread rather than restating them", () => {
+    const face = rule(".gate.install");
+    // the fill the owner asked for and the ink on it, declared as the SAME two
+    // names the thread's agent bubbles read, so .msg.agent dresses these too
+    expect(face).toMatch(/--received:\s*#eaeaeb;/);
+    expect(face).toMatch(/--received-text:\s*#111111;/);
+    expect(rule(".gate .install-msg")).toMatch(/max-width:\s*100%;/);
+    // nothing on this face restates the bubble itself
+    const block = sheet.slice(sheet.indexOf(".gate.install {"), sheet.indexOf(".bar {"));
+    expect(block).not.toMatch(/border-radius:\s*18px/);
+    expect(block).not.toMatch(/font-size:\s*17px/);
+    expect(block).not.toMatch(/\.install-msg[^{]*\{[^}]*padding/);
+  });
+
+  it("stacks them in one left-aligned column, left-aligned inside it too", () => {
+    const thread = rule(".gate .install-thread");
+    expect(thread).toMatch(/display:\s*flex;/);
+    expect(thread).toMatch(/flex-direction:\s*column;/);
+    expect(thread).toMatch(/text-align:\s*left;/); // the words, against the card's centring
+    const row = rule(".gate .install-row");
+    expect(row).toMatch(/display:\s*flex;/); // so each bubble is its own words wide
+    expect(row).toMatch(/margin-top:\s*4px;/); // the gap inside one run
+    expect(installMarkup.match(/class="install-row"/g)).toHaveLength(5);
+  });
+
+  it("holds every row's space from the first frame, so the group cannot walk", () => {
+    // visibility, not display: a hidden row keeps its box, so the card is its
+    // final height before the first message lands and the centred group stays
+    // where it is while the run arrives
+    expect(rule(".gate .install-row")).toMatch(/visibility:\s*hidden;/);
+    expect(rule(".gate .install-row.shown")).toMatch(/visibility:\s*visible;/);
+    // the row's own box is never taken out of the layout, and showing one is
+    // the visibility flip and nothing else
+    expect(rule(".gate .install-row")).toMatch(/display:\s*flex;/);
+    expect(rule(".gate .install-row.shown")).not.toMatch(/display:/);
+  });
+});
+
+describe("the dots are the chat's dots, in the first message's seat", () => {
+  it("ship with the card, wearing the thread's own typing classes", () => {
+    expect(installMarkup).toContain(
+      '<div id="install-dots" class="msg agent typing install-dots" aria-hidden="true">' +
+        "<span></span><span></span><span></span></div>",
+    );
+    // the same three-span box showTyping builds for the thread
+    expect(main).toContain('el.className = "msg agent typing"');
+  });
+
+  it("share the first row with the message they become", () => {
+    const firstRow = installMarkup.slice(
+      installMarkup.indexOf('<div class="install-row">'),
+      installMarkup.indexOf('<div class="install-row">') + 400,
+    );
+    expect(firstRow.indexOf("install-dots")).toBeLessThan(firstRow.indexOf("install-msg"));
+    // and while they are in it, the message behind them is not drawn
+    expect(sheet).toMatch(/\.gate \.install-row:has\(\.typing\) \.install-msg \{ display: none; \}/);
+  });
+
+  it("carry no gap of their own here: they sit where the message will sit", () => {
+    // stated on this face's own class rather than on the thread's .typing:
+    // that rule is the chat's and is read by name elsewhere (runs.test.ts),
+    // and the dots take this face's class only for the one thing that differs
+    expect(sheet).toMatch(/\.gate \.install-dots \{ margin-top: 0; \}/);
+    expect(rule(".typing")).toMatch(/margin-top:\s*6px;/); // the chat's own, untouched
+  });
+});
+
+describe("the line under the run, and the link inside it", () => {
+  it("is balanced onto two lines at a phone's width, and centred under the column", () => {
+    const line = rule(".gate .install-switch");
+    expect(line).toMatch(/text-wrap:\s*balance;/); // even lines, not a filled first one
+    expect(line).toMatch(/max-width:\s*[\d.]+rem;/); // the measure that makes them two
+    expect(line).toMatch(/margin:\s*0 auto;/); // centred, where the bubbles are not
+    expect(line).not.toMatch(/text-align:/); // the card's own centring reaches it
+  });
+
+  it("comes in last and is the only thing on the face that fades", () => {
+    expect(rule(".gate .install-switch")).toMatch(/opacity:\s*0;/);
+    expect(rule(".gate .install-switch")).toMatch(/transition:\s*opacity/);
+    expect(rule(".gate .install-switch.shown")).toMatch(/opacity:\s*1;/);
+    // and under reduced motion even that is taken off it
+    expect(rule(".gate .install-switch.instant")).toMatch(/transition:\s*none;/);
+  });
+
+  it("is written in the card's own ink, with the link in iOS's blue", () => {
+    expect(rule(".gate.install")).toMatch(/--install-link:\s*#1b96fe;/);
+    expect(rule(".gate .install-link")).toMatch(/color:\s*var\(--install-link\);/);
+    // the app's accent is the sent bubble's violet and is deliberately not it
+    expect(rule(".gate .install-link")).not.toContain("--accent");
+    expect(rule(".gate .install-switch")).not.toMatch(/#[0-9a-fA-F]{3,8}|rgb\(/);
+  });
+});
+
+// --- the reveal is armed by the card, and nothing else about it is here -------
+
+describe("the card hands itself to the reveal", () => {
+  it("arms it last, with the card it has just built", () => {
+    expect(gate).toContain("revealInstallSteps(card)");
+    expect(gate.indexOf("revealInstallSteps(card)")).toBeGreaterThan(
+      gate.indexOf('getElementById("browser-warn-yes")'),
+    );
+  });
+
+  it("the clock itself is somebody else's, and is not spelled here twice", () => {
+    expect(main).toContain('from "./installreveal"');
+    expect(installMarkup).not.toMatch(/setTimeout/); // this face arms no timer of its own
+    expect(main).toMatch(/revealSteps\(rows\.length, reduced\)/);
+    // the phone is asked once, by the wiring, and the schedule answers for it
+    expect(main).toContain('window.matchMedia("(prefers-reduced-motion: reduce)").matches');
+  });
+
+  it("the first message takes the dots' box over through the chat's own morph", () => {
+    const wiring = main.slice(main.indexOf("function playRevealStep"));
+    expect(wiring.slice(0, wiring.indexOf("\n}"))).toContain("runArrival(");
+    expect(wiring).toContain("dotsSeat(dots)"); // read before anything is written
   });
 });
 
@@ -221,7 +462,8 @@ describe("the install face is a white sheet, in both appearances", () => {
 // and there is no DOM under node. The card's function and the alert's block are
 // cut out by name and run in one VM context over the smallest stand-ins the two
 // of them ask for: an element table keyed by the ids the markup carries, and a
-// card element for the one querySelector.
+// card element for the one querySelector. The two glyph constants are cut out
+// with them, so the markup the VM renders is the markup the phone gets.
 
 interface Fired {
   target?: unknown;
@@ -274,7 +516,8 @@ beforeAll(async () => {
   const at = main.indexOf("const ALERT_TRANSITION_MS");
   const until = main.indexOf("function pushApisSupported(", at);
   expect(until).toBeGreaterThan(at);
-  const block = main.slice(at, until) + "\n" + gate;
+  expect(glyphSource, "the glyph constants were not found").not.toBe("");
+  const block = main.slice(at, until) + "\n" + glyphSource + "\n" + gate;
   script = (await transformWithEsbuild(block, "gate.ts", { loader: "ts" })).code;
 });
 
@@ -331,6 +574,9 @@ function harness(installed: boolean, answer = 204) {
     pushNotifications: null,
     isInstalledWindow: () => installed,
     bindGateFlight: () => built.push("flight"),
+    // the reveal is the face's own clock and is pinned in installreveal.test.ts;
+    // here it only has to be armed, with the card that was just built
+    revealInstallSteps: (given: unknown) => built.push(given === card ? "reveal" : "reveal-other"),
     createTokenGate,
     gateFetch: (url: string) => {
       asked.push(url);
@@ -352,18 +598,23 @@ function harness(installed: boolean, answer = 204) {
     },
     html: () => html,
     el: (id: string) => byId(id),
-    click: (id: string) => byId(id)!.fire("click"),
+    click: (id: string) => byId(id)!.fire("click", { preventDefault: () => {} }),
     render: () => (context.renderTokenGate as () => void)(),
   };
 }
 
 describe("a browser tab opens on the steps", () => {
-  it("shows the title, the five steps and the button, and no box to type in", () => {
+  it("shows the five messages, the line under them, and no box to type in", () => {
     const run = harness(false);
-    expect(run.html()).toContain(TITLE);
-    const items = [...run.html().matchAll(/<li>([^<]*)<\/li>/g)].map((m) => m[1]);
-    expect(items).toEqual(STEPS); // in order, on screen
+    for (const message of MESSAGES) {
+      // the glyph placeholders are the real symbols by the time this renders
+      const written = message.replace(/\$\{[A-Z_]+\}/g, "");
+      expect(run.html()).toContain(written.trimEnd());
+    }
+    expect(run.html()).toContain(LINK);
+    expect(run.html()).toContain("<svg class=\"install-glyph\""); // drawn, not typed
     expect(run.el("use-browser")).not.toBeNull();
+    expect(run.el("install-dots"), "the dots are on screen from the first frame").not.toBeNull();
     expect(run.el("token-input"), "no passcode box on this face").toBeNull();
     expect(run.el("token-save")).toBeNull();
     expect(run.html()).not.toContain("Your access token please?");
@@ -375,13 +626,18 @@ describe("a browser tab opens on the steps", () => {
     expect(harness(true).card.classes.has("install")).toBe(false);
   });
 
+  it("arms the reveal with that same card, and only on this face", () => {
+    expect(harness(false).built).toContain("reveal");
+    expect(harness(true).built).not.toContain("reveal");
+  });
+
   it("holds no controller, so a socket refused behind it paints nothing", () => {
     const run = harness(false);
     expect(run.context.tokenGate).toBeNull();
     expect(run.built).not.toContain("refused");
   });
 
-  it("ships the warning box closed, and the button opens it", () => {
+  it("ships the warning box closed, and the link opens it", () => {
     const run = harness(false);
     const warn = run.el("browser-warn")!;
     expect(warn.hidden, "the box ships out of the layout, like the other two").toBe(true);
@@ -427,8 +683,10 @@ describe("No keeps the steps, Yes brings the passcode card", () => {
     expect(run.el("token-save")).not.toBeNull();
     expect(run.el("token-note")).not.toBeNull();
     // the steps and the box are gone with the face that carried them
-    expect(run.html()).not.toContain(TITLE);
+    expect(run.html()).not.toContain(MESSAGES[0]);
+    expect(run.html()).not.toContain(LINK);
     expect(run.el("browser-warn")).toBeNull();
+    expect(run.el("install-dots")).toBeNull();
     // and the card kept the badge above it, version and all
     expect(run.html()).toContain('<span class="title">Paratrooper</span>');
     expect(run.html()).toContain("v9.9.9");
@@ -474,8 +732,10 @@ describe("an installed window never sees any of it", () => {
     const run = harness(true);
     expect(run.html()).toContain("Your access token please?");
     expect(run.el("token-input")).not.toBeNull();
-    expect(run.html()).not.toContain(TITLE);
+    expect(run.html()).not.toContain(MESSAGES[0]);
+    expect(run.html()).not.toContain(LINK);
     expect(run.el("use-browser")).toBeNull();
+    expect(run.el("install-dots")).toBeNull();
     expect(run.el("browser-warn")).toBeNull();
     expect(run.context.tokenGate).not.toBeNull(); // the card holds its controller
   });
@@ -494,10 +754,12 @@ describe("an installed window never sees any of it", () => {
 describe("logging out lands on the face the open called for", () => {
   // log out is renderTokenGate again, after the teardown (logoutbox.test.ts
   // pins that wiring); here is what the two modes get when it runs
-  it("a browser tab goes back to the steps", () => {
+  it("a browser tab goes back to the steps, and they are typed out again", () => {
     const run = harness(false);
     run.render(); // the call the log-out box makes once the fade has ended
-    expect(run.html()).toContain(TITLE);
+    expect(run.html()).toContain(MESSAGES[0]);
+    expect(run.el("install-dots")).not.toBeNull();
+    expect(run.built.filter((b) => b === "reveal")).toHaveLength(2);
     expect(run.el("token-input")).toBeNull();
   });
 
@@ -505,7 +767,7 @@ describe("logging out lands on the face the open called for", () => {
     const run = harness(true);
     run.render();
     expect(run.html()).toContain("Your access token please?");
-    expect(run.html()).not.toContain(TITLE);
+    expect(run.html()).not.toContain(MESSAGES[0]);
   });
 
   it("the choice is not remembered: a tab that chose the browser starts over", () => {
@@ -514,7 +776,7 @@ describe("logging out lands on the face the open called for", () => {
     run.click("use-browser");
     run.click("browser-warn-yes");
     run.render(); // a fresh open of the page, which is what a log out leaves
-    expect(run.html()).toContain(TITLE);
+    expect(run.html()).toContain(MESSAGES[0]);
     // nothing was written down for it either
     expect(run.stored).toEqual([]);
     expect(gate).not.toContain("localStorage.getItem");

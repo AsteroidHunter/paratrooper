@@ -518,7 +518,15 @@ describe("presentation — the original font arrow, one layered soft ring", () =
 
   it("the glyph is the original ↓ font character; the SVG redraw is gone", () => {
     expect(main).toMatch(/<span\s+class="jump-glyph">↓<\/span>/); // the approved arrow, byte for byte
-    expect(main).not.toContain("<svg"); // no redrawn silhouette anywhere in the markup
+    // No redrawn silhouette anywhere in the chat's markup. Read off the chat
+    // rather than off the whole file, which it used to be: the sign-in card's
+    // browser face now draws Safari's own share and add symbols, which are on
+    // the phone as a font and nowhere else and so cannot be typed. Nothing in
+    // the thread, the bar or the compose row is drawn that way, and that is
+    // what this pin has always been about.
+    const chat = /function renderChat\(\)[\s\S]*?\n\}/.exec(main)?.[0] ?? "";
+    expect(chat, "renderChat not found").not.toBe("");
+    expect(chat).not.toContain("<svg");
     expect(glyphRule).toContain("color: var(--jump-fg)"); // font glyphs paint with color...
     expect(glyphDecl).not.toContain("stroke"); // ...and rim with shadows, never strokes
     expect(glyphDecl).not.toContain("paint-order");

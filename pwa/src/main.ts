@@ -24,6 +24,8 @@ import {
   shotLeg,
 } from "./gather";
 import { createReplyHold, holdDiagAuth, holdDiagRecord } from "./hold";
+import { revealSteps } from "./installreveal";
+import type { RevealStep } from "./installreveal";
 import { composeMirror, fitComposeBox } from "./mirror";
 import {
   DRAW_NO_DEADLINE,
@@ -193,7 +195,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.156"; // The playground gains a live colour picker and hex field for the sent bubbles
+const APP_VERSION = "0.3.157"; // A browser tab opens on the home-screen steps as a run of messages Paratrooper types out, closed by the line to the browser
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
@@ -728,10 +730,40 @@ holdDiagAuth(authHeaders);
 // Paratrooper on the home screen, because that is the one thing worth saying to
 // somebody who has not signed in yet and is reading this in Safari: no
 // notifications on an iPhone, and the browser's own bars take part of the
-// screen. The other way is still there, one quiet button under the steps, and
-// it goes through the same centred box the chat asks its questions in.
+// screen. The other way is still there, one line under the steps, and it goes
+// through the same centred box the chat asks its questions in.
 // Nothing is stored for any of it: a reload is a fresh open and the steps come
 // back, which is the whole of the memory this version has.
+//
+// And the steps are not a list any more: they are a run of messages from
+// Paratrooper, in the chat's own received bubbles, typed out after the chat's
+// own dots (installreveal.ts holds the clock, revealInstallSteps below is the
+// wiring). The first thing this screen ever says is therefore said the way
+// everything else it will ever say is said, which is the whole argument for
+// it — somebody who has not signed in yet is being shown the app by the app.
+
+// The two symbols Safari's own flow is read off, DRAWN rather than typed.
+//
+// They are iOS glyphs, and iOS glyphs are a font (SF Symbols) that is on the
+// phone and on nothing else: a character reference to either of them renders
+// as the box-with-a-cross on a desktop browser, and the nearest Unicode
+// lookalikes (U+21AA, U+229E) are a different picture even where they do
+// resolve. An emoji would be a third picture again, in somebody else's colours.
+// So both are a few strokes in a 20-unit square, sized to the text they sit in
+// (styles.css .install-glyph gives them their 1em box, their weight and their
+// seat on the baseline) and inlined into the markup, which also keeps the
+// promise the first-paint pin makes: the card fetches nothing to draw itself.
+// Both are outlines in the message's own ink, so they carry the bubble's colour
+// in either appearance and cannot be a black mark on a dark bubble.
+const SHARE_GLYPH =
+  '<svg class="install-glyph" viewBox="0 0 20 20" aria-hidden="true">' +
+  '<path d="M6.6 8.2H4.6a2.1 2.1 0 0 0-2.1 2.1v6.1a2.1 2.1 0 0 0 2.1 2.1h10.8a2.1 2.1 0 0 0 2.1-2.1v-6.1a2.1 2.1 0 0 0-2.1-2.1h-2"/>' +
+  '<path d="M10 12.6V2.3"/><path d="m6.7 5.5 3.3-3.3 3.3 3.3"/></svg>';
+const ADD_GLYPH =
+  '<svg class="install-glyph" viewBox="0 0 20 20" aria-hidden="true">' +
+  '<rect x="2.5" y="2.5" width="15" height="15" rx="3.6"/>' +
+  '<path d="M10 6.3v7.4"/><path d="M6.3 10h7.4"/></svg>';
+
 function renderTokenGate(): void {
   // The head of the card, and the app's one badge outside the chat. Written
   // once because both faces wear it, so the trooper, the name and the version
@@ -804,15 +836,14 @@ function renderTokenGate(): void {
   // paint and says so by holding nothing.
   tokenGate = null;
   app.innerHTML = `${head}
-      <p class="install-title">Paratrooper feels better as an app on the home screen.</p>
-      <ol class="install-steps">
-        <li>Click …</li>
-        <li>Share</li>
-        <li>View more</li>
-        <li>Add to Home Screen</li>
-        <li>Add and done!</li>
-      </ol>
-      <button type="button" id="use-browser" class="gate-quiet">Use it in the browser instead</button>
+      <div class="install-thread">
+        <div class="install-row"><div id="install-dots" class="msg agent typing install-dots" aria-hidden="true"><span></span><span></span><span></span></div><div class="msg agent install-msg">1. Tap ••• in Safari's toolbar</div></div>
+        <div class="install-row"><div class="msg agent install-msg">2. Click <b>Share</b> ${SHARE_GLYPH}</div></div>
+        <div class="install-row"><div class="msg agent install-msg">3. Open <b>View More</b></div></div>
+        <div class="install-row"><div class="msg agent install-msg">4. Tap <b>Add to Home Screen</b> ${ADD_GLYPH}</div></div>
+        <div class="install-row"><div class="msg agent install-msg tail">Once added, use it like a regular app!</div></div>
+      </div>
+      <p class="install-switch">Or, if you prefer an inferior interface, <a id="use-browser" class="install-link" role="button" href="#">click here to use it within this browser's tab window</a></p>
     </div>
     <!-- The chat's own centred box, asking the third question. The card is
          rendered into #app on its own, so the box is written here rather than
@@ -833,9 +864,14 @@ function renderTokenGate(): void {
     </div>`;
   // the install face's own paint (styles.css .gate.install). The class goes on
   // here because the markup above is the head both faces share.
-  app.querySelector<HTMLElement>(".gate")!.classList.add("install");
+  const card = app.querySelector<HTMLElement>(".gate")!;
+  card.classList.add("install");
   const warn = document.getElementById("browser-warn")!;
-  document.getElementById("use-browser")!.addEventListener("click", () => {
+  document.getElementById("use-browser")!.addEventListener("click", (event) => {
+    // the line is an anchor, because a button is an atomic inline box in WebKit
+    // and the words have to wrap across the statement's two lines like any
+    // other words. So its own default navigation is the one thing to refuse.
+    event.preventDefault();
     showAlert(warn);
   });
   warn.addEventListener("click", (event) => {
@@ -849,6 +885,84 @@ function renderTokenGate(): void {
     // card it was asking about is built on the other side of that fade
     hideAlert(warn, askForToken);
   });
+  // and now the card types itself out (installreveal.ts owns the order and the
+  // clock). Last, so every element the reveal touches is wired before the first
+  // of it can play.
+  revealInstallSteps(card);
+}
+
+// --- the install face typing itself out (the DOM half) ------------------------
+//
+// installreveal.ts holds the whole of the decision — the order, the second the
+// dots keep to themselves, the cadence between the messages, the beat before
+// the line under them, and the collapse when the phone asks for less motion.
+// Nothing below decides anything: it arms one timer per step and plays what it
+// is handed.
+//
+// The face ships whole and hidden rather than being built piece by piece. Every
+// row is in the markup from the first frame with its own space reserved
+// (styles.css .install-row is visibility: hidden, which keeps its box), so the
+// card's height is settled before the first message lands and the group, which
+// is centred on the screen, does not walk up the page as the run grows. The
+// only box that changes size is the first one, and that is the morph itself.
+
+/** one step, played onto the card that is on screen */
+function playRevealStep(step: RevealStep, rows: HTMLElement[], statement: HTMLElement): void {
+  if (step.part === "statement") {
+    // under reduced motion the line is simply there, so the fade it would
+    // otherwise ride is taken off it in the same frame it is shown
+    if (step.entrance === "none") statement.classList.add("instant");
+    statement.classList.add("shown");
+    return;
+  }
+  const row = rows[step.part === "dots" ? 0 : step.index];
+  if (!row) return;
+  if (step.part === "dots") {
+    // the dots share the first message's row and the sheet hides the message
+    // while they are in it, so showing the row shows the dots and only them
+    row.classList.add("shown");
+    return;
+  }
+  const bubble = row.querySelector<HTMLElement>(".install-msg");
+  if (!bubble) return;
+  const dots = step.index === 0 ? document.getElementById("install-dots") : null;
+  // the dots exactly as they stand, read before anything is written, because
+  // the message is about to be laid out in their place
+  const seat = dots && step.entrance === "morph" ? dotsSeat(dots) : null;
+  dots?.remove(); // and the row's own rule stops hiding the bubble behind them
+  row.classList.add("shown");
+  if (!seat) {
+    if (step.entrance === "pop") bubble.classList.add("anim"); // the chat's entrance
+    return;
+  }
+  // the chat's reply arrival, on this card: ONE box from the first dot to the
+  // last word, the dots fading out inside the message as it grows (arrival.ts
+  // owns the reasoning). Nothing here scrolls, so both of the morph's ports —
+  // which exist to keep the thread pinned to its own bottom — have nothing to
+  // do, and the growth is the whole of it.
+  bubble.classList.add("arriving");
+  runArrival(row, bubble, bubble.textContent ?? "", seat, { pin: () => {}, done: () => {} });
+}
+
+function revealInstallSteps(card: HTMLElement): void {
+  const rows = Array.from(card.querySelectorAll<HTMLElement>(".install-row"));
+  const statement = card.querySelector<HTMLElement>(".install-switch");
+  if (!rows.length || !statement) return;
+  // asked once, and answered by the schedule rather than re-asked per step
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  for (const step of revealSteps(rows.length, reduced)) {
+    if (step.at === 0) {
+      playRevealStep(step, rows, statement);
+      continue;
+    }
+    setTimeout(() => {
+      // this card can be gone before its own reveal has finished: Yes in the
+      // warning box builds the passcode card over it. A step landing after
+      // that has nothing to play and must not write into a card nobody is
+      // looking at.
+      if (card.isConnected) playRevealStep(step, rows, statement);
+    }, step.at);
+  }
 }
 
 // The controller for the card currently on screen, or null while the chat is
