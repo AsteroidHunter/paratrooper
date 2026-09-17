@@ -69,6 +69,16 @@ function applyTuning(next: Tuning): void {
   Object.assign(tuning.travel, next.travel);
   Object.assign(tuning.ripple, next.ripple);
   tuning.config = next.config;
+  tuning.sent = next.sent;
+}
+
+// The sent bubbles paint from --sent (bubbles.css); so does the swatch in the
+// panel. Setting it on the root - the same CSSOM style write the field uses for
+// each row's translate, never an inline style attribute - drives the thread and
+// the control from one place, in whichever colour scheme is on, and leaves the
+// tool's own --accent chrome alone.
+function applySentColour(): void {
+  document.documentElement.style.setProperty("--sent", tuning.sent);
 }
 
 /** what this file stored before the build picker existed, when the only choice
@@ -753,9 +763,14 @@ const panel = mountControls(panelRoot, {
   tuning,
   onChange: noteChange,
   onConfig: noteConfig,
+  onColour: () => {
+    applySentColour();
+    save();
+  },
   onReset: () => {
     applyTuning(defaultTuning());
     panel.refresh();
+    applySentColour(); // the colour resets with everything else
     noteConfig();
     noteChange();
   },
@@ -796,6 +811,7 @@ buildThread(thread);
 measure();
 buildEngine(); // a stored tuning may name a historical build
 thread.scrollTop = Math.round(maxScroll * 0.6);
+applySentColour(); // a stored colour paints on load
 panel.refresh();
 paintReadout();
 

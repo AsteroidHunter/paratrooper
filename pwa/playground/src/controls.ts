@@ -20,6 +20,7 @@ import {
 import type { Knob, Tuning } from "./tuning";
 import { CONTROLLER_ONLY, configFor, provenanceOf, sharesCodeWith } from "./presets";
 import type { ConfigId } from "./presets";
+import { BAD_CLASS, DEFAULT_SENT, commitHex, syncFromHexInput, syncFromPicker } from "./swatch";
 
 export type DemoKind = "up" | "down" | "catch" | "reverse";
 export type Frame = "375" | "390" | "fill";
@@ -30,6 +31,8 @@ export interface ControlHooks {
   onChange(): void;
   /** the selected build changed: the wiring has to build its field */
   onConfig(): void;
+  /** the sent bubble colour moved: the wiring drives it onto --sent and stores it */
+  onColour(): void;
   onReset(): void;
   onDemo(kind: DemoKind): void;
   onFrame(frame: Frame): void;
@@ -249,6 +252,82 @@ export function mountControls(root: HTMLElement, hooks: ControlHooks): ControlPa
   );
   travelGroup.append(originRow);
 
+  // --- sent bubble colour ---------------------------------------------------
+  // A swatch, the native colour well and a hex field, in one row. The three are
+  // kept in step by swatch.ts; the colour itself is driven onto --sent by the
+  // wiring, and the swatch reads that same var, so it follows every change for
+  // free. Received bubbles and the sent text colour are left untouched.
+  const colourBlock = el("section", "block");
+  colourBlock.append(el("h2", "", "Bubble colour"));
+  colourBlock.append(
+    el(
+      "p",
+      "note",
+      "The fill of the sent bubbles and their tails, in both light and dark. The received bubbles are left as they are.",
+    ),
+  );
+  const colourRow = el("div", "knob");
+  const colourHead = el("div", "knobhead");
+  const colourLabel = el("label", "knoblabel", "Sent bubble colour");
+  colourHead.append(colourLabel);
+  const swatchRow = el("div", "swatchrow");
+  const swatch = el("span", "swatch");
+  swatch.setAttribute("aria-hidden", "true"); // the picker and the hex field carry the value
+  const colourInput = el("input", "colourpick");
+  colourInput.type = "color";
+  colourInput.id = "sent-colour";
+  colourLabel.htmlFor = colourInput.id;
+  const hexInput = el("input", "hexinput");
+  hexInput.type = "text";
+  hexInput.id = "sent-hex";
+  hexInput.setAttribute("aria-label", "Sent bubble colour, hex value");
+  hexInput.setAttribute("inputmode", "text");
+  hexInput.setAttribute("autocomplete", "off");
+  hexInput.setAttribute("autocapitalize", "off");
+  hexInput.setAttribute("autocorrect", "off");
+  hexInput.spellcheck = false;
+  hexInput.maxLength = 7; // "#rrggbb"
+  hexInput.placeholder = DEFAULT_SENT;
+  swatchRow.append(swatch, colourInput, hexInput);
+  colourRow.append(
+    colourHead,
+    swatchRow,
+    el(
+      "p",
+      "hint",
+      `Pick from the well, or type a hex value — three or six digits, with or without the #, either case. A part-typed or unknown value changes nothing until it is a whole colour. Reset to defaults returns it to ${DEFAULT_SENT}.`,
+    ),
+  );
+  colourBlock.append(colourRow);
+  root.append(colourBlock);
+
+  const applyColour = (colour: string): void => {
+    t.sent = colour;
+    hooks.onColour();
+  };
+  const refreshColour = (): void => {
+    colourInput.value = t.sent;
+    hexInput.value = t.sent;
+    hexInput.classList.toggle(BAD_CLASS, false);
+    hexInput.removeAttribute("aria-invalid");
+  };
+  colourInput.addEventListener("input", () => applyColour(syncFromPicker(colourInput, hexInput)));
+  hexInput.addEventListener("input", () => {
+    const colour = syncFromHexInput(hexInput, colourInput);
+    if (colour !== null) applyColour(colour);
+  });
+  // blur and Enter are the two moments a typed value is settled: a good one is
+  // normalised in place, a part-typed one falls back to the colour in force
+  const commit = (): void => applyColour(commitHex(hexInput, colourInput, t.sent));
+  hexInput.addEventListener("blur", commit);
+  hexInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commit();
+    }
+  });
+  refreshColour();
+
   // --- viewport, reset, copy ------------------------------------------------
   const outBlock = el("section", "block");
   outBlock.append(el("h2", "", "Tool"));
@@ -353,6 +432,7 @@ export function mountControls(root: HTMLElement, hooks: ControlHooks): ControlPa
       r.input.value = String(readKnob(t, r.knob.key));
       r.value.textContent = fmt(r.knob, readKnob(t, r.knob.key));
     }
+    refreshColour(); // a reset or a load pulls the colour widgets back too
     paint();
   }
 

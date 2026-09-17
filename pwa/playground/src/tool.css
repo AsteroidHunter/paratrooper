@@ -417,6 +417,54 @@ details.note summary { cursor: pointer; }
 details.note ul { margin: 6px 0 0; padding-left: 16px; }
 details.note li { margin-bottom: 3px; }
 
+/* the sent-bubble colour: a swatch, the native well and a hex field, in a row */
+.swatchrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 2px;
+}
+.swatch {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--sent); /* the same token the sent bubbles paint from */
+  border: 1px solid var(--panel-line);
+}
+/* the native colour input, trimmed to a chip rather than a system button */
+.colourpick {
+  flex: none;
+  width: 44px;
+  height: 34px;
+  padding: 2px;
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.colourpick::-webkit-color-swatch-wrapper { padding: 0; }
+.colourpick::-webkit-color-swatch { border: none; border-radius: 6px; }
+.hexinput {
+  flex: 1;
+  min-width: 0; /* the row never widens past the panel: the hex field gives */
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+}
+.hexinput:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* not a colour yet: a quiet dashed, muted field, not a loud red */
+.hexinput.bad {
+  border-style: dashed;
+  border-color: var(--muted);
+  color: var(--muted);
+}
+
 .dump {
   width: 100%;
   margin-top: 10px;
@@ -562,8 +610,12 @@ details.note li { margin-bottom: 3px; }
   .btn,
   .segbtn,
   .picker,
+  .hexinput,
+  .colourpick,
   .panelclose { min-height: 44px; }
   .seg.small .segbtn { min-height: 40px; }
+  /* the swatch grows with the row it sits in, so all three are thumb-sized */
+  .swatch { width: 44px; height: 44px; }
 }
 
 /* A finger has the swipe and the drawer's own close control, so the floating

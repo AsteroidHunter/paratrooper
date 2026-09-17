@@ -30,7 +30,8 @@
   --sent-text: #ffffff;
   --text: #000000;
   --muted: #8e8e93;
-  --accent: #432bff; /* sent bubbles */
+  --accent: #432bff; /* the tool's own accent (selected chrome, focus rings) */
+  --sent: var(--accent); /* the sent bubbles' fill; the playground retunes it live */
   --panel: #f7f7f9;
   --panel-line: #e2e2e7;
   color-scheme: light;
@@ -115,10 +116,10 @@
   border-radius: 18px;
 }
 .msg.user {
-  --fill: var(--accent); /* the tail's paint: the same token as the fill below */
+  --fill: var(--sent); /* the tail's paint: the same token as the fill below */
   --tail-mask: var(--tail-user);
   --tail-x: right;
-  background: var(--accent);
+  background: var(--sent);
   color: var(--sent-text);
 }
 .msg.agent {

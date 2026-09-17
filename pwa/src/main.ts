@@ -193,7 +193,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.155"; // The transcript spring is off: the bubbles sit still in the thread and the thread scrolls natively
+const APP_VERSION = "0.3.156"; // The playground gains a live colour picker and hex field for the sent bubbles
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.

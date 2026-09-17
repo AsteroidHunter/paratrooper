@@ -23,6 +23,7 @@ import { defaultRippleTuning } from "./ripple";
 import type { RippleTuning } from "./ripple";
 import { CONFIGS, configFor, isConfigId } from "./presets";
 import type { ConfigId } from "./presets";
+import { DEFAULT_SENT, normaliseHex } from "./swatch";
 
 export interface Tuning {
   /** which build, or the experiment, is on screen */
@@ -30,6 +31,10 @@ export interface Tuning {
   field: FieldTunables;
   travel: TravelTuning;
   ripple: RippleTuning;
+  /** the sent bubbles' colour, #rrggbb; drives --sent (bubbles.css). Not a knob:
+      it has no range and is not one of the build's shipped numbers, so it sits
+      here beside config and the wave origin rather than in KNOBS. */
+  sent: string;
 }
 
 export function defaultTuning(): Tuning {
@@ -38,6 +43,7 @@ export function defaultTuning(): Tuning {
     field: defaultFieldTunables(),
     travel: defaultTravelTuning(),
     ripple: defaultRippleTuning(),
+    sent: DEFAULT_SENT,
   };
   loadConfigValues(t, t.config);
   return t;
@@ -266,6 +272,9 @@ export function sanitise(t: Tuning): Tuning {
   }
   const origin: WaveOrigin = t.travel?.origin === "bottom" ? "bottom" : "finger";
   out.travel.origin = origin;
+  // a stored or pasted colour is not trusted either: a whole hex value stands,
+  // anything else falls back to the default rather than reaching the CSS var
+  out.sent = normaliseHex(t.sent) ?? out.sent;
   return out;
 }
 
@@ -287,6 +296,7 @@ export function exportTuning(t: Tuning): string {
     label: c.label,
     experimental: c.experimental,
     customised: changed.length > 0,
+    sentBubble: t.sent,
     shared: { tauMs: t.field.tau, divisorPx: t.field.divisor, strainPx: t.field.strain },
     sharedUsedByThisBuild: c.knobs,
   };
@@ -366,6 +376,9 @@ export function importTuning(text: string): Tuning | null {
     ripple: {
       waveMsPer100px: num(ripple.waveMsPer100px, base.ripple.waveMsPer100px),
     },
+    // a value stored before this control existed simply has no sentBubble, and
+    // sanitise turns anything that is not a whole hex back into the default
+    sent: typeof o.sentBubble === "string" ? o.sentBubble : base.sent,
   });
 }
 
