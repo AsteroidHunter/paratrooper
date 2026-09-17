@@ -536,18 +536,31 @@ html, body {
   padding: 2rem 1rem;
   top: -2.5rem;
 }
-/* The run itself: one column of received bubbles, left aligned to each other
-   and to the card's own text edge, which is what makes it read as messages
-   rather than as a list that happens to be in boxes. The column is the card's
-   full measure and every row is a flex line, so each bubble is as wide as its
-   own words (a flex item shrinks to fit) and no wider — the shape of a real
-   thread, where the column is the screen and the bubbles are whatever length
-   they are. text-align is set here rather than inherited away from the card:
-   the card centres its own line underneath, and the bubbles must not. */
+/* The run itself: one column of received bubbles, left aligned to each other,
+   which is what makes it read as messages rather than as a list that happens
+   to be in boxes. The column is ONE BLOCK exactly as wide as its widest
+   message (width: fit-content) and that block is centred on the card, and so
+   on the screen, by its auto margins — the owner's rule for this face is that
+   everything on it is centred as a group while the words in the steps stay
+   left aligned, and this is the shape that satisfies both at once: the block
+   has the same room on either side of it, and inside the block every bubble
+   starts on the block's own left edge. Every row is a flex line stretched to
+   the block's width, so each bubble is as wide as its own words (a flex item
+   shrinks to fit) and no wider — the shape of a real thread, where the bubbles
+   are whatever length they are — and the widest of them is what sets the
+   block. The width is settled from the first frame because every row is in
+   the layout from the first frame (visibility below), so the block does not
+   move sideways as the run arrives; the first bubble's morph grows inside it.
+   max-width keeps the block inside the card on a screen too narrow for the
+   longest message, where that message wraps rather than the block leaking.
+   text-align is set here rather than inherited away from the card: the card
+   centres its own line underneath, and the bubbles must not. */
 .gate .install-thread {
   display: flex;
   flex-direction: column;
-  margin: 2.5rem 0 1.75rem;
+  width: fit-content;
+  max-width: 100%;
+  margin: 2.5rem auto 1.75rem;
   text-align: left;
 }
 /* 4px between two bubbles of one run, which is the gap the thread gives them
@@ -599,31 +612,46 @@ html, body {
 }
 /* The other way out of this card, said once, in the card's own voice and at a
    size that is plainly an aside to the run above it. It is centred under the
-   column and balanced: text-wrap: balance spreads the words evenly over the
-   lines it takes rather than filling the first and orphaning the rest, and the
-   measure is set so that at a phone's width those lines are two — the sentence
-   is one breath, and three ragged lines read as a paragraph. A browser without
-   balance still wraps it, at the same measure, to the same two lines.
+   column and it takes THREE lines, the way the owner's reference draws it:
+   the plain half of the sentence on the first line on its own, and the link
+   under it on two lines of its own. The break after the comma is forced
+   rather than found — the link is a block (below), so it always starts a new
+   line whatever the width — and the paragraph itself carries no measure and
+   no balancing of its own: its one line is the plain half, and the line the
+   link's words break on is the link's own business.
    It ships faded out and comes in last (main.ts), which is the only motion on
    it; under reduced motion .instant takes even that away. */
 .gate .install-switch {
-  max-width: 19.5rem;
   margin: 0 auto;
   font-size: 0.85rem;
   font-weight: 400;
   line-height: 1.4;
-  text-wrap: balance;
   opacity: 0;
   transition: opacity 0.3s ease;
 }
 .gate .install-switch.shown { opacity: 1; }
 .gate .install-switch.instant { transition: none; }
-/* The link inside that sentence. An anchor rather than a button: WebKit draws
-   a button as one atomic inline box, so a button could not break across the
-   two lines the sentence is balanced onto, and half the link is on each line.
-   It carries no underline because the colour is the affordance here, the way
-   iOS writes a link in running text. */
+/* The link inside that sentence, as a block of its own. The block is the
+   forced break: a block-level box begins on a new line, so the plain half of
+   the sentence above it is always a line to itself. Its measure is what
+   breaks the link's own words over two lines rather than one or three, and
+   where: the whole link on one line is 20rem at this size, the reference's
+   first line ("click here to use it within this") is 11.3rem, and that line
+   with the next word on it would be 15.3rem — so any measure between 11.3
+   and 15.3rem gives the reference's two lines, and 13.5rem is the middle of
+   that room, with about 2rem to spare on either side for the phone's own
+   font metrics. Plain wrapping, not balance: balancing would move "this"
+   down to even the two lines out, and the reference does not. The block is
+   centred by its auto margins and its two lines are centred inside it by the
+   card's own text-align, and because the measure is in rem the same two
+   lines come out at any phone's width. An anchor rather than a button,
+   still: WebKit draws a button as one atomic inline box, and this one's
+   words have to wrap. It carries no underline because the colour is the
+   affordance here, the way iOS writes a link in running text. */
 .gate .install-link {
+  display: block;
+  max-width: 13.5rem;
+  margin: 0 auto;
   color: var(--install-link);
   text-decoration: none;
   cursor: pointer;

@@ -59,7 +59,7 @@ describe("the clock", () => {
     expect(first.at).toBe(REVEAL_LEAD_MS);
   });
 
-  it("the rest follow at one steady cadence, a person's five short lines", () => {
+  it("the rest follow at one steady cadence, each read before the next lands", () => {
     const messages = revealSteps(FIVE).filter((s) => s.part === "message");
     const gaps = messages.slice(1).map((s, i) => s.at - messages[i].at);
     expect(gaps).toEqual([
@@ -68,10 +68,11 @@ describe("the clock", () => {
       REVEAL_CADENCE_MS,
       REVEAL_CADENCE_MS,
     ]);
-    // the beat the owner asked for: around four tenths of a second, and inside
-    // it at both ends — a gap outside this reads as a stutter or a stall
-    expect(REVEAL_CADENCE_MS).toBeGreaterThanOrEqual(350);
-    expect(REVEAL_CADENCE_MS).toBeLessThanOrEqual(450);
+    // the beat the owner asked for after seeing four tenths: nine tenths of a
+    // second between messages, so each one is read as it lands rather than
+    // the five arriving as one flurry. Pinned to the number, because the
+    // number is the complaint that was answered.
+    expect(REVEAL_CADENCE_MS).toBe(900);
   });
 
   it("the closing line comes a beat after the last message, not with it", () => {
@@ -79,11 +80,16 @@ describe("the clock", () => {
     const last = steps.filter((s) => s.part === "message").pop()!;
     const statement = steps[steps.length - 1];
     expect(statement.at - last.at).toBe(REVEAL_CLOSE_MS);
-    expect(REVEAL_CLOSE_MS).toBeGreaterThan(0);
+    // and that beat is the cadence's own, so the line reads as the end of the
+    // same run rather than as a sixth message that came early
+    expect(REVEAL_CLOSE_MS).toBe(REVEAL_CADENCE_MS);
+    expect(REVEAL_CLOSE_MS).toBe(900);
   });
 
-  it("the whole thing is over in about three seconds", () => {
-    expect(at().pop()).toBe(3000);
+  it("the whole thing is in at five and a half seconds", () => {
+    // one second of dots, four gaps of the cadence, one close: 1000 + 4 * 900 + 900
+    expect(at().pop()).toBe(5500);
+    expect(at().pop()).toBe(REVEAL_LEAD_MS + (FIVE - 1) * REVEAL_CADENCE_MS + REVEAL_CLOSE_MS);
   });
 });
 

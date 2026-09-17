@@ -5,8 +5,10 @@
 // iPhone, and the bars the browser keeps for itself), by asking for the home
 // screen — and it asks the way the app will talk to you once you are in: five
 // messages from Paratrooper, in the chat's own received bubbles, typed out
-// after the chat's own dots, with the tail under the last of them. Under the
-// run, one line offers the other way, and the words that take it are the link.
+// after the chat's own dots, with the tail under the last of them. The run is
+// one block, as wide as its widest message, centred on the screen with every
+// bubble on the block's left edge. Under it, one sentence offers the other
+// way over three lines, and the words that take it are the link.
 // That link opens the chat's own centred box, and only Yes brings the passcode
 // card back. Opened from the home screen none of that happens: the passcode
 // card IS the screen, exactly as it always was.
@@ -215,8 +217,8 @@ describe("the warning is the chat's centred box, wearing other words", () => {
   });
 
   it("the link that opens it refuses its own navigation first", () => {
-    // an anchor, because a button cannot break across the sentence's two lines
-    // in WebKit; so the one thing it must not do is follow itself
+    // an anchor, because a button cannot break across the two lines the link's
+    // own words take in WebKit; so the one thing it must not do is follow itself
     const wiring = gate.slice(gate.indexOf('getElementById("use-browser")'));
     expect(wiring.slice(0, wiring.indexOf("});"))).toContain("event.preventDefault()");
   });
@@ -352,15 +354,36 @@ describe("the steps are messages, in the chat's own bubbles", () => {
     expect(block).not.toMatch(/\.install-msg[^{]*\{[^}]*padding/);
   });
 
-  it("stacks them in one left-aligned column, left-aligned inside it too", () => {
+  it("stacks them as one block, as wide as the widest, centred on the screen", () => {
+    // the owner's rule for this face: the group is centred on the screen, and
+    // the words in the steps are left aligned. So the column is a block that
+    // is exactly its widest bubble wide and no wider, and its auto margins put
+    // the same room on either side of it
     const thread = rule(".gate .install-thread");
     expect(thread).toMatch(/display:\s*flex;/);
     expect(thread).toMatch(/flex-direction:\s*column;/);
+    expect(thread).toMatch(/width:\s*fit-content;/);
+    expect(thread).toMatch(/max-width:\s*100%;/); // and never wider than the card
+    expect(thread).toMatch(/margin:\s*[\d.]+rem auto [\d.]+rem;/);
     expect(thread).toMatch(/text-align:\s*left;/); // the words, against the card's centring
+    expect(installMarkup.match(/class="install-row"/g)).toHaveLength(5);
+  });
+
+  it("every bubble starts on the block's own left edge, and keeps its own width", () => {
+    // nothing pulls a row off the block's left edge: the rows are stretched
+    // across the block and lay their bubble at the start, and nothing centres
+    // or right-aligns the items
+    const thread = rule(".gate .install-thread");
+    expect(thread).not.toMatch(/align-items:|justify-content:/);
     const row = rule(".gate .install-row");
     expect(row).toMatch(/display:\s*flex;/); // so each bubble is its own words wide
+    expect(row).not.toMatch(/justify-content:|align-items:|margin-left:|margin-right:/);
     expect(row).toMatch(/margin-top:\s*4px;/); // the gap inside one run
-    expect(installMarkup.match(/class="install-row"/g)).toHaveLength(5);
+    // and the bubbles stay bubbles, sized to their words: nothing stretches
+    // them to the block's width, which is the widest one's alone
+    const bubble = rule(".gate .install-msg");
+    expect(bubble).toMatch(/max-width:\s*100%;/);
+    expect(bubble).not.toMatch(/(?:^|[^-])width:\s*100%|flex:|align-self:|min-width:/);
   });
 
   it("holds every row's space from the first frame, so the group cannot walk", () => {
@@ -406,10 +429,39 @@ describe("the dots are the chat's dots, in the first message's seat", () => {
 });
 
 describe("the line under the run, and the link inside it", () => {
-  it("is balanced onto two lines at a phone's width, and centred under the column", () => {
+  it("takes three lines: the aside on one of its own, the link on two under it", () => {
+    // the sentence is still written as one paragraph, the aside and then the
+    // link, with no break element anywhere in it ...
+    const paragraph = /<p class="install-switch">[\s\S]*?<\/p>/.exec(installMarkup)?.[0] ?? "";
+    expect(paragraph).not.toBe("");
+    expect(paragraph).not.toMatch(/<br|<span|display/);
+    // ... because the break after the comma is the link being a block: a
+    // block-level box starts a new line whatever the width, so the aside is
+    // always a line to itself and the link always begins the next one
+    const link = rule(".gate .install-link");
+    expect(link).toMatch(/display:\s*block;/);
+    expect(link).toMatch(/margin:\s*0 auto;/); // centred under the aside
+    // and the link's measure is what breaks its own words over two lines, and
+    // where. Measured in Chrome at this size: the reference's first line
+    // ("click here to use it within this") is 11.3rem, and with the next word
+    // on it it would be 15.3rem; so the measure has to sit between those two,
+    // and it sits in the middle of them with room on either side for the
+    // phone's own font metrics. In rem, so the same two lines come out at any
+    // phone's width — the reference's break, after "this"
+    const measure = Number(/max-width:\s*([\d.]+)rem;/.exec(link)?.[1]);
+    expect(measure).toBeGreaterThanOrEqual(12.5);
+    expect(measure).toBeLessThanOrEqual(14.25);
+    // plain wrapping, not balance: balancing would even the two lines out by
+    // moving "this" down, and the reference does not
+    expect(link).not.toMatch(/text-wrap:/);
+  });
+
+  it("the paragraph itself carries no measure and no balancing of its own", () => {
+    // its one line is the aside; the line the link's words break on is the
+    // link's own business, so nothing on the paragraph can move that break
     const line = rule(".gate .install-switch");
-    expect(line).toMatch(/text-wrap:\s*balance;/); // even lines, not a filled first one
-    expect(line).toMatch(/max-width:\s*[\d.]+rem;/); // the measure that makes them two
+    expect(line).not.toMatch(/max-width:/);
+    expect(line).not.toMatch(/text-wrap:/);
     expect(line).toMatch(/margin:\s*0 auto;/); // centred, where the bubbles are not
     expect(line).not.toMatch(/text-align:/); // the card's own centring reaches it
   });

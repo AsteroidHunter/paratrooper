@@ -195,7 +195,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.158"; // The accent is now #4538ff everywhere, replacing the old blue-purple
+const APP_VERSION = "0.3.159"; // The set-up screen's run sits centred as one block, with its closing line on three lines and a slower beat between messages
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
@@ -868,9 +868,10 @@ function renderTokenGate(): void {
   card.classList.add("install");
   const warn = document.getElementById("browser-warn")!;
   document.getElementById("use-browser")!.addEventListener("click", (event) => {
-    // the line is an anchor, because a button is an atomic inline box in WebKit
-    // and the words have to wrap across the statement's two lines like any
-    // other words. So its own default navigation is the one thing to refuse.
+    // the link is an anchor, because a button is an atomic inline box in WebKit
+    // and the link's words have to wrap over the two lines of their own the
+    // sheet gives them. So its own default navigation is the one thing to
+    // refuse.
     event.preventDefault();
     showAlert(warn);
   });
