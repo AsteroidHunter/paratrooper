@@ -13,8 +13,9 @@
 # and "Provisioning on Render" sections.
 #
 # Exercised: the interactions and input order; step 0 building with uv present
-# and with uv obtained through the hook, and a uv obtain failure stopping before
-# any cloud creation; step 1 offering to install a missing Render CLI, with y
+# and with uv obtained through the hook after consent, declining or reaching EOF
+# before uv installation, and a uv obtain failure stopping before any cloud
+# creation; step 1 offering to install a missing Render CLI, with y
 # (obtained) and n (stops before sign in, exit 0); step 2 offering to install a
 # missing Claude Code, with y (installed, then found) and n (stops before sign
 # in, exit 0); optional-key and skipped-key paths; cancellation; EOF at the idle
@@ -63,6 +64,7 @@ SHARED_VENV="$(mktemp -d -t ptp-venv.XXXXXX)"
 HOOKS="$(mktemp -d -t ptp-hooks.XXXXXX)"
 cat > "$HOOKS/uv_installer.sh" <<EOF
 #!/usr/bin/env bash
+: > "\$HOME/uv-installer-called"
 cp "$VERIFY/bin/uv" "\$1"
 EOF
 cat > "$HOOKS/render_installer.sh" <<EOF
@@ -262,27 +264,53 @@ assert_contains "$OUT" "Validating blueprint" $NAME "reached blueprint gate"
 
 # --- 7. step 0: uv missing, obtained through the hook, then builds ----------
 FRESHUV1="$(mktemp -d -t ptp-uv1.XXXXXX)"
-run 0 no_uv "$NEW_INPUT" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/uv_installer.sh" PARATROOPER_INSTALL_VENV="$FRESHUV1"; NAME=no_uv; FB=$FAILURES
+run 0 no_uv "y$NEW_INPUT" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/uv_installer.sh" PARATROOPER_INSTALL_VENV="$FRESHUV1"; NAME=no_uv; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "Download and install uv now?" $NAME "asked before obtaining uv"
+[ -e "$HOMEDIR/uv-installer-called" ] || fail $NAME "did not invoke uv installer after consent"
 assert_contains "$OUT" "uv ready." $NAME "obtained uv"
 assert_contains "$OUT" "Local environment ready." $NAME "built the environment"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
+# --- 7b. missing uv, n or EOF never invokes the installer -------------------
+FRESHUV_DECLINE="$(mktemp -d -t ptp-uv-decline.XXXXXX)"
+run 0 no_uv_no "yn" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/uv_installer.sh" PARATROOPER_INSTALL_VENV="$FRESHUV_DECLINE"; NAME=no_uv_decline; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0 on decline)"
+assert_contains "$OUT" "Download and install uv now?" $NAME "offered uv installation"
+assert_contains "$OUT" "Install uv from" $NAME "manual installation guidance"
+assert_absent "$OUT" "Obtaining uv" $NAME "did not start installation"
+[ ! -e "$HOMEDIR/uv-installer-called" ] || fail $NAME "invoked uv installer after decline"
+[ ! -e "$FRESHUV_DECLINE/bin/python" ] || fail $NAME "built environment after decline"
+[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services after decline"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+FRESHUV_EOF="$(mktemp -d -t ptp-uv-eof.XXXXXX)"
+run 0 no_uv_eof "y" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/uv_installer.sh" PARATROOPER_INSTALL_VENV="$FRESHUV_EOF"; NAME=no_uv_eof; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0 on EOF)"
+assert_contains "$OUT" "Download and install uv now?" $NAME "offered uv installation"
+assert_contains "$OUT" "Install uv from" $NAME "manual installation guidance"
+assert_absent "$OUT" "Obtaining uv" $NAME "did not start installation"
+[ ! -e "$HOMEDIR/uv-installer-called" ] || fail $NAME "invoked uv installer after EOF"
+[ ! -e "$FRESHUV_EOF/bin/python" ] || fail $NAME "built environment after EOF"
+[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services after EOF"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
 # --- 8. step 0: uv present, reused to build the environment -----------------
 FRESHUV2="$(mktemp -d -t ptp-uv2.XXXXXX)"
-run 0 uv_present "$NEW_INPUT" PARATROOPER_INSTALL_VENV="$FRESHUV2"; NAME=uv_present; FB=$FAILURES
+run 0 uv_present "$NEW_INPUT" PARATROOPER_INSTALL_VENV="$FRESHUV2" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh"; NAME=uv_present; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
 assert_contains "$OUT" "uv found." $NAME "reused uv on PATH"
 assert_absent "$OUT" "uv ready." $NAME "did not obtain uv when present"
+assert_absent "$OUT" "Download and install uv now?" $NAME "did not ask when uv is present"
 assert_contains "$OUT" "Local environment ready." $NAME "built the environment"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 9. step 0: uv obtain failure stops before any cloud creation ----------
-run 0 uv_fail "$NEW_INPUT" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_VENV="$(mktemp -d -t ptp-uv3.XXXXXX)"; NAME=uv_fail; FB=$FAILURES
+run 0 uv_fail "y$NEW_INPUT" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_VENV="$(mktemp -d -t ptp-uv3.XXXXXX)"; NAME=uv_fail; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on uv obtain failure"
 [ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created resources despite uv failure"
 [ "$(state_count "$STATE" key_values)" = 0 ] || fail $NAME "created a store despite uv failure"
@@ -365,8 +393,9 @@ run 0 rerun_first "$NEW_INPUT"; NAME=rerun; FB=$FAILURES
 KEEP="$STATE"
 LIVE_PW="$(state_env "$KEEP" paratrooper-web PARATROOPER_APP_TOKEN)"
 rm -f "$KEEP/api_calls.jsonl"
-run 1 rerun_second "yny"
+run 1 rerun_second "yny" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh"
 [ "$CODE" = 0 ] || fail $NAME "second run exit $CODE"
+assert_absent "$OUT" "Download and install uv now?" $NAME "reused environment without uv"
 assert_absent "$OUT" "reused web paratrooper-web" $NAME "progress chatter on screen"
 assert_contains "$LOGFILE" "reused web paratrooper-web" $NAME "web reused (in log)"
 [ "$(state_env "$KEEP" paratrooper-web PARATROOPER_APP_TOKEN)" = "$LIVE_PW" ] || fail $NAME "re-run changed the live password"

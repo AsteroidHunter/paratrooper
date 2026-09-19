@@ -9,9 +9,8 @@ The installer flow these fixtures cover, in order: step 0 Python (an isolated
 environment built with uv), step 1 Render (the Render CLI, then sign in), step 2
 Claude Code (Claude Code, then sign in), step 3 idle sleeping, step 4 app
 password, then the unnumbered "Preparing your deployment" and "Provisioning on
-Render" sections. Steps 0 through 2 obtain a missing tool: step 0 obtains uv
-without asking, and steps 1 and 2 ask a y/n before installing the Render CLI or
-Claude Code.
+Render" sections. Steps 0 through 2 ask a y/n before obtaining a missing tool:
+uv, the Render CLI or Claude Code.
 
 The bin/ fakes stand in for the provider tools. bin/uv creates the virtual
 environment with the python3 on PATH, the same way the tests used to build one,
@@ -41,7 +40,8 @@ is not exercised there; the render and claude fakes are on PATH, so steps 1 and 
 announce them and ask nothing.
 
 run_install_tests.sh covers bootstrap; step 0 building with uv present and with
-uv obtained through the hook, plus a uv obtain failure that stops before any
+uv obtained through the hook after consent, missing uv declined or canceled at
+EOF without running the hook, plus a uv obtain failure that stops before any
 cloud creation; step 1 offering to install a missing Render CLI with y (obtained)
 and n (stops before sign in, exit 0); step 2 offering to install a missing Claude
 Code with y (installed, then found) and n (stops before sign in, exit 0); both

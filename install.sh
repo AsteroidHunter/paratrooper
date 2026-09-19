@@ -144,7 +144,7 @@ SPIN_FRAMES=("${SPIN_HEAVY[@]}")
 # banner <subtitle> - print the gradient PARATROOPER wordmark followed by a
 # right-aligned subtitle. The wordmark is drawn in inline python3 because
 # UTF-8-aware per-char coloring in bash is awkward (each block is 3 bytes).
-# Brand-green #007200 on the left fades to (180, 240, 180) on the right.
+# The app's #4538FF accent on the left fades to pale violet on the right.
 banner() {
 	local subtitle="${1:-}"
 	# The wordmark is drawn with python3. This runs before the runtime is ensured,
@@ -174,8 +174,8 @@ GLYPHS = {
 }
 WORD = "PARATROOPER"
 ROWS = [" ".join(GLYPHS[ch][r] for ch in WORD) for r in range(5)]
-START = (0, 114, 0)
-END = (180, 240, 180)
+START = (69, 56, 255)
+END = (201, 197, 255)
 width = max(len(r) for r in ROWS)
 for row in ROWS:
     out = []
@@ -258,11 +258,10 @@ spin_pid() {
 	printf '\r\033[K'
 }
 
-# welcome - the ☼ note that opens the installer. No signature and no contact
-# block: it says what the app is and what it will ask, and nothing personal.
+# welcome - the ☼ note that opens the installer and describes the app.
 welcome() {
 	printf '%s☼%s %sBefore we start%s\n\n' "$RESET" "$RESET" "$BOLD" "$RESET"
-	printf 'Paratrooper allows you to interact with your agent on the cloud using an iMessage-like interface on your phone. This install script sets up a basic\n\n'
+	printf 'Paratrooper allows you to interact with your agent on the cloud using an iMessage-like interface. This install script sets up a basic chat version of the Paratrooper on Render. Once installed, you will be able to access the chat interface on your iPhone as a PWA.\n\n'
 }
 
 # prompt_keypress <valid-chars> <prompt-text>
@@ -435,26 +434,32 @@ _download_uv() {
 	rm -f "$dest.tar.gz"
 }
 
-# ensure_uv - make uv available, obtaining it into the per-user cache and onto
-# PATH if missing. uv is how step 0 provides Python: it supplies the interpreter
-# and builds the isolated environment, both in per-user caches, never in the
-# global Python. Offline tests supply PARATROOPER_INSTALL_UV_INSTALLER, which is
-# handed the destination path and must leave a working uv there.
+# ensure_uv - use an existing uv or ask before obtaining it into the per-user
+# cache. Offline tests supply PARATROOPER_INSTALL_UV_INSTALLER, which is handed
+# the destination path after consent and must leave a working uv there.
 ensure_uv() {
+	if command -v uv >/dev/null 2>&1; then
+		printf '%s✓%s uv found.\n' "$GREEN" "$RESET"
+		return 0
+	fi
+	printf 'uv is not installed. It can be downloaded into a per-user cache,\n'
+	printf 'without touching your system directories.\n\n'
+	if ! prompt_keypress "yn" "Download and install uv now? (y / n) " || [ "$REPLY" != "y" ]; then
+		printf '\nNo problem. Install uv from\n'
+		printf 'https://docs.astral.sh/uv/getting-started/installation/, then run\n'
+		printf './install.sh again when ready.\n'
+		exit 0
+	fi
+	printf '\n'
+	mkdir -p "$CACHE/bin"
 	if [ -n "${PARATROOPER_INSTALL_UV_INSTALLER:-}" ]; then
-		mkdir -p "$CACHE/bin"
 		spinner "Obtaining uv ..." "uv ready." \
 			"$PARATROOPER_INSTALL_UV_INSTALLER" "$CACHE/bin/uv"
-		chmod +x "$CACHE/bin/uv" 2>/dev/null || true
-		export PATH="$CACHE/bin:$PATH"
-	elif command -v uv >/dev/null 2>&1; then
-		printf '%s✓%s uv found.\n' "$GREEN" "$RESET"
 	else
-		mkdir -p "$CACHE/bin"
 		spinner "Obtaining uv ..." "uv ready." _download_uv "$CACHE/bin/uv"
-		chmod +x "$CACHE/bin/uv" 2>/dev/null || true
-		export PATH="$CACHE/bin:$PATH"
 	fi
+	chmod +x "$CACHE/bin/uv" 2>/dev/null || true
+	export PATH="$CACHE/bin:$PATH"
 	if ! command -v uv >/dev/null 2>&1; then
 		err ""
 		err "⚠ Could not download uv. See $LOG for details, or install it from"
