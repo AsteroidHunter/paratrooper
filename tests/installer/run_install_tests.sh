@@ -48,7 +48,7 @@ PROVISION_KEY="rnd_provisioning_key_E2E_AAAA"
 IDLE_KEY="rnd_idle_key_E2E_ZZZZ"
 CLAUDE_TOKEN="sk-ant-oat01-E2E-CLAUDE-000"
 APP_PASSWORD="fake violet lantern orchard comet"
-NEW_INPUT="yn$APP_PASSWORD
+NEW_INPUT="yyn$APP_PASSWORD
 $APP_PASSWORD"
 WORKSPACE="tea-e2eworkspace000000001"
 REPO_URL="https://github.com/example/paratrooper.git"
@@ -218,6 +218,19 @@ if os.path.exists(path):
 print(n)
 PY
 }
+read_workspaces() {
+	python3 - "$1/api_calls.jsonl" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+owners = set()
+if os.path.exists(path):
+    for line in open(path):
+        call = json.loads(line)
+        if call["method"] == "GET" and call["path"] in ("/services", "/key-value"):
+            owners.add(call.get("params", {}).get("ownerId", ""))
+print(",".join(sorted(owners)))
+PY
+}
 claude_calls() {
 	python3 - "$1/claude.calls" <<'PY'
 import os, sys
@@ -233,6 +246,8 @@ assert_contains "$OUT" "Local environment ready." $NAME "environment prepared"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "ready banner"
 assert_contains "$OUT" "https://paratrooper-web.onrender.com" $NAME "app URL"
 assert_absent "$STATE/render.calls" "render workspace set" $NAME "kept the selected workspace"
+assert_contains "$OUT" "Render workspace: Test Workspace ($WORKSPACE)" $NAME "showed the active workspace"
+assert_contains "$OUT" "Render workspace confirmed." $NAME "required confirmation"
 # The per-resource progress no longer prints on screen; it lands in the install log.
 assert_absent "$OUT" "created web paratrooper-web" $NAME "progress chatter on screen"
 assert_contains "$LOGFILE" "created web paratrooper-web" $NAME "progress kept in log"
@@ -256,22 +271,66 @@ assert_absent "$LOGFILE" "$VAPID_PRIV" $NAME "VAPID private key in log"
 
 # --- 1b. fresh login requires a user-selected workspace --------------------
 run 0 fresh_workspace "y2
-n$APP_PASSWORD
+yn$APP_PASSWORD
 $APP_PASSWORD" MOCK_WORKSPACE_FRESH=1 RENDER_WORKSPACE=; NAME=fresh_workspace; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
 assert_contains "$OUT" "Choose a Render workspace to continue." $NAME "offered workspace selection"
 assert_contains "$OUT" "Select a workspace (1 or 2):" $NAME "ran the CLI picker"
 assert_contains "$STATE/render.calls" "render workspace set" $NAME "invoked workspace selector"
-assert_contains "$OUT" "Render workspace selected." $NAME "confirmed selection"
+assert_contains "$OUT" "Render workspace confirmed." $NAME "confirmed selection"
 assert_contains "$HOMEDIR/.render/cli.yaml" "workspace: tea-second00000000000002" $NAME "saved the user's second choice"
 assert_contains "$STATE/api_state.json" '"ownerId": "tea-second00000000000002"' $NAME "provisioned in the chosen workspace"
+[ "$(read_workspaces "$STATE")" = tea-second00000000000002 ] || fail $NAME "inspected a different workspace"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 run 0 saved_workspace "$NEW_INPUT" MOCK_WORKSPACE_FRESH=1 MOCK_INITIAL_WORKSPACE=tea-saved000000000000001 RENDER_WORKSPACE=; NAME=saved_workspace; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
 assert_absent "$STATE/render.calls" "render workspace set" $NAME "kept the saved workspace"
+assert_contains "$OUT" "Render workspace: Saved Workspace (tea-saved000000000000001)" $NAME "showed the saved workspace"
 assert_contains "$STATE/api_state.json" '"ownerId": "tea-saved000000000000001"' $NAME "provisioned in the saved workspace"
+[ "$(read_workspaces "$STATE")" = tea-saved000000000000001 ] || fail $NAME "inspected a different workspace"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+for choice in decline eof switch_cancel; do
+	case "$choice" in
+		decline) input="yn"; extra="MOCK_WORKSPACE_SET=interactive" ;;
+		eof) input="y"; extra="MOCK_WORKSPACE_SET=interactive" ;;
+		switch_cancel) input="ys"; extra="MOCK_WORKSPACE_SET=cancel" ;;
+	esac
+	run 0 "saved_workspace_$choice" "$input" MOCK_WORKSPACE_FRESH=1 MOCK_INITIAL_WORKSPACE=tea-saved000000000000001 RENDER_WORKSPACE= "$extra"
+	NAME="saved_workspace_$choice"; FB=$FAILURES
+	if [ "$choice" = decline ]; then
+		[ "$CODE" = 0 ] || fail $NAME "expected a clean exit"
+		assert_contains "$OUT" "Installation stopped before deployment." $NAME "declined the saved target"
+	else
+		[ "$CODE" != 0 ] || fail $NAME "expected cancellation"
+	fi
+	assert_contains "$OUT" "Render workspace: Saved Workspace (tea-saved000000000000001)" $NAME "showed the stale saved target"
+	[ ! -e "$STATE/api_calls.jsonl" ] || fail $NAME "inspected app resources before confirmation"
+	assert_absent "$OUT" "Claude Code token captured." $NAME "continued after cancellation"
+	[ "$FAILURES" = "$FB" ] && pass $NAME
+done
+
+run 0 saved_workspace_switch "ys2
+yn$APP_PASSWORD
+$APP_PASSWORD" MOCK_WORKSPACE_FRESH=1 MOCK_INITIAL_WORKSPACE=tea-saved000000000000001 RENDER_WORKSPACE=tea-override00000000001; NAME=saved_workspace_switch; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "Render workspace: Selected Workspace (tea-override00000000001)" $NAME "showed the environment override"
+assert_contains "$OUT" "Render workspace: Selected Workspace (tea-second00000000000002)" $NAME "showed the newly selected workspace"
+assert_contains "$STATE/render.calls" "render workspace set" $NAME "opened the CLI picker"
+[ "$(read_workspaces "$STATE")" = tea-second00000000000002 ] || fail $NAME "inspect or provision read outside the confirmed workspace"
+assert_contains "$STATE/api_state.json" '"ownerId": "tea-second00000000000002"' $NAME "created resources in the confirmed workspace"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+run 0 saved_workspace_same_switch "ys2
+yn$APP_PASSWORD
+$APP_PASSWORD" MOCK_WORKSPACE_FRESH=1 MOCK_INITIAL_WORKSPACE=tea-second00000000000002 RENDER_WORKSPACE=tea-override00000000001; NAME=saved_workspace_same_switch; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "Render workspace: Selected Workspace (tea-override00000000001)" $NAME "showed the override before switching"
+assert_contains "$OUT" "Render workspace: Selected Workspace (tea-second00000000000002)" $NAME "confirmed the already-saved choice"
+[ "$(read_workspaces "$STATE")" = tea-second00000000000002 ] || fail $NAME "read outside the confirmed saved workspace"
+assert_contains "$STATE/api_state.json" '"ownerId": "tea-second00000000000002"' $NAME "created in the confirmed saved workspace"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # A canceled or empty picker must stop even when the CLI exits successfully.
@@ -288,6 +347,7 @@ for choice in cancel empty invalid; do
 	assert_contains "$OUT" "No Render workspace was selected." $NAME "selection stopped cleanly"
 	assert_contains "$STATE/render.calls" "render workspace set" $NAME "attempted workspace selection"
 	assert_absent "$OUT" "Claude Code token captured." $NAME "stopped before Claude"
+	[ ! -e "$STATE/api_calls.jsonl" ] || fail $NAME "inspected app resources without a workspace"
 	[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services without a workspace"
 	[ "$FAILURES" = "$FB" ] && pass $NAME
 done
@@ -296,11 +356,12 @@ run 0 workspace_check_error "y" MOCK_WORKSPACE_CURRENT_ERROR=1; NAME=workspace_c
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
 assert_contains "$OUT" "Could not check your Render workspace." $NAME "reported check failure"
 assert_absent "$STATE/render.calls" "render workspace set" $NAME "did not change workspace after unrelated error"
+[ ! -e "$STATE/api_calls.jsonl" ] || fail $NAME "inspected app resources after workspace check error"
 [ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services after check failure"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 2. idle sleeping on, keys stay distinct -------------------------------
-run 0 idle_on "yy$IDLE_KEY
+run 0 idle_on "yyy$IDLE_KEY
 $APP_PASSWORD
 $APP_PASSWORD"; NAME=idle_on; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
@@ -318,14 +379,14 @@ assert_contains "$OUT" "No problem" $NAME "cancel message"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 4. EOF at the idle choice cancels before provisioning ------------------
-run 0 eof_idle "y"; NAME=eof_idle; FB=$FAILURES
+run 0 eof_idle "yy"; NAME=eof_idle; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on EOF"
 assert_contains "$OUT" "No answer, so nothing was set up" $NAME "EOF cancel message"
 [ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "provisioned despite EOF"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 5. failed Claude sign in runs setup-token once, leaks no token ---------
-run 0 claude_fail "y" MOCK_CLAUDE_FAIL=1; NAME=claude_fail; FB=$FAILURES
+run 0 claude_fail "yy" MOCK_CLAUDE_FAIL=1; NAME=claude_fail; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
 [ "$(claude_calls "$STATE")" = 1 ] || fail $NAME "setup-token ran $(claude_calls "$STATE") times, expected 1"
 assert_absent "$OUT" "$CLAUDE_TOKEN" $NAME "token on stdout after failure"
@@ -334,7 +395,7 @@ assert_contains "$OUT" "Claude Code sign in did not complete" $NAME "single sign
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 5b. Claude hands back no token: the SAME single sign-in failure message -
-run 0 claude_notoken "y" MOCK_CLAUDE_TOKEN=; NAME=claude_notoken; FB=$FAILURES
+run 0 claude_notoken "yy" MOCK_CLAUDE_TOKEN=; NAME=claude_notoken; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
 assert_contains "$OUT" "Claude Code sign in did not complete" $NAME "same message on the no-token path"
 [ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "provisioned despite missing token"
@@ -404,7 +465,7 @@ run 0 uv_fail "y$NEW_INPUT" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 10. step 1: Render CLI missing, y installs it, then signs in -----------
-run 0 no_render "yyn$APP_PASSWORD
+run 0 no_render "yyyn$APP_PASSWORD
 $APP_PASSWORD" PATH="$NOREN_BIN" PARATROOPER_INSTALL_RENDER_INSTALLER="$HOOKS/render_installer.sh"; NAME=no_render; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
 assert_contains "$OUT" "Download and install the Render CLI now?" $NAME "offered render install"
@@ -417,7 +478,7 @@ assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
 # --- 10b. the real Render download path uses the official release ZIP ------
 for spec in Darwin:arm64:darwin:arm64 Darwin:x86_64:darwin:amd64 Linux:aarch64:linux:arm64 Linux:x86_64:linux:amd64; do
 	IFS=: read -r release_os release_arch release_platform release_cpu <<< "$spec"
-	run 0 "render_release_${release_platform}_${release_cpu}" "yyn$APP_PASSWORD
+	run 0 "render_release_${release_platform}_${release_cpu}" "yyyn$APP_PASSWORD
 $APP_PASSWORD" PATH="$RENDER_RELEASE_BIN" MOCK_RELEASE_OS="$release_os" MOCK_RELEASE_ARCH="$release_arch" MOCK_RELEASE_PLATFORM="$release_platform" MOCK_RELEASE_CPU="$release_cpu"
 	NAME="render_release_${release_platform}_${release_cpu}"; FB=$FAILURES
 	[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
@@ -455,7 +516,7 @@ assert_absent "$OUT" "Signed in to Render." $NAME "did not sign in after decline
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 12. step 2: Claude Code missing, y installs it, then signs in ----------
-run 0 no_claude "yyn$APP_PASSWORD
+run 0 no_claude "yyyn$APP_PASSWORD
 $APP_PASSWORD" PATH="$NOCLAUDE_BIN" PARATROOPER_INSTALL_CLAUDE_INSTALLER="$HOOKS/claude_installer.sh"; NAME=no_claude; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
 assert_contains "$OUT" "Download and install Claude Code now?" $NAME "offered claude install"
@@ -466,7 +527,7 @@ assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 13. step 2: Claude Code missing, n stops before sign in, exit 0 --------
-run 0 no_claude_no "yn" PATH="$NOCLAUDE_BIN"; NAME=no_claude_decline; FB=$FAILURES
+run 0 no_claude_no "yyn" PATH="$NOCLAUDE_BIN"; NAME=no_claude_decline; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0 on decline)"
 assert_contains "$OUT" "Download and install Claude Code now?" $NAME "offered claude install"
 assert_contains "$OUT" "Install Claude Code from" $NAME "manual link"
@@ -511,7 +572,7 @@ run 0 rerun_first "$NEW_INPUT"; NAME=rerun; FB=$FAILURES
 KEEP="$STATE"
 LIVE_PW="$(state_env "$KEEP" paratrooper-web PARATROOPER_APP_TOKEN)"
 rm -f "$KEEP/api_calls.jsonl"
-run 1 rerun_second "yny" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh"
+run 1 rerun_second "yyny" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh"
 [ "$CODE" = 0 ] || fail $NAME "second run exit $CODE"
 assert_absent "$OUT" "Download and install uv now?" $NAME "reused environment without uv"
 assert_absent "$OUT" "reused web paratrooper-web" $NAME "progress chatter on screen"
@@ -529,7 +590,7 @@ run 0 lost_first "$NEW_INPUT" MOCK_API_LOSE_RESPONSE=paratrooper-web; NAME=respo
 KEEP="$STATE"
 STORED_PW="$(state_env "$KEEP" paratrooper-web PARATROOPER_APP_TOKEN)"
 [ -n "$STORED_PW" ] || fail $NAME "web not created on the server before the lost response"
-run 1 lost_second "yny"
+run 1 lost_second "yyny"
 [ "$CODE" = 0 ] || fail $NAME "resume run exit $CODE"
 assert_absent "$OUT" "reused web paratrooper-web" $NAME "progress chatter on screen"
 assert_contains "$LOGFILE" "reused web paratrooper-web" $NAME "web reused on resume (in log)"
@@ -566,7 +627,7 @@ assert_absent "$OUT" "PARATROOPER_INSTALL_BRANCH" $NAME "no variable name in Git
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- Password entry and explicit reuse regressions -------------------------
-run 0 mismatch "yn$APP_PASSWORD
+run 0 mismatch "yyn$APP_PASSWORD
 different fake confirmation words
 $APP_PASSWORD
 $APP_PASSWORD"; NAME=mismatch; FB=$FAILURES
@@ -576,20 +637,20 @@ assert_absent "$OUT" "different fake confirmation words" $NAME "confirmation in 
 [ "$(state_env "$STATE" paratrooper-web PARATROOPER_APP_TOKEN)" = "$APP_PASSWORD" ] || fail $NAME "selected password not stored"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-run 0 blank_then_valid "yn
+run 0 blank_then_valid "yyn
 $APP_PASSWORD
 $APP_PASSWORD"; NAME=blank_then_valid; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE"
 assert_contains "$OUT" "That was empty" $NAME "blank rejected"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-run 0 eof_password "yn"; NAME=eof_password; FB=$FAILURES
+run 0 eof_password "yyn"; NAME=eof_password; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected cancellation"
 assert_contains "$OUT" "No password, so nothing was set up" $NAME "EOF canceled"
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "write before password confirmation"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-run 0 eof_confirmation "yn$APP_PASSWORD"; NAME=eof_confirmation; FB=$FAILURES
+run 0 eof_confirmation "yyn$APP_PASSWORD"; NAME=eof_confirmation; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected cancellation"
 assert_contains "$OUT" "No password, so nothing was set up" $NAME "EOF at confirmation canceled"
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "write before password confirmation"
@@ -603,14 +664,14 @@ run 0 debug_flags "$NEW_INPUT" MOCK_BASH_FLAGS=-xva APP_PASSWORD=caller-export-m
 # The previous run provides an existing app. Canceling or EOF at the deliberate
 # keep step must write nothing and must not ask for a fresh password.
 rm -f "$STATE/api_calls.jsonl"
-run 1 cancel_existing "ynn"; NAME=cancel_existing; FB=$FAILURES
+run 1 cancel_existing "yynn"; NAME=cancel_existing; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected cancellation"
 assert_contains "$OUT" "No resources or passwords were changed" $NAME "cancellation message"
 assert_absent "$OUT" "App password (input hidden):" $NAME "unneeded password prompt"
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "write after cancel"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
-run 1 eof_existing "yn"; NAME=eof_existing; FB=$FAILURES
+run 1 eof_existing "yyn"; NAME=eof_existing; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected cancellation"
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "write after EOF"
 [ "$FAILURES" = "$FB" ] && pass $NAME

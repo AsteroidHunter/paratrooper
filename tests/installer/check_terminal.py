@@ -159,6 +159,8 @@ class TerminalRun:
     def begin(self):
         self.expect("Ready to begin? (y / n) ")
         self.send("y")
+        self.expect("Use this workspace for Paratrooper? (y / s / n) ")
+        self.send("y")
         self.expect("answer: ")
         self.send("n")
 
@@ -200,15 +202,28 @@ def exercise():
     fresh.send("y")
     fresh.expect("Select a workspace (1 or 2): ")
     fresh.send("2\n")
+    fresh.expect("Use this workspace for Paratrooper? (y / s / n) ")
+    fresh.send("y")
     fresh.expect("answer: ")
     fresh.send("n")
     fresh.hidden("App password (input hidden): ", PASSWORD + "\n")
     fresh.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
     output = fresh.finish(0)
-    assert "Render workspace selected." in output
+    assert "Render workspace confirmed." in output
     assert "render workspace set" in (fresh.state / "render.calls").read_text()
     state = json.loads((fresh.state / "api_state.json").read_text())
     assert state["services"]["paratrooper-web"]["ownerId"] == "tea-second00000000000002"
+
+    workspace_cancel = TerminalRun("workspace-ctrl-c")
+    workspace_cancel.expect("Ready to begin? (y / n) ")
+    workspace_cancel.send("y")
+    workspace_cancel.expect("  n - stop here\r\n\r\n")
+    workspace_cancel.expect("Use this workspace for Paratrooper? (y / s / n) ")
+    # The trace prints the prompt text before the live read; let that read start.
+    time.sleep(0.3)
+    workspace_cancel.send("\x03")
+    workspace_cancel.finish(130)
+    assert not (workspace_cancel.state / "api_calls.jsonl").exists()
 
     run = TerminalRun("new-mismatch-blank-success")
     run.begin()

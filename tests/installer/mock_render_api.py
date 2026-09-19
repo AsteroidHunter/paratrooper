@@ -74,7 +74,8 @@ def handler(request: httpx.Request) -> httpx.Response:
     auth = request.headers.get("Authorization", "")
     token = auth[len("Bearer "):] if auth.startswith("Bearer ") else auth
     body = json.loads(request.content) if request.content else None
-    _record({"method": request.method, "path": path, "token": token, "body": body})
+    _record({"method": request.method, "path": path,
+             "params": dict(request.url.params), "token": token, "body": body})
 
     unreachable = os.environ.get("MOCK_API_UNREACHABLE", "")
     if unreachable and unreachable in path:

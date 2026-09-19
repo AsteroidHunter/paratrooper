@@ -89,9 +89,12 @@ REPORT_FILE=""
 # Holds the provisioner's stderr (its "error: ..." line) while the provisioning
 # spinner animates, so a failure prints it cleanly once the spinner is erased.
 PROVISION_ERR=""
+WORKSPACE_ERR=""
 TERMINAL_STATE=""
 PASSWORD_MODE=""
 EXISTING_WEB_ID=""
+WORKSPACE_ID=""
+WORKSPACE_NAME=""
 
 # Secrets live only in these shell variables, for the life of this process. They
 # are never written to the log, never echoed back, and never named in an error.
@@ -114,6 +117,7 @@ cleanup() {
 	fi
 	[ -n "$REPORT_FILE" ] && rm -f "$REPORT_FILE" 2>/dev/null
 	[ -n "$PROVISION_ERR" ] && rm -f "$PROVISION_ERR" 2>/dev/null
+	[ -n "$WORKSPACE_ERR" ] && rm -f "$WORKSPACE_ERR" 2>/dev/null
 	unset APP_PASSWORD CLAUDE_TOKEN RENDER_KEY provision_payload
 	return 0
 }
@@ -272,14 +276,25 @@ welcome() {
 prompt_keypress() {
 	local valid="$1"
 	local prompt="$2"
+	if [ -t 0 ]; then
+		TERMINAL_STATE="$(stty -g)" || return 1
+	fi
 	printf '%s' "$prompt"
 	local ch
 	while true; do
 		if ! IFS= read -s -n 1 -r ch; then
+			if [ -n "$TERMINAL_STATE" ]; then
+				stty "$TERMINAL_STATE"
+				TERMINAL_STATE=""
+			fi
 			printf '\n'
 			return 1
 		fi
 		if [ -n "$ch" ] && [[ "$valid" == *"$ch"* ]]; then
+			if [ -n "$TERMINAL_STATE" ]; then
+				stty "$TERMINAL_STATE"
+				TERMINAL_STATE=""
+			fi
 			printf '%s\n' "$ch"
 			REPLY="$ch"
 			return 0
@@ -590,6 +605,59 @@ ensure_claude() {
 	obtain_claude
 }
 
+# Read the CLI's active workspace as structured output. The CLI resolves a
+# RENDER_WORKSPACE override before its saved config; after the user chooses a
+# different workspace, ignore that override to read the new saved choice.
+read_render_workspace() {
+	local raw fields errors status=0
+	WORKSPACE_ERR="$(mktemp -t paratrooper-workspace.XXXXXX)" || return 1
+	if [ "${1:-}" = "saved" ]; then
+		raw="$(unset RENDER_WORKSPACE; render workspace current --output json 2>"$WORKSPACE_ERR")" || status=$?
+	else
+		raw="$(render workspace current --output json 2>"$WORKSPACE_ERR")" || status=$?
+	fi
+	errors="$(cat "$WORKSPACE_ERR")"
+	[ -z "$errors" ] || printf '%s\n' "$errors" >>"$LOG"
+	rm -f "$WORKSPACE_ERR"
+	WORKSPACE_ERR=""
+	if [ "$status" -ne 0 ]; then
+		[ -z "$raw" ] || printf '%s\n' "$raw" >>"$LOG"
+		[[ "$errors" == *"no workspace set."* ]] && return 2
+		return 1
+	fi
+	if ! fields="$(printf '%s' "$raw" | "$PY" -c '
+import json, re, sys
+try:
+    workspace = json.load(sys.stdin)
+    ident = workspace["id"]
+    name = workspace["name"]
+    if not isinstance(ident, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", ident):
+        raise ValueError("invalid workspace ID")
+    if not isinstance(name, str):
+        raise ValueError("invalid workspace name")
+    name = " ".join("".join(c for c in name if c.isprintable()).split())
+    if not name:
+        raise ValueError("empty workspace name")
+    print(f"{ident}\t{name}")
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+')"; then
+		printf 'Render workspace current returned an unreadable workspace.\n' >>"$LOG"
+		return 1
+	fi
+	IFS=$'\t' read -r WORKSPACE_ID WORKSPACE_NAME <<< "$fields"
+	printf 'Render workspace: %s (%s)\n' "$WORKSPACE_NAME" "$WORKSPACE_ID" >>"$LOG"
+}
+
+select_render_workspace() {
+	printf '\nChoose a Render workspace to continue.\n\n'
+	# The CLI picker writes the user's choice to its config. A pre-existing
+	# environment override must not hide that choice when we read it back. The
+	# result is shown for explicit confirmation even if the picker was canceled.
+	(unset RENDER_WORKSPACE; render workspace set) || return 1
+	read_render_workspace saved
+}
+
 # --- start-up --------------------------------------------------------------
 
 if [ ! -f "$BLUEPRINT" ] || [ ! -f "$REPO/pyproject.toml" ]; then
@@ -684,38 +752,48 @@ if ! render login; then
 	exit 1
 fi
 
-# The CLI saves login and workspace selection separately. A new login can have
-# a token but no active workspace, so let the user select one before continuing.
-if workspace_check="$(render workspace current 2>&1)"; then
-	printf '%s\n' "$workspace_check" >>"$LOG"
-elif [[ "$workspace_check" == *"no workspace set."* ]]; then
-	printf '%s\n' "$workspace_check" >>"$LOG"
-	printf '\nChoose a Render workspace to continue.\n\n'
-	if ! render workspace set; then
+# The CLI can save a workspace from an earlier use, or inherit an override from
+# the shell. Show the actual target and ask before any app resource is inspected.
+if read_render_workspace; then
+	:
+else
+	workspace_status=$?
+	if [ "$workspace_status" -ne 2 ]; then
+		err ""
+		err "⚠ Could not check your Render workspace. See $LOG for details."
+		exit 1
+	fi
+	if ! select_render_workspace; then
 		err ""
 		err "⚠ No Render workspace was selected."
 		err "  Choose or create a workspace in Render, then run ./install.sh again."
 		exit 1
 	fi
-	if ! workspace_check="$(render workspace current 2>&1)"; then
-		printf '%s\n' "$workspace_check" >>"$LOG"
+fi
+while :; do
+	printf '\nRender workspace: %s (%s)\n' "$WORKSPACE_NAME" "$WORKSPACE_ID"
+	printf '  y - use this workspace\n'
+	printf '  s - select another workspace\n'
+	printf '  n - stop here\n\n'
+	if ! prompt_keypress "ysn" "Use this workspace for Paratrooper? (y / s / n) "; then
 		err ""
-		if [[ "$workspace_check" == *"no workspace set."* ]]; then
-			err "⚠ No Render workspace was selected."
-			err "  Choose or create a workspace in Render, then run ./install.sh again."
-		else
-			err "⚠ Could not check your Render workspace. See $LOG for details."
-		fi
+		err "⚠ No workspace was confirmed. Run ./install.sh again when ready."
 		exit 1
 	fi
-	printf '%s\n' "$workspace_check" >>"$LOG"
-	printf '%s✓%s Render workspace selected.\n' "$GREEN" "$RESET"
-else
-	printf '%s\n' "$workspace_check" >>"$LOG"
-	err ""
-	err "⚠ Could not check your Render workspace. See $LOG for details."
-	exit 1
-fi
+	case "$REPLY" in
+		y) printf '\n'; break ;;
+		n) printf 'No problem. Installation stopped before deployment.\n'; exit 0 ;;
+		s)
+			if ! select_render_workspace; then
+				err ""
+				err "⚠ No Render workspace was selected."
+				err "  Choose or create a workspace in Render, then run ./install.sh again."
+				exit 1
+			fi
+			;;
+	esac
+done
+printf '%s✓%s Render workspace confirmed.\n' "$GREEN" "$RESET"
 printf '%s✓%s Signed in to Render.\n' "$GREEN" "$RESET"
 
 # --- 2. Claude Code --------------------------------------------------------
@@ -795,6 +873,7 @@ REPORT_FILE="$(mktemp -t paratrooper-provision.XXXXXX)"
 # one, and bind an existing-install confirmation to that exact web service id.
 if ! "$PY" -m paratrooper.provision --inspect-app \
 	--blueprint "$BLUEPRINT" --repo "$REPO_URL" --branch "$REPO_BRANCH" \
+	--workspace "$WORKSPACE_ID" \
 	--report "$REPORT_FILE"; then
 	err "Could not check your existing app. Nothing was set up."
 	exit 1
@@ -895,6 +974,7 @@ run_provisioner() {
 		--config "$CONFIG_FILE" \
 		--repo "$REPO_URL" \
 		--branch "$REPO_BRANCH" \
+		--workspace "$WORKSPACE_ID" \
 		--report "$REPORT_FILE" \
 		--password-mode "$PASSWORD_MODE" \
 		--existing-web-id "$EXISTING_WEB_ID" \

@@ -33,17 +33,24 @@ case "$sub" in
         [ "${MOCK_WORKSPACE_CURRENT_ERROR:-0}" = "1" ] && { echo "request failed" >&2; exit 1; }
         if [ "${MOCK_WORKSPACE_FRESH:-0}" = "1" ]; then
           workspace_id="${RENDER_WORKSPACE:-}"
+          workspace_name="Selected Workspace"
           if [ -z "$workspace_id" ] && [ -f "$HOME/.render/cli.yaml" ]; then
             while IFS= read -r line; do
               case "$line" in
                 'workspace: '*) workspace_id="${line#workspace: }" ;;
+                'workspace_name: '*) workspace_name="${line#workspace_name: }" ;;
               esac
             done < "$HOME/.render/cli.yaml"
           fi
           [ -n "$workspace_id" ] || { echo 'no workspace set. Use `render workspace set` to set a workspace' >&2; exit 1; }
-          printf '%s (Selected Workspace)\n' "$workspace_id"
         else
-          echo "tea-test000000000000000 (Test Workspace)"
+          workspace_id="${RENDER_WORKSPACE:-tea-test000000000000000}"
+          workspace_name="Test Workspace"
+        fi
+        if [ "${3:-}" = "--output" ] && [ "${4:-}" = "json" ]; then
+          printf '{"id":"%s","name":"%s"}\n' "$workspace_id" "$workspace_name"
+        else
+          printf '%s (%s)\n' "$workspace_id" "$workspace_name"
         fi
         exit 0
         ;;
