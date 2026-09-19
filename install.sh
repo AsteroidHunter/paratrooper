@@ -469,11 +469,10 @@ ensure_uv() {
 }
 
 # _download_render_cli <dest> - the real mechanism for obtaining the Render CLI:
-# the official render-oss/cli GitHub releases, extracted into place. The asset
-# naming is a documented value to confirm at a real install; the offline tests
-# exercise the obtain path through PARATROOPER_INSTALL_RENDER_INSTALLER instead.
+# use the versioned ZIP published by the official render-oss/cli releases and
+# extract its CLI binary into the per-user cache.
 _download_render_cli() {
-	local dest="$1" os arch
+	local dest="$1" os arch version version_num archive url tmpdir
 	case "$(uname -s)" in
 		Darwin) os="darwin" ;;
 		Linux)  os="linux" ;;
@@ -484,11 +483,23 @@ _download_render_cli() {
 		x86_64|amd64)  arch="amd64" ;;
 		*) err "No automatic Render CLI build for $(uname -m)."; return 1 ;;
 	esac
-	local url="https://github.com/render-oss/cli/releases/latest/download/cli_${os}_${arch}.tar.gz"
-	curl -fsSL "$url" -o "$dest.tar.gz"
-	tar -xzf "$dest.tar.gz" -C "$(dirname "$dest")" render 2>/dev/null ||
-		tar -xzf "$dest.tar.gz" -C "$(dirname "$dest")"
-	rm -f "$dest.tar.gz"
+	command -v unzip >/dev/null 2>&1 || { err "unzip is required to install the Render CLI."; return 1; }
+	version="$(curl -fsSL https://api.github.com/repos/render-oss/cli/releases/latest |
+		sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')" || return 1
+	[[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { err "Could not read the latest Render CLI version."; return 1; }
+	version_num="${version#v}"
+	url="https://github.com/render-oss/cli/releases/download/${version}/cli_${version_num}_${os}_${arch}.zip"
+	tmpdir="$(mktemp -d)" || return 1
+	archive="$tmpdir/render.zip"
+	if ! curl -fsSL "$url" -o "$archive" ||
+		! unzip -p "$archive" "cli_v${version_num}" > "$tmpdir/render" ||
+		[ ! -s "$tmpdir/render" ] ||
+		! chmod +x "$tmpdir/render" ||
+		! mv "$tmpdir/render" "$dest"; then
+		rm -rf "$tmpdir"
+		return 1
+	fi
+	rm -rf "$tmpdir"
 }
 
 # obtain_render - download the Render CLI into the per-user cache and onto PATH.

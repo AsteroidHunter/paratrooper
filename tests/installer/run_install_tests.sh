@@ -16,7 +16,8 @@
 # and with uv obtained through the hook after consent, declining or reaching EOF
 # before uv installation, and a uv obtain failure stopping before any cloud
 # creation; step 1 offering to install a missing Render CLI, with y
-# (obtained) and n (stops before sign in, exit 0); step 2 offering to install a
+# (obtained through the hook or a mocked release ZIP) and n (stops before sign
+# in, exit 0); step 2 offering to install a
 # missing Claude Code, with y (installed, then found) and n (stops before sign
 # in, exit 0); optional-key and skipped-key paths; cancellation; EOF at the idle
 # choice; a failed Claude sign in and a Claude that hands back no token, both
@@ -83,13 +84,20 @@ echo "mock: obtaining the tool failed" >&2
 exit 1
 EOF
 chmod +x "$HOOKS"/*.sh
+python3 - "$VERIFY/bin/render" "$HOOKS/render-release.zip" <<'PY'
+import sys
+import zipfile
+with zipfile.ZipFile(sys.argv[2], "w") as archive:
+    archive.write(sys.argv[1], "cli_v2.28.0")
+PY
+printf 'not a ZIP archive\n' > "$HOOKS/invalid-release.zip"
 
 # A curated bin dir with the tools install.sh needs, optionally excluding one, so
 # a scenario can present a PATH with no uv, no render or no claude.
 make_bin() {  # make_bin <dest> <exclude:python3|render|claude|uv|none>
 	local dest="$1" exclude="$2" t src
 	mkdir -p "$dest"
-	for t in bash sh env mktemp rm mkdir rmdir chmod cat sleep awk tar ln cp mv \
+	for t in bash sh env mktemp rm mkdir rmdir chmod cat sleep awk tar unzip ln cp mv \
 	         sed grep dirname basename stty uname date head tail true false tr sort; do
 		src="$(command -v "$t" 2>/dev/null)" && [ -n "$src" ] && ln -sf "$src" "$dest/$t"
 	done
@@ -101,6 +109,34 @@ make_bin() {  # make_bin <dest> <exclude:python3|render|claude|uv|none>
 NOREN_BIN="$(mktemp -d -t ptp-noren.XXXXXX)";   make_bin "$NOREN_BIN" render
 NOCLAUDE_BIN="$(mktemp -d -t ptp-nocla.XXXXXX)"; make_bin "$NOCLAUDE_BIN" claude
 NOUV_BIN="$(mktemp -d -t ptp-nouv.XXXXXX)";      make_bin "$NOUV_BIN" uv
+RENDER_RELEASE_BIN="$(mktemp -d -t ptp-render-release.XXXXXX)"; make_bin "$RENDER_RELEASE_BIN" render
+rm "$RENDER_RELEASE_BIN/curl" "$RENDER_RELEASE_BIN/uname"
+cat > "$RENDER_RELEASE_BIN/uname" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    -s) printf '%s\n' "${MOCK_RELEASE_OS:-Darwin}" ;;
+    -m) printf '%s\n' "${MOCK_RELEASE_ARCH:-arm64}" ;;
+    *) /usr/bin/uname "$@" ;;
+esac
+EOF
+cat > "$RENDER_RELEASE_BIN/curl" <<EOF
+#!/usr/bin/env bash
+if [ "\${2:-}" = https://api.github.com/repos/render-oss/cli/releases/latest ]; then
+    [ "\${MOCK_RELEASE_FAIL:-}" = api ] && exit 22
+    printf '{"tag_name":"%s"}\n' "\${MOCK_RELEASE_TAG:-v2.28.0}"
+    exit 0
+fi
+if [[ "\${2:-}" == https://github.com/render-oss/cli/releases/download/* ]]; then
+    printf '%s\n' "\$2" >> "\$MOCK_STATE_DIR/render_release.calls"
+    expected="https://github.com/render-oss/cli/releases/download/v2.28.0/cli_2.28.0_\${MOCK_RELEASE_PLATFORM}_\${MOCK_RELEASE_CPU}.zip"
+    [ "\$2" = "\$expected" ] || exit 22
+    [ "\${MOCK_RELEASE_FAIL:-}" = download ] && exit 22
+    cp "\${MOCK_RELEASE_ARCHIVE:-$HOOKS/render-release.zip}" "\$4"
+    exit \$?
+fi
+exec "$VERIFY/bin/curl" "\$@"
+EOF
+chmod +x "$RENDER_RELEASE_BIN/uname" "$RENDER_RELEASE_BIN/curl"
 
 FAILURES=0
 
@@ -326,6 +362,37 @@ assert_contains "$OUT" "Signed in to Render." $NAME "signed in after install"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
 [ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 10b. the real Render download path uses the official release ZIP ------
+for spec in Darwin:arm64:darwin:arm64 Darwin:x86_64:darwin:amd64 Linux:aarch64:linux:arm64 Linux:x86_64:linux:amd64; do
+	IFS=: read -r release_os release_arch release_platform release_cpu <<< "$spec"
+	run 0 "render_release_${release_platform}_${release_cpu}" "yyn$APP_PASSWORD
+$APP_PASSWORD" PATH="$RENDER_RELEASE_BIN" MOCK_RELEASE_OS="$release_os" MOCK_RELEASE_ARCH="$release_arch" MOCK_RELEASE_PLATFORM="$release_platform" MOCK_RELEASE_CPU="$release_cpu"
+	NAME="render_release_${release_platform}_${release_cpu}"; FB=$FAILURES
+	[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+	assert_contains "$STATE/render_release.calls" "https://github.com/render-oss/cli/releases/download/v2.28.0/cli_2.28.0_${release_platform}_${release_cpu}.zip" $NAME "official release asset URL"
+	cmp -s "$HOMEDIR/.cache/paratrooper/bin/render" "$VERIFY/bin/render" || fail $NAME "did not extract the CLI binary"
+	assert_contains "$OUT" "Signed in to Render." $NAME "continued after extracting CLI"
+	[ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
+	[ "$FAILURES" = "$FB" ] && pass $NAME
+done
+
+for failure in api bad_tag download invalid_archive unsupported_arch; do
+	case "$failure" in
+		api) extra="MOCK_RELEASE_FAIL=api" ;;
+		bad_tag) extra="MOCK_RELEASE_TAG=unexpected" ;;
+		download) extra="MOCK_RELEASE_FAIL=download" ;;
+		invalid_archive) extra="MOCK_RELEASE_ARCHIVE=$HOOKS/invalid-release.zip" ;;
+		unsupported_arch) extra="MOCK_RELEASE_ARCH=riscv64" ;;
+	esac
+	run 0 "render_release_$failure" "yy" PATH="$RENDER_RELEASE_BIN" MOCK_RELEASE_PLATFORM=darwin MOCK_RELEASE_CPU=arm64 "$extra"
+	NAME="render_release_$failure"; FB=$FAILURES
+	[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+	assert_contains "$OUT" "Obtaining the Render CLI ... failed" $NAME "reported download failure"
+	[ ! -e "$HOMEDIR/.cache/paratrooper/bin/render" ] || fail $NAME "left a CLI binary after failure"
+	[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services after failed download"
+	[ "$FAILURES" = "$FB" ] && pass $NAME
+done
 
 # --- 11. step 1: Render CLI missing, n stops before sign in, exit 0 ---------
 run 0 no_render_no "yn" PATH="$NOREN_BIN"; NAME=no_render_decline; FB=$FAILURES

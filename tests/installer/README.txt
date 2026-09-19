@@ -42,8 +42,10 @@ announce them and ask nothing.
 run_install_tests.sh covers bootstrap; step 0 building with uv present and with
 uv obtained through the hook after consent, missing uv declined or canceled at
 EOF without running the hook, plus a uv obtain failure that stops before any
-cloud creation; step 1 offering to install a missing Render CLI with y (obtained)
-and n (stops before sign in, exit 0); step 2 offering to install a missing Claude
+cloud creation; step 1 offering to install a missing Render CLI with y (obtained
+through the hook and through a mocked official release ZIP for macOS and Linux
+architectures, including release and archive failures) and n (stops before sign
+in, exit 0); step 2 offering to install a missing Claude
 Code with y (installed, then found) and n (stops before sign in, exit 0); both
 idle choices; passphrase entry; a failed blueprint gate stopping the unnumbered
 prepare section; readiness; reruns; partial installs; cancellation; EOF; and
