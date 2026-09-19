@@ -195,6 +195,21 @@ class TerminalRun:
 
 
 def exercise():
+    fresh = TerminalRun("fresh-workspace", extra={"RENDER_WORKSPACE": "", "MOCK_WORKSPACE_FRESH": "1"})
+    fresh.expect("Ready to begin? (y / n) ")
+    fresh.send("y")
+    fresh.expect("Select a workspace (1 or 2): ")
+    fresh.send("2\n")
+    fresh.expect("answer: ")
+    fresh.send("n")
+    fresh.hidden("App password (input hidden): ", PASSWORD + "\n")
+    fresh.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
+    output = fresh.finish(0)
+    assert "Render workspace selected." in output
+    assert "render workspace set" in (fresh.state / "render.calls").read_text()
+    state = json.loads((fresh.state / "api_state.json").read_text())
+    assert state["services"]["paratrooper-web"]["ownerId"] == "tea-second00000000000002"
+
     run = TerminalRun("new-mismatch-blank-success")
     run.begin()
     run.hidden("App password (input hidden): ", "\n")

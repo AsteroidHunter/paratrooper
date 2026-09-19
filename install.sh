@@ -684,12 +684,36 @@ if ! render login; then
 	exit 1
 fi
 
-# The delivery tool and the service lookups both read the active workspace the
-# CLI saved. Confirm one is selected now, before anything depends on it.
-if ! render workspace current >>"$LOG" 2>&1; then
+# The CLI saves login and workspace selection separately. A new login can have
+# a token but no active workspace, so let the user select one before continuing.
+if workspace_check="$(render workspace current 2>&1)"; then
+	printf '%s\n' "$workspace_check" >>"$LOG"
+elif [[ "$workspace_check" == *"no workspace set."* ]]; then
+	printf '%s\n' "$workspace_check" >>"$LOG"
+	printf '\nChoose a Render workspace to continue.\n\n'
+	if ! render workspace set; then
+		err ""
+		err "⚠ No Render workspace was selected."
+		err "  Choose or create a workspace in Render, then run ./install.sh again."
+		exit 1
+	fi
+	if ! workspace_check="$(render workspace current 2>&1)"; then
+		printf '%s\n' "$workspace_check" >>"$LOG"
+		err ""
+		if [[ "$workspace_check" == *"no workspace set."* ]]; then
+			err "⚠ No Render workspace was selected."
+			err "  Choose or create a workspace in Render, then run ./install.sh again."
+		else
+			err "⚠ Could not check your Render workspace. See $LOG for details."
+		fi
+		exit 1
+	fi
+	printf '%s\n' "$workspace_check" >>"$LOG"
+	printf '%s✓%s Render workspace selected.\n' "$GREEN" "$RESET"
+else
+	printf '%s\n' "$workspace_check" >>"$LOG"
 	err ""
-	err "⚠ No Render workspace is selected."
-	err "  Run \`render workspace set\`, then re-run this installer."
+	err "⚠ Could not check your Render workspace. See $LOG for details."
 	exit 1
 fi
 printf '%s✓%s Signed in to Render.\n' "$GREEN" "$RESET"

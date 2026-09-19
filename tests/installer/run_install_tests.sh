@@ -168,6 +168,11 @@ run() {
 		export PARATROOPER_PROVISION_READY_INTERVAL=0
 		local kv
 		for kv in "$@"; do export "${kv?}"; done
+		if [ -n "${MOCK_INITIAL_WORKSPACE:-}" ]; then
+			mkdir -p "$HOME/.render"
+			printf 'version: 1\nworkspace: %s\nworkspace_name: Saved Workspace\napi:\n  key: mock-cli-token\n' \
+				"$MOCK_INITIAL_WORKSPACE" > "$HOME/.render/cli.yaml"
+		fi
 		printf '%s\n' "$input" | bash ${MOCK_BASH_FLAGS:-} "$INSTALL"
 	) >"$OUT" 2>&1
 	CODE=$?
@@ -227,6 +232,7 @@ run 0 happy_off "$NEW_INPUT"; NAME=happy_off; FB=$FAILURES
 assert_contains "$OUT" "Local environment ready." $NAME "environment prepared"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "ready banner"
 assert_contains "$OUT" "https://paratrooper-web.onrender.com" $NAME "app URL"
+assert_absent "$STATE/render.calls" "render workspace set" $NAME "kept the selected workspace"
 # The per-resource progress no longer prints on screen; it lands in the install log.
 assert_absent "$OUT" "created web paratrooper-web" $NAME "progress chatter on screen"
 assert_contains "$LOGFILE" "created web paratrooper-web" $NAME "progress kept in log"
@@ -246,6 +252,51 @@ assert_absent "$LOGFILE" "$CLAUDE_TOKEN" $NAME "claude token in log"
 assert_absent "$OUT" "$PROVISION_KEY" $NAME "provisioning key on stdout"
 assert_absent "$OUT" "$VAPID_PRIV" $NAME "VAPID private key on stdout"
 assert_absent "$LOGFILE" "$VAPID_PRIV" $NAME "VAPID private key in log"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 1b. fresh login requires a user-selected workspace --------------------
+run 0 fresh_workspace "y2
+n$APP_PASSWORD
+$APP_PASSWORD" MOCK_WORKSPACE_FRESH=1 RENDER_WORKSPACE=; NAME=fresh_workspace; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "Choose a Render workspace to continue." $NAME "offered workspace selection"
+assert_contains "$OUT" "Select a workspace (1 or 2):" $NAME "ran the CLI picker"
+assert_contains "$STATE/render.calls" "render workspace set" $NAME "invoked workspace selector"
+assert_contains "$OUT" "Render workspace selected." $NAME "confirmed selection"
+assert_contains "$HOMEDIR/.render/cli.yaml" "workspace: tea-second00000000000002" $NAME "saved the user's second choice"
+assert_contains "$STATE/api_state.json" '"ownerId": "tea-second00000000000002"' $NAME "provisioned in the chosen workspace"
+[ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+run 0 saved_workspace "$NEW_INPUT" MOCK_WORKSPACE_FRESH=1 MOCK_INITIAL_WORKSPACE=tea-saved000000000000001 RENDER_WORKSPACE=; NAME=saved_workspace; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_absent "$STATE/render.calls" "render workspace set" $NAME "kept the saved workspace"
+assert_contains "$STATE/api_state.json" '"ownerId": "tea-saved000000000000001"' $NAME "provisioned in the saved workspace"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# A canceled or empty picker must stop even when the CLI exits successfully.
+for choice in cancel empty invalid; do
+	case "$choice" in
+		cancel) extra="MOCK_WORKSPACE_SET=cancel"; input="y" ;;
+		empty) extra="MOCK_WORKSPACE_SET=empty"; input="y" ;;
+		invalid) extra="MOCK_WORKSPACE_SET=interactive"; input="y0
+" ;;
+	esac
+	run 0 "fresh_workspace_$choice" "$input" MOCK_WORKSPACE_FRESH=1 RENDER_WORKSPACE= "$extra"
+	NAME="fresh_workspace_$choice"; FB=$FAILURES
+	[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+	assert_contains "$OUT" "No Render workspace was selected." $NAME "selection stopped cleanly"
+	assert_contains "$STATE/render.calls" "render workspace set" $NAME "attempted workspace selection"
+	assert_absent "$OUT" "Claude Code token captured." $NAME "stopped before Claude"
+	[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services without a workspace"
+	[ "$FAILURES" = "$FB" ] && pass $NAME
+done
+
+run 0 workspace_check_error "y" MOCK_WORKSPACE_CURRENT_ERROR=1; NAME=workspace_check_error; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+assert_contains "$OUT" "Could not check your Render workspace." $NAME "reported check failure"
+assert_absent "$STATE/render.calls" "render workspace set" $NAME "did not change workspace after unrelated error"
+[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services after check failure"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 2. idle sleeping on, keys stay distinct -------------------------------

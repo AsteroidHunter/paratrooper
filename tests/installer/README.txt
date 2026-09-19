@@ -45,7 +45,11 @@ EOF without running the hook, plus a uv obtain failure that stops before any
 cloud creation; step 1 offering to install a missing Render CLI with y (obtained
 through the hook and through a mocked official release ZIP for macOS and Linux
 architectures, including release and archive failures) and n (stops before sign
-in, exit 0); step 2 offering to install a missing Claude
+in, exit 0). It also covers a fresh Render login with no workspace: selecting
+the second workspace continues in that workspace, an existing selection is
+preserved, while cancellation, an empty account or an unrelated workspace check
+error stops before deployment. Step 2
+offers to install a missing Claude
 Code with y (installed, then found) and n (stops before sign in, exit 0); both
 idle choices; passphrase entry; a failed blueprint gate stopping the unnumbered
 prepare section; readiness; reruns; partial installs; cancellation; EOF; and

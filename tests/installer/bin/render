@@ -17,14 +17,62 @@ case "$sub" in
   login)
     printf 'render login\n' >>"$CALLS"
     [ "${MOCK_RENDER_LOGIN_FAIL:-0}" = "1" ] && { echo "login failed" >&2; exit 1; }
+    if [ "${MOCK_WORKSPACE_FRESH:-0}" = "1" ]; then
+      mkdir -p "$HOME/.render"
+      [ -f "$HOME/.render/cli.yaml" ] ||
+        printf 'version: 1\napi:\n  key: mock-cli-token\n' > "$HOME/.render/cli.yaml"
+    fi
     echo "Opened browser to authenticate. Signed in."
     exit 0
     ;;
   workspace)
     printf 'render workspace %s\n' "$sub2" >>"$CALLS"
     [ "${MOCK_WORKSPACE_FAIL:-0}" = "1" ] && { echo "no workspace" >&2; exit 1; }
-    echo "tea-test000000000000000 (Test Workspace)"
-    exit 0
+    case "$sub2" in
+      current)
+        [ "${MOCK_WORKSPACE_CURRENT_ERROR:-0}" = "1" ] && { echo "request failed" >&2; exit 1; }
+        if [ "${MOCK_WORKSPACE_FRESH:-0}" = "1" ]; then
+          workspace_id="${RENDER_WORKSPACE:-}"
+          if [ -z "$workspace_id" ] && [ -f "$HOME/.render/cli.yaml" ]; then
+            while IFS= read -r line; do
+              case "$line" in
+                'workspace: '*) workspace_id="${line#workspace: }" ;;
+              esac
+            done < "$HOME/.render/cli.yaml"
+          fi
+          [ -n "$workspace_id" ] || { echo 'no workspace set. Use `render workspace set` to set a workspace' >&2; exit 1; }
+          printf '%s (Selected Workspace)\n' "$workspace_id"
+        else
+          echo "tea-test000000000000000 (Test Workspace)"
+        fi
+        exit 0
+        ;;
+      set)
+        if [ "${MOCK_WORKSPACE_FRESH:-0}" = "1" ]; then
+          case "${MOCK_WORKSPACE_SET:-interactive}" in
+            cancel) echo "Selection canceled."; exit 0 ;;
+            empty) echo "No workspaces are available." >&2; exit 1 ;;
+            error) echo "Could not list workspaces." >&2; exit 1 ;;
+            interactive)
+              printf 'Select a workspace (1 or 2): '
+              IFS= read -r choice || exit 1
+              case "$choice" in
+                1) workspace_id="tea-first000000000000001" ;;
+                2) workspace_id="tea-second00000000000002" ;;
+                *) echo "Selection canceled."; exit 0 ;;
+              esac
+              printf 'workspace: %s\nworkspace_name: Selected Workspace\n' "$workspace_id" >> "$HOME/.render/cli.yaml"
+              printf 'Workspace set to: Selected Workspace (%s)\n' "$workspace_id"
+              exit 0
+              ;;
+          esac
+        fi
+        echo "tea-test000000000000000 (Test Workspace)"
+        exit 0
+        ;;
+    esac
+    echo "mock render: unhandled workspace command '$sub2'" >&2
+    exit 2
     ;;
   blueprints)
     printf 'render blueprints %s\n' "$sub2" >>"$CALLS"
