@@ -47,7 +47,7 @@ REAL_PYTHON3="$(command -v python3)"   # captured before any PATH is curated
 PROVISION_KEY="rnd_provisioning_key_E2E_AAAA"
 IDLE_KEY="rnd_idle_key_E2E_ZZZZ"
 CLAUDE_TOKEN="sk-ant-oat01-E2E-CLAUDE-000"
-APP_PASSWORD="fake violet lantern orchard comet"
+APP_PASSWORD="fake violet lantern orchard comet 7!"
 NEW_INPUT="yyn$APP_PASSWORD
 $APP_PASSWORD"
 WORKSPACE="tea-e2eworkspace000000001"
@@ -733,6 +733,29 @@ $APP_PASSWORD"; NAME=mismatch; FB=$FAILURES
 assert_contains "$OUT" "did not match" $NAME "mismatch message"
 assert_absent "$OUT" "different fake confirmation words" $NAME "confirmation in output"
 [ "$(state_env "$STATE" paratrooper-web PARATROOPER_APP_TOKEN)" = "$APP_PASSWORD" ] || fail $NAME "selected password not stored"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+RULE_VALID="Ab1! cdefgh" # 11 characters; an internal space is preserved
+RULE_TRAILING="Ab1!cdefghi "
+run 0 password_rules "yynAb1!cdefgh
+1234567890!
+Abcdefghij!
+Abcdefghi12
+Ab1 cdefghi
+ Ab1!cdefghi
+$RULE_TRAILING
+Ab1!cdefghié
+$RULE_VALID
+$RULE_VALID"; NAME=password_rules; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE"
+assert_contains "$OUT" "Use at least 11 characters, with a letter, a number and a symbol." $NAME "showed rule before entry"
+assert_contains "$OUT" "spaces are not symbols" $NAME "rejected space as symbol"
+assert_contains "$OUT" "Leave out spaces at the beginning and end." $NAME "rejected edge spaces"
+assert_contains "$OUT" "Use printable ASCII letters, numbers, spaces or symbols only." $NAME "rejected non-ASCII"
+[ "$(grep -Fc 'Confirm app password (input hidden): ' "$OUT")" = 1 ] || fail $NAME "invalid candidates reached confirmation"
+[ "$(state_env "$STATE" paratrooper-web PARATROOPER_APP_TOKEN)" = "$RULE_VALID" ] || fail $NAME "11-character password with internal space was not preserved"
+assert_absent "$OUT" "$RULE_VALID" $NAME "password in output"
+assert_absent "$LOGFILE" "$RULE_VALID" $NAME "password in log"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 run 0 blank_then_valid "yyn

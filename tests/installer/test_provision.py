@@ -37,7 +37,7 @@ BRANCH = "main"
 # the idle key is a different value that must only ever land in the web service.
 PROVISION_KEY = "rnd_provisioning_key_AAAAAAA"
 IDLE_KEY = "rnd_idle_sleeping_key_ZZZZZZZ"
-APP_PASSWORD = "fake violet lantern orchard comet"
+APP_PASSWORD = "fake violet lantern orchard comet 7!"
 CLAUDE_TOKEN = "sk-ant-oat01-CLAUDETOKEN000"
 
 # The plain configuration the installer writes (the tracked example's own short
@@ -445,7 +445,7 @@ def test_resume_activates_missing_vapid_subject():
     # subject was never set. The rerun must complete AND activate it (a saved env
     # var is not active until a deploy), and recover the live password.
     _fresh_state()
-    seeded_token = "recovered-app-password-xyz"
+    seeded_token = "legacy"  # existing passwords are reused without applying the new rule
     _seed_key_value("paratrooper-kv", region="oregon")
     _seed_service("paratrooper-worker", service_type="background_worker", repo=REPO, region="oregon")
     _seed_service("paratrooper-web", service_type="web_service", repo=REPO, region="oregon", env={
@@ -564,16 +564,30 @@ def test_activation_deploy_reaching_live_succeeds():
     assert statuses["web"] == "live"
 
 
-def test_passphrase_rules_preserve_compatible_values():
-    for value in (APP_PASSWORD, "Aa = $() `quotes` \\ ! " + "word" * 5, "x" * 1000):
+def test_password_rules_preserve_compatible_values():
+    for value in (APP_PASSWORD, "Ab1!cdefghi", "Ab1! cdefgh",
+                  "Aa7 = $() `quotes` \\ ! " + "word" * 5, "A" * 1000 + "7!"):
         provision.validate_app_password(value)
-    for value in ("", " ", "short", " " + APP_PASSWORD, APP_PASSWORD + " ",
-                  APP_PASSWORD + "\t", APP_PASSWORD + "\n", APP_PASSWORD + "\r",
-                  APP_PASSWORD + "\x00", APP_PASSWORD + "é"):
+    for value, expected in (
+        ("", "That was empty"), (" ", "at least 11"),
+        ("Ab1!cdefgh", "at least 11"),  # 10 characters
+        ("1234567890!", "letter, a number and a symbol"),
+        ("Abcdefghij!", "letter, a number and a symbol"),
+        ("Abcdefghi12", "letter, a number and a symbol"),
+        ("Ab1 cdefghi", "spaces are not symbols"),
+        (" " + APP_PASSWORD, "beginning and end"),
+        (APP_PASSWORD + " ", "beginning and end"),
+        (APP_PASSWORD + "\t", "letters, numbers, spaces or symbols"),
+        (APP_PASSWORD + "\n", "letters, numbers, spaces or symbols"),
+        (APP_PASSWORD + "\r", "letters, numbers, spaces or symbols"),
+        (APP_PASSWORD + "\x00", "letters, numbers, spaces or symbols"),
+        (APP_PASSWORD + "é", "letters, numbers, spaces or symbols"),
+    ):
         try:
             provision.validate_app_password(value)
-            raise AssertionError("accepted an incompatible passphrase")
+            raise AssertionError("accepted an incompatible password")
         except provision.ProvisionError as exc:
+            assert expected in str(exc)
             assert APP_PASSWORD not in str(exc)
 
 

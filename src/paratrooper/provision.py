@@ -52,6 +52,7 @@ import argparse
 import base64
 import json
 import os
+import string
 import sys
 import textwrap
 from dataclasses import dataclass, field
@@ -736,7 +737,7 @@ class ProvisionReport:
 
 
 def validate_app_password(value: str) -> None:
-    """A memorable passphrase compatible with the existing bearer-token gate.
+    """An ASCII password compatible with the existing bearer-token gate.
 
     The phone trims surrounding whitespace and sends the value in an HTTP
     header. Keep internal spaces and punctuation verbatim, but reject edge
@@ -745,12 +746,15 @@ def validate_app_password(value: str) -> None:
     """
     if not value:
         raise ProvisionError("That was empty. Choose a strong passphrase.")
-    if len(value) < 20:
-        raise ProvisionError("Use at least 20 characters, such as several unrelated words.")
+    if len(value) < 11:
+        raise ProvisionError("Use at least 11 characters, with a letter, a number and a symbol.")
     if not all(" " <= ch <= "~" for ch in value):
-        raise ProvisionError("Use printable ASCII letters, spaces or punctuation only.")
+        raise ProvisionError("Use printable ASCII letters, numbers, spaces or symbols only.")
     if value != value.strip():
         raise ProvisionError("Leave out spaces at the beginning and end.")
+    if not all(any(ch in chars for ch in value) for chars in
+               (string.ascii_letters, string.digits, string.punctuation)):
+        raise ProvisionError("Use a letter, a number and a symbol; spaces are not symbols.")
 
 
 def inspect_app(

@@ -66,8 +66,9 @@ socket-blocking Python wrapper and /usr/bin:/bin, and disable user site imports
 and bytecode. The delivery REPORT.txt records the exact runner and paths used for
 this change.
 
-Password behavior: new installs ask for 20 or more printable ASCII characters,
-with internal spaces and punctuation allowed, and matching confirmation.
+Password behavior: new installs ask for at least 11 printable ASCII characters,
+including a letter, a number and a symbol, with matching confirmation. Internal
+spaces are allowed but do not count as the symbol; edge spaces are rejected.
 Existing installs explicitly keep their existing password without re-entry,
 retrieval to the terminal, or rotation. A missing existing password or a changed
 web service stops the run. A partial install with no web service asks for a

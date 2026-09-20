@@ -17,7 +17,7 @@
 #      queue is empty to cut the Render bill. Skip it and the worker stays on,
 #      and no key is needed for that feature.
 #   4. App password: checks for an existing app, then either confirms keeping its
-#      password or asks for a long passphrase twice with hidden input.
+#      password or asks for a new password twice with hidden input.
 #   Then, with no more questions, two headed sections that ask nothing:
 #   Preparing your deployment: writes a plain deployment config, generates the
 #      browser-notification (VAPID) keys, and validates the config and the
@@ -355,7 +355,8 @@ except ProvisionError as exc:
 choose_app_password() {
 	local confirmation=""
 	export -n confirmation
-	printf 'Choose a strong password to log into your Paratrooper instance.\n\n'
+	printf 'Choose a strong password to log into your Paratrooper instance.\n'
+	printf 'Use at least 11 characters, with a letter, a number and a symbol.\n\n'
 	while :; do
 		prompt_secret "App password (input hidden): " APP_PASSWORD || return 1
 		if ! check_app_password; then

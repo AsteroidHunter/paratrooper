@@ -24,7 +24,7 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent
-PASSWORD = "fake violet lantern = $() `comet` \\ orchard"
+PASSWORD = "fake violet lantern = $() `comet` \\ orchard 7"
 WRONG = "different fake confirmation words"
 RUN = Path(tempfile.mkdtemp(prefix="ptp-password-terminal-"))
 SOURCE = RUN / "source"
@@ -206,6 +206,7 @@ def exercise():
     fresh.send("y")
     fresh.expect("answer: ")
     fresh.send("n")
+    fresh.expect("Use at least 11 characters, with a letter, a number and a symbol.")
     fresh.hidden("App password (input hidden): ", PASSWORD + "\n")
     fresh.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
     output = fresh.finish(0)
