@@ -56,9 +56,9 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 # and outside the global Python, so nothing lands in source control or changes a
 # system install.
 CACHE="$HOME/.cache/paratrooper"
-# Tools obtained on an earlier run live here. Keep any tools already on PATH
-# ahead of the cache, while making cached tools available in a fresh shell.
-export PATH="${PATH:+$PATH:}$CACHE/bin"
+# Tools obtained on an earlier run live here or in the Claude native install
+# directory. Keep caller tools ahead of both locations in a fresh shell.
+export PATH="${PATH:+$PATH:}$CACHE/bin:$HOME/.local/bin"
 # The isolated environment the project's laptop tools run in, and its Python.
 # Built by step 0 with uv so a fresh clone works; reused if already present.
 VENVDIR="${PARATROOPER_INSTALL_VENV:-$CACHE/venv}"
@@ -113,6 +113,13 @@ IDLE_SLEEP="no"
 
 err() { printf '%s\n' "$*" >&2; }
 
+# A PATH match can name a stale file that is not executable.
+tool_usable() {
+	local found
+	found="$(command -v "$1" 2>/dev/null)" || return 1
+	[ -f "$found" ] && [ -x "$found" ]
+}
+
 # cleanup - restore the terminal and remove the non-secret report on the way out.
 cleanup() {
 	if [ -n "$TERMINAL_STATE" ]; then
@@ -156,7 +163,7 @@ banner() {
 	local subtitle="${1:-}"
 	# The wordmark is drawn with python3. This runs before the runtime is ensured,
 	# so if there is no python3 yet, fall back to a plain title rather than fail.
-	if ! command -v python3 >/dev/null 2>&1; then
+	if ! tool_usable python3; then
 		printf '%sPARATROOPER%s\n' "$BOLD" "$RESET"
 		[ -n "$subtitle" ] && printf '%s\n' "$subtitle"
 		return 0
@@ -427,7 +434,7 @@ PY
 
 # usable_python3 - is there a python3 on PATH new enough (>= 3.12) to use as is?
 usable_python3() {
-	command -v python3 >/dev/null 2>&1 &&
+	tool_usable python3 &&
 		python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 12) else 1)' >/dev/null 2>&1
 }
 
@@ -459,7 +466,7 @@ _download_uv() {
 # cache. Offline tests supply PARATROOPER_INSTALL_UV_INSTALLER, which is handed
 # the destination path after consent and must leave a working uv there.
 ensure_uv() {
-	if command -v uv >/dev/null 2>&1; then
+	if tool_usable uv; then
 		printf '%s✓%s uv found.\n' "$GREEN" "$RESET"
 		return 0
 	fi
@@ -480,8 +487,7 @@ ensure_uv() {
 		spinner "Obtaining uv ..." "uv ready." _download_uv "$CACHE/bin/uv"
 	fi
 	chmod +x "$CACHE/bin/uv" 2>/dev/null || true
-	export PATH="$CACHE/bin:$PATH"
-	if ! command -v uv >/dev/null 2>&1; then
+	if ! tool_usable uv; then
 		err ""
 		err "⚠ Could not download uv."
 		err "  See $LOG for details, or install it from"
@@ -524,7 +530,7 @@ _download_render_cli() {
 	rm -rf "$tmpdir"
 }
 
-# obtain_render - download the Render CLI into the per-user cache and onto PATH.
+# obtain_render - download the Render CLI into the per-user cache already on PATH.
 # Offline tests supply PARATROOPER_INSTALL_RENDER_INSTALLER, handed the
 # destination path. Stops the run if the CLI still is not callable afterwards.
 obtain_render() {
@@ -536,8 +542,7 @@ obtain_render() {
 		spinner "Obtaining the Render CLI ..." "Render CLI ready." _download_render_cli "$CACHE/bin/render"
 	fi
 	chmod +x "$CACHE/bin/render" 2>/dev/null || true
-	export PATH="$CACHE/bin:$PATH"
-	if ! command -v render >/dev/null 2>&1; then
+	if ! tool_usable render; then
 		err ""
 		err "⚠ Could not download the Render CLI."
 		err "  See $LOG for details, or install it from"
@@ -550,7 +555,7 @@ obtain_render() {
 # not, explain in one sentence, then ask to install it: y downloads it into the
 # per-user cache, n (or a closed stdin) stops politely with the manual link.
 ensure_render() {
-	if command -v render >/dev/null 2>&1; then
+	if tool_usable render; then
 		printf '%s✓%s render found.\n' "$GREEN" "$RESET"
 		return 0
 	fi
@@ -576,9 +581,8 @@ _install_claude_code() {
 	curl -fsSL https://claude.ai/install.sh | bash
 }
 
-# obtain_claude - install Claude Code, then add ~/.local/bin (where its native
-# installer puts the binary) to this run's PATH and re-check. Stops the run if
-# claude still is not callable afterwards.
+# obtain_claude - install Claude Code, then re-check ~/.local/bin (where its
+# native installer puts the binary). Stops if claude still is not callable.
 obtain_claude() {
 	if [ -n "${PARATROOPER_INSTALL_CLAUDE_INSTALLER:-}" ]; then
 		spinner "Installing Claude Code ..." "Claude Code installed." \
@@ -586,8 +590,7 @@ obtain_claude() {
 	else
 		spinner "Installing Claude Code ..." "Claude Code installed." _install_claude_code
 	fi
-	export PATH="$HOME/.local/bin:$PATH"
-	if ! command -v claude >/dev/null 2>&1; then
+	if ! tool_usable claude; then
 		err ""
 		err "⚠ Could not install Claude Code."
 		err "  See $LOG for details, or install it from"
@@ -600,7 +603,7 @@ obtain_claude() {
 # If not, explain in one sentence, then ask to install it: y runs the official
 # installer, n (or a closed stdin) stops politely with the setup link.
 ensure_claude() {
-	if command -v claude >/dev/null 2>&1; then
+	if tool_usable claude; then
 		printf '%s✓%s claude found.\n' "$GREEN" "$RESET"
 		return 0
 	fi

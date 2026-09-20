@@ -92,9 +92,9 @@ with zipfile.ZipFile(sys.argv[2], "w") as archive:
 PY
 printf 'not a ZIP archive\n' > "$HOOKS/invalid-release.zip"
 
-# A curated bin dir with the tools install.sh needs, optionally excluding one, so
-# a scenario can present a PATH with no uv, no render or no claude.
-make_bin() {  # make_bin <dest> <exclude:python3|render|claude|uv|none>
+# A curated bin dir with the tools install.sh needs, optionally excluding one
+# or all installable tools, so scenarios can test missing-tool discovery.
+make_bin() {  # make_bin <dest> <exclude:python3|render|claude|uv|all_installable|none>
 	local dest="$1" exclude="$2" t src
 	mkdir -p "$dest"
 	for t in bash sh env mktemp rm mkdir rmdir chmod cat sleep awk tar unzip ln cp mv \
@@ -103,12 +103,15 @@ make_bin() {  # make_bin <dest> <exclude:python3|render|claude|uv|none>
 	done
 	[ "$exclude" = python3 ] || ln -sf "$REAL_PYTHON3" "$dest/python3"
 	for t in render claude curl uv; do
-		[ "$exclude" = "$t" ] || ln -sf "$VERIFY/bin/$t" "$dest/$t"
+		if [ "$exclude" != "$t" ] && { [ "$exclude" != all_installable ] || [ "$t" = curl ]; }; then
+			ln -sf "$VERIFY/bin/$t" "$dest/$t"
+		fi
 	done
 }
 NOREN_BIN="$(mktemp -d -t ptp-noren.XXXXXX)";   make_bin "$NOREN_BIN" render
 NOCLAUDE_BIN="$(mktemp -d -t ptp-nocla.XXXXXX)"; make_bin "$NOCLAUDE_BIN" claude
 NOUV_BIN="$(mktemp -d -t ptp-nouv.XXXXXX)";      make_bin "$NOUV_BIN" uv
+NOINSTALL_BIN="$(mktemp -d -t ptp-noinstall.XXXXXX)"; make_bin "$NOINSTALL_BIN" all_installable
 RENDER_RELEASE_BIN="$(mktemp -d -t ptp-render-release.XXXXXX)"; make_bin "$RENDER_RELEASE_BIN" render
 rm "$RENDER_RELEASE_BIN/curl" "$RENDER_RELEASE_BIN/uname"
 cat > "$RENDER_RELEASE_BIN/uname" <<'EOF'
@@ -561,6 +564,65 @@ assert_contains "$OUT" "Claude Code token captured." $NAME "signed in after inst
 assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
 [ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 12a. fresh shells reuse all three obtained tools and the local venv ---
+REUSE_HOME="$(mktemp -d -t ptp-all-cache-home.XXXXXX)"
+ALL_VENV1="$(mktemp -d -t ptp-all-cache-venv1.XXXXXX)"
+ALL_VENV2="$(mktemp -d -t ptp-all-cache-venv2.XXXXXX)"
+ALL_INPUT="yyyyyn$APP_PASSWORD
+$APP_PASSWORD"
+run 0 all_cache_first "$ALL_INPUT" PATH="$NOINSTALL_BIN" PARATROOPER_INSTALL_VENV="$ALL_VENV1" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/uv_installer.sh" PARATROOPER_INSTALL_RENDER_INSTALLER="$HOOKS/render_installer.sh" PARATROOPER_INSTALL_CLAUDE_INSTALLER="$HOOKS/claude_installer.sh"; NAME=all_cache_first; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+for tool in uv render; do [ -x "$REUSE_HOME/.cache/paratrooper/bin/$tool" ] || fail $NAME "$tool was not cached"; done
+[ -x "$REUSE_HOME/.local/bin/claude" ] || fail $NAME "Claude was not installed"
+assert_contains "$OUT" "uv ready." $NAME "obtained uv"
+assert_contains "$OUT" "Render CLI ready." $NAME "obtained Render CLI"
+assert_contains "$OUT" "Claude Code installed." $NAME "obtained Claude Code"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+run 0 all_cache_second "$NEW_INPUT" PATH="$NOINSTALL_BIN" PARATROOPER_INSTALL_VENV="$ALL_VENV1" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_RENDER_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_CLAUDE_INSTALLER="$HOOKS/fail_installer.sh"; NAME=all_cache_second; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "Local environment ready." $NAME "reused local Python environment"
+assert_contains "$OUT" "render found." $NAME "found cached Render CLI"
+assert_contains "$OUT" "claude found." $NAME "found native Claude Code"
+for tool in uv 'the Render CLI' 'Claude Code'; do assert_absent "$OUT" "Download and install $tool now?" $NAME "did not prompt for $tool"; done
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+run 0 all_cache_third "$NEW_INPUT" PATH="$NOINSTALL_BIN" PARATROOPER_INSTALL_VENV="$ALL_VENV2" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_RENDER_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_CLAUDE_INSTALLER="$HOOKS/fail_installer.sh"; NAME=all_cache_third; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "uv found." $NAME "found cached uv for a new environment"
+assert_contains "$OUT" "render found." $NAME "found cached Render CLI"
+assert_contains "$OUT" "claude found." $NAME "found native Claude Code"
+[ -x "$ALL_VENV2/bin/python" ] || fail $NAME "did not build the second environment"
+for tool in uv 'the Render CLI' 'Claude Code'; do assert_absent "$OUT" "Download and install $tool now?" $NAME "did not prompt for $tool"; done
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# An explicit caller PATH tool wins over the installer's saved copy.
+CALLER_BIN="$(mktemp -d -t ptp-caller-tools.XXXXXX)"; make_bin "$CALLER_BIN" none
+for tool in uv render claude; do
+	rm "$CALLER_BIN/$tool"
+	cat > "$CALLER_BIN/$tool" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$tool' >> "\$MOCK_STATE_DIR/caller_tools"
+exec "$VERIFY/bin/$tool" "\$@"
+EOF
+	chmod +x "$CALLER_BIN/$tool"
+done
+ALL_VENV3="$(mktemp -d -t ptp-all-cache-venv3.XXXXXX)"
+run 0 caller_tools_win "$NEW_INPUT" PATH="$CALLER_BIN" PARATROOPER_INSTALL_VENV="$ALL_VENV3" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_RENDER_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_CLAUDE_INSTALLER="$HOOKS/fail_installer.sh"; NAME=caller_tools_win; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+for tool in uv render claude; do assert_contains "$STATE/caller_tools" "$tool" $NAME "used caller $tool"; done
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# A stale non-executable native entry is missing, so consent is required.
+chmod -x "$REUSE_HOME/.local/bin/claude"
+run 0 broken_cached_claude "yyn" PATH="$NOINSTALL_BIN" PARATROOPER_INSTALL_VENV="$ALL_VENV1" PARATROOPER_INSTALL_CLAUDE_INSTALLER="$HOOKS/fail_installer.sh"; NAME=broken_cached_claude; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0 on decline)"
+assert_contains "$OUT" "Download and install Claude Code now?" $NAME "offered to replace unusable Claude Code"
+assert_absent "$OUT" "Claude Code token captured." $NAME "did not sign in after decline"
+[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services after decline"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+unset REUSE_HOME
 
 # --- 13. step 2: Claude Code missing, n stops before sign in, exit 0 --------
 run 0 no_claude_no "yyn" PATH="$NOCLAUDE_BIN"; NAME=no_claude_decline; FB=$FAILURES
