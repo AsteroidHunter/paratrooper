@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Mock uv for offline verification of install.sh. It stands in for the two uv
+# calls the installer makes when it builds the environment: `uv venv` (create the
+# isolated interpreter) and, only for a networked install, `uv pip install`.
+#
+# `uv venv` here creates a real virtual environment with the python3 already on
+# PATH, exactly the way the offline tests used to build one, so no network and no
+# real uv are ever touched. The installer's air-gapped path then makes the
+# vendored dependencies importable in it with a .pth file, so `uv pip install` is
+# not reached under the offline tests; it is handled as a quiet success anyway.
+# Calls are recorded under $MOCK_STATE_DIR when it is set.
+set -u
+
+if [ -n "${MOCK_STATE_DIR:-}" ]; then
+	mkdir -p "$MOCK_STATE_DIR"
+	printf 'uv %s\n' "$*" >>"$MOCK_STATE_DIR/uv.calls"
+fi
+
+case "${1:-}" in
+	--version|version)
+		echo "uv 0.0.0 (offline fake)"
+		exit 0
+		;;
+	venv)
+		shift
+		# Skip the interpreter flags the installer passes (--python <spec> and
+		# --python-preference <pref>); the target directory is the bare argument.
+		target=""
+		while [ "$#" -gt 0 ]; do
+			case "$1" in
+				--python|--python-preference) shift 2 ;;
+				--python=*|--python-preference=*) shift ;;
+				--*) shift ;;
+				*) target="$1"; shift ;;
+			esac
+		done
+		if [ -z "$target" ]; then
+			echo "fake uv: no venv target directory given" >&2
+			exit 2
+		fi
+		python3 -m venv "$target"
+		exit $?
+		;;
+	pip)
+		# Offline tests build via the vendored dependencies (.pth), so a real
+		# install is not expected here. Succeed quietly if it is called.
+		exit 0
+		;;
+	python)
+		# `uv python find`/`install` is not needed offline (an existing python3
+		# is reused). Succeed quietly.
+		exit 0
+		;;
+	*)
+		echo "fake uv: unhandled subcommand '$*'" >&2
+		exit 2
+		;;
+esac

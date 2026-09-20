@@ -66,12 +66,17 @@ web = [
     "redis>=5.0",
     "pywebpush>=2.0",
 ]
-# The config delivery command (`python -m paratrooper.deploy`). A laptop's
-# dependencies, not a service's: neither image installs this extra, and nothing
-# a service imports reaches for httpx or yaml on its account.
+# The laptop tools: the config delivery command (`python -m paratrooper.deploy`)
+# and the first-install provisioner (`python -m paratrooper.provision`). A
+# laptop's dependencies, not a service's: neither image installs this extra, and
+# nothing a service imports reaches for these on its account.
 deploy = [
     "httpx>=0.27",  # the Render API calls
-    "pyyaml>=6.0",  # reading the Render CLI's own config for a saved token
+    "pyyaml>=6.0",  # reading the Render CLI's own config, and render.yaml
+    # generating the browser-push (VAPID) EC P-256 key pair the provisioner sets
+    # on the web service. Already in the project's closure via the agent extra's
+    # pyjwt[crypto]; named here because the installer runs without the agent extra.
+    "cryptography>=42.0",
 ]
 dev = [
     "pytest>=8.0",

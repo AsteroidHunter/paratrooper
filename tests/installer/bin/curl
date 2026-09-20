@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Mock curl for offline verification: answers the health poll. Fails the first
+# MOCK_HEALTH_FAILS attempts (tracked in a counter file) to exercise retrying.
+set -u
+STATE="${MOCK_STATE_DIR:?MOCK_STATE_DIR must be set}"
+mkdir -p "$STATE"
+printf 'curl %s\n' "$*" >>"$STATE/curl.calls"
+
+fails="${MOCK_HEALTH_FAILS:-0}"
+counter="$STATE/curl.count"
+n=0
+[ -f "$counter" ] && n="$(cat "$counter" 2>/dev/null || echo 0)"
+n=$((n+1))
+printf '%s' "$n" >"$counter"
+
+if [ "$n" -le "$fails" ]; then
+  echo "curl: (7) failed to connect" >&2
+  exit 7
+fi
+echo '{"ok": true, "version": "abc1234", "profile": "plain"}'
+exit 0
