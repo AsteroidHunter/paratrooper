@@ -143,7 +143,11 @@ FAILURES=0
 # run <reuse:0|1> <name> <input> [ENV=VAL ...]
 run() {
 	local reuse="$1" input="$3"; shift 3
-	HOMEDIR="$(mktemp -d -t ptp-home.XXXXXX)"
+	if [ -n "${REUSE_HOME:-}" ]; then
+		HOMEDIR="$REUSE_HOME"
+	else
+		HOMEDIR="$(mktemp -d -t ptp-home.XXXXXX)"
+	fi
 	LOGFILE="$HOMEDIR/.paratrooper-install.log"
 	OUT="$(mktemp -t ptp-out.XXXXXX)"
 	if [ "$reuse" != 1 ]; then
@@ -464,6 +468,23 @@ run 0 uv_fail "y$NEW_INPUT" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$
 [ "$(state_count "$STATE" key_values)" = 0 ] || fail $NAME "created a store despite uv failure"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
+# --- 9b. a new process reuses cached uv when another venv needs building ---
+REUSE_HOME="$(mktemp -d -t ptp-uv-cache-home.XXXXXX)"
+FRESHUV_CACHE1="$(mktemp -d -t ptp-uv-cache1.XXXXXX)"
+run 0 uv_cache_first "yyn" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/uv_installer.sh" PARATROOPER_INSTALL_VENV="$FRESHUV_CACHE1"; NAME=uv_cache_first; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+[ -x "$HOMEDIR/.cache/paratrooper/bin/uv" ] || fail $NAME "uv was not cached"
+assert_contains "$OUT" "uv ready." $NAME "obtained uv on first run"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+FRESHUV_CACHE2="$(mktemp -d -t ptp-uv-cache2.XXXXXX)"
+run 0 uv_cache_second "yn" PATH="$NOUV_BIN" PARATROOPER_INSTALL_UV_INSTALLER="$HOOKS/fail_installer.sh" PARATROOPER_INSTALL_VENV="$FRESHUV_CACHE2"; NAME=uv_cache_second; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "uv found." $NAME "found cached uv in the new process"
+assert_absent "$OUT" "Download and install uv now?" $NAME "did not offer a second download"
+[ -x "$FRESHUV_CACHE2/bin/python" ] || fail $NAME "did not build the second environment"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+unset REUSE_HOME
+
 # --- 10. step 1: Render CLI missing, y installs it, then signs in -----------
 run 0 no_render "yyyn$APP_PASSWORD
 $APP_PASSWORD" PATH="$NOREN_BIN" PARATROOPER_INSTALL_RENDER_INSTALLER="$HOOKS/render_installer.sh"; NAME=no_render; FB=$FAILURES
@@ -474,6 +495,20 @@ assert_contains "$OUT" "Signed in to Render." $NAME "signed in after install"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "proceeded to ready"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "did not provision"
 [ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 10a. a new process finds a Render CLI cached by the first run ---------
+REUSE_HOME="$(mktemp -d -t ptp-render-cache-home.XXXXXX)"
+run 0 render_cache_first "yyn" PATH="$NOREN_BIN" PARATROOPER_INSTALL_RENDER_INSTALLER="$HOOKS/render_installer.sh"; NAME=render_cache_first; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+[ -x "$HOMEDIR/.cache/paratrooper/bin/render" ] || fail $NAME "Render CLI was not cached"
+assert_contains "$OUT" "Render CLI ready." $NAME "obtained CLI on first run"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+run 0 render_cache_second "yn" PATH="$NOREN_BIN" PARATROOPER_INSTALL_RENDER_INSTALLER="$HOOKS/fail_installer.sh"; NAME=render_cache_second; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "render found." $NAME "found cached CLI in the new process"
+assert_absent "$OUT" "Download and install the Render CLI now?" $NAME "did not offer a second download"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+unset REUSE_HOME
 
 # --- 10b. the real Render download path uses the official release ZIP ------
 for spec in Darwin:arm64:darwin:arm64 Darwin:x86_64:darwin:amd64 Linux:aarch64:linux:arm64 Linux:x86_64:linux:amd64; do

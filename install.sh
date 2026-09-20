@@ -56,6 +56,9 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 # and outside the global Python, so nothing lands in source control or changes a
 # system install.
 CACHE="$HOME/.cache/paratrooper"
+# Tools obtained on an earlier run live here. Keep any tools already on PATH
+# ahead of the cache, while making cached tools available in a fresh shell.
+export PATH="${PATH:+$PATH:}$CACHE/bin"
 # The isolated environment the project's laptop tools run in, and its Python.
 # Built by step 0 with uv so a fresh clone works; reused if already present.
 VENVDIR="${PARATROOPER_INSTALL_VENV:-$CACHE/venv}"
