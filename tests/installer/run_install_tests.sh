@@ -545,7 +545,8 @@ done
 run 0 no_render_no "yn" PATH="$NOREN_BIN"; NAME=no_render_decline; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0 on decline)"
 assert_contains "$OUT" "Download and install the Render CLI now?" $NAME "offered render install"
-assert_contains "$OUT" "Install the Render CLI from https://render.com/docs/cli" $NAME "manual link"
+assert_contains "$OUT" "Install the Render CLI from" $NAME "manual guidance"
+assert_contains "$OUT" "https://render.com/docs/cli" $NAME "manual link"
 assert_absent "$OUT" "Signed in to Render." $NAME "did not sign in after decline"
 [ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services after decline"
 [ "$FAILURES" = "$FB" ] && pass $NAME

@@ -53,6 +53,7 @@ import base64
 import json
 import os
 import sys
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, TextIO
@@ -92,6 +93,30 @@ DEPLOY_FAILED = frozenset({"build_failed", "update_failed", "canceled", "pre_dep
 class ProvisionError(DeployError):
     """A provisioning step that could not be completed. Like every DeployError
     its message is safe to print: no token, no request body, no response body."""
+
+
+def wrap_installer_message(
+    message: str, *, first_prefix: str = "", later_prefix: str = "  ", width: int = 72
+) -> str:
+    """Wrap variable status and error text without splitting a path or URL."""
+    lines = textwrap.wrap(
+        message, width=width, initial_indent=first_prefix,
+        subsequent_indent=later_prefix, break_long_words=False, break_on_hyphens=False,
+    )
+    if len(lines) > 1:
+        previous_prefix = first_prefix if len(lines) == 2 else later_prefix
+        previous = lines[-2][len(previous_prefix):].split()
+        last = lines[-1][len(later_prefix):].split()
+        while len(previous) > 1:
+            candidate = [previous[-1], *last]
+            new_previous = previous_prefix + " ".join(previous[:-1])
+            new_last = later_prefix + " ".join(candidate)
+            if len(new_last) > width or abs(len(new_previous) - len(new_last)) >= abs(len(lines[-2]) - len(lines[-1])):
+                break
+            previous.pop()
+            last = candidate
+            lines[-2], lines[-1] = new_previous, new_last
+    return "\n".join(lines)
 
 
 # --- the client ----------------------------------------------------------------
@@ -1102,7 +1127,7 @@ def main(argv: list[str] | None = None) -> int:
             _write_report(args.report, report)
         return 0
     except DeployError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(wrap_installer_message(str(exc), first_prefix="error: "), file=sys.stderr)
         return 2
 
 

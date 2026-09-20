@@ -268,7 +268,10 @@ spin_pid() {
 # welcome - the ☼ note that opens the installer and describes the app.
 welcome() {
 	printf '%s☼%s %sBefore we start%s\n\n' "$RESET" "$RESET" "$BOLD" "$RESET"
-	printf 'Paratrooper allows you to interact with your agent on the cloud using an iMessage-like interface. This install script sets up a basic chat version of the Paratrooper on Render. Once installed, you will be able to access the chat interface on your iPhone as a PWA.\n\n'
+	printf 'Paratrooper allows you to interact with your agent on the cloud\n'
+	printf 'using an iMessage-like interface. This install script sets up a\n'
+	printf 'basic chat version of the Paratrooper on Render. Once installed, you\n'
+	printf 'will be able to access the chat interface on your iPhone as a PWA.\n\n'
 }
 
 # prompt_keypress <valid-chars> <prompt-text>
@@ -460,12 +463,12 @@ ensure_uv() {
 		printf '%s✓%s uv found.\n' "$GREEN" "$RESET"
 		return 0
 	fi
-	printf 'uv is not installed. It can be downloaded into a per-user cache,\n'
-	printf 'without touching your system directories.\n\n'
+	printf 'uv is not installed. It can be downloaded into a\n'
+	printf 'per-user cache, without touching your system directories.\n\n'
 	if ! prompt_keypress "yn" "Download and install uv now? (y / n) " || [ "$REPLY" != "y" ]; then
 		printf '\nNo problem. Install uv from\n'
-		printf 'https://docs.astral.sh/uv/getting-started/installation/, then run\n'
-		printf './install.sh again when ready.\n'
+		printf 'https://docs.astral.sh/uv/getting-started/installation/,\n'
+		printf 'then run ./install.sh again when ready.\n'
 		exit 0
 	fi
 	printf '\n'
@@ -480,7 +483,8 @@ ensure_uv() {
 	export PATH="$CACHE/bin:$PATH"
 	if ! command -v uv >/dev/null 2>&1; then
 		err ""
-		err "⚠ Could not download uv. See $LOG for details, or install it from"
+		err "⚠ Could not download uv."
+		err "  See $LOG for details, or install it from"
 		err "  https://docs.astral.sh/uv/getting-started/installation/ and re-run."
 		exit 1
 	fi
@@ -535,8 +539,9 @@ obtain_render() {
 	export PATH="$CACHE/bin:$PATH"
 	if ! command -v render >/dev/null 2>&1; then
 		err ""
-		err "⚠ Could not download the Render CLI. See $LOG for details, or install"
-		err "  it from https://render.com/docs/cli and re-run."
+		err "⚠ Could not download the Render CLI."
+		err "  See $LOG for details, or install it from"
+		err "  https://render.com/docs/cli and re-run."
 		exit 1
 	fi
 }
@@ -549,11 +554,13 @@ ensure_render() {
 		printf '%s✓%s render found.\n' "$GREEN" "$RESET"
 		return 0
 	fi
-	printf 'The Render command line tool is not installed. It can be downloaded into a\n'
-	printf 'per-user cache, without touching your system directories.\n\n'
+	printf 'The Render command line tool is not installed.\n'
+	printf 'It can be downloaded into a per-user cache,\n'
+	printf 'without touching your system directories.\n\n'
 	if ! prompt_keypress "yn" "Download and install the Render CLI now? (y / n) " || [ "$REPLY" != "y" ]; then
-		printf '\nNo problem. Install the Render CLI from https://render.com/docs/cli, then\n'
-		printf 'run ./install.sh again when ready.\n'
+		printf '\nNo problem. Install the Render CLI from\n'
+		printf 'https://render.com/docs/cli, then run\n'
+		printf './install.sh again when ready.\n'
 		exit 0
 	fi
 	printf '\n'
@@ -582,7 +589,8 @@ obtain_claude() {
 	export PATH="$HOME/.local/bin:$PATH"
 	if ! command -v claude >/dev/null 2>&1; then
 		err ""
-		err "⚠ Could not install Claude Code. See $LOG for details, or install it from"
+		err "⚠ Could not install Claude Code."
+		err "  See $LOG for details, or install it from"
 		err "  https://docs.claude.com/en/docs/claude-code/setup and re-run."
 		exit 1
 	fi
@@ -600,8 +608,8 @@ ensure_claude() {
 	printf '~/.local/bin, without touching your system directories.\n\n'
 	if ! prompt_keypress "yn" "Download and install Claude Code now? (y / n) " || [ "$REPLY" != "y" ]; then
 		printf '\nNo problem. Install Claude Code from\n'
-		printf 'https://docs.claude.com/en/docs/claude-code/setup, then run ./install.sh\n'
-		printf 'again when ready.\n'
+		printf 'https://docs.claude.com/en/docs/claude-code/setup,\n'
+		printf 'then run ./install.sh again when ready.\n'
 		exit 0
 	fi
 	printf '\n'
@@ -685,7 +693,8 @@ if [ -z "$REPO_URL" ] || [ -z "$REPO_BRANCH" ]; then
 	if ! command -v git >/dev/null 2>&1; then
 		err ""
 		err "⚠ Paratrooper needs Git, but it is not installed."
-		err "  Install it from https://git-scm.com/downloads and run ./install.sh again."
+		err "  Install it from https://git-scm.com/downloads"
+		err "  and run ./install.sh again."
 		exit 1
 	fi
 fi
@@ -709,7 +718,9 @@ fi
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
 section "0. Python"
-printf 'Setup needs a few Python tools. It puts them in a private folder using uv, so it never touches existing Python installation you may have on your computer.\n\n'
+printf 'Setup needs a few Python tools. It puts them in a\n'
+printf 'private folder using uv, so it never touches existing\n'
+printf 'Python installation you may have on your computer.\n\n'
 
 # An environment a previous run already built is reused as is: no uv, no
 # interpreter search, just the fast path. Otherwise uv provides the interpreter
@@ -741,9 +752,9 @@ fi
 
 SPIN_FRAMES=("${SPIN_HEAVY[@]}")
 section "1. Render"
-printf 'Paratrooper runs on Render. This step makes sure the Render command line\n'
-printf 'tool is available, then opens your browser to sign in; the Render CLI saves\n'
-printf 'the session for the rest of the install.\n\n'
+printf 'Paratrooper runs on Render. This step makes sure the Render\n'
+printf 'command line tool is available, then opens your browser to\n'
+printf 'sign in; the Render CLI saves the session for the rest of the install.\n\n'
 
 # The Render CLI check lives in this step: present is announced, missing offers a
 # y/n install into the per-user cache before the sign in.
@@ -751,7 +762,8 @@ ensure_render
 
 if ! render login; then
 	err ""
-	err "⚠ Render sign in did not complete. Run \`render login\` and try again."
+	err "⚠ Render sign in did not complete."
+	err "  Run \`render login\` and try again."
 	exit 1
 fi
 
@@ -763,7 +775,8 @@ else
 	workspace_status=$?
 	if [ "$workspace_status" -ne 2 ]; then
 		err ""
-		err "⚠ Could not check your Render workspace. See $LOG for details."
+		err "⚠ Could not check your Render workspace."
+		err "  See $LOG for details."
 		exit 1
 	fi
 	if ! select_render_workspace; then
@@ -803,10 +816,10 @@ printf '%s✓%s Signed in to Render.\n' "$GREEN" "$RESET"
 
 SPIN_FRAMES=("${SPIN_CIRCLE[@]}")
 section "2. Claude Code"
-printf 'The worker talks to Claude on your subscription. This step makes sure Claude\n'
-printf 'Code is available, then `claude setup-token` opens the browser to authorize\n'
-printf 'and hands back a long-lived token the worker will use. The token is captured\n'
-printf 'quietly and never shown.\n\n'
+printf 'The worker talks to Claude on your subscription. This step makes\n'
+printf 'sure Claude Code is available, then `claude setup-token` opens\n'
+printf 'the browser to authorize and hands back a long-lived token the\n'
+printf 'worker will use. The token is captured quietly and never shown.\n\n'
 
 # The Claude Code check lives in this step: present is announced, missing offers a
 # y/n install through its official installer before the sign in.
@@ -816,13 +829,15 @@ ensure_claude
 # Take the last non-empty line so a stray banner line cannot end up in the value.
 if ! CLAUDE_TOKEN="$(claude setup-token | awk 'NF{last=$0} END{print last}')"; then
 	err ""
-	err "⚠ Claude Code sign in did not complete. Run \`claude setup-token\` and try again."
+	err "⚠ Claude Code sign in did not complete."
+	err "  Run \`claude setup-token\` and try again."
 	exit 1
 fi
 CLAUDE_TOKEN="${CLAUDE_TOKEN//[[:space:]]/}"
 if [ -z "$CLAUDE_TOKEN" ]; then
 	err ""
-	err "⚠ Claude Code sign in did not complete. Run \`claude setup-token\` and try again."
+	err "⚠ Claude Code sign in did not complete."
+	err "  Run \`claude setup-token\` and try again."
 	exit 1
 fi
 printf '%s✓%s Claude Code token captured.\n' "$GREEN" "$RESET"
@@ -831,10 +846,9 @@ printf '%s✓%s Claude Code token captured.\n' "$GREEN" "$RESET"
 
 SPIN_FRAMES=("${SPIN_CLASSIC[@]}")
 section "3. Idle sleeping"
-printf 'Render bills you whenever the worker on the server is awake.\n'
-printf 'Paratrooper can let the web service suspend the worker and\n'
-printf 'wake it only when a new message arrives, so you pay for\n'
-printf 'the worker only while it is thinking.\n\n'
+printf 'Render bills you whenever the worker on the server is awake. Paratrooper\n'
+printf 'can let the web service suspend the worker and wake it only when a new\n'
+printf 'message arrives, so you pay for the worker only while it is thinking.\n\n'
 printf '  y - yes, sleep the worker when idle (needs a Render API key)\n'
 printf '  n - no, keep the worker always on (no key needed)\n\n'
 
@@ -848,8 +862,9 @@ if ! prompt_keypress "yn" "answer: "; then
 fi
 if [ "$REPLY" = "y" ]; then
 	printf '\n'
-	printf 'Find a key under Render: Account Settings -> API Keys. Paste it below.\n'
-	printf 'The key lets the web service suspend and resume the worker on your behalf.\n\n'
+	printf 'Find a key under Render: Account Settings -> API Keys.\n'
+	printf 'Paste it below. The key lets the web service\n'
+	printf 'suspend and resume the worker on your behalf.\n\n'
 	while :; do
 		if ! prompt_secret "Render API key (input hidden): " RENDER_KEY; then
 			err ""
@@ -899,7 +914,7 @@ case "$PASSWORD_MODE" in
 			exit 1
 		fi
 		;;
-	*) err "Could not tell whether this is a new app or an existing one. Nothing was set up."; exit 1 ;;
+	*) err "Could not tell whether this is a new app"; err "or an existing one. Nothing was set up."; exit 1 ;;
 esac
 
 # Everything the install needs from you has now been collected. From here on it
@@ -994,9 +1009,10 @@ if [ "$provision_status" -ne 0 ]; then
 		cat "$PROVISION_ERR" >&2
 	fi
 	err ""
-	err "⚠ Setup did not finish. Fix the problem above and run ./install.sh again."
-	err "  Nothing is lost, and if your app was created, keep using the password"
-	err "  you chose."
+	err "⚠ Setup did not finish. Fix the problem above"
+	err "  and run ./install.sh again."
+	err "  Nothing is lost, and if your app was created,"
+	err "  keep using the password you chose."
 	exit 1
 fi
 cat "$PROVISION_ERR" >>"$LOG"
@@ -1029,8 +1045,15 @@ fi
 if [ "$READY" = 1 ]; then
 	printf '\n%s✦%s Paratrooper is ready!\n\n' "$GREEN" "$RESET"
 else
-	printf '\n%s⚠%s Your Paratrooper resources were created, but the deployment is not ready yet.\n' "$BOLD" "$RESET"
-	printf '\n  Status: %s\n\n' "$STATUS"
+	printf '\n%s⚠%s Your Paratrooper resources were created,\n' "$BOLD" "$RESET"
+	printf '  but the deployment is not ready yet.\n'
+	printf '\n'
+	printf '%s' "$STATUS" | "$PY" -c '
+import sys
+from paratrooper.provision import wrap_installer_message
+print(wrap_installer_message(sys.stdin.read(), first_prefix="  Status: ", later_prefix="          "))
+'
+	printf '\n'
 fi
 
 # The app address is the only sign-in detail displayed, including on failure.
@@ -1042,7 +1065,8 @@ printf '\n'
 printf '%sOn your iPhone:%s\n\n' "$BOLD" "$RESET"
 printf '  %s1.%s Open the app address above in Safari.\n\n' "$BOLD" "$RESET"
 printf '  %s2.%s Add it to your Home Screen\n\n' "$BOLD" "$RESET"
-printf '  %s3.%s Open Paratrooper from the Home Screen and sign in with your app password.\n\n' "$BOLD" "$RESET"
+printf '  %s3.%s Open Paratrooper from the Home Screen\n' "$BOLD" "$RESET"
+printf '     and sign in with your app password.\n\n'
 printf '  %s4.%s Allow notifications when Paratrooper asks.\n\n' "$BOLD" "$RESET"
 
 # A created-but-unconfirmed deployment is an incomplete install: exit non-zero so
