@@ -6,7 +6,9 @@ never drift from what the app shows:
 
 - markup: the token-gate `head` template in `pwa/src/main.ts`
 - styles: `pwa/src/styles.css` (the `--gate-badge-scale` badge)
-- logo: `pwa/public/topbar-logo.png`
+- logo: `pwa/public/splash-logo.png` (the full-resolution 700x800 copy of the
+  same artwork the app ships small as `pwa/public/topbar-logo.png`, used so the
+  upscaled header stays sharp)
 - version: `APP_VERSION` in `pwa/src/main.ts` (read automatically, never copied)
 
 Output is two transparent PNGs in this folder:

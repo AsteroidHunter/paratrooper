@@ -2,8 +2,11 @@
 """Render the README header badge from the app's own source of truth.
 
 This draws the exact contact badge the PWA shows on first open (the token gate
-head in pwa/src/main.ts, styled by pwa/src/styles.css, with the real
-pwa/public/topbar-logo.png). It reads APP_VERSION straight out of main.ts, so
+head in pwa/src/main.ts, styled by pwa/src/styles.css). For the logo it uses
+pwa/public/splash-logo.png, the full-resolution (700x800) copy of the same
+cutout the app ships small as pwa/public/topbar-logo.png (140x160); feeding the
+badge the large copy keeps the scaled-up README image sharp without enlarging
+the tiny topbar asset. It reads APP_VERSION straight out of main.ts, so
 there is never a second version string to keep in step. Output is two
 transparent PNGs, one tuned for a light page and one for a dark page, so the
 README can swap them with prefers-color-scheme.
@@ -139,7 +142,10 @@ def main() -> int:
 
     main_ts_path = repo_root / "pwa" / "src" / "main.ts"
     css_path = repo_root / "pwa" / "src" / "styles.css"
-    logo_path = repo_root / "pwa" / "public" / "topbar-logo.png"
+    # Full-resolution copy of the topbar logo (same artwork, 700x800 vs the
+    # topbar's 140x160). Injected in place of the markup's /topbar-logo.png so
+    # the upscaled README image stays sharp without enlarging the small asset.
+    logo_path = repo_root / "pwa" / "public" / "splash-logo.png"
     for pth in (main_ts_path, css_path, logo_path):
         if not pth.exists():
             raise SystemExit(f"Required source file not found: {pth}")
