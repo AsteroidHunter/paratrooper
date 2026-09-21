@@ -1,7 +1,7 @@
-<p align="center">
+<p align="left">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="tools/readme-header/paratrooper-header-dark.png">
-    <img alt="Paratrooper" src="tools/readme-header/paratrooper-header-light.png" width="205">
+    <img alt="Paratrooper" src="tools/readme-header/paratrooper-header-light.png" width="320">
   </picture>
 </p>
 

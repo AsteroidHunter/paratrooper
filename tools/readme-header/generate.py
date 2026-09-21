@@ -32,8 +32,9 @@ from playwright.sync_api import sync_playwright
 # Bounded so a wedged browser fails loudly instead of hanging forever.
 LAUNCH_TIMEOUT_MS = 60_000
 OP_TIMEOUT_MS = 30_000
-# Retina render: the PNG carries 2x the CSS pixels, the README shows it at 1x.
-DEVICE_SCALE_FACTOR = 2
+# Oversampled render: the PNG carries 4x the CSS pixels so it stays sharp when
+# the README scales it up past its native CSS width.
+DEVICE_SCALE_FACTOR = 4
 
 THEMES = ("light", "dark")
 
