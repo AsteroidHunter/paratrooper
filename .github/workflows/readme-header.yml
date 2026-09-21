@@ -1,12 +1,15 @@
 name: readme-header
 
-# Refresh the README header badge (tools/readme-header/*.png) whenever the app's
-# version, badge markup, badge styles, logo, or the generator itself changes.
-# The image is rendered from pwa/src/main.ts + pwa/src/styles.css +
-# pwa/public/splash-logo.png (the full-resolution copy of the same artwork the
-# app ships small as pwa/public/topbar-logo.png), so it always matches the app's
-# first-open badge and carries the real APP_VERSION. Branch-relative on purpose:
-# each branch keeps its own header for the version on that branch.
+# Refresh the README header banner (tools/readme-header/*.png) whenever the app's
+# version, badge markup, badge styles, logo, the scenery source PNGs, or the
+# generator itself changes. The banner is rendered from pwa/src/main.ts +
+# pwa/src/styles.css + pwa/public/splash-logo.png (the full-resolution copy of
+# the same artwork the app ships small as pwa/public/topbar-logo.png) composed
+# with the static watercolour PNGs in tools/readme-header/assets/, reusing the
+# app's first-open lockup with banner-specific sizing and the real APP_VERSION.
+# Branch-relative on purpose: each branch keeps its own header for the version on
+# that branch. Only the generated PNGs are committed here; the assets/ PNGs are
+# tracked static inputs and are never rewritten by this job.
 #
 # Nothing here is live until this workflow file and the generator are actually
 # pushed to GitHub. It does not create semantic version bumps and cannot force
@@ -23,6 +26,7 @@ on:
       - pwa/src/styles.css
       - pwa/public/splash-logo.png
       - pwa/public/topbar-logo.png
+      - tools/readme-header/assets/**
       - tools/readme-header/generate.py
       - .github/workflows/readme-header.yml
 

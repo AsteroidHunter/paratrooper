@@ -1,22 +1,40 @@
-# README header badge
+# README header banner
 
-`generate.py` renders the header graphic used at the top of the README. It is
-the app's own first-open contact badge, drawn from the real source so it can
-never drift from what the app shows:
+`generate.py` renders the illustrated banner used at the top of the README: a
+wide rounded white panel carrying the app's own first-open logo/name/version
+lockup, surrounded by hand-painted scenery. The lockup reuses the app's source,
+with banner-specific sizing, spacing and colours:
 
 - markup: the token-gate `head` template in `pwa/src/main.ts`
-- styles: `pwa/src/styles.css` (the `--gate-badge-scale` badge)
+- styles: `pwa/src/styles.css` (the `--gate-badge-scale` badge), scaled up for
+  the banner with a slightly tighter logo-to-text gap
 - logo: `pwa/public/splash-logo.png` (the full-resolution 700x800 copy of the
   same artwork the app ships small as `pwa/public/topbar-logo.png`, used so the
   upscaled header stays sharp)
 - version: `APP_VERSION` in `pwa/src/main.ts` (read automatically, never copied)
 
-Output is two transparent PNGs in this folder:
+The scenery is composed from four static watercolour PNGs in `assets/`, plain
+inputs stored in the repo (not generated):
 
-- `paratrooper-header-light.png` (black title, for a light page)
-- `paratrooper-header-dark.png` (white title, for a dark page)
+- `assets/mountain.png` — one peak, placed three times as the mountain range
+  rising from the bottom-left (middle tallest), clipped by the panel edges
+- `assets/cloud.png` — one cloud, placed twice as the two overlapping clouds
+- `assets/sun.png` — the sun at the top-right, behind the clouds
+- `assets/stars.png` — the star scatter in the top-left
 
-The README picks between them with `prefers-color-scheme`.
+Layout lives in the `DECOR` table and the lockup constants near the top of
+`generate.py`, in the panel's own CSS pixels (authored at 1000x300, rendered at
+2x to a 2000x600 PNG).
+
+Output is two PNGs in this folder:
+
+- `paratrooper-header-light.png`
+- `paratrooper-header-dark.png`
+
+The panel is a real white rectangle with rounded, transparent corners and a
+black title. Both files carry the identical composition — a white panel reads
+the same on a light or dark page — so the two filenames stay only for
+compatibility with the README's `prefers-color-scheme` swap.
 
 ## Run it
 
@@ -30,14 +48,19 @@ WebKit is used on purpose: it is Safari's engine, so `-apple-system` resolves to
 San Francisco, the face the app wears. Rendering on macOS keeps that font. Output
 is deterministic, so re-running without a source change rewrites identical bytes.
 
+`--version X.Y.Z` is a test-only override that renders a different version string
+WITHOUT touching `main.ts`, so a fixture can prove the version flows through to
+the image.
+
 ## Automatic refresh
 
 `.github/workflows/readme-header.yml` re-runs this on push when the version,
-badge markup, badge styles, logo, or this generator change, and commits the
-refreshed PNGs on the same branch. It is branch-relative: each branch keeps its
-own header for the version on that branch. This becomes live only once the
-workflow and generator are pushed to GitHub. It does not bump the semantic
-version and does not force GitHub's image cache to refresh instantly.
+badge markup, badge styles, logo, the scenery PNGs in `assets/`, or this
+generator change, and commits the refreshed output PNGs on the same branch (the
+`assets/` inputs are never rewritten by the job). It is branch-relative: each
+branch keeps its own header for the version on that branch. This becomes live
+only once the workflow and generator are pushed to GitHub. It does not bump the
+semantic version and does not force GitHub's image cache to refresh instantly.
 
 ## Referencing the images
 
