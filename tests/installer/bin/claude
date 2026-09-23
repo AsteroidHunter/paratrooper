@@ -7,6 +7,22 @@ mkdir -p "$STATE"
 case "${1:-}" in
   setup-token)
     printf 'claude setup-token\n' >>"$STATE/claude.calls"
+    if [ "${MOCK_CLAUDE_NESTED_WAIT:-0}" = "1" ]; then
+      [ ! -t 0 ] || stty -echo -icanon
+      echo "mock Claude browser opened" >&2
+      printf '%s\n' "$$" >"$STATE/claude_wait.pid"
+      sleep 120 &
+      helper=$!
+      printf '%s\n' "$helper" >"$STATE/claude_helper.pid"
+      printf '%s\n' "$$" >"$STATE/claude_helper.ppid"
+      wait "$helper"
+      exit $?
+    fi
+    if [ "${MOCK_CLAUDE_WAIT:-0}" = "1" ]; then
+      echo "mock Claude browser opened" >&2
+      printf '%s\n' "$$" >"$STATE/claude_wait.pid"
+      exec sleep 120
+    fi
     if [ "${MOCK_CLAUDE_FAIL:-0}" = "1" ]; then
       echo "authorization failed" >&2
       exit 1
@@ -18,6 +34,9 @@ case "${1:-}" in
       echo "Authorized. Your token:"
     fi
     printf '%s\n' "${MOCK_CLAUDE_TOKEN-sk-ant-oat01-MOCKTOKEN0000000000000000}"
+    if [ "${MOCK_CLAUDE_TRAILING_BLANK:-0}" = "1" ]; then
+      printf '  \t  \n'
+    fi
     exit 0
     ;;
   *)

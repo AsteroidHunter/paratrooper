@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -76,6 +77,11 @@ def handler(request: httpx.Request) -> httpx.Response:
     body = json.loads(request.content) if request.content else None
     _record({"method": request.method, "path": path,
              "params": dict(request.url.params), "token": token, "body": body})
+
+    if os.environ.get("MOCK_API_WAIT_ON", "") == f"{request.method} {path}":
+        (_state_dir() / "api_wait.pid").write_text(str(os.getpid()), encoding="ascii")
+        (_state_dir() / "api_wait.ppid").write_text(str(os.getppid()), encoding="ascii")
+        time.sleep(120)
 
     unreachable = os.environ.get("MOCK_API_UNREACHABLE", "")
     if unreachable and unreachable in path:

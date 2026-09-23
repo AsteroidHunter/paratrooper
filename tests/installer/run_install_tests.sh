@@ -43,7 +43,7 @@ if [ ! -d "$DEPS" ]; then
 fi
 chmod +x "$VERIFY"/bin/* 2>/dev/null || true
 
-REAL_PYTHON3="$(command -v python3)"   # captured before any PATH is curated
+REAL_PYTHON3="$(python3 -c 'import sys; print(sys._base_executable)')" # before PATH is curated
 PROVISION_KEY="rnd_provisioning_key_E2E_AAAA"
 IDLE_KEY="rnd_idle_key_E2E_ZZZZ"
 CLAUDE_TOKEN="sk-ant-oat01-E2E-CLAUDE-000"
@@ -97,7 +97,7 @@ printf 'not a ZIP archive\n' > "$HOOKS/invalid-release.zip"
 make_bin() {  # make_bin <dest> <exclude:python3|render|claude|uv|all_installable|none>
 	local dest="$1" exclude="$2" t src
 	mkdir -p "$dest"
-	for t in bash sh env mktemp rm mkdir rmdir chmod cat sleep awk tar unzip ln cp mv \
+	for t in bash sh env mktemp mkfifo rm mkdir rmdir chmod cat sleep ps awk tar unzip ln cp mv \
 	         sed grep dirname basename stty uname date head tail true false tr sort; do
 		src="$(command -v "$t" 2>/dev/null)" && [ -n "$src" ] && ln -sf "$src" "$dest/$t"
 	done
@@ -163,6 +163,7 @@ run() {
 		export PARATROOPER_INSTALL_OFFLINE_DEPS="$DEPS"   # air-gapped: no pip network
 		export PARATROOPER_INSTALL_VENV="$SHARED_VENV"
 		export MOCK_STATE_DIR="$STATE"
+		export PARATROOPER_INSTALL_TEST_PYTHON="$REAL_PYTHON3"
 		export PARATROOPER_PROVISION_MOCK=1
 		export RENDER_API_KEY="$PROVISION_KEY"
 		export RENDER_WORKSPACE="$WORKSPACE"
@@ -408,6 +409,12 @@ assert_contains "$OUT" "Claude Code sign in did not complete" $NAME "same messag
 [ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "provisioned despite missing token"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
+run 0 claude_trailing_blank "$NEW_INPUT" MOCK_CLAUDE_NOISE=1 MOCK_CLAUDE_TRAILING_BLANK=1; NAME=claude_trailing_blank; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+assert_contains "$OUT" "Paratrooper is ready" $NAME "kept the last nonblank token line"
+assert_absent "$LOGFILE" "$CLAUDE_TOKEN" $NAME "token not logged"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
 # --- 6. failed blueprint gate stops the unnumbered prepare section ----------
 run 0 validate_fail "$NEW_INPUT" MOCK_BP_FAIL=1; NAME=validate_fail; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
@@ -415,6 +422,22 @@ assert_contains "$OUT" "Preparing your deployment" $NAME "reached prepare sectio
 assert_absent "$OUT" "5. Preparing your deployment" $NAME "prepare section still numbered"
 assert_contains "$OUT" "Validating blueprint" $NAME "reached blueprint gate"
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "provisioned despite validation failure"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# A piped run cannot opt in to continuing after a Cloudflare block, even if the
+# input stream has extra characters. An ordinary Render 403 remains a hard stop.
+run 0 cloudflare_noninteractive "${NEW_INPUT}
+y" MOCK_BP_CLOUDFLARE=1; NAME=cloudflare_noninteractive; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+assert_contains "$OUT" "Run interactively to choose whether to continue" $NAME "noninteractive fail-closed message"
+assert_absent "$OUT" "Continue without Render's preflight check?" $NAME "did not read piped opt-in"
+[ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "provisioned after a noninteractive block"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+run 0 forbidden_noninteractive "$NEW_INPUT" MOCK_BP_FORBIDDEN=1; NAME=forbidden_noninteractive; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+assert_absent "$OUT" "Continue without Render's preflight check?" $NAME "permission error offered bypass"
+[ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "provisioned after permission error"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 7. step 0: uv missing, obtained through the hook, then builds ----------

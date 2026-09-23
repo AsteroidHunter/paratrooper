@@ -16,6 +16,11 @@ sub2="${2:-}"
 case "$sub" in
   login)
     printf 'render login\n' >>"$CALLS"
+    if [ "${MOCK_RENDER_LOGIN_WAIT:-0}" = "1" ]; then
+      echo "mock render login waiting" >&2
+      printf '%s\n' "$$" >"$STATE/render_login_wait.pid"
+      exec sleep 120
+    fi
     [ "${MOCK_RENDER_LOGIN_FAIL:-0}" = "1" ] && { echo "login failed" >&2; exit 1; }
     if [ "${MOCK_WORKSPACE_FRESH:-0}" = "1" ]; then
       mkdir -p "$HOME/.render"
@@ -83,6 +88,20 @@ case "$sub" in
     ;;
   blueprints)
     printf 'render blueprints %s\n' "$sub2" >>"$CALLS"
+    if [ "${MOCK_BP_WAIT:-0}" = "1" ]; then
+      echo "mock blueprint validation waiting" >&2
+      printf '%s\n' "$$" >"$STATE/blueprint_wait.pid"
+      [ "${MOCK_BP_IGNORE_TERM:-0}" != "1" ] || trap '' TERM
+      exec sleep 120
+    fi
+    if [ "${MOCK_BP_CLOUDFLARE:-0}" = "1" ]; then
+      echo 'validation request failed with status 403: <!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head><body><h1>Sorry, you have been blocked</h1><p>Cloudflare Ray ID: fake-test-ray</p></body></html>' >&2
+      exit 1
+    fi
+    if [ "${MOCK_BP_FORBIDDEN:-0}" = "1" ]; then
+      echo 'validation request failed with status 403: {"message":"workspace permission denied"}' >&2
+      exit 1
+    fi
     [ "${MOCK_BP_FAIL:-0}" = "1" ] && { echo "blueprint invalid" >&2; exit 1; }
     echo "render.yaml is valid."
     exit 0

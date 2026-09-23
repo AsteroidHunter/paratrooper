@@ -93,7 +93,19 @@ REPORT_FILE=""
 # spinner animates, so a failure prints it cleanly once the spinner is erased.
 PROVISION_ERR=""
 WORKSPACE_ERR=""
+WORKSPACE_OUT=""
+VALIDATION_OUT=""
 TERMINAL_STATE=""
+INITIAL_TERMINAL_STATE=""
+TTY_FD_OPEN="no"
+if [ -t 0 ]; then
+	exec 9<&0
+	TTY_FD_OPEN="yes"
+	INITIAL_TERMINAL_STATE="$(stty -g <&9 2>/dev/null || true)"
+fi
+ACTIVE_CHILD_PID=""
+TOKEN_DIR=""
+PROVISION_STARTED="no"
 PASSWORD_MODE=""
 EXISTING_WEB_ID=""
 WORKSPACE_ID=""
@@ -122,19 +134,103 @@ tool_usable() {
 
 # cleanup - restore the terminal and remove the non-secret report on the way out.
 cleanup() {
-	if [ -n "$TERMINAL_STATE" ]; then
-		stty "$TERMINAL_STATE" 2>/dev/null || true
+	if [ -n "$INITIAL_TERMINAL_STATE" ]; then
+		stty "$INITIAL_TERMINAL_STATE" <&9 2>/dev/null || true
+	elif [ -n "$TERMINAL_STATE" ]; then
+		stty "$TERMINAL_STATE" <&9 2>/dev/null || true
 	fi
+	[ "$TTY_FD_OPEN" = "no" ] || exec 9<&-
 	[ -n "$REPORT_FILE" ] && rm -f "$REPORT_FILE" 2>/dev/null
 	[ -n "$PROVISION_ERR" ] && rm -f "$PROVISION_ERR" 2>/dev/null
 	[ -n "$WORKSPACE_ERR" ] && rm -f "$WORKSPACE_ERR" 2>/dev/null
+	[ -n "$WORKSPACE_OUT" ] && rm -f "$WORKSPACE_OUT" 2>/dev/null
+	[ -n "$VALIDATION_OUT" ] && rm -f "$VALIDATION_OUT" 2>/dev/null
+	[ -n "$TOKEN_DIR" ] && rm -rf "$TOKEN_DIR" 2>/dev/null
 	unset APP_PASSWORD CLAUDE_TOKEN RENDER_KEY provision_payload
 	return 0
 }
 trap cleanup EXIT
-trap 'err ""; err "Installation canceled. Run ./install.sh again when ready."; exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+
+# Bash postpones an INT trap while it waits for a foreground child. Run lengthy
+# tools as tracked background children and wait for them instead. A Ctrl-C then
+# interrupts the wait immediately, including while a browser sign-in is pending.
+# Only descendants of the active installer command are stopped. Unrelated app
+# processes, including an already-open browser, are never selected for cleanup.
+owned_child_pids() {
+	local root="$1"
+	ps -eo pid=,ppid= 2>/dev/null | awk -v root="$root" '
+		{ parent[$1] = $2; order[++count] = $1 }
+		END {
+			owned[root] = 1
+			for (pass = 0; pass < count; pass++) {
+				changed = 0
+				for (i = 1; i <= count; i++)
+					if (owned[parent[order[i]]] && !owned[order[i]]) {
+						owned[order[i]] = 1; changed = 1
+					}
+				if (!changed) break
+			}
+			for (i = 1; i <= count; i++) if (owned[order[i]] && order[i] != root) print order[i]
+		}' || true
+}
+
+stop_active_child() {
+	local pid descendants attempt
+	[ -n "$ACTIVE_CHILD_PID" ] || return 0
+	descendants="$(owned_child_pids "$ACTIVE_CHILD_PID")"
+	# Stop descendants while their parent is still alive. Never send a delayed
+	# SIGKILL to a saved descendant PID: it might have exited and been reused.
+	for pid in $descendants; do kill -TERM "$pid" 2>/dev/null || true; done
+	for pid in $descendants; do kill -KILL "$pid" 2>/dev/null || true; done
+	kill -TERM "$ACTIVE_CHILD_PID" 2>/dev/null || true
+	for attempt in 1 2 3 4 5; do
+		kill -0 "$ACTIVE_CHILD_PID" 2>/dev/null || break
+		sleep 0.1
+	done
+	# Bash may already have reaped a finished child. Its running-jobs list is
+	# authoritative for this shell; a reused PID cannot appear there by accident.
+	if jobs -pr | grep -Fxq "$ACTIVE_CHILD_PID"; then
+		kill -KILL "$ACTIVE_CHILD_PID" 2>/dev/null || true
+	fi
+	wait "$ACTIVE_CHILD_PID" 2>/dev/null || true
+	ACTIVE_CHILD_PID=""
+}
+
+stop_install() {
+	local code="$1"
+	trap '' INT TERM HUP
+	stop_active_child
+	if [ "$code" -eq 130 ]; then
+		err ""
+		err "Installation canceled. Run ./install.sh again when ready."
+		if [ "$PROVISION_STARTED" = yes ]; then
+			err "Any Render resources already created were kept; the next run can reuse them."
+		fi
+	fi
+	exit "$code"
+}
+trap 'stop_install 130' INT
+trap 'stop_install 143' TERM
+trap 'stop_install 129' HUP
+
+wait_active_child() {
+	local status=0
+	wait "$ACTIVE_CHILD_PID" || status=$?
+	ACTIVE_CHILD_PID=""
+	return "$status"
+}
+
+run_owned() {
+	"$@" &
+	ACTIVE_CHILD_PID=$!
+	wait_active_child
+}
+
+run_owned_tty() {
+	"$@" <&0 &
+	ACTIVE_CHILD_PID=$!
+	wait_active_child
+}
 
 # --- presentation helpers --------------------------------------------------
 # ANSI color only when stdout is a TTY (keeps logs/redirects clean).
@@ -234,19 +330,20 @@ spinner() {
 	local success="$2"
 	shift 2
 	local code=0
+	"$@" >>"$LOG" 2>&1 &
+	local pid=$!
+	ACTIVE_CHILD_PID="$pid"
 	if [ -t 1 ]; then
-		"$@" >>"$LOG" 2>&1 &
-		local pid=$!
 		local i=0 n=${#SPIN_FRAMES[@]}
 		while kill -0 "$pid" 2>/dev/null; do
 			printf '\r%s%s%s %s' "$GREEN" "${SPIN_FRAMES[i % n]}" "$RESET" "$running"
 			i=$((i+1))
 			sleep 0.08
 		done
-		wait "$pid" || code=$?
+		wait_active_child || code=$?
 		printf '\r\033[K'
 	else
-		"$@" >>"$LOG" 2>&1 || code=$?
+		wait_active_child || code=$?
 	fi
 	if [ "$code" -eq 0 ]; then
 		printf '%s✓%s %s\n' "$GREEN" "$RESET" "$success"
@@ -378,6 +475,65 @@ report_field() {
 		"$REPORT_FILE" "$1" 2>/dev/null || true
 }
 
+# Keep the OAuth token in shell memory. A private FIFO lets the parent read the
+# CLI's stdout while it tracks the CLI PID; unlike command substitution, a read
+# from the FIFO is interrupted promptly by Ctrl-C. Nothing is saved in the FIFO.
+capture_claude_token() {
+	local line="" status=0
+	export -n line
+	TOKEN_DIR="$(mktemp -d -t paratrooper-token.XXXXXX)" || return 1
+	mkfifo "$TOKEN_DIR/stdout" || return 1
+	claude setup-token <&0 >"$TOKEN_DIR/stdout" &
+	ACTIVE_CHILD_PID=$!
+	while IFS= read -r line || [ -n "$line" ]; do
+		if [[ "$line" =~ [^[:space:]] ]]; then CLAUDE_TOKEN="$line"; fi
+	done <"$TOKEN_DIR/stdout"
+	wait_active_child || status=$?
+	rm -rf "$TOKEN_DIR"
+	TOKEN_DIR=""
+	return "$status"
+}
+
+is_cloudflare_blueprint_block() {
+	grep -Fq 'validation request failed with status 403:' "$1" &&
+		grep -Fq 'Attention Required! | Cloudflare' "$1" &&
+		grep -Fq 'Sorry, you have been blocked' "$1"
+}
+
+validate_blueprint() {
+	local status=0
+	VALIDATION_OUT="$(mktemp -t paratrooper-blueprint.XXXXXX)" || return 1
+	render blueprints validate "$BLUEPRINT" >"$VALIDATION_OUT" 2>&1 &
+	ACTIVE_CHILD_PID=$!
+	spin_pid "$ACTIVE_CHILD_PID" "Validating blueprint ..."
+	wait_active_child || status=$?
+	cat "$VALIDATION_OUT" >>"$LOG"
+	if [ "$status" -eq 0 ]; then
+		printf '%s✓%s Blueprint is valid.\n' "$GREEN" "$RESET"
+	elif is_cloudflare_blueprint_block "$VALIDATION_OUT"; then
+		err "⚠ Render's Blueprint preflight was blocked by Cloudflare."
+		err "  Render has not checked the Blueprint. See $LOG for the block details."
+		if [ ! -t 0 ] || [ ! -t 1 ]; then
+			err "  Run interactively to choose whether to continue. No resources were created."
+			rm -f "$VALIDATION_OUT"; VALIDATION_OUT=""
+			return 1
+		fi
+		printf 'Later Render API checks may still reject this setup after creating some resources.\n'
+		if ! prompt_keypress "yn" "Continue without Render's preflight check? (y / n) " || [ "$REPLY" != y ]; then
+			err "Setup stopped before creating resources."
+			rm -f "$VALIDATION_OUT"; VALIDATION_OUT=""
+			return 1
+		fi
+		printf "⚠ Continuing without Render's Blueprint preflight.\n"
+	else
+		err "⚠ Validating blueprint ... failed. See $LOG for details."
+		rm -f "$VALIDATION_OUT"; VALIDATION_OUT=""
+		return 1
+	fi
+	rm -f "$VALIDATION_OUT"
+	VALIDATION_OUT=""
+}
+
 # wait_for_health <base-url> - poll <base-url><HEALTH_PATH> until it answers or
 # the attempts run out. Animates on a TTY; silent when redirected. The poll
 # count and gap are overridable so a test can drive it without waiting. Returns
@@ -389,7 +545,7 @@ wait_for_health() {
 	local msg="Waiting for the app to come online ..."
 	local i=0 n=${#SPIN_FRAMES[@]}
 	while [ "$i" -lt "$tries" ]; do
-		if curl -fsS "$url" >>"$LOG" 2>&1; then
+		if run_owned curl -fsS "$url" >>"$LOG" 2>&1; then
 			[ -t 1 ] && printf '\r\033[K'
 			return 0
 		fi
@@ -397,7 +553,7 @@ wait_for_health() {
 			printf '\r%s%s%s %s' "$GREEN" "${SPIN_FRAMES[i % n]}" "$RESET" "$msg"
 		fi
 		i=$((i+1))
-		[ "$interval" -gt 0 ] && sleep "$interval"
+		if [ "$interval" -gt 0 ]; then run_owned sleep "$interval"; fi
 	done
 	[ -t 1 ] && printf '\r\033[K'
 	return 1
@@ -626,15 +782,18 @@ ensure_claude() {
 read_render_workspace() {
 	local raw fields errors status=0
 	WORKSPACE_ERR="$(mktemp -t paratrooper-workspace.XXXXXX)" || return 1
+	WORKSPACE_OUT="$(mktemp -t paratrooper-workspace-out.XXXXXX)" || return 1
 	if [ "${1:-}" = "saved" ]; then
-		raw="$(unset RENDER_WORKSPACE; render workspace current --output json 2>"$WORKSPACE_ERR")" || status=$?
+		run_owned_tty env -u RENDER_WORKSPACE render workspace current --output json >"$WORKSPACE_OUT" 2>"$WORKSPACE_ERR" || status=$?
 	else
-		raw="$(render workspace current --output json 2>"$WORKSPACE_ERR")" || status=$?
+		run_owned_tty render workspace current --output json >"$WORKSPACE_OUT" 2>"$WORKSPACE_ERR" || status=$?
 	fi
+	raw="$(cat "$WORKSPACE_OUT")"
 	errors="$(cat "$WORKSPACE_ERR")"
 	[ -z "$errors" ] || printf '%s\n' "$errors" >>"$LOG"
-	rm -f "$WORKSPACE_ERR"
+	rm -f "$WORKSPACE_ERR" "$WORKSPACE_OUT"
 	WORKSPACE_ERR=""
+	WORKSPACE_OUT=""
 	if [ "$status" -ne 0 ]; then
 		[ -z "$raw" ] || printf '%s\n' "$raw" >>"$LOG"
 		[[ "$errors" == *"no workspace set."* ]] && return 2
@@ -669,7 +828,7 @@ select_render_workspace() {
 	# The CLI picker writes the user's choice to its config. A pre-existing
 	# environment override must not hide that choice when we read it back. The
 	# result is shown for explicit confirmation even if the picker was canceled.
-	(unset RENDER_WORKSPACE; render workspace set) || return 1
+	run_owned_tty env -u RENDER_WORKSPACE render workspace set || return 1
 	read_render_workspace saved
 }
 
@@ -764,7 +923,7 @@ printf 'sign in; the Render CLI saves the session for the rest of the install.\n
 # y/n install into the per-user cache before the sign in.
 ensure_render
 
-if ! render login; then
+if ! run_owned_tty render login; then
 	err ""
 	err "⚠ Render sign in did not complete."
 	err "  Run \`render login\` and try again."
@@ -831,7 +990,7 @@ ensure_claude
 
 # Capture stdout (the token); the interactive authorize flow uses the terminal.
 # Take the last non-empty line so a stray banner line cannot end up in the value.
-if ! CLAUDE_TOKEN="$(claude setup-token | awk 'NF{last=$0} END{print last}')"; then
+if ! capture_claude_token; then
 	err ""
 	err "⚠ Claude Code sign in did not complete."
 	err "  Run \`claude setup-token\` and try again."
@@ -893,7 +1052,7 @@ section "4. App password"
 REPORT_FILE="$(mktemp -t paratrooper-provision.XXXXXX)"
 # This is read-only. Determine whether a password is needed before asking for
 # one, and bind an existing-install confirmation to that exact web service id.
-if ! "$PY" -m paratrooper.provision --inspect-app \
+if ! run_owned "$PY" -m paratrooper.provision --inspect-app \
 	--blueprint "$BLUEPRINT" --repo "$REPO_URL" --branch "$REPO_BRANCH" \
 	--workspace "$WORKSPACE_ID" \
 	--report "$REPORT_FILE"; then
@@ -956,8 +1115,7 @@ spinner "Validating configuration ..." "Configuration is valid." \
 # Pre-provision gate 2: the blueprint is well formed. The provisioner parses this
 # same file to build the resources, so validating it first is validating what it
 # is about to read.
-spinner "Validating blueprint ..." "Blueprint is valid." \
-	render blueprints validate "$BLUEPRINT"
+validate_blueprint
 
 # --- Provisioning on Render (unnumbered: asks nothing) ---------------------
 
@@ -1006,8 +1164,10 @@ PROVISION_ERR="$(mktemp -t paratrooper-provision-err.XXXXXX)"
 provision_status=0
 run_provisioner &
 provision_pid=$!
+PROVISION_STARTED=yes
+ACTIVE_CHILD_PID="$provision_pid"
 spin_pid "$provision_pid" "Setting up your app on Render and waiting for it to go live."
-wait "$provision_pid" || provision_status=$?
+wait_active_child || provision_status=$?
 if [ "$provision_status" -ne 0 ]; then
 	if [ -s "$PROVISION_ERR" ]; then
 		cat "$PROVISION_ERR" >&2

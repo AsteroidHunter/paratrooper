@@ -38,7 +38,7 @@ case "${1:-}" in
 			echo "fake uv: no venv target directory given" >&2
 			exit 2
 		fi
-		python3 -m venv "$target"
+		"${PARATROOPER_INSTALL_TEST_PYTHON:-python3}" -m venv "$target"
 		exit $?
 		;;
 	pip)
