@@ -289,6 +289,22 @@ def test_shell_guard_also_refuses_the_secret_mount():
 # way, is fixed by the SDK version rather than by the build date.
 
 MIN_SCRUB_CLI = (2, 1, 83)  # the release the switch first appears in
+# The first release that runs claude-opus-5-5 (code.claude.com/docs/en/model-config).
+# Older ones pass the id through with another model's defaults: the 2.1.191 this
+# replaced sent it with a 32k output ceiling instead of Opus 5.5's own.
+MIN_OPUS_5_5_CLI = (2, 1, 280)
+
+
+def _bundled_cli_version() -> tuple[int, int, int]:
+    import claude_agent_sdk
+
+    cli = Path(claude_agent_sdk.__file__).resolve().parent / "_bundled" / "claude"
+    assert cli.exists(), f"no bundled CLI at {cli}"
+    proc = subprocess.run([str(cli), "-v"], capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    found = re.search(r"(\d+)\.(\d+)\.(\d+)", proc.stdout)
+    assert found, proc.stdout
+    return tuple(int(part) for part in found.groups())
 
 
 def test_the_agent_sdk_is_pinned_exactly():
@@ -305,16 +321,17 @@ def test_the_bundled_cli_carries_the_scrub_switch():
     reads, so neither value means anything — which is the one failure a setting
     cannot announce by itself, and the floor that keeps turning it back on a
     one-line change rather than an upgrade."""
-    import claude_agent_sdk
+    version = _bundled_cli_version()
+    assert version >= MIN_SCRUB_CLI, f"bundled CLI {version} predates the switch"
 
-    cli = Path(claude_agent_sdk.__file__).resolve().parent / "_bundled" / "claude"
-    assert cli.exists(), f"no bundled CLI at {cli}"
-    proc = subprocess.run([str(cli), "-v"], capture_output=True, text=True, timeout=120)
-    assert proc.returncode == 0, proc.stderr
-    found = re.search(r"(\d+)\.(\d+)\.(\d+)", proc.stdout)
-    assert found, proc.stdout
-    version = tuple(int(part) for part in found.groups())
-    assert version >= MIN_SCRUB_CLI, f"bundled CLI {proc.stdout.strip()} predates the switch"
+
+def test_the_bundled_cli_runs_the_example_model():
+    """The example names Opus 5.5, which needs Claude Code 2.1.280. The CLI is
+    whatever the SDK pin bundles, so moving that pin back below 0.2.158 is the one
+    edit that would quietly hand the model to a CLI that does not know it."""
+    assert example_config().model == "claude-opus-5-5"
+    version = _bundled_cli_version()
+    assert version >= MIN_OPUS_5_5_CLI, f"bundled CLI {version} cannot run Opus 5.5"
 
 
 # --- the paratrooper/* branch cap (effectful: counts the site checkout) -------
@@ -647,8 +664,8 @@ def test_the_sdk_pin_lives_in_pyproject_not_only_the_constraints():
     stays an `==` in pyproject.toml as well as a line in the constraints."""
     _, extras = _project_dependencies()
     for extra in ("agent", "agent-plain"):
-        assert "claude-agent-sdk==0.2.110" in extras[extra]
-        assert _constraint_versions(PINNED_EXTRAS[extra])["claude-agent-sdk"] == "0.2.110"
+        assert "claude-agent-sdk==0.2.158" in extras[extra]
+        assert _constraint_versions(PINNED_EXTRAS[extra])["claude-agent-sdk"] == "0.2.158"
 
 
 def test_no_image_ships_a_config_folder():
@@ -1517,6 +1534,27 @@ def test_the_isolation_switch_is_optional_shared_and_boolean():
         assert validate_config(table, source="under test").shell_isolation is value
     for bad in ("true", 1, "yes", []):
         _reject(lambda t, b=bad: t.update(shell_isolation=b), "shell_isolation")
+
+
+def test_the_effort_is_optional_shared_and_one_of_the_cli_levels():
+    """Absent means no level is sent and the model's own default runs, which is
+    what every source written before this key existed keeps doing. Opus 5.5's
+    own default is medium, so the example writes its level down."""
+    assert example_config().effort == "high"
+    for table in (example_table(), plain_table()):
+        table.pop("effort")
+        assert validate_config(table, source="under test").effort is None
+    for level in ("low", "medium", "high", "xhigh", "max"):
+        for table in (example_table(), plain_table()):
+            table["effort"] = level
+            assert validate_config(table, source="under test").effort == level
+    for bad in ("HIGH", "ultracode", "", "auto", 3, True, ["high"]):
+        _reject(lambda t, b=bad: t.update(effort=b), "effort")
+
+
+def test_the_effort_is_a_shared_key_and_not_a_pinboard_one():
+    """Written under [pinboard] it is a key in the wrong place, refused by name."""
+    _reject(lambda t: t["pinboard"].update(effort="high"), "pinboard.effort")
 
 
 def test_the_screenshot_table_is_optional():
@@ -2944,6 +2982,50 @@ def test_the_session_model_is_the_configured_one(tmp_path, monkeypatch):
     job = worker_mod.Job(job_id="j10", thread_id="t1", text="hello")
     assert asyncio.run(worker_mod.run_job(job, config=cfg)).status == "done"
     assert captured["options"].model == "claude-something-else-9"
+
+
+@pytest.mark.parametrize("effort", ["high", "xhigh", None])
+def test_both_profiles_carry_the_same_effort_delivery_and_settings(
+    tmp_path, monkeypatch, effort
+):
+    """One helper decides these for both sessions, so neither can drift: the
+    configured effort (none at all when the source names none), prompts
+    delivered as written, and the attribution the prompt forbids switched off.
+    The pinboard session also declares its base tool set, as plain always has."""
+    import paratrooper.agent.worker as worker_mod
+
+    captured: dict = {}
+
+    async def fake_query(*, prompt, options):
+        captured["options"] = options
+        if False:
+            yield
+
+    monkeypatch.setattr(worker_mod, "installation_token", _no_app_configured)
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "spotify_credentials", _no_spotify)
+    monkeypatch.setattr(
+        worker_mod, "build_tool_server",
+        lambda ctx: ({"name": "paratrooper"}, ["mcp__paratrooper__place_pin"]),
+    )
+    monkeypatch.setattr(worker_mod, "run_session", fake_query)
+
+    job = worker_mod.Job(job_id="j11", thread_id="t1", text="hello")
+    seen = {}
+    for name, cfg in (("pinboard", _tool_cfg(tmp_path)), ("plain", plain_config(tmp_path))):
+        cfg = dataclasses.replace(cfg, effort=effort)
+        assert asyncio.run(worker_mod.run_job(job, config=cfg)).status == "done"
+        seen[name] = options = captured.pop("options")
+        assert options.effort == effort
+        assert options.verbatim_prompts is True
+        assert json.loads(options.settings) == {
+            "attribution": {"commit": "", "pr": "", "sessionUrl": False}
+        }
+    assert seen["pinboard"].tools == worker_mod.BUILTIN_TOOLS
+    assert seen["pinboard"].allowed_tools == [
+        "mcp__paratrooper__place_pin", *worker_mod.BUILTIN_TOOLS
+    ]
+    assert seen["plain"].tools == worker_mod.PLAIN_TOOLS
 
 
 def test_worker_image_keeps_the_tools_the_scrub_switch_needs():

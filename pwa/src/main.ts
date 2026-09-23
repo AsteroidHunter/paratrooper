@@ -195,7 +195,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.162"; // The set-up messages now land 0.56 seconds apart instead of nine tenths
+const APP_VERSION = "0.3.163"; // Refresh the agent runtime and app build tools, with explicit model effort and CLI compatibility fixes
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.

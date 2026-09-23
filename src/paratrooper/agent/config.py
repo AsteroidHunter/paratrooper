@@ -2,14 +2,15 @@
 
 Three kinds of value, deliberately separated:
 
-* **Deployment configuration** — the profile, the model, the notification texts,
-  the upload expiry and, on ``pinboard``, everything that describes one person's
-  site: owner, address, remote, branch names, commit identity, stage folders,
-  changelog and the optional screenshot shape. All of it lives in one TOML
-  source which reaches a running service through exactly one environment
-  variable, ``PARATROOPER_CONFIG_B64``, holding that text base64-encoded. There
-  is no path variable, no mounted file, no search order and no second source: a
-  service either has that one value or does not start. ``config/paratrooper.toml``
+* **Deployment configuration** — the profile, the model and its effort, the
+  notification texts, the upload expiry and, on ``pinboard``, everything that
+  describes one person's site: owner, address, remote, branch names, commit
+  identity, stage folders, changelog and the optional screenshot shape. All of
+  it lives in one TOML source which reaches a running service through exactly
+  one environment variable, ``PARATROOPER_CONFIG_B64``, holding that text
+  base64-encoded. There is no path variable, no mounted file, no search order
+  and no second source: a service either has that one value or does not start.
+  ``config/paratrooper.toml``
   is the thing a human edits and ``config/paratrooper.example.toml`` documents
   every field; neither is ever read by a running service.
 * **Machine paths** stay environment values, because they are the two things
@@ -70,6 +71,10 @@ PINBOARD, PLAIN = "pinboard", "plain"
 PROFILES = (PINBOARD, PLAIN)
 # A photo only has to survive until the worker picks it up; never infinite.
 TTL_HOURS_MIN, TTL_HOURS_MAX = 1, 168
+# The reasoning levels the Claude CLI accepts for `effort`. A model that does not
+# support the level named runs at the highest one it has below it; a model with
+# no effort support ignores the setting.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 # Standardized asset filenames inside a pin folder (post-refactor contract).
 PREVIEW_ASSET = "preview.webp"  # the pinned/board preview image
@@ -257,6 +262,10 @@ class Config:
     # Not a product control and not reachable from inside a turn: see the switch
     # written in agent/worker.py for what it does and what it costs.
     shell_isolation: bool = False
+    # Shared, optional. None sends no level, so the model's own default applies,
+    # and that default differs by model: Opus 5.5 starts at medium where Opus 4.8
+    # started at high. A deployment that means a level writes it down.
+    effort: str | None = None
     inbox: Path | None = None  # env PARATROOPER_INBOX, required by both services
     pinboard: PinboardConfig | None = None  # None on plain
 
@@ -296,7 +305,7 @@ class Config:
 # somewhere was invalid.
 
 _TOP_LEVEL_KEYS = frozenset(
-    {"schema", "model", "notifications", "uploads", "shell_isolation", "profile"}
+    {"schema", "model", "effort", "notifications", "uploads", "shell_isolation", "profile"}
 )
 _PINBOARD_KEYS = frozenset({
     "owner", "site", "remote", "default_branch", "branch_prefix", "git_name",
@@ -548,6 +557,13 @@ def validate_config(raw: dict, *, source: str = CONFIG_VAR) -> Config:
             f"{source}: 'shell_isolation' must be true or false (got {isolation!r})"
         )
 
+    effort = raw.get("effort")
+    if effort is not None and effort not in EFFORT_LEVELS:
+        raise ConfigError(
+            f"{source}: 'effort' must be one of {', '.join(repr(e) for e in EFFORT_LEVELS)} "
+            f"(got {effort!r}). Leave it out to run the model's own default."
+        )
+
     notifications = _sub_table(raw, "notifications", source=source, name="")
     _reject_unknown(
         notifications, frozenset({"reply", "error"}), source=source, name="notifications"
@@ -580,6 +596,7 @@ def validate_config(raw: dict, *, source: str = CONFIG_VAR) -> Config:
         ),
         uploads=Uploads(ttl_hours=_ttl_hours(raw, source=source)),
         shell_isolation=isolation,
+        effort=effort,
         pinboard=(
             _pinboard_config(pinboard_table, source=source) if profile == PINBOARD else None
         ),

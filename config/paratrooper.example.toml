@@ -23,10 +23,16 @@
 # last line before the profile's own table.
 
 schema = 1                                   # the only version this build accepts
-model = "claude-opus-4-8"                     # the model id the worker runs
+model = "claude-opus-5-5"                     # the model id the worker runs
 # A plain deployment usually runs a smaller model, e.g.
 #   model = "claude-sonnet-5"
 # Either profile takes either id: this is configuration, not a profile rule.
+
+# OPTIONAL, both profiles. How deeply the model reasons on each step: "low",
+# "medium", "high", "xhigh" or "max". Absent means the model's own default, and
+# that differs by model: Opus 5.5 starts at "medium", Opus 4.8 and Sonnet 5 at
+# "high". Written out so a change of model never quietly changes it.
+effort = "high"
 
 # Push bodies both profiles use.
 notifications.reply = "Paratrooper replied."  # a reply with no text of its own

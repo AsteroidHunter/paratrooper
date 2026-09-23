@@ -70,5 +70,9 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    // Vite 5's own default, written out. Vite 7 raised the default to Safari
+    // 16.4, and moving the build tool should not change which phones can open
+    // the app.
+    target: ["es2020", "edge88", "firefox78", "chrome87", "safari14"],
   },
 });

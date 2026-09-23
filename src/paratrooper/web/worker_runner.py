@@ -287,6 +287,7 @@ def main() -> None:
     config = load_config(require_site_root=True)
     print(
         f"paratrooper worker: profile={config.profile} model={config.model} "
+        f"effort={config.effort or 'model default'} "
         f"shell_isolation={config.shell_isolation} "
         f"uploads.ttl_hours={config.uploads.ttl_hours}",
         flush=True,

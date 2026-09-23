@@ -5,6 +5,13 @@
 # Debian 13 trixie). Nothing here is an upgrade: every line is the version
 # already serving traffic.
 #
+# Three lines moved on purpose on 2026-09-22 (PINNING.md step 1), ahead of the
+# deploy that carries them: claude-agent-sdk 0.2.110 -> 0.2.158 (bundles Claude
+# Code 2.1.280, which Opus 5.5 needs), playwright 1.62.0 -> 1.63.0 (Chromium
+# 153) and PyJWT 2.13.0 -> 2.14.0 (a security release). The rest of the set
+# resolves unchanged around them. Replace this file with the running worker's
+# own freeze once that deploy is live (step 2).
+#
 # pyproject.toml keeps the intent ranges (the floors the code actually needs);
 # this file is what makes a rebuild land on the same set the range happened to
 # resolve to. Dockerfile.worker applies it with `pip install -c`. Transitive
@@ -19,7 +26,7 @@ anyio==4.15.1
 attrs==26.1.0
 certifi==2026.7.22
 cffi==2.1.1
-claude-agent-sdk==0.2.110
+claude-agent-sdk==0.2.158
 click==8.5.0
 cryptography==50.0.1
 greenlet==3.5.5
@@ -33,13 +40,13 @@ jsonschema-specifications==2025.9.1
 mcp==1.30.0
 numpy==2.5.3
 pillow==12.3.0
-playwright==1.62.0
+playwright==1.63.0
 pycparser==3.0
 pydantic==2.13.5
 pydantic-settings==2.15.0
 pydantic_core==2.46.5
 pyee==13.0.1
-PyJWT==2.13.0
+PyJWT==2.14.0
 python-dotenv==1.2.3
 python-multipart==0.0.32
 redis==8.1.0

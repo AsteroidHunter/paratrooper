@@ -6,13 +6,17 @@
 # remain even though the plain runtime never uses the GitHub authentication
 # path. Playwright, its browser, greenlet and pyee are absent. Base NumPy,
 # SciPy and Pillow remain. See PINNING.md for closure verification.
+#
+# Moved with the full worker on 2026-09-22: claude-agent-sdk 0.2.110 -> 0.2.158
+# (bundles Claude Code 2.1.280, which Opus 5.5 needs) and pyjwt 2.13.0 -> 2.14.0
+# (a security release). Re-resolved under the same rule; nothing else changed.
 
 annotated-types==0.8.0
 anyio==4.15.1
 attrs==26.1.0
 certifi==2026.7.22
 cffi==2.1.1
-claude-agent-sdk==0.2.110
+claude-agent-sdk==0.2.158
 click==8.5.0
 cryptography==50.0.1
 h11==0.16.0
@@ -29,7 +33,7 @@ pycparser==3.0
 pydantic==2.13.5
 pydantic-core==2.46.5
 pydantic-settings==2.15.0
-pyjwt==2.13.0
+pyjwt==2.14.0
 python-dotenv==1.2.3
 python-multipart==0.0.32
 redis==8.1.0

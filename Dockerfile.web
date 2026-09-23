@@ -19,9 +19,10 @@ COPY pwa/ ./
 RUN npm run build
 
 # --- stage 2: python web service ---
-# python:3.12-slim as it stood on 2026-09-07 (Python 3.12.14, Debian 13
-# trixie), the same interpreter the live service reports. See PINNING.md.
-FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+# python:3.12-slim as it stood on 2026-09-22 (built 2026-09-19: Python 3.12.14,
+# Debian 13 trixie with its glibc, SQLite, PCRE2 and tzdata updates), the same
+# interpreter the live service reports. See PINNING.md.
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \

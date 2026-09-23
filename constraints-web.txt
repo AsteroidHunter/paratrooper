@@ -5,6 +5,11 @@
 # Debian 13 trixie). Nothing here is an upgrade: every line is the version
 # already serving traffic.
 #
+# One line moved on purpose on 2026-09-22 (PINNING.md step 1), ahead of the
+# deploy that carries it: urllib3 2.7.0 -> 2.8.0, a security release, reached
+# through requests for push delivery. Replace this file with the running web
+# service's own freeze once that deploy is live (step 2).
+#
 # pyproject.toml keeps the intent ranges (the floors the code actually needs);
 # this file is what makes a rebuild land on the same set the range happened to
 # resolve to. Dockerfile.web applies it with `pip install -c`. Transitive
@@ -52,7 +57,7 @@ scipy==1.18.1
 starlette==1.6.0
 typing-inspection==0.4.4
 typing_extensions==4.16.0
-urllib3==2.7.0
+urllib3==2.8.0
 uvicorn==0.52.4
 uvloop==0.22.1
 watchfiles==1.2.0

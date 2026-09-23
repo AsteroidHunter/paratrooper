@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
+import tempfile
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import anyio
 from claude_agent_sdk import (
@@ -64,7 +66,12 @@ from .tools import SERVER_NAME, ToolContext, build_plain_tool_server, build_tool
 logger = logging.getLogger(__name__)
 
 # headless built-ins the agent needs; Bash is gated by the main-guard hook and
-# the three file tools by the file guard
+# the three file tools by the file guard. Declared as the pinboard session's
+# `tools`, so it is the whole base set rather than a list of what may run out of
+# a larger one: a CLI tool that asks no permission (Agent, CronCreate,
+# EnterPlanMode and others, found running unrefused on 2.1.191 and 2.1.280)
+# never reaches allowed_tools, dontAsk or the gate, so it is only kept out by
+# not being in the session at all.
 BUILTIN_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 # The plain profile's whole base tool set, declared as `tools` so it REPLACES the
 # CLI's default set rather than sitting beside it: web search and page reading,
@@ -90,6 +97,16 @@ DENIED_READS = ["Read(//proc/**)", "Read(//etc/secrets/**)"]
 # pinned SDK version is checked against in the tests. Every session pins it to a
 # value — see the comment on session_env in run_job for which value and why.
 SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
+# Session settings, passed with --settings, which outranks every settings file
+# in the checkout or the home folder. Claude Code tells the model to sign commits
+# and pull requests as Claude (2.1.191 in the shell tool's description, 2.1.280 in
+# a reminder at the start of every turn); the prompt forbids exactly that, so the
+# attribution is emptied and the two no longer disagree.
+SESSION_SETTINGS = json.dumps({"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
+# Where the CLI keeps its own temporary files. From 2.1.280 that includes a copy
+# of every photo a turn carries, which nothing removed; each turn now gets its
+# own folder here, deleted when the turn ends (see run_session).
+CLI_TMPDIR_VAR = "CLAUDE_CODE_TMPDIR"
 # What the permission gate says this session holds. Each profile names its own
 # set: a plain session refused a tool used to be told it lacked "the pinboard
 # tools", which is a sentence about a deployment it is not.
@@ -153,11 +170,21 @@ async def run_session(
     ``prompt`` is a string on pinboard and an async stream of user messages on
     plain. The string is the whole message; the stream is how an image block is
     attached at all, since single-message input does not take attachments. Both
-    go to the same client call, which accepts either."""
-    async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
-        async for message in client.receive_response():
-            yield message
+    go to the same client call, which accepts either.
+
+    The CLI's temporary files go in a folder made for this turn and removed
+    with it. A photo is the person's, and the worker already deletes its own
+    copy after every job; the CLI's copy, which 2.1.280 started writing, goes
+    the same way instead of outliving the upload's expiry."""
+    scratch = tempfile.mkdtemp(prefix="paratrooper-turn-")
+    options = replace(options, env={**options.env, CLI_TMPDIR_VAR: scratch})
+    try:
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
+            async for message in client.receive_response():
+                yield message
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 @dataclass
@@ -291,6 +318,29 @@ def session_env(config: Config) -> dict[str, str]:
     return {
         SCRUB_VAR: "1" if config.shell_isolation else "0",
         "GIT_TERMINAL_PROMPT": "0",  # fail fast, never hang on a prompt
+    }
+
+
+def shared_session_options(config: Config) -> dict:
+    """The options both profiles' sessions carry, whatever else differs.
+
+    * ``effort`` is the configured level, or None to send none and leave the
+      model's own default. It is passed as ``--effort``, which outranks any
+      effort a settings file in the checkout might name.
+    * ``verbatim_prompts``: the turn's text is the person's message plus recent
+      thread lines, and a thread line can be text the agent wrote after reading
+      a web page. Without this the CLI reads a file named as ``@/path`` in that
+      text straight into the turn, on both profiles, with no tool call for a
+      hook or the gate to see; with it the text is delivered as written, with
+      no file expansion and no slash-command dispatch. The CLI's per-turn
+      context then first arrives after the turn's first tool call, which is
+      still more than the pinned 2.1.191 ever sent with this prompt.
+    * ``settings`` is :data:`SESSION_SETTINGS`.
+    """
+    return {
+        "effort": config.effort,
+        "verbatim_prompts": True,
+        "settings": SESSION_SETTINGS,
     }
 
 
@@ -433,6 +483,9 @@ async def _run_pinboard_job(
         # merged over the inherited worker env by the SDK transport
         env=env,
         mcp_servers={SERVER_NAME: server},
+        # the base set is the six built-ins and nothing else (see BUILTIN_TOOLS);
+        # the in-process tools ride beside it on their own server
+        tools=list(BUILTIN_TOOLS),
         allowed_tools=session_tools,
         disallowed_tools=DENIED_READS,
         # headless least-privilege: listed tools run, unlisted are denied without
@@ -458,6 +511,7 @@ async def _run_pinboard_job(
         # stream partials so we can signal "composing text" (typing dots) as
         # distinct from "running tools" (status line)
         include_partial_messages=True,
+        **shared_session_options(config),
     )
 
     result_text = ""
@@ -519,7 +573,9 @@ async def _run_plain_job(
       because a plain deployment has no checkout and the CLI still needs a
       working directory that exists;
     * ``env`` writes the isolation switch explicitly either way, exactly as the
-      pinboard session does, from the same shared setting.
+      pinboard session does, from the same shared setting;
+    * the effort, verbatim delivery and session settings are the pinboard
+      session's own, from :func:`shared_session_options`.
 
     Claude's own credential stays reachable for the CLI, deliberately. The GitHub
     App and the worker-only secrets are not in ``os.environ`` by the time any
@@ -584,6 +640,7 @@ async def _run_plain_job(
         # no hooks: nothing this session can run opens a shell or a file
         max_buffer_size=10 * 1024 * 1024,
         include_partial_messages=True,
+        **shared_session_options(config),
     )
 
     result_text = ""
