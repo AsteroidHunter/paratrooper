@@ -37,7 +37,9 @@ You are encouraged to customize your set up by providing the agent with custom t
 
 Once the backend portion is wired up, visit your server's address, and you will see the following page:
 
-paratrooper_pwa_installation_screen.gif
+<p align="center">
+  <img alt="Paratrooper installation screen" src="docs/readme/paratrooper_pwa_installation_screen.gif" width="300">
+</p>
 
 After adding the paratrooper web app to your home screen, you will be able to access and use it like any other application!
 
