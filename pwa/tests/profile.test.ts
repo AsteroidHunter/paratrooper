@@ -227,6 +227,7 @@ function harness(options: HarnessOptions = {}) {
     tailGen: 0,
     scrollGhostWrite: () => {},
     settleLoadingScreen: async () => {},
+    noteThreadStart: () => {}, // the older-messages spinner (emptyhistory.test.ts), nothing here
     connect: () => void (connected = true),
     // --- health collaborators
     __BUILT_AT__: "built",

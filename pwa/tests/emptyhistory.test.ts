@@ -1,5 +1,6 @@
-// The older-history spinner in a chat that opened empty, and in a short chat
-// that fits on the screen (its own section, further down).
+// The older-history spinner in a chat that opened empty, in a chat that starts
+// at its first message, and in a short chat that fits on the screen (their own
+// sections, further down).
 //
 // The spinner is a row above the oldest message that says "older history
 // exists". styles.css shows it the moment the thread holds any row at all, and
@@ -20,7 +21,7 @@
 // These cases run the app's own code for all of that, cut out of main.ts by name
 // and run together in one VM context the way profile.test.ts does it: the
 // socket, the tail probe, the replay settle, the older-history fetch and drain,
-// logout, and the fresh shell's history reset. The harness owns only what sits
+// the cold open's saved-copy paint, logout, and the fresh shell's history reset. The harness owns only what sits
 // underneath: a server with an AUTOINCREMENT seq and the history endpoint's
 // paging rule, a socket, a thread box holding rows and the spinner, and a clock.
 import { readFileSync } from "node:fs";
@@ -78,6 +79,8 @@ beforeAll(async () => {
     sourceBetween("function applyReplay(", "// A truly fresh open must LAND"),
     sourceBetween("function connect(): void {", "let closeProbeBusy"),
     sourceBetween("function dropSocket(): void {", "/** true if this resume replaced the socket */"),
+    // the cold open's saved-copy paint, which connects when it is done
+    sourceBetween("async function bootFromCache(): Promise<void> {", "\nif (token) {"),
   ];
   script =
     (await transformWithEsbuild(blocks.join("\n"), "emptyhistory.ts", { loader: "ts" })).code +
@@ -208,6 +211,9 @@ function harness(options: { pageAge?: number } = {}) {
   let clock = 0;
   let nextTimer = 1;
   let failNextProbe = false;
+  let saved: { id: string; lastSeq: number; frames: Frame[] } | null = null; // the phone's saved copy
+  // what the screen showed at each paint: the browser paints only between tasks
+  const paints: Array<{ rows: number; showing: boolean }> = [];
 
   const context: Record<string, unknown> = {
     // the page and the host
@@ -288,6 +294,19 @@ function harness(options: { pageAge?: number } = {}) {
     springReseat: () => {},
     scrollGhostWrite: () => {},
     jankSpan: () => {},
+    // bootFromCache's collaborators: the saved record, the pin, and nothing else that decides
+    cacheGet: async () => saved,
+    armBootFrameGuard: () => {},
+    restoreProfile: () => null,
+    profile: null,
+    scrollToBottom: () => {
+      const t = shell.thread;
+      if (t) t.scrollTop = t.scrollHeight;
+    },
+    tailGen: 0,
+    requestAnimationFrame: () => 0,
+    noteSpringAppWrite: () => {},
+    settleLoadingScreen: async () => {},
   };
   runInNewContext(script, context);
   const probe = () => context.__probe as Probe;
@@ -295,16 +314,24 @@ function harness(options: { pageAge?: number } = {}) {
   const thread = () => shell.thread!;
   const socket = () => FakeSocket.all[FakeSocket.all.length - 1];
 
+  /** a frame reaches the screen: the spinner as the thread box now stands */
+  function paint(): void {
+    const t = shell.thread;
+    if (t) paints.push({ rows: t.rows.length, showing: t.spinnerShowing });
+  }
+
   /** answer only what is parked right now, and let those answers run */
   async function step(): Promise<void> {
     for (const p of parked.splice(0)) release(p);
     await tick();
+    paint();
   }
 
   /** answer every parked request, and everything they chain, until quiet */
   async function flush(): Promise<void> {
     for (let i = 0; i < 100; i++) {
       await tick();
+      paint();
       if (!parked.length) return;
       for (const p of parked.splice(0)) release(p);
     }
@@ -328,6 +355,7 @@ function harness(options: { pageAge?: number } = {}) {
       timers.delete(due[0]);
       clock = due[1].at;
       due[1].run();
+      paint();
     }
     clock = until;
   }
@@ -350,15 +378,28 @@ function harness(options: { pageAge?: number } = {}) {
       thread().scrollTop = thread().scrollHeight; // pinned to the bottom
     },
     connect: () => call("connect"),
-    /** the handshake completes: onopen asks the probe, then the replay streams in */
+    paints,
+    /** the cold open with a saved copy: bootFromCache paints it, then connects */
+    async boot(frames: Frame[]): Promise<void> {
+      paint(); // the fresh shell, before the saved copy is read
+      saved = { id: "default", lastSeq: Math.max(0, ...frames.map((f) => f.seq)), frames };
+      await (context.bootFromCache as () => Promise<void>)();
+      paint();
+    },
+    /** the handshake completes: onopen asks the probe, then the replay streams in, a task a frame */
     open(): void {
       const s = socket();
       s.onopen?.();
-      for (const f of server.replay(s.since())) s.onmessage?.({ data: JSON.stringify(f) });
+      paint();
+      for (const f of server.replay(s.since())) {
+        s.onmessage?.({ data: JSON.stringify(f) });
+        paint();
+      }
     },
     /** a live frame on the open socket */
     deliver(f: Frame): void {
       socket().onmessage?.({ data: JSON.stringify(f) });
+      paint();
     },
     /** the socket died; the blind two-second retry opens the next one */
     drop(): void {
@@ -380,6 +421,7 @@ function harness(options: { pageAge?: number } = {}) {
     /** the send's own bubble: an unkeyed .evt row at the tail (localWrapper) */
     send(): void {
       thread().rows.push("local");
+      paint();
     },
     /** the server accepted it: the ACK keys the row and moves both cursors */
     ack(): Frame {
@@ -390,6 +432,7 @@ function harness(options: { pageAge?: number } = {}) {
       if (p.oldestSeq === 0 || f.seq < p.oldestSeq) p.oldestSeq = f.seq;
       const at = thread().rows.indexOf("local");
       if (at >= 0) thread().rows[at] = f.seq;
+      paint();
       return f;
     },
     /** a finger on the thread: nothing may land under it */
@@ -411,19 +454,25 @@ function harness(options: { pageAge?: number } = {}) {
       if (thread().scrollTop < 1200) void (context.loadOlder as () => Promise<void>)();
       probe().lastScrollAt = 0;
       call("tryApplyOlder");
+      paint();
     },
     /** a scroll event with the glide still running: the scroll handler's work, no boundary */
     glide(top: number): void {
       thread().scrollTop = top;
       if (thread().scrollTop < 1200) void (context.loadOlder as () => Promise<void>)();
       probe().lastScrollAt = (context.performance as { now: () => number }).now();
+      paint();
     },
     /** a boundary check that finds the glide still running (the lift's timer, say) */
-    check: () => call("tryApplyOlder"),
+    check(): void {
+      call("tryApplyOlder");
+      paint();
+    },
     /** the glide ends: scrollend, with nothing else moving */
     glideEnds(): void {
       probe().lastScrollAt = 0;
       call("tryApplyOlder");
+      paint();
     },
   };
 }
@@ -518,8 +567,8 @@ describe("a chat that opened empty", () => {
     FakeSocket.all = [];
     const h = harness();
     const gone = new Server();
-    gone.addMany(30);
-    h.cached(gone.rows); // rows on screen, from a server that has since been wiped
+    gone.addMany(40);
+    h.cached(gone.rows.slice(-30)); // rows on screen (11..40), from a server since wiped
     expect(h.thread().spinnerShowing).toBe(true);
     h.connect();
     h.open();
@@ -533,8 +582,8 @@ describe("a chat that opened empty", () => {
     FakeSocket.all = [];
     const h = harness();
     const gone = new Server();
-    gone.addMany(30);
-    h.cached(gone.rows);
+    gone.addMany(40);
+    h.cached(gone.rows.slice(-30));
     h.fingerDown(); // reading the saved copy as the socket settles
     h.connect();
     h.open();
@@ -620,38 +669,148 @@ describe("a chat that opens with messages", () => {
   });
 });
 
-// --- a short chat: rows that fit on the screen, nothing older on the server -------
+// --- a chat that starts at its first message: the spinner never shows -----------
 //
-// The thread can't scroll, so the scroll boundary the farewell waits for never
-// comes on its own. Two things kept the spinner up until a touch. The settle's
-// check drained first and asked loadOlder second, and loadOlder settles the top
-// on the spot when the oldest message held is the thread's first, so the mark
-// landed just after the only drain that would come. And in the page's first
-// 140 ms the glide gate shut that check before it asked anything at all.
+// The server numbers messages from 1 and never gives a number out twice, so a
+// phone that holds seq 1 holds the thread's first message: nothing older can
+// exist, whatever a page or a probe says. The phone settles that itself, in the
+// same task as the rows that would turn the spinner on (the saved copy's paint,
+// the replay's one commit, a socket frame), so the spinner is gone before any
+// paint and never plays a farewell (the collapse is on screen for a quarter
+// second, even when it starts in the same task as the rows). It used to be
+// painted with the saved copy and taken out only once the socket settled, or at
+// a scroll boundary.
 
-describe("a short chat with nothing older", () => {
+/** every paint with a row on screen, and whether the spinner showed in it */
+const paintsWithRows = (h: Harness) => h.paints.filter((p) => p.rows > 0);
+const neverShown = (h: Harness) => {
+  expect(paintsWithRows(h).length).toBeGreaterThan(0);
+  expect(paintsWithRows(h).filter((p) => p.showing)).toEqual([]);
+  expect(h.thread().spin.attached).toBe(false); // out of the page ...
+  expect(h.thread().spin.bye).toBe(false); // ... outright: a farewell's collapse is itself on screen
+};
+
+describe("a chat that starts at its first message never shows the spinner", () => {
   it.each([
     ["from the saved copy", true, 1_000_000],
     ["from the server's replay", false, 1_000_000],
     ["from the saved copy, settling in the page's first 140 ms", true, 80],
     ["from the server's replay, settling in the page's first 140 ms", false, 80],
-  ] as const)("loses the spinner at the settle with no touch, opened %s", async (_, saved, pageAge) => {
+  ] as const)("a 4-message chat opened %s", async (_, saved, pageAge) => {
     FakeSocket.all = [];
     const h = harness({ pageAge });
     h.server.addMany(4); // two sent, two received
-    if (saved) h.cached(h.server.rows);
-    h.connect();
+    if (saved) {
+      await h.boot(h.server.rows); // painted before the socket even opens
+      expect(h.thread().spin.attached).toBe(false);
+    } else {
+      h.connect();
+    }
     h.open();
     await h.flush();
-    expect(h.thread().rows).toEqual([1, 2, 3, 4]);
-    expect(h.thread().scrollHeight).toBeLessThanOrEqual(h.thread().clientHeight); // it can't scroll
-    expect(h.probe().historyDone).toBe(true);
-    expect(h.thread().spinnerShowing).toBe(false); // the farewell has started, untouched
     h.advance(300);
-    expect(h.thread().spin.attached).toBe(false);
-    expect(olderPageCursors(h)).toEqual([]); // the first message is held: nothing to ask
+    expect(h.thread().rows).toEqual([1, 2, 3, 4]);
+    neverShown(h);
+    expect(h.probe().historyDone).toBe(true);
+    expect(olderPageCursors(h)).toEqual([]);
   });
 
+  it.each([
+    ["from the saved copy", true],
+    ["from the server's replay", false],
+  ] as const)("a 40-message chat opened %s, read to the top under a finger", async (_, saved) => {
+    FakeSocket.all = [];
+    const h = harness();
+    h.server.addMany(40); // taller than the screen, first message included
+    if (saved) await h.boot(h.server.rows);
+    else h.connect();
+    h.open();
+    await h.flush();
+    h.fingerDown();
+    h.glide(0); // dragged all the way up
+    h.check();
+    h.fingerUp();
+    h.glideEnds();
+    await h.flush();
+    neverShown(h);
+    expect(olderPageCursors(h)).toEqual([]);
+  });
+
+  it("through a reconnect and a new reply", async () => {
+    FakeSocket.all = [];
+    const h = harness();
+    h.server.addMany(4);
+    await h.boot(h.server.rows);
+    h.open();
+    await h.flush();
+    h.drop(); // the socket goes; the retry replays from lastSeq
+    const reply = h.server.add("agent");
+    h.open(); // the reply comes back in the catch-up
+    await h.flush();
+    h.deliver(h.server.add("agent")); // and one more, live
+    h.advance(300);
+    expect(h.thread().rows).toEqual([1, 2, 3, 4, reply.seq, reply.seq + 1]);
+    neverShown(h);
+  });
+
+  it("after sending, and after the answer", async () => {
+    FakeSocket.all = [];
+    const h = harness();
+    h.server.addMany(4);
+    await h.boot(h.server.rows);
+    h.open();
+    await h.flush();
+    h.send();
+    h.ack();
+    h.deliver(h.server.add("agent"));
+    h.advance(300);
+    expect(h.thread().rows).toEqual([1, 2, 3, 4, 5, 6]);
+    neverShown(h);
+  });
+
+  it("after a logout and a login, in the new shell's own spinner", async () => {
+    FakeSocket.all = [];
+    const h = harness();
+    h.server.addMany(4);
+    await h.boot(h.server.rows);
+    h.open();
+    await h.flush();
+    h.logout();
+    h.login(); // a fresh shell, spinner and all, and a full replay
+    h.open();
+    await h.flush();
+    h.advance(300);
+    expect(h.thread().rows).toEqual([1, 2, 3, 4]);
+    neverShown(h);
+  });
+
+  it("when the thread's first message arrives live, with the server's answer still out", async () => {
+    FakeSocket.all = [];
+    const h = harness();
+    h.connect();
+    h.open(); // an empty thread; this probe hangs
+    const hung = h.parked.splice(0);
+    h.advance(5000); // the fallback closes the ledger at nothing
+    const first = h.server.add("user"); // sent from another device
+    h.deliver(first);
+    expect(h.thread().rows).toEqual([first.seq]);
+    h.parked.push(...hung); // the empty answer lands at last
+    await h.flush();
+    h.advance(300);
+    neverShown(h);
+  });
+});
+
+// --- a short chat whose oldest message is above the first ------------------------
+//
+// Here the phone can't tell on its own whether older messages exist (the first
+// ones may have been taken back, or not loaded yet), so the older-history check
+// asks the server, and the spinner shows while it does. Two things once kept it
+// up until a touch in a chat too short to scroll: the check drained before it
+// learned the answer, and in the page's first 140 ms the glide gate shut the
+// check before it asked anything at all.
+
+describe("a short chat whose oldest message is above the first", () => {
   it.each([
     ["", 1_000_000],
     [", settling in the page's first 140 ms", 80],
@@ -673,17 +832,34 @@ describe("a short chat with nothing older", () => {
     },
   );
 
+  it("from a saved copy it shows while the server is asked, as before", async () => {
+    FakeSocket.all = [];
+    const h = harness();
+    h.server.addMany(6);
+    h.server.rows = h.server.rows.slice(2);
+    await h.boot(h.server.rows);
+    expect(h.thread().spinnerShowing).toBe(true); // the copy can't answer for seqs 1 and 2
+    h.open();
+    await h.flush();
+    expect(olderPageCursors(h)).toEqual([3]);
+    expect(h.thread().spinnerShowing).toBe(false); // the empty page takes it out, untouched
+  });
+
   it("a finger resting on it holds the farewell until the lift, then it goes", async () => {
     FakeSocket.all = [];
     const h = harness();
-    h.server.addMany(4);
+    h.server.addMany(6);
+    h.server.rows = h.server.rows.slice(2);
     h.cached(h.server.rows);
     h.fingerDown(); // on the thread as the socket settles
     h.connect();
     h.open();
     await h.flush();
     expect(h.thread().spinnerShowing).toBe(true); // nothing leaves under a finger
-    h.fingerUp();
+    expect(olderPageCursors(h)).toEqual([]); // nor is anything asked under one
+    h.fingerUp(); // the lift's check asks ...
+    await h.flush(); // ... and the empty page takes it out
+    expect(olderPageCursors(h)).toEqual([3]);
     expect(h.thread().spinnerShowing).toBe(false);
     h.advance(300);
     expect(h.thread().spin.attached).toBe(false);
@@ -712,6 +888,7 @@ describe("a short chat with nothing older", () => {
       expect(showingWhileOlderLeft.every(Boolean)).toBe(true);
       expect(heldSeqs(h)).toEqual(allSeqs(h));
       expect(h.thread().spin.attached).toBe(false);
+      expect(h.thread().spin.bye).toBe(true); // the page that brought seq 1 kept its farewell
     },
   );
 });
@@ -719,10 +896,11 @@ describe("a short chat with nothing older", () => {
 // --- chats that can scroll keep every boundary rule ------------------------------
 
 describe("a chat that can scroll still waits for a scroll boundary", () => {
-  it("with everything in hand, the farewell waits out a finger and a glide", async () => {
+  it("with its first messages taken back, the farewell waits out a finger and a glide", async () => {
     FakeSocket.all = [];
     const h = harness();
-    h.server.addMany(40); // all of it replays, first message included
+    h.server.addMany(45);
+    h.server.rows = h.server.rows.slice(5); // 6..45 replay; nothing older is left
     h.connect();
     h.open();
     await h.flush();
@@ -731,7 +909,9 @@ describe("a chat that can scroll still waits for a scroll boundary", () => {
     expect(h.thread().spinnerShowing).toBe(true);
 
     h.fingerDown();
-    h.glide(0); // dragged to the top: loadOlder marks the top reached, no page to ask
+    h.glide(0); // dragged to the top: the check goes out ...
+    await h.flush(); // ... and its empty page comes back under the finger
+    expect(olderPageCursors(h)).toEqual([6]);
     expect(h.probe().historyDone).toBe(true);
     h.check();
     expect(h.thread().spinnerShowing).toBe(true); // not under a finger
@@ -741,18 +921,19 @@ describe("a chat that can scroll still waits for a scroll boundary", () => {
     expect(h.thread().spinnerShowing).toBe(true); // not mid-glide either
     h.glideEnds();
     expect(h.thread().spinnerShowing).toBe(false); // the boundary takes it out
-    expect(olderPageCursors(h)).toEqual([]);
   });
 
   it("a chat a little taller than the screen leaves it for the next boundary", async () => {
     FakeSocket.all = [];
     const h = harness();
-    h.server.addMany(15); // taller than the screen, pinned 340 px down
+    h.server.addMany(17);
+    h.server.rows = h.server.rows.slice(2); // 3..17: taller than the screen, pinned 340 px down
     h.connect();
     h.open();
     await h.flush();
     expect(h.thread().scrollTop).toBeGreaterThan(50);
-    expect(h.probe().historyDone).toBe(true); // the settle's check found the first message
+    expect(olderPageCursors(h)).toEqual([3]); // the settle's check asked, and heard nothing older
+    expect(h.probe().historyDone).toBe(true);
     expect(h.thread().spinnerShowing).toBe(true); // above the fold, waiting as it always did
     h.glide(0);
     h.check();
@@ -778,6 +959,7 @@ describe("a chat that can scroll still waits for a scroll boundary", () => {
     expect(olderPageCursors(h)).toEqual([31, 6]);
     expect(heldSeqs(h)).toEqual(allSeqs(h));
     expect(h.thread().spin.attached).toBe(false);
+    expect(h.thread().spin.bye).toBe(true); // it left by the farewell, as before
   });
 
   it("older pages still land one per boundary, never under a finger or mid-glide", async () => {
