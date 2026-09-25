@@ -736,7 +736,7 @@ run 0 all_cache_second "$NEW_INPUT" PATH="$NOINSTALL_BIN" PARATROOPER_INSTALL_VE
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
 assert_contains "$OUT" "Local environment ready." $NAME "reused local Python environment"
 assert_contains "$OUT" "render found." $NAME "found cached Render CLI"
-assert_contains "$OUT" "claude found." $NAME "found native Claude Code"
+assert_contains "$OUT" "Claude found." $NAME "found native Claude Code"
 for tool in uv 'the Render CLI' 'Claude Code'; do assert_absent "$OUT" "Download and install $tool now?" $NAME "did not prompt for $tool"; done
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
@@ -744,7 +744,7 @@ run 0 all_cache_third "$NEW_INPUT" PATH="$NOINSTALL_BIN" PARATROOPER_INSTALL_VEN
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
 assert_contains "$OUT" "uv found." $NAME "found cached uv for a new environment"
 assert_contains "$OUT" "render found." $NAME "found cached Render CLI"
-assert_contains "$OUT" "claude found." $NAME "found native Claude Code"
+assert_contains "$OUT" "Claude found." $NAME "found native Claude Code"
 [ -x "$ALL_VENV2/bin/python" ] || fail $NAME "did not build the second environment"
 for tool in uv 'the Render CLI' 'Claude Code'; do assert_absent "$OUT" "Download and install $tool now?" $NAME "did not prompt for $tool"; done
 [ "$FAILURES" = "$FB" ] && pass $NAME
