@@ -197,7 +197,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.165"; // In a chat too short to fill the screen, the messages no longer jump or slip under the header when the keyboard opens or closes
+const APP_VERSION = "0.3.166"; // After a send, the empty message box shows its whole prompt again instead of a cut-off slice of it
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
@@ -6759,8 +6759,24 @@ async function send(): Promise<void> {
   // through the one compensated path; called at a branch-dependent moment
   const collapseBar = (): void => {
     composerWroteAt = performance.now(); // the clear's selectionchange is ours, not composing
+    // The placeholder's repaint. Emptying a box that held text brings its
+    // placeholder back as a fresh box, and WebKit's textarea layout does not
+    // repaint that box (a one-line input's layout does, a textarea's does
+    // not). With the keyboard up the text box is its own layer, so nothing
+    // else is sure to repaint it either, and the phone drew the prompt only
+    // where the sent words had been: "Carrier pi" under "Who this" (0.3.165,
+    // the owner's screenshot). So the placeholder is laid out wearing
+    // .emptying (styles.css), and taking the class off in this same task is
+    // a colour change, which repaints the placeholder's whole box. No frame
+    // is ever drawn with the class on; a box that held no text is left alone.
+    const emptying = textEl.value !== "" ? textEl.form : null;
+    emptying?.classList.add("emptying");
     textEl.value = "";
     autosize();
+    if (emptying) {
+      void textEl.offsetHeight; // the placeholder's layout, done under the class
+      emptying.classList.remove("emptying");
+    }
     pendingFiles = [];
     dismissSent(); // the strip closes on the flight's beat, squares aboard, out of the layout
   };

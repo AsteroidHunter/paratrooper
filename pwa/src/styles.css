@@ -1611,6 +1611,17 @@ html, body {
   caret-color: transparent;
 }
 
+/* THE PLACEHOLDER'S REPAINT ON SEND (main.ts send, collapseBar). The class is
+   on for one synchronous stretch of the send, across the clear and a layout,
+   and off again before any frame is drawn, so this colour is never seen.
+   Taking it off is what matters: a colour change repaints the placeholder's
+   whole box, which WebKit's textarea layout does not do for a placeholder
+   that has just come back, and the phone drew only the slice under the
+   words that were sent. The placeholder only: no box, no caret, no layout. */
+#app .compose.emptying textarea::placeholder {
+  color: transparent;
+}
+
 /* The picker session window (.settling, shell.ts): the ＋ greys and the whole
    field looks switched off from the ＋ tap that OPENS the picker all the way
    through teardown-complete — so there is no off/on blink after a dismissal;
