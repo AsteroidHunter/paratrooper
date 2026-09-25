@@ -27,6 +27,13 @@ PROJECT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent
 PASSWORD = "fake violet lantern = $() `comet` \\ orchard 7"
 WRONG = "different fake confirmation words"
+# Fake Claude tokens with the real shape and length. FIXTURE_TOKEN is what the
+# fake setup-token prints; PASTED_TOKEN is typed at the hidden paste prompt;
+# OTHER_TOKEN is a second, different token on the screen or a token Claude
+# should refuse.
+FIXTURE_TOKEN = "sk-ant-oat01-fake-claude-fixture-token_0123456789abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUV-fixAA"
+PASTED_TOKEN = "sk-ant-oat01-fake-pasted-fixture-token_9876543210zyxwvutsrqponmlkjihgfedcba-ZYXWVUTSRQPONMLKJIHG-pasteAA"
+OTHER_TOKEN = "sk-ant-oat01-fake-other-fixture-token_1357924680acegikmoqsuwybdfhjlnprtvxz-ACEGIKMOQSUWYBDFHJLN-otherAA"
 RUN = Path(tempfile.mkdtemp(prefix="ptp-password-terminal-"))
 SOURCE = RUN / "source"
 SOURCE.mkdir()
@@ -86,7 +93,7 @@ for name in ("python", "python3"):
 # still runs against real test PIDs without seeing or signaling anyone else.
 if os.environ.get("PARATROOPER_INSTALL_TEST_REAL_PS") != "1":
     (BIN / "ps").write_text('''#!/bin/bash
-for stem in api_wait claude_helper; do
+for stem in api_wait claude_helper claude_check; do
     pid="$MOCK_STATE_DIR/$stem.pid"
     parent="$MOCK_STATE_DIR/$stem.ppid"
     if [ -f "$pid" ] && [ -f "$parent" ]; then
@@ -114,7 +121,7 @@ class TerminalRun:
             "TMPDIR": str(self.case), "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
             "OPENSSL_CONF": "/dev/null", "MOCK_STATE_DIR": str(self.state),
             "PARATROOPER_PROVISION_MOCK": "1", "RENDER_API_KEY": "fake-render-fixture-key",
-            "RENDER_WORKSPACE": "tea-terminal-fixture", "MOCK_CLAUDE_TOKEN": "fake-claude-fixture-token",
+            "RENDER_WORKSPACE": "tea-terminal-fixture", "MOCK_CLAUDE_TOKEN": FIXTURE_TOKEN,
             "PARATROOPER_INSTALL_VENV": str(VENV), "PARATROOPER_INSTALL_OFFLINE_DEPS": str(DEPS),
             "PARATROOPER_INSTALL_REPO_URL": "https://github.com/example/paratrooper.git",
             "PARATROOPER_INSTALL_BRANCH": "fixture", "PARATROOPER_INSTALL_POLL_TRIES": "1",
@@ -203,7 +210,8 @@ class TerminalRun:
         (self.case / "output.txt").write_text(output)
         log = (self.case / "home" / ".paratrooper-install.log").read_text()
         processes = (self.state / "process.jsonl").read_text()
-        for secret in (PASSWORD, WRONG, "fake-render-fixture-key", "fake-claude-fixture-token"):
+        for secret in (PASSWORD, WRONG, "fake-render-fixture-key", FIXTURE_TOKEN, PASTED_TOKEN,
+                       OTHER_TOKEN, "fixture-token_"):
             assert secret not in output + log + processes, "secret appeared in output/log/argv/env"
         # Non-secret caller values may persist until their local input helper is
         # entered. No caller-exported name may contain newly entered input.
@@ -467,6 +475,127 @@ def exercise():
     assert_layout(run.finish(1))
     state = json.loads((run.state / "api_state.json").read_text())
     assert state["services"]["paratrooper-web"]["_envVars"]["PARATROOPER_APP_TOKEN"] == PASSWORD
+
+    exercise_token()
+
+
+def to_claude_step(run):
+    run.expect("Ready to begin? (y / n) ")
+    run.send("y")
+    run.expect("Use this workspace for Paratrooper? (y / s / n) ")
+    run.send("y")
+
+
+def finish_new_install(run):
+    run.expect("answer: ")
+    run.send("n")
+    run.hidden("App password (input hidden): ", PASSWORD + "\n")
+    run.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
+    return run.finish(0)
+
+
+def worker_token(run):
+    state = json.loads((run.state / "api_state.json").read_text())
+    return state["services"]["paratrooper-worker"]["_envVars"]["CLAUDE_CODE_OAUTH_TOKEN"]
+
+
+def no_render_api_calls(run):
+    assert not (run.state / "api_calls.jsonl").exists(), "called the Render API"
+
+
+def exercise_token():
+    """setup-token's real screen, the hidden paste fallback and the token test."""
+    # The realistic screen: the token is found by its shape and tested first.
+    found = TerminalRun("token-found", extra={"MOCK_CLAUDE_WRAP": "1"})
+    to_claude_step(found)
+    found.expect("Claude Code token captured.")
+    found.expect("Claude accepted the token.")
+    output = finish_new_install(found)
+    assert "Claude Code token (input hidden)" not in output
+    assert worker_token(found) == FIXTURE_TOKEN
+
+    # No token in the output: explain, then a hidden paste with a shape check,
+    # an empty entry and edge spaces, then the pasted token is tested and used.
+    paste = TerminalRun("token-missing-paste",
+                        extra={"MOCK_CLAUDE_TOKEN": "", "MOCK_CLAUDE_ACCEPT_TOKEN": PASTED_TOKEN})
+    to_claude_step(paste)
+    paste.expect("Claude Code finished, but its token could not be read from its output.")
+    paste.hidden("Claude Code token (input hidden): ", "not-a-claude-token\n")
+    paste.expect("That does not look like a Claude Code token. It starts with sk-ant-.")
+    paste.hidden("Claude Code token (input hidden): ", "\n")
+    paste.expect("That was empty. Paste the token, or press Ctrl-C to cancel.")
+    paste.hidden("Claude Code token (input hidden): ", "  " + PASTED_TOKEN + " \n")
+    paste.expect("Claude Code token received.")
+    paste.expect("Claude accepted the token.")
+    output = finish_new_install(paste)
+    assert "not-a-claude-token" not in output
+    assert worker_token(paste) == PASTED_TOKEN
+    assert "oauth=expected extra=[] config=fresh-empty" in (paste.state / "claude_check.calls").read_text()
+
+    # Two different tokens on the screen: the same paste prompt; EOF stops cleanly.
+    ambiguous = TerminalRun("token-ambiguous-eof", extra={"MOCK_CLAUDE_EXTRA_TOKEN": OTHER_TOKEN})
+    to_claude_step(ambiguous)
+    ambiguous.expect("Claude Code printed more than one token, so it is unclear which to use.")
+    ambiguous.hidden("Claude Code token (input hidden): ", "\x04")
+    output = ambiguous.finish(1)
+    assert "No token, so nothing was set up." in output
+    assert not (ambiguous.state / "claude_check.calls").exists()
+    no_render_api_calls(ambiguous)
+
+    paste_cancel = TerminalRun("token-paste-ctrl-c", extra={"MOCK_CLAUDE_TOKEN": ""})
+    to_claude_step(paste_cancel)
+    paste_cancel.hidden("Claude Code token (input hidden): ", "\x03")
+    paste_cancel.finish(130)
+    no_render_api_calls(paste_cancel)
+
+    # Claude refuses the captured token: stopping creates nothing on Render.
+    refused = TerminalRun("token-refused-stop", extra={"MOCK_CLAUDE_ACCEPT_TOKEN": OTHER_TOKEN})
+    to_claude_step(refused)
+    refused.expect("Claude did not accept this token. Nothing was set up on Render.")
+    refused.expect("Paste a new token? (p / n) ")
+    refused.send("n")
+    output = refused.finish(1)
+    assert "Claude accepted the token." not in output
+    no_render_api_calls(refused)
+
+    # Or paste a new one, which is tested again before anything continues.
+    repaste = TerminalRun("token-refused-paste", extra={"MOCK_CLAUDE_ACCEPT_TOKEN": PASTED_TOKEN})
+    to_claude_step(repaste)
+    repaste.expect("Paste a new token? (p / n) ")
+    repaste.send("p")
+    repaste.hidden("Claude Code token (input hidden): ", PASTED_TOKEN + "\n")
+    repaste.expect("Claude accepted the token.")
+    finish_new_install(repaste)
+    assert worker_token(repaste) == PASTED_TOKEN
+    checks = (repaste.state / "claude_check.calls").read_text().splitlines()
+    assert [line.split()[0] for line in checks] == ["oauth=other", "oauth=expected"], checks
+
+    # A test that could not run offers to run it again.
+    offline = TerminalRun("token-check-offline-stop", extra={"MOCK_CLAUDE_CHECK_OFFLINE": "1"})
+    to_claude_step(offline)
+    offline.expect("Could not test the token with Claude. Nothing was set up on Render.")
+    offline.expect("Test again or paste a token? (r / p / n) ")
+    offline.send("r")
+    offline.expect("Test again or paste a token? (r / p / n) ")
+    offline.send("n")
+    text = screen(offline.finish(1))
+    step = text[text.index("✓ claude found."):]
+    assert "\n\n\n" not in step, ("two blank lines in a row", step)
+    assert len((offline.state / "claude_check.calls").read_text().splitlines()) == 2
+    no_render_api_calls(offline)
+
+    # Ctrl-C while the test waits on Claude stops the tracked child cleanly.
+    check_cancel = TerminalRun("token-check-ctrl-c", extra={"MOCK_CLAUDE_CHECK_WAIT": "1"})
+    to_claude_step(check_cancel)
+    check_cancel.expect("Testing the token with Claude ...")
+    deadline = time.monotonic() + 10
+    while not (check_cancel.state / "claude_check.ppid").exists():
+        assert time.monotonic() < deadline, "the token test did not reach the mock wait"
+        check_cancel.read()
+    check_cancel.send("\x03")
+    check_cancel.finish(130)
+    assert_stopped(check_cancel.state / "claude_check.pid")
+    no_render_api_calls(check_cancel)
 
 
 if __name__ == "__main__":

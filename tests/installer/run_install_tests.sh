@@ -46,7 +46,10 @@ chmod +x "$VERIFY"/bin/* 2>/dev/null || true
 REAL_PYTHON3="$(python3 -c 'import sys; print(sys._base_executable)')" # before PATH is curated
 PROVISION_KEY="rnd_provisioning_key_E2E_AAAA"
 IDLE_KEY="rnd_idle_key_E2E_ZZZZ"
-CLAUDE_TOKEN="sk-ant-oat01-E2E-CLAUDE-000"
+# Real tokens are about 108 characters, so the real screen wraps them at 80
+# columns. This fake one has the real shape and length.
+CLAUDE_TOKEN="sk-ant-oat01-E2EfakeClaudeToken_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVW-xyzE2EAA"
+OTHER_TOKEN="sk-ant-oat01-E2EotherToken_9876543210zyxwvutsrqponmlkjihgfedcbaZYXWVUTSRQPONMLKJIHGFEDCBA-otherAA"
 APP_PASSWORD="fake violet lantern orchard comet 7!"
 NEW_INPUT="yyn$APP_PASSWORD
 $APP_PASSWORD"
@@ -271,6 +274,19 @@ path = sys.argv[1]
 print(sum(1 for _ in open(path)) if os.path.exists(path) else 0)
 PY
 }
+# How many token checks the fake claude answered (one line each, no token).
+check_calls() {
+	python3 - "$1/claude_check.calls" <<'PY'
+import os, sys
+path = sys.argv[1]
+print(sum(1 for _ in open(path)) if os.path.exists(path) else 0)
+PY
+}
+# The isolation every token check must have: only the expected token, as
+# CLAUDE_CODE_OAUTH_TOKEN; no other ANTHROPIC_* or CLAUDE* variable; a fresh
+# empty config folder that is also the working directory; no token in argv;
+# stdin closed.
+CHECK_ISOLATED="extra=[] config=fresh-empty cwd_is_config=yes token_in_argv=no stdin=empty nonessential=1"
 
 # --- 1. happy path, idle sleeping off, both deploys live -------------------
 run 0 happy_off "$NEW_INPUT"; NAME=happy_off; FB=$FAILURES
@@ -439,6 +455,90 @@ run 0 claude_trailing_blank "$NEW_INPUT" MOCK_CLAUDE_NOISE=1 MOCK_CLAUDE_TRAILIN
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "kept the last nonblank token line"
 assert_absent "$LOGFILE" "$CLAUDE_TOKEN" $NAME "token not logged"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# --- 5c. the token is read from setup-token's real screen, then tested ------
+# The fake claude prints what the real CLI writes to a pipe: a whole screen, the
+# token, lines after it, the "<token>" hint and terminal reset codes as the very
+# last output. The worker must get exactly the token. The caller's own Claude and
+# Anthropic credentials and settings are exported here as decoys: none of them
+# may reach the token check, which must see only the captured token.
+run 0 token_realistic "$NEW_INPUT" ANTHROPIC_API_KEY=decoy-api-key ANTHROPIC_AUTH_TOKEN=decoy-auth-token \
+	ANTHROPIC_BASE_URL=http://decoy.invalid ANTHROPIC_CUSTOM_HEADERS="Authorization: Bearer decoy" \
+	CLAUDE_CONFIG_DIR=/tmp/ptp-decoy-config CLAUDE_SECURESTORAGE_CONFIG_DIR= CLAUDE_CODE_USE_BEDROCK=1 \
+	CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=9 CLAUDE_CODE_OAUTH_TOKEN="$OTHER_TOKEN"; NAME=token_realistic; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+[ "$(state_env "$STATE" paratrooper-worker CLAUDE_CODE_OAUTH_TOKEN)" = "$CLAUDE_TOKEN" ] || fail $NAME "worker token is not the token setup-token printed"
+assert_contains "$OUT" "Claude Code token captured." $NAME "captured without a paste"
+assert_contains "$OUT" "Claude accepted the token." $NAME "token tested before Render"
+[ "$(check_calls "$STATE")" = 1 ] || fail $NAME "token check ran $(check_calls "$STATE") times, expected 1"
+assert_contains "$STATE/claude_check.calls" "oauth=expected $CHECK_ISOLATED" $NAME "check isolated to the captured token"
+assert_contains "$STATE/claude_check.calls" "args=-p Reply with OK --model haiku --max-turns 1 --tools  --no-session-persistence --output-format json" $NAME "one turn, no tools, no session"
+assert_absent "$OUT" "Claude Code token (input hidden)" $NAME "asked for a paste it did not need"
+assert_absent "$OUT" "$CLAUDE_TOKEN" $NAME "token on screen"
+assert_absent "$LOGFILE" "$CLAUDE_TOKEN" $NAME "token in log"
+assert_contains "$LOGFILE" "Claude token check: accepted" $NAME "check result in log"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+run 0 token_wrapped "$NEW_INPUT" MOCK_CLAUDE_WRAP=1; NAME=token_wrapped; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+[ "$(state_env "$STATE" paratrooper-worker CLAUDE_CODE_OAUTH_TOKEN)" = "$CLAUDE_TOKEN" ] || fail $NAME "wrapped token not rejoined exactly"
+assert_contains "$STATE/claude_check.calls" "oauth=expected $CHECK_ISOLATED" $NAME "check used the rejoined token"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+FUTURE_TOKEN="sk-ant-oat02-E2EfutureLabel_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-futureAA"
+run 0 token_future_label "$NEW_INPUT" MOCK_CLAUDE_TOKEN="$FUTURE_TOKEN" MOCK_CLAUDE_WRAP=1; NAME=token_future_label; FB=$FAILURES
+[ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
+[ "$(state_env "$STATE" paratrooper-worker CLAUDE_CODE_OAUTH_TOKEN)" = "$FUTURE_TOKEN" ] || fail $NAME "a new version label was not accepted"
+assert_absent "$LOGFILE" "$FUTURE_TOKEN" $NAME "token in log"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# No token, or two different ones: a piped run cannot paste, so it stops
+# before the check and before any Render API call. (A terminal run asks for a
+# paste; check_terminal.py covers that.)
+run 0 token_missing "$NEW_INPUT" MOCK_CLAUDE_TOKEN=; NAME=token_missing; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+assert_contains "$OUT" "its token could not be read from its output." $NAME "said why"
+assert_contains "$OUT" "Run ./install.sh in a terminal to paste the token instead." $NAME "pointed to the paste"
+assert_absent "$OUT" "Claude Code token (input hidden)" $NAME "piped run asked for a hidden paste"
+[ "$(check_calls "$STATE")" = 0 ] || fail $NAME "tested a token it did not have"
+[ ! -e "$STATE/api_calls.jsonl" ] || fail $NAME "called the Render API"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+run 0 token_ambiguous "$NEW_INPUT" MOCK_CLAUDE_EXTRA_TOKEN="$OTHER_TOKEN"; NAME=token_ambiguous; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+assert_contains "$OUT" "Claude Code printed more than one token, so it is unclear which to use." $NAME "said why"
+[ "$(check_calls "$STATE")" = 0 ] || fail $NAME "picked one of two tokens"
+[ ! -e "$STATE/api_calls.jsonl" ] || fail $NAME "called the Render API"
+assert_absent "$OUT" "$OTHER_TOKEN" $NAME "a token on screen"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+# The token check fails: nothing is created on Render, not even inspected.
+run 0 token_check_refused "$NEW_INPUT" MOCK_CLAUDE_ACCEPT_TOKEN="$OTHER_TOKEN"; NAME=token_check_refused; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+assert_contains "$OUT" "Claude did not accept this token. Nothing was set up on Render." $NAME "refusal message"
+assert_contains "$STATE/claude_check.calls" "oauth=other $CHECK_ISOLATED" $NAME "check sent the captured token only"
+[ ! -e "$STATE/api_calls.jsonl" ] || fail $NAME "called the Render API after a refused token"
+[ "$(state_count "$STATE" services)" = 0 ] || fail $NAME "created services with a refused token"
+assert_absent "$OUT" "Claude accepted the token." $NAME "claimed success"
+assert_absent "$LOGFILE" "$CLAUDE_TOKEN" $NAME "token in log"
+assert_contains "$LOGFILE" "Claude token check: refused" $NAME "check result in log"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+run 0 token_check_offline "$NEW_INPUT" MOCK_CLAUDE_CHECK_OFFLINE=1; NAME=token_check_offline; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+assert_contains "$OUT" "Could not test the token with Claude. Nothing was set up on Render." $NAME "honest could-not-test message"
+assert_absent "$OUT" "did not accept this token" $NAME "blamed the token for a network failure"
+[ ! -e "$STATE/api_calls.jsonl" ] || fail $NAME "called the Render API"
+[ "$FAILURES" = "$FB" ] && pass $NAME
+
+run 0 token_check_timeout "$NEW_INPUT" MOCK_CLAUDE_CHECK_WAIT=1 PARATROOPER_INSTALL_KEY_CHECK_TIMEOUT=2; NAME=token_check_timeout; FB=$FAILURES
+[ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
+assert_contains "$OUT" "Claude did not answer the token test in time." $NAME "timeout message"
+[ ! -e "$STATE/api_calls.jsonl" ] || fail $NAME "called the Render API"
+if [ -f "$STATE/claude_check.pid" ] && kill -0 "$(cat "$STATE/claude_check.pid")" 2>/dev/null; then
+	fail $NAME "the timed-out check was left running"
+fi
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 # --- 6. failed blueprint gate stops the unnumbered prepare section ----------

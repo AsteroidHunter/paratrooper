@@ -1,8 +1,51 @@
 #!/usr/bin/env bash
 # Mock Claude Code CLI for offline verification of install.sh.
+#
+# setup-token reproduces what the real CLI (2.1.278 to 2.1.280) writes to a pipe.
+# It renders an Ink screen, and on a non-terminal stdout every changed frame is
+# written in full, so its stdout carries, in order: the input-mode switches
+# turned on when raw input starts, the welcome and sign-in frame, the success
+# frame (the token in color on its own line, then the "Store this token" line
+# and the literal "<token>" hint), and on exit the input-mode reset codes
+# ESC[>4m ESC[<u ESC[?1004l ESC[?2031l ESC[?2004l as the very last output. The
+# success block sits in a box with one column of left padding, so every line
+# starts with a space. With a column count the renderer hard-wraps the token at
+# 80 columns under that padding (MOCK_CLAUDE_WRAP=1 reproduces that).
+#
+# -p (print mode) stands in for the installer's one-question token check. It
+# answers OK, as the real CLI's JSON result, only when CLAUDE_CODE_OAUTH_TOKEN
+# is exactly the expected token, and otherwise fails the way the real CLI does
+# on a 401. It records what it saw about its environment, never the token.
 set -u
 STATE="${MOCK_STATE_DIR:?MOCK_STATE_DIR must be set}"
 mkdir -p "$STATE"
+ESC=$'\033'
+BEL=$'\007'
+
+success_frame() {  # success_frame <token>
+  local token="$1" width=79
+  printf ' %s[32m✓ Long-lived authentication token created successfully!%s[39m\n\n' "$ESC" "$ESC"
+  printf ' Your OAuth token (valid for 1 year):\n\n'
+  if [ "${MOCK_CLAUDE_WRAP:-0}" = "1" ]; then
+    while [ -n "$token" ]; do
+      printf ' %s[33m%s%s[39m\n' "$ESC" "${token:0:$width}" "$ESC"
+      token="${token:$width}"
+    done
+  else
+    printf ' %s[33m%s%s[39m\n' "$ESC" "$token" "$ESC"
+  fi
+  printf '\n %s[2mStore this token securely. You won'"'"'t be able to see it again.%s[22m\n\n' "$ESC" "$ESC"
+  printf ' %s[2mUse this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>%s[22m\n' "$ESC" "$ESC"
+}
+
+welcome_frame() {
+  printf '%s[1mWelcome to Claude Code%s[22m v2.1.280\n' "$ESC" "$ESC"
+  printf '…………………………………………………………………………………………………………………………………………………………\n\n'
+  printf '     *                                       █████▓▓░\n'
+  printf '                                 *         ███▓░     ░░\n'
+  printf '…………………………………………………………………………………………………………………………………………………………\n\n'
+  printf ' %s[1mThis will guide you through long-lived (1-year) auth token setup for your Claude account. Claude subscription required.%s[22m\n\n' "$ESC" "$ESC"
+}
 
 case "${1:-}" in
   setup-token)
@@ -27,17 +70,73 @@ case "${1:-}" in
       echo "authorization failed" >&2
       exit 1
     fi
-    # The interactive authorize flow would print instructions to the terminal
-    # (stderr); the token is what lands on stdout. Emit an optional noise line to
-    # prove the installer keeps only the last line as the token.
-    if [ "${MOCK_CLAUDE_NOISE:-0}" = "1" ]; then
-      echo "Authorized. Your token:"
-    fi
-    printf '%s\n' "${MOCK_CLAUDE_TOKEN-sk-ant-oat01-MOCKTOKEN0000000000000000}"
-    if [ "${MOCK_CLAUDE_TRAILING_BLANK:-0}" = "1" ]; then
-      printf '  \t  \n'
-    fi
+    token="${MOCK_CLAUDE_TOKEN-sk-ant-oat01-MOCKTOKEN0000000000000000}"
+    # An optional plain line before the screen, as older fixtures did.
+    [ "${MOCK_CLAUDE_NOISE:-0}" = "1" ] && echo "Authorized. Your token:"
+    # Raw input starts: bracketed paste, theme reports, focus events, extended keys.
+    printf '%s[?2004h%s[?2031h%s[?1004h%s[<u%s[>1u%s[>4;2m' "$ESC" "$ESC" "$ESC" "$ESC" "$ESC" "$ESC"
+    # Frame 1: welcome, the intro and the waiting sign-in, with a hyperlinked URL.
+    url="https://claude.com/cai/oauth/authorize?code=true&client_id=mock&state=mock"
+    welcome_frame
+    printf ' Opening browser to sign in…\n\n'
+    printf ' %s[2mBrowser didn'"'"'t open? Use the url below to sign in%s[22m\n\n' "$ESC" "$ESC"
+    printf '%s]8;;%s%s%s[2m%s%s[22m%s]8;;%s\n\n' "$ESC" "$url" "$BEL" "$ESC" "$url" "$ESC" "$ESC" "$BEL"
+    printf ' Paste code here if prompted > \n'
+    # Frame 2: the whole screen again, now with the success block.
+    welcome_frame
+    success_frame "$token"
+    # A second, different token on the screen makes the result ambiguous.
+    [ -n "${MOCK_CLAUDE_EXTRA_TOKEN:-}" ] && { printf '\n'; success_frame "$MOCK_CLAUDE_EXTRA_TOKEN"; }
+    # Unmount: the renderer's newline, then raw input ends and the input modes
+    # are reset. This reset line is the last thing written, with no newline.
+    printf '\n%s[>4m%s[<u%s[?1004l%s[?2031l%s[?2004l' "$ESC" "$ESC" "$ESC" "$ESC" "$ESC"
+    [ "${MOCK_CLAUDE_TRAILING_BLANK:-0}" = "1" ] && printf '\n  \t  \n'
     exit 0
+    ;;
+  -p|--print)
+    expected="${MOCK_CLAUDE_ACCEPT_TOKEN-${MOCK_CLAUDE_TOKEN-sk-ant-oat01-MOCKTOKEN0000000000000000}}"
+    oauth="unset"
+    if [ -n "${CLAUDE_CODE_OAUTH_TOKEN+x}" ]; then
+      if [ -n "$expected" ] && [ "$CLAUDE_CODE_OAUTH_TOKEN" = "$expected" ]; then oauth="expected"; else oauth="other"; fi
+    fi
+    # Record the facts the installer's isolation promises, never a value.
+    extra=""
+    for name in $(compgen -e); do
+      case "$name" in
+        CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC|CLAUDE_CODE_MAX_RETRIES) ;;
+        ANTHROPIC_*|CLAUDE*) extra="$extra $name" ;;
+      esac
+    done
+    config="${CLAUDE_CONFIG_DIR:-}"
+    config_state="unset"
+    if [ -n "$config" ]; then
+      shopt -s nullglob dotglob
+      entries=("$config"/*)
+      if [ -d "$config" ] && [ "${#entries[@]}" -eq 0 ]; then config_state="fresh-empty"; else config_state="not-empty"; fi
+      [ "$config" = "$HOME/.claude" ] && config_state="home-default"
+    fi
+    in_argv="no"
+    for arg in "$@"; do [ -n "$expected" ] && [[ "$arg" == *"$expected"* ]] && in_argv="yes"; done
+    stdin="terminal-or-pipe"
+    [ -t 0 ] || { IFS= read -r -t 1 _ || stdin="empty"; }
+    printf 'oauth=%s extra=[%s] config=%s cwd_is_config=%s token_in_argv=%s stdin=%s nonessential=%s args=%s\n' \
+      "$oauth" "${extra# }" "$config_state" "$([ "$PWD" = "$config" ] && echo yes || echo no)" "$in_argv" \
+      "$stdin" "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-unset}" "$*" >>"$STATE/claude_check.calls"
+    if [ "${MOCK_CLAUDE_CHECK_WAIT:-0}" = "1" ]; then
+      printf '%s\n' "$$" >"$STATE/claude_check.pid"
+      printf '%s\n' "$PPID" >"$STATE/claude_check.ppid"
+      exec sleep 120
+    fi
+    if [ "${MOCK_CLAUDE_CHECK_OFFLINE:-0}" = "1" ]; then
+      printf '{"type":"result","subtype":"success","is_error":true,"result":"API Error: Connection refused (ECONNREFUSED)","terminal_reason":"api_error","api_error_status":null}\n'
+      exit 1
+    fi
+    if [ "$oauth" = "expected" ]; then
+      printf '{"type":"result","subtype":"success","is_error":false,"result":"OK","terminal_reason":"completed","api_error_status":null,"num_turns":1}\n'
+      exit 0
+    fi
+    printf '{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate. API Error: 401 Invalid bearer token","terminal_reason":"api_error","api_error_status":401,"num_turns":1}\n'
+    exit 1
     ;;
   *)
     echo "mock claude: unhandled '$*'" >&2

@@ -12,7 +12,10 @@
 #      per-user cache if it is missing, then signs you in (opens the browser; the
 #      CLI saves the session).
 #   2. Claude Code: makes sure Claude Code is present, offering to install it if
-#      it is missing, then mints a worker token with claude setup-token.
+#      it is missing, then mints a worker token with claude setup-token. The
+#      token is picked out of its output by shape (or pasted when it cannot be),
+#      then tested with one short question to Claude, using only that token,
+#      before anything is created on Render.
 #   3. Idle sleeping: offers to let the web service suspend the worker when the
 #      queue is empty to cut the Render bill. Skip it and the worker stays on,
 #      and no key is needed for that feature.
@@ -105,6 +108,11 @@ if [ -t 0 ]; then
 fi
 ACTIVE_CHILD_PID=""
 TOKEN_DIR=""
+# The token check's private Claude Code folder and its non-secret reply.
+KEY_CHECK_DIR=""
+KEY_CHECK_OUT=""
+KEY_CHECK_RESULT=""
+KEY_CHECK_TIMEOUT="${PARATROOPER_INSTALL_KEY_CHECK_TIMEOUT:-60}"
 PROVISION_STARTED="no"
 PASSWORD_MODE=""
 EXISTING_WEB_ID=""
@@ -115,8 +123,10 @@ WORKSPACE_NAME=""
 # are never written to the log, never echoed back, and never named in an error.
 # Remove inherited export attributes, so input cannot become a child process's
 # environment if the caller happened to export variables with these names.
-unset CLAUDE_TOKEN APP_PASSWORD RENDER_KEY provision_payload
+# TOKEN_OUTPUT holds everything claude setup-token printed, token included.
+unset CLAUDE_TOKEN APP_PASSWORD RENDER_KEY provision_payload TOKEN_OUTPUT
 CLAUDE_TOKEN=""
+TOKEN_OUTPUT=""
 APP_PASSWORD=""
 RENDER_KEY=""
 IDLE_SLEEP="no"
@@ -146,7 +156,9 @@ cleanup() {
 	[ -n "$WORKSPACE_OUT" ] && rm -f "$WORKSPACE_OUT" 2>/dev/null
 	[ -n "$VALIDATION_OUT" ] && rm -f "$VALIDATION_OUT" 2>/dev/null
 	[ -n "$TOKEN_DIR" ] && rm -rf "$TOKEN_DIR" 2>/dev/null
-	unset APP_PASSWORD CLAUDE_TOKEN RENDER_KEY provision_payload
+	[ -n "$KEY_CHECK_DIR" ] && rm -rf "$KEY_CHECK_DIR" 2>/dev/null
+	[ -n "$KEY_CHECK_OUT" ] && rm -f "$KEY_CHECK_OUT" 2>/dev/null
+	unset APP_PASSWORD CLAUDE_TOKEN RENDER_KEY provision_payload TOKEN_OUTPUT
 	return 0
 }
 trap cleanup EXIT
@@ -475,23 +487,200 @@ report_field() {
 		"$REPORT_FILE" "$1" 2>/dev/null || true
 }
 
-# Keep the OAuth token in shell memory. A private FIFO lets the parent read the
-# CLI's stdout while it tracks the CLI PID; unlike command substitution, a read
-# from the FIFO is interrupted promptly by Ctrl-C. Nothing is saved in the FIFO.
+# Keep everything claude setup-token prints in shell memory. The token is not
+# its last line: the CLI draws a whole screen, prints more lines after the
+# token and ends with invisible terminal reset codes, so TOKEN_TOOL find picks
+# the token out by its shape afterwards. A private FIFO lets the parent
+# read the CLI's stdout while it tracks the CLI PID; unlike command
+# substitution, a read from the FIFO is interrupted promptly by Ctrl-C.
+# Nothing is saved in the FIFO.
 capture_claude_token() {
 	local line="" status=0
 	export -n line
+	TOKEN_OUTPUT=""
 	TOKEN_DIR="$(mktemp -d -t paratrooper-token.XXXXXX)" || return 1
 	mkfifo "$TOKEN_DIR/stdout" || return 1
 	claude setup-token <&0 >"$TOKEN_DIR/stdout" &
 	ACTIVE_CHILD_PID=$!
 	while IFS= read -r line || [ -n "$line" ]; do
-		if [[ "$line" =~ [^[:space:]] ]]; then CLAUDE_TOKEN="$line"; fi
+		TOKEN_OUTPUT="$TOKEN_OUTPUT$line
+"
 	done <"$TOKEN_DIR/stdout"
 	wait_active_child || status=$?
 	rm -rf "$TOKEN_DIR"
 	TOKEN_DIR=""
 	return "$status"
+}
+
+# The Claude token's shape and the three jobs done with it, run with the local
+# environment's Python and fed on stdin only, so no token reaches argv:
+#   find     - read setup-token's output, drop terminal escape sequences (CSI,
+#              OSC and other ESC sequences) and stray control characters, and
+#              print the one token in it. A token the CLI wrapped at the screen
+#              edge is rejoined from the following lines that are made purely of
+#              token characters; a blank line or a sentence ends it. The
+#              "<token>" hint line is ignored. Exit 3: no token; exit 4: more
+#              than one different token.
+#   check    - print a pasted token without surrounding spaces if it has the
+#              shape, else exit 1.
+#   verdict  - read the token check's reply (the CLI's JSON result) and its exit
+#              status, and print accepted, refused (Claude answered 401 or 403)
+#              or unchecked (anything else: no network, an old CLI, a crash).
+# The shape: sk-ant-, a lowercase label with a version number (oat01 today),
+# a dash, then token characters.
+TOKEN_TOOL='
+import json, re, sys
+SHAPE = r"sk-ant-[a-z]+[0-9]+-[A-Za-z0-9_-]+"
+BODY = r"[A-Za-z0-9_-]+"
+mode = sys.argv[1]
+data = sys.stdin.buffer.read().decode("utf-8", "replace")
+if mode == "check":
+    value = data.strip()
+    if not re.fullmatch(SHAPE, value):
+        raise SystemExit(1)
+    print(value)
+    raise SystemExit(0)
+if mode == "verdict":
+    status, result = int(sys.argv[2]), {}
+    for line in reversed(data.splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                result = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(result, dict):
+                break
+            result = {}
+    said = str(result.get("result", ""))
+    if status == 0 and result.get("is_error") is False:
+        print("accepted")
+    elif result.get("api_error_status") in (401, 403) or re.search(
+            r"\b40[13]\b|authenticat|invalid (api key|bearer)|oauth token", said, re.I):
+        print("refused")
+    else:
+        print("unchecked")
+    raise SystemExit(0)
+data = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]"
+              r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"
+              r"|\x1b[PX^_][^\x1b]*(?:\x1b\\)?"
+              r"|\x1b[ -/]*[0-~]?", "", data)
+data = data.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+data = re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", data)
+lines = data.split("\n")
+found = []
+for index, line in enumerate(lines):
+    if "<token>" in line:
+        continue
+    for match in re.finditer(r"(?<![A-Za-z0-9_-])" + SHAPE, line):
+        token = match.group()
+        if not line[match.end():].strip():
+            for following in lines[index + 1:]:
+                following = following.strip()
+                if not re.fullmatch(BODY, following):
+                    break
+                token += following
+        if token not in found:
+            found.append(token)
+if len(found) != 1:
+    raise SystemExit(3 if not found else 4)
+print(found[0])
+'
+
+# paste_claude_token - ask for a token with hidden input until one has the
+# token's shape. Returns non-zero at EOF, so the caller stops cleanly.
+paste_claude_token() {
+	local pasted="" shaped=""
+	export -n pasted shaped
+	while :; do
+		prompt_secret "Claude Code token (input hidden): " pasted || return 1
+		if [[ ! "$pasted" =~ [^[:space:]] ]]; then
+			printf 'That was empty. Paste the token, or press Ctrl-C to cancel.\n'
+		elif shaped="$(printf '%s' "$pasted" | "$PY" -c "$TOKEN_TOOL" check)"; then
+			CLAUDE_TOKEN="$shaped"
+			return 0
+		else
+			printf 'That does not look like a Claude Code token. It starts with sk-ant-.\n'
+		fi
+		pasted="" shaped=""
+	done
+}
+
+# The token check asks Claude one tiny question using ONLY the captured token,
+# so a token the worker could not use stops the install before anything is
+# created on Render. It must not be able to pass on the user's own login:
+# - the token reaches the CLI only as CLAUDE_CODE_OAUTH_TOKEN in this child's
+#   environment, never in argv;
+# - every other ANTHROPIC_* and CLAUDE* variable is removed for the child (API
+#   keys, auth tokens, custom headers, base URLs and gateways, provider
+#   switches, token file descriptors, config and secure-storage folders);
+# - CLAUDE_CONFIG_DIR is a fresh empty folder. Claude Code keeps a stored login
+#   in its config folder and, on macOS, in a Keychain entry named after that
+#   folder: "Claude Code-credentials" for the default one, with a hash of the
+#   folder's path appended for any other. The empty folder holds no login, and
+#   its Keychain name matches no entry, so no stored login can be found;
+# - the folder is also the working directory, so no project settings apply.
+# One turn, no tools, no session kept, two network retries at most, stdin
+# closed. The reply is Claude's JSON result; it names no secret.
+key_check_command() {
+	local name
+	for name in $(compgen -e); do
+		case "$name" in ANTHROPIC_*|CLAUDE*) unset "$name" 2>/dev/null || true ;; esac
+	done
+	export CLAUDE_CONFIG_DIR="$KEY_CHECK_DIR"
+	export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_TOKEN"
+	export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_MAX_RETRIES=2
+	# Offline proofs point the check at a local stand-in for the API.
+	if [ -n "${PARATROOPER_INSTALL_CLAUDE_CHECK_BASE_URL:-}" ]; then
+		export ANTHROPIC_BASE_URL="$PARATROOPER_INSTALL_CLAUDE_CHECK_BASE_URL"
+	fi
+	cd "$KEY_CHECK_DIR" || exit 1
+	exec claude -p "Reply with OK" --model haiku --max-turns 1 --tools "" \
+		--no-session-persistence --output-format json </dev/null
+}
+
+# Runs as the tracked child. The CLI never echoes the token; it is removed from
+# the reply anyway before the reply is kept for the verdict and the log.
+key_check_child() {
+	local reply="" status=0
+	reply="$(key_check_command 2>&1)" || status=$?
+	printf '%s\n' "${reply//"$CLAUDE_TOKEN"/[token]}"
+	return "$status"
+}
+
+# check_claude_token - run the token check as a tracked child under a time
+# limit, animating on a TTY, and set KEY_CHECK_RESULT to accepted, refused,
+# unchecked or timeout. Ctrl-C stops the child like any other long command.
+check_claude_token() {
+	local status=0 deadline i=0 n=${#SPIN_FRAMES[@]}
+	local msg="Testing the token with Claude ..."
+	KEY_CHECK_RESULT="unchecked"
+	KEY_CHECK_DIR="$(mktemp -d -t paratrooper-claude-check.XXXXXX)" || return 0
+	KEY_CHECK_OUT="$(mktemp -t paratrooper-claude-reply.XXXXXX)" || return 0
+	key_check_child >"$KEY_CHECK_OUT" &
+	ACTIVE_CHILD_PID=$!
+	deadline=$((SECONDS + KEY_CHECK_TIMEOUT))
+	while kill -0 "$ACTIVE_CHILD_PID" 2>/dev/null; do
+		if [ "$SECONDS" -ge "$deadline" ]; then
+			stop_active_child
+			KEY_CHECK_RESULT="timeout"
+			break
+		fi
+		if [ -t 1 ]; then
+			printf '\r%s%s%s %s' "$GREEN" "${SPIN_FRAMES[i % n]}" "$RESET" "$msg"
+		fi
+		i=$((i+1))
+		sleep 0.08
+	done
+	if [ -t 1 ]; then printf '\r\033[K'; fi
+	if [ "$KEY_CHECK_RESULT" != timeout ]; then
+		wait_active_child || status=$?
+		KEY_CHECK_RESULT="$("$PY" -c "$TOKEN_TOOL" verdict "$status" <"$KEY_CHECK_OUT")" ||
+			KEY_CHECK_RESULT="unchecked"
+	fi
+	{ printf 'Claude token check: %s\n' "$KEY_CHECK_RESULT"; cat "$KEY_CHECK_OUT"; } >>"$LOG"
+	rm -rf "$KEY_CHECK_DIR" "$KEY_CHECK_OUT"
+	KEY_CHECK_DIR="" KEY_CHECK_OUT=""
 }
 
 is_cloudflare_blueprint_block() {
@@ -985,28 +1174,109 @@ section "2. Claude Code"
 printf 'The worker talks to Claude on your subscription. This step makes\n'
 printf 'sure Claude Code is available, then `claude setup-token` opens\n'
 printf 'the browser to authorize and hands back a long-lived token the\n'
-printf 'worker will use. The token is captured quietly and never shown.\n\n'
+printf 'worker will use. The token is captured quietly and never shown,\n'
+printf 'then tested with one short question to Claude.\n\n'
 
 # The Claude Code check lives in this step: present is announced, missing offers a
 # y/n install through its official installer before the sign in.
 ensure_claude
 
-# Capture stdout (the token); the interactive authorize flow uses the terminal.
-# Take the last non-empty line so a stray banner line cannot end up in the value.
+# Capture stdout (the screen with the token); the interactive authorize flow
+# uses the terminal. The token is found by its shape, not its position.
 if ! capture_claude_token; then
 	err ""
 	err "⚠ Claude Code sign in did not complete."
 	err "  Run \`claude setup-token\` and try again."
 	exit 1
 fi
-CLAUDE_TOKEN="${CLAUDE_TOKEN//[[:space:]]/}"
-if [ -z "$CLAUDE_TOKEN" ]; then
-	err ""
-	err "⚠ Claude Code sign in did not complete."
-	err "  Run \`claude setup-token\` and try again."
-	exit 1
+token_status=0
+CLAUDE_TOKEN="$(printf '%s' "$TOKEN_OUTPUT" | "$PY" -c "$TOKEN_TOOL" find)" || token_status=$?
+TOKEN_OUTPUT=""
+if [ "$token_status" -eq 0 ] && [ -n "$CLAUDE_TOKEN" ]; then
+	printf '%s✓%s Claude Code token captured.\n' "$GREEN" "$RESET"
+else
+	CLAUDE_TOKEN=""
+	if [ "$token_status" -eq 4 ]; then
+		token_problem="Claude Code printed more than one token, so it is unclear which to use."
+	else
+		token_problem="Claude Code finished, but its token could not be read from its output."
+	fi
+	if [ ! -t 0 ]; then
+		err ""
+		err "⚠ Claude Code sign in did not complete."
+		err "$token_problem"
+		err "Run ./install.sh in a terminal to paste the token instead."
+		exit 1
+	fi
+	printf '%s\n' "$token_problem"
+	printf 'Run `claude setup-token` in another window and paste the token here.\n\n'
+	if ! paste_claude_token; then
+		err ""
+		err "⚠ No token, so nothing was set up. Run ./install.sh again when ready."
+		exit 1
+	fi
+	printf '%s✓%s Claude Code token received.\n' "$GREEN" "$RESET"
 fi
-printf '%s✓%s Claude Code token captured.\n' "$GREEN" "$RESET"
+
+# Test the token before anything is created on Render. A refused token offers a
+# paste or a stop; a test that could not run also offers to run it again.
+token_retry="no"
+while :; do
+	check_claude_token
+	if [ "$KEY_CHECK_RESULT" = accepted ]; then
+		printf '%s✓%s Claude accepted the token.\n' "$GREEN" "$RESET"
+		break
+	fi
+	# A retry already left a blank line after its answer.
+	[ "$token_retry" = yes ] || err ""
+	token_retry="no"
+	case "$KEY_CHECK_RESULT" in
+		refused)
+			err "⚠ Claude did not accept this token. Nothing was set up on Render." ;;
+		timeout)
+			err "⚠ Claude did not answer the token test in time."
+			err "Nothing was set up on Render." ;;
+		*)
+			err "⚠ Could not test the token with Claude. Nothing was set up on Render."
+			err "See $LOG for details." ;;
+	esac
+	if [ ! -t 0 ]; then
+		err "Run ./install.sh in a terminal when ready."
+		exit 1
+	fi
+	if [ "$KEY_CHECK_RESULT" = refused ]; then
+		printf 'Run `claude setup-token` in another window for a new token.\n\n'
+		printf '  p - paste a new token\n'
+		printf '  n - stop here\n\n'
+		token_choices="pn"
+		token_question="Paste a new token? (p / n) "
+	else
+		printf '\n  r - test the token again\n'
+		printf '  p - paste a different token\n'
+		printf '  n - stop here\n\n'
+		token_choices="rpn"
+		token_question="Test again or paste a token? (r / p / n) "
+	fi
+	if ! prompt_keypress "$token_choices" "$token_question"; then
+		err ""
+		err "⚠ No answer, so nothing was set up. Run ./install.sh again when ready."
+		exit 1
+	fi
+	case "$REPLY" in
+		n) printf 'No problem. Nothing was set up on Render.\n'; exit 1 ;;
+		r) printf '\n'; token_retry="yes" ;;
+		p)
+			printf '\n'
+			CLAUDE_TOKEN=""
+			if ! paste_claude_token; then
+				err ""
+				err "⚠ No token, so nothing was set up. Run ./install.sh again when ready."
+				exit 1
+			fi
+			printf '%s✓%s Claude Code token received.\n' "$GREEN" "$RESET"
+			;;
+	esac
+done
 
 # --- 3. Idle sleeping ------------------------------------------------------
 

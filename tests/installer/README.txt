@@ -16,7 +16,20 @@ The bin/ fakes stand in for the provider tools. bin/uv creates the virtual
 environment with the python3 on PATH, the same way the tests used to build one,
 so no real uv and no network are touched; the installer's air-gapped path then
 makes the vendored dependencies importable with a .pth file. bin/render and
-bin/claude mock the Render CLI and Claude Code. The download/install boundary is
+bin/claude mock the Render CLI and Claude Code.
+
+bin/claude setup-token prints what the real CLI (2.1.278 to 2.1.280) writes to
+a pipe, in the same order: input-mode switches, the welcome and sign-in screen,
+the success screen with the token on its own line (in color, one column in,
+optionally wrapped at 80 columns), the lines after it including the literal
+"export CLAUDE_CODE_OAUTH_TOKEN=<token>" hint, and terminal reset codes as the
+very last output. The token is not the last line, so a capture that keeps the
+last line fails these fixtures. bin/claude -p is the installer's token test: it
+answers OK only for the expected token (MOCK_CLAUDE_ACCEPT_TOKEN, else
+MOCK_CLAUDE_TOKEN) and fails like the real CLI's 401 otherwise, and it records
+what it saw about its own environment (never the token) in claude_check.calls.
+Other switches: MOCK_CLAUDE_WRAP, MOCK_CLAUDE_EXTRA_TOKEN (a second, different
+token), MOCK_CLAUDE_CHECK_OFFLINE and MOCK_CLAUDE_CHECK_WAIT. The download/install boundary is
 mocked with installer hooks (PARATROOPER_INSTALL_UV_INSTALLER,
 PARATROOPER_INSTALL_RENDER_INSTALLER, PARATROOPER_INSTALL_CLAUDE_INSTALLER): the
 uv and render hooks drop the fake binary where the installer expects it, and the
@@ -58,8 +71,16 @@ RENDER_WORKSPACE overrides the saved setting. Decline, EOF, picker cancellation,
 an empty account or an unrelated workspace check error stops before any app
 resource inspection. Step 2
 offers to install a missing Claude
-Code with y (installed, then found) and n (stops before sign in, exit 0); both
-idle choices; passphrase entry; a failed blueprint gate stopping the unnumbered
+Code with y (installed, then found) and n (stops before sign in, exit 0). The
+Claude token is read from the realistic screen, wrapped or not, with a future
+version label, and saved exactly; the token test sees only that token, with the
+caller's own Claude and Anthropic variables removed and a fresh empty config
+folder; no token or two different tokens stop a piped run; a refused token, an
+offline test and a test that runs out of time all stop before any Render API
+call. check_terminal.py adds the terminal paths: the hidden paste with its shape
+check, EOF and Ctrl-C at the paste, stop or paste again after a refused token,
+test again after an offline test, and Ctrl-C during the test. It also covers
+both idle choices; passphrase entry; a failed blueprint gate stopping the unnumbered
 prepare section; readiness; reruns; partial installs; cancellation; EOF; and
 secret hiding. Run it ONLY in a disposable copy of the candidate source and these
 fixtures. It deliberately exercises the installer's config-writing step, so the
