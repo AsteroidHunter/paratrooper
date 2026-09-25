@@ -194,12 +194,12 @@ assert_contains() { grep -Fq -- "$2" "$1" || fail "$3" "expected to find: $4"; }
 assert_absent()   { ! grep -Fq -- "$2" "$1" || fail "$3" "expected NOT to find: $4"; }
 
 # Layout below "✓ Configuration is valid.": never two blank lines in a row, no
-# indented line except the numbered iPhone steps, and every warning, result,
-# error or question starts its own block after a blank line.
+# indented line, and every warning, result, error or question starts its own
+# block after a blank line.
 assert_layout() {  # assert_layout <output-file> <name>
 	local problem
 	problem="$(python3 - "$1" <<'PY'
-import re, sys
+import sys
 text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 marker = "✓ Configuration is valid."
 if marker not in text:
@@ -209,7 +209,7 @@ for i, line in enumerate(lines[1:], 1):
     before = lines[i - 1]
     if not line.strip() and not before.strip():
         print(f"two blank lines in a row before line {i + 1}"); break
-    if line[:1].isspace() and line.strip() and not re.match(r"  [0-9]\. \S|     \S", line):
+    if line[:1].isspace() and line.strip():
         print(f"indented line: {line!r}"); break
     if line.startswith(("⚠", "✦", "error:", "Status:", "Continue without")) and before.strip():
         print(f"no blank line before: {line!r}"); break
@@ -292,7 +292,7 @@ assert_absent "$LOGFILE" "$APP_PASSWORD" $NAME "password in log"
 [ -n "$(state_env "$STATE" paratrooper-web VAPID_PUBLIC_KEY)" ] || fail $NAME "no VAPID public key"
 [ "$(state_env "$STATE" paratrooper-web VAPID_SUBJECT)" = "https://paratrooper-web.onrender.com" ] || fail $NAME "VAPID subject not the app URL"
 # Step 4 is one line now, printed unconditionally (no keys-not-configured variant).
-assert_contains "$OUT" "Allow notifications when Paratrooper asks." $NAME "single step 4"
+assert_contains "$OUT" "Allow notifications when prompted" $NAME "single step 4"
 assert_absent "$OUT" "already configured" $NAME "old keys-configured wording"
 assert_absent "$OUT" "were not configured this run" $NAME "keys-not-configured variant"
 VAPID_PRIV="$(state_env "$STATE" paratrooper-web VAPID_PRIVATE_KEY)"

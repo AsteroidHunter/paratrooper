@@ -237,14 +237,13 @@ def screen(output):
 
 def assert_layout(output):
     """Below the configuration check: never two blank lines in a row, no indented
-    line except the numbered iPhone steps, and every warning, result, error or
-    question starts its own block after a blank line."""
+    line, and every warning, result, error or question starts its own block
+    after a blank line."""
     text = screen(output)
     lines = text[text.index("✓ Configuration is valid."):].splitlines()
     for before, line in zip(lines, lines[1:]):
         assert line.strip() or before.strip(), ("two blank lines in a row", text)
-        assert not (line[:1].isspace() and line.strip()) or re.match(r"  [0-9]\. \S|     \S", line), (
-            "indented line", line)
+        assert not (line[:1].isspace() and line.strip()), ("indented line", line)
         assert not line.startswith(("⚠", "✦", "error:", "Status:", "Continue without")) or not before.strip(), (
             "no blank line before", line)
 
@@ -421,7 +420,7 @@ def exercise():
     log = (run.case / "home" / ".paratrooper-install.log").read_text()
     assert "created web paratrooper-web" not in output, "progress chatter reached the screen"
     assert "created web paratrooper-web" in log, "progress not kept in the log"
-    assert "Allow notifications when Paratrooper asks." in output, "single step 4 missing"
+    assert "Allow notifications when prompted" in output, "single step 4 missing"
     assert "already configured" not in output, "old keys-configured wording still shown"
     state = json.loads((run.state / "api_state.json").read_text())
     assert state["services"]["paratrooper-web"]["_envVars"]["PARATROOPER_APP_TOKEN"] == PASSWORD

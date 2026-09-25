@@ -1234,11 +1234,10 @@ if [ -n "$WEB_URL" ]; then
 fi
 
 printf '%sOn your iPhone:%s\n\n' "$BOLD" "$RESET"
-printf '  %s1.%s Open the app address above in Safari.\n\n' "$BOLD" "$RESET"
-printf '  %s2.%s Add it to your Home Screen\n\n' "$BOLD" "$RESET"
-printf '  %s3.%s Open Paratrooper from the Home Screen\n' "$BOLD" "$RESET"
-printf '     and sign in with your app password.\n\n'
-printf '  %s4.%s Allow notifications when Paratrooper asks.\n\n' "$BOLD" "$RESET"
+printf '%s1.%s Open the address above in Safari\n' "$BOLD" "$RESET"
+printf '%s2.%s Follow the steps to add the app to your Home Screen\n' "$BOLD" "$RESET"
+printf '%s3.%s Open Paratrooper and sign in with your password\n' "$BOLD" "$RESET"
+printf '%s4.%s Allow notifications when prompted\n\n' "$BOLD" "$RESET"
 
 # A created-but-unconfirmed deployment is an incomplete install: exit non-zero so
 # a caller can tell, after pointing the way to finish. Nothing is removed.
