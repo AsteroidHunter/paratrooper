@@ -195,7 +195,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.163"; // Refresh the agent runtime and app build tools, with explicit model effort and CLI compatibility fixes
+const APP_VERSION = "0.3.164"; // A chat that opened empty no longer shows the older-messages spinner over its first message
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
@@ -232,6 +232,7 @@ const HISTORY_BANK = 3; // pages fetched ahead ≈ 6+ screens of ready runway
 let pendingOlder: ServerMsg[][] = [];
 let fetchCursor = 0; // min seq fetched so far; 0 = follow oldestSeq
 let historyDone = false; // the server returned an empty page: true top reached
+let historyDoneEmpty = false; // ... because the whole thread was empty (noteServerEmpty), not a page
 let threadTouching = false; // finger on the thread: never insert under it
 let lastScrollAt = 0; // scroll events still arriving = momentum still running
 let ws: WebSocket | null = null;
@@ -1409,6 +1410,7 @@ function renderChat(): void {
   pendingOlder = []; // banked pages hold stale seqs from the old session
   fetchCursor = 0;
   historyDone = false;
+  historyDoneEmpty = false;
   setFollowTail(true, "fresh-shell");
   downBtn.bottomReached(); // fresh shell opens pinned: no chevron, no pending timer
   bootGate.reset(); // fresh shell: replay ledger re-arms, the first settle owns the pin
@@ -1516,6 +1518,27 @@ function tryApplyOlder(): void {
   if (performance.now() - lastScrollAt < 140) return; // glide still running
   drainOlder();
   if (!historyDone && threadEl().scrollTop < 1200) void loadOlder();
+}
+
+// The server's own word on whether the thread holds any message at all (the
+// tail probe's answer, never the phone's saved copy, which a wipe can empty
+// while the server still holds everything). An empty thread settles the older
+// history without a page: every message from here on is newer than that answer,
+// so nothing older can ever exist. loadOlder can't see that for itself, since an
+// empty thread gives it no cursor, so the spinner turned on under the first
+// message and stayed until a scroll. The mark lasts only while sockets keep
+// finding the thread empty: one that finds messages hands the question back to
+// loadOlder, because messages sent from another device while this phone was away
+// can be older than anything it holds.
+function noteServerEmpty(empty: boolean): void {
+  if (!empty && !historyDoneEmpty) return; // a thread with messages: loadOlder's question, as always
+  historyDone = historyDoneEmpty = empty;
+  // With no rows the spinner isn't drawn (styles.css) and nothing can scroll, so
+  // it comes out now rather than at a glide boundary: the boundary gate is shut
+  // for the page's first 140 ms, and an empty chat need not scroll before its
+  // first message. With rows (a saved copy the server no longer has) it leaves
+  // at the next boundary, replaySettle's included, like any drain.
+  if (empty && !threadEl().querySelector(".evt")) drainOlder();
 }
 
 // --- pending attachments (picked but not yet sent) -----------------------------
@@ -4749,6 +4772,8 @@ async function checkServerVersion(): Promise<void> {
 // a socket that can't reach the server is dying anyway, and its reconnect
 // re-probes.
 async function probeReplayTail(): Promise<void> {
+  const sock = ws; // a reconnect or a login replaces it: then this answer is stale
+  let empty: boolean | null = null; // the server's answer, when it gave one
   let tail: number;
   try {
     const r = await fetch(
@@ -4757,11 +4782,13 @@ async function probeReplayTail(): Promise<void> {
     );
     if (!r.ok) throw new Error(String(r.status));
     const { messages } = (await r.json()) as { messages: ServerMsg[] };
+    empty = messages.length === 0;
     // pages are oldest-first, so the newest row — the backlog's ceiling — is last
     tail = messages.length ? (messages[messages.length - 1].seq ?? 0) : 0;
   } catch {
     tail = Math.max(lastSeq, replayBufferMax); // whatever has arrived, buffered included
   }
+  if (empty !== null && sock === ws) noteServerEmpty(empty);
   bootGate.tailKnown(tail);
   replaySettle();
 }
