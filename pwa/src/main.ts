@@ -113,6 +113,7 @@ import {
   watchFollowTail,
   watchKeyboard,
   watchKeyboardProven,
+  watchLiftEdge,
   watchLiftLanding,
   watchScrollRestore,
   watchScrollWrites,
@@ -133,6 +134,7 @@ import type { Fetcher, TokenGate } from "./tokengate";
 import {
   SETTLE_BURST_GAP_MS,
   USER_SCROLL_INTENT_MS,
+  closingListLift,
   compensationFor,
   createSettleBurst,
   flightOverflow,
@@ -195,7 +197,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.164"; // A chat that opened empty no longer shows the older-messages spinner over its first message
+const APP_VERSION = "0.3.165"; // In a chat too short to fill the screen, the messages no longer jump or slip under the header when the keyboard opens or closes
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
@@ -485,15 +487,29 @@ watchKeyboard((up) => {
 // both back the same way. It runs at the landing and never at the edge: the
 // landing is after the keyboard's motion, where the engine takes the page's
 // writes, and the edge is inside it, where it does not.
+//
+// The top padding is the LIST's lift, which is less than the bar's in a chat
+// too short to fill the screen (aimListLift below): the list stood back down by
+// the room under its newest message, so only its own share went under the
+// header. The rest of the lift is the part of the thread's box standing behind
+// the bar and the keyboard, and it becomes bottom padding in the same write, so
+// the thread scrolls exactly as far as the bar and no further. The two always
+// add up to the whole lift, and a chat that fills the screen has no room, no
+// bottom padding and the whole lift on top, exactly as it had before.
 let liftPad = 0; // the padding as applied, so a repeated landing writes nothing
+let liftPadB = 0; // the bottom half of it: the lift the list did not take
 
-function setLiftPad(next: number): void {
+function setLiftPad(next: number, nextB = 0): void {
   const t = document.getElementById("thread");
-  if (!t || next === liftPad) return;
+  if (!t || (next === liftPad && nextB === liftPadB)) return;
   const delta = next - liftPad;
   liftPad = next;
+  liftPadB = nextB;
   const st = t.scrollTop; // before the padding lands, so the shift is off the old offset
   app.style.setProperty("--lift-pad", `${next}px`);
+  // the bottom lands in the same write, so the range the scroll below is
+  // clamped to already has it: nothing above it moves, so it needs no shift
+  app.style.setProperty("--lift-pad-b", `${nextB}px`);
   // the padding is the THREAD's own (styles.css .thread), so every row's
   // offsetTop moves by the delta and the springs' row table is stale from here
   springDirty = true;
@@ -510,7 +526,143 @@ function setLiftPad(next: number): void {
   t.scrollTop = top; // same frame as the padding, so the two paint as one
   springReseat(t.scrollTop - st); // the reference across it, and the note
   scrollGhostWrite("lift-pad", top); // TEMP DIAGNOSTIC (scroll-ghost)
-  holdDiagRecord("lift-pad", { pad: Math.round(next), from: Math.round(st), to: Math.round(top) });
+  holdDiagRecord("lift-pad", {
+    pad: Math.round(next),
+    padB: Math.round(nextB),
+    from: Math.round(st),
+    to: Math.round(top),
+  });
+}
+
+// The list's own share of the lift, and why it is not always the bar's.
+//
+// The wrapper lifts the list and the bar together by the keyboard's height, on
+// the assumption that the newest message sits on the bar. Once a chat fills
+// the screen it does, and the list has to rise with the bar or the keyboard
+// covers the conversation. A chat that does not fill the screen has its
+// messages at the top and empty room under them; lifted the whole way, the
+// messages went under the header (a new chat went blank), and the padding
+// swap at the landing had no range to scroll into, so it showed as a jump down
+// on the open and a slide down then snap up on the close. The list therefore
+// takes only what keeps its newest message above the bar: the lift less the
+// room, never less than nothing. styles.css (#app.kb .thread) turns the room
+// into the thread's counter-translate on the wrapper's own clock; this is where
+// the room is measured.
+//
+// WHEN. At the keyboard's open edge (shell.ts watchLiftEdge), before the class
+// that starts the lift turns, so the thread and the wrapper leave in the same
+// style pass and on the same curve. A chat that fills the screen has no room,
+// the property is left unset, and the thread keeps no transform at all.
+//
+// The room is read off the layout as it would stand with no keyboard: the
+// newest laid-out row's bottom in the thread's content coordinates, less any
+// keyboard padding still standing, plus the thread's own bottom padding,
+// against the thread's own height. The row's own running translate (a flight,
+// a shift, the peek) is taken out, since it is not where the row sits.
+function threadRest(t: HTMLElement): { room: number; range: number } {
+  const cs = getComputedStyle(t);
+  const rows = laidOutRows(t);
+  const last = rows[rows.length - 1] as HTMLElement | undefined;
+  let end = parseFloat(cs.paddingTop) || 0; // an empty thread: the content is its padding
+  if (last) {
+    const own = getComputedStyle(last);
+    const ty = own.transform === "none" ? 0 : new DOMMatrixReadOnly(own.transform).f;
+    const at = last.getBoundingClientRect().bottom - ty;
+    end = at - t.getBoundingClientRect().top - t.clientTop + t.scrollTop;
+    end += parseFloat(own.marginBottom) || 0;
+  }
+  const content = end - liftPad + (parseFloat(cs.paddingBottom) || 0) - liftPadB;
+  return {
+    room: Math.max(0, t.clientHeight - content),
+    range: Math.max(0, content - t.clientHeight),
+  };
+}
+
+// the room the thread stands back down by, as styles.css reads it; unset is a
+// chat that fills the screen, whose thread then has no transform at all
+function setListRoom(room: number): void {
+  if (room > 0) app.style.setProperty("--list-room", `${room}px`);
+  else app.style.removeProperty("--list-room");
+}
+
+function aimListLift(): void {
+  const t = document.getElementById("thread");
+  if (t) setListRoom(threadRest(t).room);
+}
+
+// the thread's counter-translate as the engine holds it: 0 when it has none
+function listDrop(): number {
+  const t = document.getElementById("thread");
+  const tr = t ? getComputedStyle(t).transform : "none";
+  return tr === "none" ? 0 : Math.max(0, new DOMMatrixReadOnly(tr).f);
+}
+
+// The CLOSE asks the question again, because the chat may have changed while
+// the keyboard was up: a reply arrived, the user sent, the photo drawer opened,
+// the typing dots came or went, or a short chat grew past one screen. The
+// share the open took would then carry the list home by the wrong amount and
+// the landing would have to snap the difference (viewport.ts closingListLift
+// holds the arithmetic). So the edge re-splits the lift from this frame's
+// numbers, before the class turns: the list's translate and the two paddings
+// move by the same amount in opposite directions, with the thread's transition
+// held off for the one flush, so nothing on screen moves. The two paddings
+// still add up to the whole lift, so the scroll range does not change and the
+// offset is not written: this is the one padding change that may happen at an
+// edge, because what keeps the others at the landing is the scroll write they
+// need, and this one needs none. (Neither engine anchors a scroller's offset
+// across its own padding change; checked headless in WebKit and Chromium.) The
+// close then starts from the re-split. A list that took the whole lift at the
+// open (a chat that fills the screen) is left exactly as it was.
+function reaimListLift(via: "close-split" | "retime-split" = "close-split"): void {
+  const t = document.getElementById("thread");
+  if (!t || liftPadB <= 0) return;
+  const lift = liftPad + liftPadB;
+  const st = t.scrollTop;
+  const { room, range } = threadRest(t);
+  const top = closingListLift(lift, room, range, st);
+  if (Math.abs(top - liftPad) < 0.5) return; // the open's split still lands exactly
+  const drop = lift - top;
+  t.style.transition = "none";
+  setListRoom(drop);
+  liftPad = top;
+  liftPadB = drop;
+  app.style.setProperty("--lift-pad", `${top}px`);
+  app.style.setProperty("--lift-pad-b", `${drop}px`);
+  void t.offsetHeight; // the flush: the close's transition leaves from here
+  t.style.transition = "";
+  springDirty = true; // every row's offsetTop moved with the top padding
+  holdDiagRecord("lift-pad", {
+    pad: Math.round(top),
+    padB: Math.round(drop),
+    from: Math.round(st),
+    to: Math.round(t.scrollTop),
+    via,
+  });
+}
+
+// A later report that changes the keyboard's height while it is up (the emoji
+// keyboard, an accessory bar, WebKit's corrected second report) re-times the
+// lift from where it stands (shell.ts retimeLift), and the list's share has to
+// be the one the chat needs NOW, or the new height is played against a room
+// measured before the chat changed. Still rising, nothing has landed and the
+// open's own question is simply asked again. Landed, the split is first
+// brought up to date exactly as the close does it (invisible, no scroll
+// write), and then, unless the reader's own scroll is what holds that split,
+// the list is handed the room itself, so the new height is shared out the way
+// an open on this chat would share it. A chat that fills the screen is left
+// alone throughout.
+function retimeListLift(): void {
+  const t = document.getElementById("thread");
+  if (!t) return;
+  if (liftPad === 0 && liftPadB === 0) {
+    aimListLift();
+    return;
+  }
+  if (liftPadB <= 0) return;
+  reaimListLift("retime-split");
+  const lift = liftPad + liftPadB;
+  const { room } = threadRest(t);
+  if (Math.abs(liftPad - (lift - Math.min(lift, room))) < 0.5) setListRoom(room);
 }
 
 watchLiftLanding((up, lift) => {
@@ -519,7 +671,15 @@ watchLiftLanding((up, lift) => {
   // focused box under a running ancestor transform is the frame iOS re-places
   // its caret from geometry the lift is not in, and it draws it below the bar.
   widen.landed(up);
-  setLiftPad(up ? lift : 0);
+  // the list's share, read off the engine the way the lift itself is: the
+  // wrapper's translate less the thread's own counter-translate
+  const drop = up ? Math.min(lift, listDrop()) : 0;
+  setLiftPad(up ? lift - drop : 0, drop);
+});
+watchLiftEdge((edge) => {
+  if (edge === "open") aimListLift();
+  else if (edge === "close") reaimListLift();
+  else retimeListLift();
 });
 // TEMP DIAGNOSTIC (kb-lift, shell.ts): the app's write counter, so a landing
 // record can say whether anything scrolled inside the keyboard's motion
@@ -1105,8 +1265,10 @@ function renderChat(): void {
       </div>
     </div>`;
   // the keyboard lift (shell.ts): the thread, the drawer and the compose bar
-  // ride one transformed wrapper, rebuilt with the rest of the shell here
-  bindLift(app.querySelector<HTMLElement>(".lift")!);
+  // ride one transformed wrapper, rebuilt with the rest of the shell here; the
+  // thread is handed over too, since a short chat's list takes less of the lift
+  // than the bar and has to be re-timed with it (aimListLift)
+  bindLift(app.querySelector<HTMLElement>(".lift")!, document.getElementById("thread"));
   document.getElementById("settings")!.addEventListener("click", () => {
     document.getElementById("menu")!.classList.toggle("open");
   });

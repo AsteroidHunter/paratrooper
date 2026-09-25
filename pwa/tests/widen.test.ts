@@ -1122,7 +1122,7 @@ describe("wiring: one driver, fed by the shell's two edges, bound per render", (
     // reachability padding share it; the switch goes first, and both land in
     // the one style pass this task ends with
     expect(main).toMatch(
-      /watchLiftLanding\(\(up, lift\) => \{[\s\S]{0,400}?widen\.landed\(up\);\n\s*setLiftPad\(up \? lift : 0\);\n\}\);/,
+      /watchLiftLanding\(\(up, lift\) => \{[\s\S]{0,400}?widen\.landed\(up\);\n[\s\S]{0,300}?setLiftPad\(up \? lift - drop : 0, drop\);\n\}\);/,
     );
     expect(main.match(/widen\.landed\(/g)).toHaveLength(1);
     // and the landing itself is the lift wrapper's own transitionend, with the

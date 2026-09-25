@@ -824,7 +824,11 @@ let liftRun = 0; // one per edge; a landing belongs to the run that armed it
 let liftLandedRun = 0; // the run whose landing has been recorded
 let landedLift = NaN; // the translate the last landing read, so a re-aim mid-session lands again
 let liftEl: HTMLElement | null = null; // the .lift wrapper, rebuilt by every chat render
+// the message list inside it, whose own share of the lift (main.ts, a short
+// chat) is a counter-translate on the same clock, re-timed with the wrapper
+let liftList: HTMLElement | null = null;
 let onLiftLanding: ((up: boolean, lift: number) => void) | null = null;
+let onLiftEdge: ((edge: LiftEdge) => void) | null = null;
 // the app's scroll-write counter (scrollghost.ts), read at the edge and at the
 // landing so the kb-lift record can say whether anything wrote inside the
 // keyboard's own animation
@@ -864,9 +868,15 @@ export function watchKeyboardProven(cb: (proven: boolean) => void): void {
 // compose bar, and re-binds it on every render since the render rebuilds it).
 // Its transitionend is the one exact signal that the keyboard's motion, as the
 // page plays it, is over: the box can drop to the pin and the thread's top
-// padding can change, neither of which may happen inside the motion.
-export function bindLift(el: HTMLElement): void {
+// padding can change, neither of which may happen inside the motion. The list
+// is the thread: a chat too short to fill the screen lifts it by less than the
+// bar (main.ts aimListLift), so a later report re-times it with the wrapper.
+// (Its close-edge re-split, main.ts reaimListLift, moves padding at the edge,
+// but it trades the padding for the list's translate one for one and so needs
+// no scroll write, which is what keeps every other padding change here.)
+export function bindLift(el: HTMLElement, list: HTMLElement | null = null): void {
   liftEl = el;
+  liftList = list;
   el.addEventListener("transitionend", (e) => {
     if (e.target !== el || e.propertyName !== "transform") return;
     liftLanded("end");
@@ -915,6 +925,18 @@ export function bindGateFlight(gate: HTMLElement): void {
 // than re-derived from the inset, so the number is the engine's own.
 export function watchLiftLanding(cb: (up: boolean, lift: number) => void): void {
   onLiftLanding = cb;
+}
+
+// Register the one listener for a keyboard EDGE, called in applyShell before
+// the classes turn, so anything it writes lands in the same style pass that
+// starts the lift. main.ts uses it for the list's own share of the lift: how
+// much room the chat has under its newest message, read at the open, and the
+// same question asked again at the close and when a later report changes the
+// keyboard's height (before retimeLift pins the motion where it stands).
+export type LiftEdge = "open" | "close" | "retime";
+
+export function watchLiftEdge(cb: (edge: LiftEdge) => void): void {
+  onLiftEdge = cb;
 }
 
 // Register the app's scroll-write counter (scrollghost.ts scrollWriteCount);
@@ -1054,11 +1076,24 @@ function retimeLift(inset: number): void {
   if (!liftEl) return;
   const y = matrixY(getComputedStyle(liftEl).transform);
   if (!Number.isFinite(y)) return;
+  // The list's counter-translate, when a short chat has one, reads the same
+  // inset and rides the same clock, so it is pinned in the same flush and the
+  // two leave together again. A list with none (a full chat) is not touched.
+  const list = liftList?.isConnected ? getComputedStyle(liftList).transform : "none";
+  const listY = list === "none" ? NaN : matrixY(list);
   liftEl.style.transition = "none";
   liftEl.style.transform = `translateY(${y}px)`;
+  if (liftList && Number.isFinite(listY)) {
+    liftList.style.transition = "none";
+    liftList.style.transform = `translateY(${listY}px)`;
+  }
   void liftEl.offsetHeight; // the flush IS the pin
   liftEl.style.transition = "";
   liftEl.style.transform = "";
+  if (liftList && Number.isFinite(listY)) {
+    liftList.style.transition = "";
+    liftList.style.transform = "";
+  }
   // TEMP DIAGNOSTIC (kb-lift, block at the bottom): how far into the run the
   // second report landed, where the bar stood when it did, and what it is now
   // aimed at, so a trail says whether the flake ever reaches this phone
@@ -1146,7 +1181,9 @@ function applyShell(t: ShellTarget, settling: boolean): void {
     // The report IS the start. On the open edge this is the frame the keyboard
     // began to slide, so the transition is armed here and the inset write below
     // sends it the whole KB_ANIM_MS to the height the report just carried; on
-    // the close edge it is the focus loss, exactly as before.
+    // the close edge it is the focus loss, exactly as before. The list's share
+    // is decided first, before any class turns (watchLiftEdge).
+    onLiftEdge?.(t.kb ? "open" : "close");
     if (t.kb) reportedInset(inset);
     armLift(t.kb ? "open" : "close", inset);
   }
@@ -1174,8 +1211,12 @@ function applyShell(t: ShellTarget, settling: boolean): void {
     // (WebKit bug 295918's correction) or a keyboard that grew an accessory
     // bar. Either way the run in flight must not finish on the first report's
     // clock: retimeLift pins the transform where it stands and the write below
-    // sends a fresh KB_ANIM_MS from there.
-    if (t.kb && wasKb) retimeLift(inset);
+    // sends a fresh KB_ANIM_MS from there. The list's share is asked again
+    // first, so the pin catches it on its way to the new answer.
+    if (t.kb && wasKb) {
+      onLiftEdge?.("retime");
+      retimeLift(inset);
+    }
     appliedInset = inset;
     appEl.style.setProperty("--kb-inset", `${inset}px`);
     // a keyboard that changed height while up is what the next open is read

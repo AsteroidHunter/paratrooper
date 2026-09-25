@@ -260,6 +260,23 @@ html, body {
   transition: transform var(--kb-anim);
   will-change: transform;
 }
+/* The list's own share of the lift. The wrapper carries the bar up by the
+   keyboard's whole height, which is right for the bar and for a chat that fills
+   the screen, whose newest message sits on the bar. A shorter chat has empty
+   room under its newest message, and lifting that room too only pushes the
+   messages under the header. So the thread stands back down by the room it has,
+   never more than the whole lift, and on the same clock as the wrapper: the
+   list rises only by what it takes to keep the newest message above the bar,
+   and a chat with more room than the keyboard is tall does not move at all.
+   main.ts measures the room at the keyboard's edge (--list-room) and leaves it
+   unset for a chat that fills the screen, which makes this declaration invalid
+   at computed-value time, so the thread's transform is `none` exactly as
+   before. The part of the thread's box that stands behind the bar and the
+   keyboard is empty room by construction, and the bar and the drawer, being
+   positioned and later in the wrapper, paint and take taps over it. */
+#app.kb .thread {
+  transform: translateY(min(var(--list-room), -1 * var(--kb-lift)));
+}
 
 /* --- token gate --- */
 /* The card is centred in the shell by auto margins, and the shell holds its
@@ -808,13 +825,23 @@ html, body {
      clip, so once the keyboard's open has landed the thread is given that much
      top padding (main.ts setLiftPad writes it, and moves the scroll by the same
      amount in the same frame) and the earliest messages stay reachable behind
-     the keyboard; the close's landing takes it back the same way */
-  padding: calc(0.75rem + var(--lift-pad, 0px)) 1rem 0.75rem;
+     the keyboard; the close's landing takes it back the same way.
+     --lift-pad-b: the same for the bottom, for a short chat whose list stood
+     back down (#app.kb .thread above): the part of its box behind the bar is
+     padding, so the scroll reaches exactly to the bar and a message arriving
+     while the keyboard is up is pinned above it like any other. 0 for a chat
+     that fills the screen. */
+  padding: calc(0.75rem + var(--lift-pad, 0px)) 1rem calc(0.75rem + var(--lift-pad-b, 0px));
   display: flex;
   flex-direction: column;
   gap: 2px;
   touch-action: pan-y; /* leftward drags belong to the time-peek gesture */
   overscroll-behavior: contain; /* a thread overscroll must never chain to a page pan */
+  /* the list's own share of the lift (#app.kb .thread above) plays the
+     wrapper's clock and curve. Declared here rather than under the class for
+     the reason .gate's is: a transition starts from the after-change style,
+     so one that left with .kb would never play the close. */
+  transition: transform var(--kb-anim);
 }
 
 /* each chat event renders inside one .evt wrapper; display:contents keeps its

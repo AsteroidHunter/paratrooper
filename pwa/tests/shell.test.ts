@@ -522,15 +522,19 @@ describe("wiring: the lift is the keyboard's one write, and the landing is its o
   it("a later report re-times the running transition from where the engine holds it", () => {
     // the pin, the flush and the release, then applyShell's own write: a fresh
     // KB_ANIM_MS from the bar's current position to the height just reported
-    expect(apply).toMatch(/if \(t\.kb && wasKb\) retimeLift\(inset\);/);
+    // (the list's share is asked again first: main.ts retimeListLift)
+    expect(apply).toMatch(
+      /if \(t\.kb && wasKb\) \{\n\s*onLiftEdge\?\.\("retime"\);\n\s*retimeLift\(inset\);\n\s*\}/,
+    );
     const retime = shell.match(/function retimeLift\([\s\S]*?\n\}/)?.[0] ?? "";
     expect(retime).toContain("const y = matrixY(getComputedStyle(liftEl).transform);");
     expect(retime).toContain('liftEl.style.transition = "none";');
     expect(retime).toContain("liftEl.style.transform = `translateY(${y}px)`;");
     expect(retime).toContain("void liftEl.offsetHeight; // the flush IS the pin");
     expect(retime).toMatch(/liftEl\.style\.transition = "";\n\s*liftEl\.style\.transform = "";/);
-    // no clock, no fallback, no second element: one flush and the sheet's own
-    // transition, which is the whole of the re-timing
+    // no clock, no fallback: one flush and the sheet's own transition, which
+    // is the whole of the re-timing. The only other element in the flush is
+    // the list, when a short chat gave it a counter-translate on the same clock
     expect(retime).not.toMatch(/setTimeout|requestAnimationFrame|setInterval/);
     expect(shell.match(/retimeLift\(/g)).toHaveLength(2); // the definition and its one site
   });
@@ -1125,18 +1129,25 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
 
   it("one keyboard clock, written once: every transition on the keyboard's path spells the token", () => {
     const onToken = rules.filter((r) => transitionOf(r.body).includes("--kb-anim")).map((r) => r.sel);
-    // in source order: the chat's wrapper, the sign-in card, and the three
-    // pieces of the compose bar's widening (the pill's face piece, the text's
-    // ride and the ＋'s shrink, widen.test.ts), which run WITH the keyboard on
-    // its own clock rather than on a shorter clock of their own. Every one
-    // spells the token rather than a duration, so there is one clock to change.
-    expect(onToken).toEqual([".lift", ".gate", ".cap", ".compose textarea", ".attach"]);
+    // in source order: the chat's wrapper, the sign-in card, the thread (a
+    // short chat's list stands back down by its room on the wrapper's own
+    // clock, #app.kb .thread), and the three pieces of the compose bar's
+    // widening (the pill's face piece, the text's ride and the ＋'s shrink,
+    // widen.test.ts), which run WITH the keyboard on its own clock rather than
+    // on a shorter clock of their own. Every one spells the token rather than a
+    // duration, so there is one clock to change.
+    expect(onToken).toEqual([".lift", ".gate", ".thread", ".cap", ".compose textarea", ".attach"]);
     expect(rule("#app")).toMatch(/--kb-anim: 0\.22s cubic-bezier\(0\.45, 0, 0\.55, 1\);/);
   });
 
   it("the thread's top padding is the reachability pad, and only that pad moves it", () => {
-    expect(rule(".thread")).toContain("padding: calc(0.75rem + var(--lift-pad, 0px)) 1rem 0.75rem");
-    expect(bare.match(/--lift-pad/g)).toHaveLength(1); // one reader; main.ts is the one writer
+    // the top is the list's own share of the lift, the bottom the share it did
+    // not take (a short chat only; 0 when the chat fills the screen)
+    expect(rule(".thread")).toContain(
+      "padding: calc(0.75rem + var(--lift-pad, 0px)) 1rem calc(0.75rem + var(--lift-pad-b, 0px))",
+    );
+    expect(bare.match(/--lift-pad\b(?!-)/g)).toHaveLength(1); // one reader; main.ts is the one writer
+    expect(bare.match(/--lift-pad-b\b/g)).toHaveLength(1);
   });
 
   it("the whole raise is keyed off .kb alone: the bar's pieces leave with the wrapper", () => {
@@ -1159,7 +1170,9 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
     expect(main).toMatch(
       /<div class="liftclip">\n\s*<div class="lift">\n\s*<main id="thread" class="thread">[\s\S]*?<div id="pending" class="pending"><\/div>\n\s*<form id="compose" class="compose">[\s\S]*?<\/form>\n\s*<\/div>\n\s*<\/div>`;/,
     );
-    expect(main).toContain('bindLift(app.querySelector<HTMLElement>(".lift")!);');
+    expect(main).toContain(
+      'bindLift(app.querySelector<HTMLElement>(".lift")!, document.getElementById("thread"));',
+    );
   });
 });
 

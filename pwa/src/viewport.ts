@@ -239,6 +239,41 @@ export function padShift(scrollTop: number, delta: number): number {
   return Math.max(0, scrollTop + delta);
 }
 
+// The list's share of the lift, asked again at the CLOSE (and before a later
+// report re-times the lift at a new keyboard height, main.ts retimeListLift).
+//
+// A chat too short to fill the screen lifts its list by less than the bar: the
+// keyboard's lift less the room under its newest message (main.ts
+// aimListLift). While the keyboard is up the thread carries that share as top
+// padding and the rest of the lift as bottom padding, so what is on screen is
+// the same whatever the split is, and a message arriving meanwhile is simply
+// pinned above the bar. The split only matters for the close: the list rides
+// home by its share, and the close's landing then takes the top padding back
+// off the scroll. That landing lands exactly only if the scroll minus the top
+// padding is a position the rested thread can hold, 0 to its range, which a
+// chat that grew while the keyboard was up no longer satisfies with the share
+// it opened with. So the close re-splits first, from this frame's numbers:
+// the share the open would give the chat as it stands now, held inside the
+// span the landing can hand back exactly. Every term is known at the edge and
+// the answer needs no scroll write, because the re-split moves the padding and
+// the list's translate by the same amount in opposite directions.
+//
+//   lift       the whole lift the wrapper stands at (the two paddings' sum)
+//   room       the room under the newest message with no keyboard, never < 0
+//   range      how far the rested thread can scroll, never < 0
+//   scrollTop  the thread's offset now, paddings included
+export function closingListLift(
+  lift: number,
+  room: number,
+  range: number,
+  scrollTop: number,
+): number {
+  const want = lift - Math.min(lift, room);
+  const lo = Math.max(0, scrollTop - range);
+  const hi = Math.min(lift, scrollTop);
+  return Math.min(Math.max(want, lo), hi);
+}
+
 // ===================== TEMP DIAGNOSTIC (remove after the blank-thread session) =====================
 // The per-frame settles, folded into one mark per run.
 //

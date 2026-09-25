@@ -178,7 +178,7 @@ describe("the pad's wiring in main.ts: at the landing, same frame, announced", (
   });
 
   it("a repeated landing at the same pad writes nothing", () => {
-    expect(pad).toContain("if (!t || next === liftPad) return");
+    expect(pad).toContain("if (!t || (next === liftPad && nextB === liftPadB)) return");
   });
 
   it("nothing here waits on a clock, and the write announces itself", () => {
@@ -190,9 +190,11 @@ describe("the pad's wiring in main.ts: at the landing, same frame, announced", (
   it("it is the lift's landing that calls it, never the keyboard edge", () => {
     // one landing callback, shared with the bar's layout switch (widen.ts),
     // which goes first so both land in the same style pass
-    expect(src).toContain("  setLiftPad(up ? lift : 0);\n});");
+    // (the list's own share: the wrapper's lift less the thread's own
+    // counter-translate, which is 0 for a chat that fills the screen)
+    expect(src).toContain("  setLiftPad(up ? lift - drop : 0, drop);\n});");
     expect(src.match(/watchLiftLanding\(/g)).toHaveLength(1);
-    expect(src.match(/setLiftPad\(up \? lift : 0\)/g)).toHaveLength(1);
+    expect(src.match(/setLiftPad\(/g)).toHaveLength(2); // the definition and this one call
     const gate = src.slice(src.indexOf("watchKeyboard((up) => {"));
     expect(gate.slice(0, gate.indexOf("\n});"))).not.toContain("setLiftPad");
   });
