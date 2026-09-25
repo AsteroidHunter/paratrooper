@@ -197,7 +197,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.166"; // After a send, the empty message box shows its whole prompt again instead of a cut-off slice of it
+const APP_VERSION = "0.3.167"; // A short chat that fits on the screen no longer keeps the older-messages spinner turning until a touch
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
@@ -1677,9 +1677,24 @@ function drainOlder(): void {
 // that can't scroll at all — it tops the bank back up.
 function tryApplyOlder(): void {
   if (threadTouching) return;
-  if (performance.now() - lastScrollAt < 140) return; // glide still running
+  // glide still running, unless the thread is no taller than its box: that one
+  // can't scroll, so nothing is gliding on it and no boundary would ever come
+  // to reopen this (the page's first 140 ms read as a glide too)
+  if (performance.now() - lastScrollAt < 140) {
+    const t = document.getElementById("thread");
+    if (!t || t.scrollHeight > t.clientHeight) return;
+  }
   drainOlder();
-  if (!historyDone && threadEl().scrollTop < 1200) void loadOlder();
+  if (!historyDone && threadEl().scrollTop < 1200) {
+    void loadOlder();
+    // loadOlder marks the top on the spot, with no fetch, when the oldest
+    // message held is the thread's first, so no page answer comes back to take
+    // the spinner out the way an empty one does. It goes here instead, at this
+    // same boundary and on that answer's terms: only for a reader at the
+    // spinner, and only the spinner, never a banked page. A short chat never
+    // scrolls, so without this it spun until a touch.
+    if (historyDone && !pendingOlder.length && threadEl().scrollTop <= 50) drainOlder();
+  }
 }
 
 // The server's own word on whether the thread holds any message at all (the

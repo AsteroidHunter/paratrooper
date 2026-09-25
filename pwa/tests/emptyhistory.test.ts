@@ -1,4 +1,5 @@
-// The older-history spinner in a chat that opened empty.
+// The older-history spinner in a chat that opened empty, and in a short chat
+// that fits on the screen (its own section, further down).
 //
 // The spinner is a row above the oldest message that says "older history
 // exists". styles.css shows it the moment the thread holds any row at all, and
@@ -411,6 +412,19 @@ function harness(options: { pageAge?: number } = {}) {
       probe().lastScrollAt = 0;
       call("tryApplyOlder");
     },
+    /** a scroll event with the glide still running: the scroll handler's work, no boundary */
+    glide(top: number): void {
+      thread().scrollTop = top;
+      if (thread().scrollTop < 1200) void (context.loadOlder as () => Promise<void>)();
+      probe().lastScrollAt = (context.performance as { now: () => number }).now();
+    },
+    /** a boundary check that finds the glide still running (the lift's timer, say) */
+    check: () => call("tryApplyOlder"),
+    /** the glide ends: scrollend, with nothing else moving */
+    glideEnds(): void {
+      probe().lastScrollAt = 0;
+      call("tryApplyOlder");
+    },
   };
 }
 
@@ -603,6 +617,189 @@ describe("a chat that opens with messages", () => {
     expect(h.thread().spinnerShowing).toBe(true);
     await readToTheTop(h);
     expect(heldSeqs(h)).toEqual(allSeqs(h));
+  });
+});
+
+// --- a short chat: rows that fit on the screen, nothing older on the server -------
+//
+// The thread can't scroll, so the scroll boundary the farewell waits for never
+// comes on its own. Two things kept the spinner up until a touch. The settle's
+// check drained first and asked loadOlder second, and loadOlder settles the top
+// on the spot when the oldest message held is the thread's first, so the mark
+// landed just after the only drain that would come. And in the page's first
+// 140 ms the glide gate shut that check before it asked anything at all.
+
+describe("a short chat with nothing older", () => {
+  it.each([
+    ["from the saved copy", true, 1_000_000],
+    ["from the server's replay", false, 1_000_000],
+    ["from the saved copy, settling in the page's first 140 ms", true, 80],
+    ["from the server's replay, settling in the page's first 140 ms", false, 80],
+  ] as const)("loses the spinner at the settle with no touch, opened %s", async (_, saved, pageAge) => {
+    FakeSocket.all = [];
+    const h = harness({ pageAge });
+    h.server.addMany(4); // two sent, two received
+    if (saved) h.cached(h.server.rows);
+    h.connect();
+    h.open();
+    await h.flush();
+    expect(h.thread().rows).toEqual([1, 2, 3, 4]);
+    expect(h.thread().scrollHeight).toBeLessThanOrEqual(h.thread().clientHeight); // it can't scroll
+    expect(h.probe().historyDone).toBe(true);
+    expect(h.thread().spinnerShowing).toBe(false); // the farewell has started, untouched
+    h.advance(300);
+    expect(h.thread().spin.attached).toBe(false);
+    expect(olderPageCursors(h)).toEqual([]); // the first message is held: nothing to ask
+  });
+
+  it.each([
+    ["", 1_000_000],
+    [", settling in the page's first 140 ms", 80],
+  ] as const)(
+    "whose first messages were taken back asks once and loses it untouched%s",
+    async (_, pageAge) => {
+      FakeSocket.all = [];
+      const h = harness({ pageAge });
+      h.server.addMany(6);
+      h.server.rows = h.server.rows.slice(2); // seqs 1 and 2 are gone: the oldest held is 3
+      h.connect();
+      h.open();
+      await h.flush();
+      expect(h.thread().rows).toEqual([3, 4, 5, 6]);
+      expect(olderPageCursors(h)).toEqual([3]); // one empty page says the top is reached
+      expect(h.thread().spinnerShowing).toBe(false);
+      h.advance(300);
+      expect(h.thread().spin.attached).toBe(false);
+    },
+  );
+
+  it("a finger resting on it holds the farewell until the lift, then it goes", async () => {
+    FakeSocket.all = [];
+    const h = harness();
+    h.server.addMany(4);
+    h.cached(h.server.rows);
+    h.fingerDown(); // on the thread as the socket settles
+    h.connect();
+    h.open();
+    await h.flush();
+    expect(h.thread().spinnerShowing).toBe(true); // nothing leaves under a finger
+    h.fingerUp();
+    expect(h.thread().spinnerShowing).toBe(false);
+    h.advance(300);
+    expect(h.thread().spin.attached).toBe(false);
+  });
+
+  it.each([
+    ["", 1_000_000],
+    [", settling in the page's first 140 ms", 80],
+  ] as const)(
+    "a short chat that does have older messages shows the spinner while they come%s",
+    async (_, pageAge) => {
+      FakeSocket.all = [];
+      const h = harness({ pageAge });
+      h.server.addMany(100);
+      h.cached(h.server.rows.slice(-4)); // the saved copy holds 97..100 and fits on the screen
+      h.connect();
+      h.open();
+      await h.step(); // the probe answers, the socket settles, the older page goes out
+      expect(h.parked.map((p) => p.before)).toEqual([97]);
+      expect(h.probe().historyDone).toBe(false);
+      expect(h.thread().spinnerShowing).toBe(true); // older messages exist: it spins
+      await h.step(); // the page comes back to a reader at the spinner, and lands
+      expect(heldSeqs(h)[0]).toBe(72);
+      expect(h.thread().spinnerShowing).toBe(true); // and older still exist
+      const { showingWhileOlderLeft } = await readToTheTop(h);
+      expect(showingWhileOlderLeft.every(Boolean)).toBe(true);
+      expect(heldSeqs(h)).toEqual(allSeqs(h));
+      expect(h.thread().spin.attached).toBe(false);
+    },
+  );
+});
+
+// --- chats that can scroll keep every boundary rule ------------------------------
+
+describe("a chat that can scroll still waits for a scroll boundary", () => {
+  it("with everything in hand, the farewell waits out a finger and a glide", async () => {
+    FakeSocket.all = [];
+    const h = harness();
+    h.server.addMany(40); // all of it replays, first message included
+    h.connect();
+    h.open();
+    await h.flush();
+    expect(h.thread().scrollTop).toBeGreaterThanOrEqual(1200); // pinned far from the top
+    expect(h.probe().historyDone).toBe(false);
+    expect(h.thread().spinnerShowing).toBe(true);
+
+    h.fingerDown();
+    h.glide(0); // dragged to the top: loadOlder marks the top reached, no page to ask
+    expect(h.probe().historyDone).toBe(true);
+    h.check();
+    expect(h.thread().spinnerShowing).toBe(true); // not under a finger
+    h.probe().threadTouching = false; // lifted, and the glide rides on
+    h.glide(0);
+    h.check();
+    expect(h.thread().spinnerShowing).toBe(true); // not mid-glide either
+    h.glideEnds();
+    expect(h.thread().spinnerShowing).toBe(false); // the boundary takes it out
+    expect(olderPageCursors(h)).toEqual([]);
+  });
+
+  it("a chat a little taller than the screen leaves it for the next boundary", async () => {
+    FakeSocket.all = [];
+    const h = harness();
+    h.server.addMany(15); // taller than the screen, pinned 340 px down
+    h.connect();
+    h.open();
+    await h.flush();
+    expect(h.thread().scrollTop).toBeGreaterThan(50);
+    expect(h.probe().historyDone).toBe(true); // the settle's check found the first message
+    expect(h.thread().spinnerShowing).toBe(true); // above the fold, waiting as it always did
+    h.glide(0);
+    h.check();
+    expect(h.thread().spinnerShowing).toBe(true); // mid-glide: still waiting
+    h.glideEnds();
+    expect(h.thread().spinnerShowing).toBe(false);
+  });
+
+  it("an 80-message chat settling in the page's first 140 ms opens and pages as before", async () => {
+    FakeSocket.all = [];
+    const h = harness({ pageAge: 80 });
+    h.server.addMany(80);
+    h.connect();
+    h.open();
+    await h.flush();
+    expect(h.probe().historyDone).toBe(false);
+    expect(heldSeqs(h)[0]).toBe(31);
+    expect(h.thread().spinnerShowing).toBe(true);
+    expect(olderPageCursors(h)).toEqual([]); // nothing asked until the reader scrolls
+    const { showingWhileOlderLeft } = await readToTheTop(h);
+    expect(showingWhileOlderLeft.length).toBeGreaterThan(0);
+    expect(showingWhileOlderLeft.every(Boolean)).toBe(true);
+    expect(olderPageCursors(h)).toEqual([31, 6]);
+    expect(heldSeqs(h)).toEqual(allSeqs(h));
+    expect(h.thread().spin.attached).toBe(false);
+  });
+
+  it("older pages still land one per boundary, never under a finger or mid-glide", async () => {
+    FakeSocket.all = [];
+    const h = harness();
+    h.server.addMany(120);
+    h.cached(h.server.rows.slice(-30)); // 91..120
+    h.connect();
+    h.open();
+    await h.flush();
+    h.fingerDown();
+    h.glide(0); // at the top under a finger: the fetch goes out, the page banks
+    await h.flush();
+    expect(heldSeqs(h)[0]).toBe(91); // banked, not landed
+    expect(h.thread().spinnerShowing).toBe(true);
+    h.probe().threadTouching = false;
+    h.glide(0);
+    h.check();
+    expect(heldSeqs(h)[0]).toBe(91); // mid-glide: still banked
+    h.glideEnds();
+    expect(heldSeqs(h)[0]).toBe(66); // one page at the boundary
+    expect(h.thread().spinnerShowing).toBe(true);
   });
 });
 
