@@ -11,6 +11,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import shlex
 import shutil
@@ -215,6 +216,39 @@ class TerminalRun:
         return output
 
 
+def screen(output):
+    """The text a terminal shows: colors dropped, erased spinner lines applied."""
+    output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    lines, line, col = [], [], 0
+    for part in re.split(r"(\x1b\[K|\r|\n)", output):
+        if part == "\x1b[K":
+            del line[col:]
+        elif part == "\r":
+            col = 0
+        elif part == "\n":
+            lines.append("".join(line))
+            line, col = [], 0
+        else:
+            for ch in part:
+                line[col:col + 1] = [ch]
+                col += 1
+    return "\n".join(lines + ["".join(line)])
+
+
+def assert_layout(output):
+    """Below the configuration check: never two blank lines in a row, no indented
+    line except the numbered iPhone steps, and every warning, result, error or
+    question starts its own block after a blank line."""
+    text = screen(output)
+    lines = text[text.index("✓ Configuration is valid."):].splitlines()
+    for before, line in zip(lines, lines[1:]):
+        assert line.strip() or before.strip(), ("two blank lines in a row", text)
+        assert not (line[:1].isspace() and line.strip()) or re.match(r"  [0-9]\. \S|     \S", line), (
+            "indented line", line)
+        assert not line.startswith(("⚠", "✦", "error:", "Status:", "Continue without")) or not before.strip(), (
+            "no blank line before", line)
+
+
 def assert_stopped(path):
     pid = int(path.read_text())
     try:
@@ -310,7 +344,7 @@ def exercise():
     blocked_no.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
     blocked_no.expect("Continue without Render's preflight check? (y / n) ")
     blocked_no.send("n")
-    blocked_no.finish(1)
+    assert_layout(blocked_no.finish(1))
     assert not any(json.loads(line)["method"] in ("POST", "PUT")
                    for line in (blocked_no.state / "api_calls.jsonl").read_text().splitlines())
 
@@ -324,6 +358,20 @@ def exercise():
     assert "Blueprint is valid." not in output
     assert "Continuing without Render's Blueprint preflight." in output
     assert (blocked_yes.state / "api_state.json").exists()
+    assert_layout(output)
+
+    # The reported path: continue past the block, then Render refuses a create.
+    blocked_error = TerminalRun(
+        "cloudflare-continue-api-error", extra={"MOCK_BP_CLOUDFLARE": "1", "MOCK_API_FAIL_KV": "1"}
+    )
+    blocked_error.begin()
+    blocked_error.hidden("App password (input hidden): ", PASSWORD + "\n")
+    blocked_error.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
+    blocked_error.expect("Continue without Render's preflight check? (y / n) ")
+    blocked_error.send("y")
+    output = blocked_error.finish(1)
+    assert "error: Render API POST /key-value answered 500" in output
+    assert_layout(output)
 
     invalid = TerminalRun("invalid-blueprint", extra={"MOCK_BP_FAIL": "1"})
     invalid.begin()
@@ -331,6 +379,7 @@ def exercise():
     invalid.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
     output = invalid.finish(1)
     assert "Continue without Render's preflight check?" not in output
+    assert_layout(output)
 
     forbidden = TerminalRun("permission-403", extra={"MOCK_BP_FORBIDDEN": "1"})
     forbidden.begin()
@@ -338,6 +387,7 @@ def exercise():
     forbidden.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
     output = forbidden.finish(1)
     assert "Continue without Render's preflight check?" not in output
+    assert_layout(output)
 
     provision_cancel = TerminalRun(
         "provision-ctrl-c", extra={"MOCK_API_WAIT_ON": "POST /key-value"}
@@ -366,6 +416,7 @@ def exercise():
     run.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
     output = run.finish(0)
     assert "Paratrooper is ready!" in output and "App address:" in output
+    assert_layout(output)
     # The per-resource progress is log-only now; the screen shows the single step 4.
     log = (run.case / "home" / ".paratrooper-install.log").read_text()
     assert "created web paratrooper-web" not in output, "progress chatter reached the screen"
@@ -414,7 +465,7 @@ def exercise():
     run.begin()
     run.hidden("App password (input hidden): ", PASSWORD + "\n")
     run.hidden("Confirm app password (input hidden): ", PASSWORD + "\n")
-    run.finish(1)
+    assert_layout(run.finish(1))
     state = json.loads((run.state / "api_state.json").read_text())
     assert state["services"]["paratrooper-web"]["_envVars"]["PARATROOPER_APP_TOKEN"] == PASSWORD
 

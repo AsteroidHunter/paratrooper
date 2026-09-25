@@ -39,6 +39,10 @@ installer in the checkout. Its pre-built environment is reused by step 0, so uv
 is not exercised there; the render and claude fakes are on PATH, so steps 1 and 2
 announce them and ask nothing.
 
+Both runners check the screen layout below "Configuration is valid.": never two
+blank lines in a row, no indented line except the numbered iPhone steps, and a
+blank line before each warning, result, error or question.
+
 run_install_tests.sh covers bootstrap; step 0 building with uv present and with
 uv obtained through the hook after consent, missing uv declined or canceled at
 EOF without running the hook, plus a uv obtain failure that stops before any

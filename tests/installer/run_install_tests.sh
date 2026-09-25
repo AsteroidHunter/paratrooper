@@ -193,6 +193,31 @@ fail() { printf 'FAIL %s: %s\n' "$1" "$2"; FAILURES=$((FAILURES+1)); }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "$3" "expected to find: $4"; }
 assert_absent()   { ! grep -Fq -- "$2" "$1" || fail "$3" "expected NOT to find: $4"; }
 
+# Layout below "✓ Configuration is valid.": never two blank lines in a row, no
+# indented line except the numbered iPhone steps, and every warning, result,
+# error or question starts its own block after a blank line.
+assert_layout() {  # assert_layout <output-file> <name>
+	local problem
+	problem="$(python3 - "$1" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+marker = "✓ Configuration is valid."
+if marker not in text:
+    print("no configuration check line"); raise SystemExit
+lines = text[text.index(marker):].splitlines()
+for i, line in enumerate(lines[1:], 1):
+    before = lines[i - 1]
+    if not line.strip() and not before.strip():
+        print(f"two blank lines in a row before line {i + 1}"); break
+    if line[:1].isspace() and line.strip() and not re.match(r"  [0-9]\. \S|     \S", line):
+        print(f"indented line: {line!r}"); break
+    if line.startswith(("⚠", "✦", "error:", "Status:", "Continue without")) and before.strip():
+        print(f"no blank line before: {line!r}"); break
+PY
+)"
+	[ -z "$problem" ] || fail "$2" "layout: $problem"
+}
+
 state_env() {
 	python3 - "$1/api_state.json" "$2" "$3" <<'PY'
 import json, os, sys
@@ -252,6 +277,7 @@ run 0 happy_off "$NEW_INPUT"; NAME=happy_off; FB=$FAILURES
 [ "$CODE" = 0 ] || fail $NAME "exit $CODE (expected 0)"
 assert_contains "$OUT" "Local environment ready." $NAME "environment prepared"
 assert_contains "$OUT" "Paratrooper is ready" $NAME "ready banner"
+assert_layout "$OUT" $NAME
 assert_contains "$OUT" "https://paratrooper-web.onrender.com" $NAME "app URL"
 assert_absent "$STATE/render.calls" "render workspace set" $NAME "kept the selected workspace"
 assert_contains "$OUT" "Render workspace: Test Workspace ($WORKSPACE)" $NAME "showed the active workspace"
@@ -421,6 +447,7 @@ run 0 validate_fail "$NEW_INPUT" MOCK_BP_FAIL=1; NAME=validate_fail; FB=$FAILURE
 assert_contains "$OUT" "Preparing your deployment" $NAME "reached prepare section"
 assert_absent "$OUT" "5. Preparing your deployment" $NAME "prepare section still numbered"
 assert_contains "$OUT" "Validating blueprint" $NAME "reached blueprint gate"
+assert_layout "$OUT" $NAME
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "provisioned despite validation failure"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
@@ -431,12 +458,14 @@ y" MOCK_BP_CLOUDFLARE=1; NAME=cloudflare_noninteractive; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
 assert_contains "$OUT" "Run interactively to choose whether to continue" $NAME "noninteractive fail-closed message"
 assert_absent "$OUT" "Continue without Render's preflight check?" $NAME "did not read piped opt-in"
+assert_layout "$OUT" $NAME
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "provisioned after a noninteractive block"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
 run 0 forbidden_noninteractive "$NEW_INPUT" MOCK_BP_FORBIDDEN=1; NAME=forbidden_noninteractive; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit"
 assert_absent "$OUT" "Continue without Render's preflight check?" $NAME "permission error offered bypass"
+assert_layout "$OUT" $NAME
 [ "$(writes_in_calls "$STATE")" = 0 ] || fail $NAME "provisioned after permission error"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
@@ -661,6 +690,7 @@ run 0 health_timeout "$NEW_INPUT" MOCK_HEALTH_FAILS=999; NAME=health_timeout; FB
 [ "$CODE" != 0 ] || fail $NAME "expected non-zero exit on health timeout"
 assert_contains "$OUT" "Status: Everything is running, but the app has not answered yet." $NAME "accurate timeout status"
 assert_contains "$OUT" "not ready yet" $NAME "not-ready heading"
+assert_layout "$OUT" $NAME
 assert_absent "$OUT" "Paratrooper is ready!" $NAME "no false success"
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "resources removed on timeout"
 [ "$FAILURES" = "$FB" ] && pass $NAME
@@ -672,6 +702,7 @@ assert_absent "$OUT" "Paratrooper is ready!" $NAME "no false success"
 assert_contains "$OUT" "Part of your app did not deploy" $NAME "reworded partial-failure status"
 assert_contains "$OUT" "worker" $NAME "names the worker"
 assert_contains "$OUT" "build_failed" $NAME "names the failure"
+assert_layout "$OUT" $NAME
 [ "$(state_count "$STATE" services)" = 2 ] || fail $NAME "resources removed on worker failure"
 [ "$FAILURES" = "$FB" ] && pass $NAME
 
@@ -681,6 +712,7 @@ run 0 worker_pending "$NEW_INPUT" MOCK_DEPLOY_STATUS_WORKER=build_in_progress; N
 assert_absent "$OUT" "Paratrooper is ready!" $NAME "no false success"
 assert_contains "$OUT" "not ready yet" $NAME "unconfirmed status heading"
 assert_contains "$OUT" "did not come up in time" $NAME "reworded timeout status"
+assert_layout "$OUT" $NAME
 # The poll-by-poll waiting lines are log-only now, never on screen.
 assert_absent "$OUT" "waiting for the deploy to finish" $NAME "no wait chatter on screen"
 assert_contains "$LOGFILE" "waiting for the deploy to finish" $NAME "wait chatter kept in log"
@@ -708,6 +740,7 @@ assert_contains "$OUT" "Continue keeping the existing app password?" $NAME "expl
 # --- 18. create succeeded, response lost: rerun delivers stored password ----
 run 0 lost_first "$NEW_INPUT" MOCK_API_LOSE_RESPONSE=paratrooper-web; NAME=response_lost; FB=$FAILURES
 [ "$CODE" != 0 ] || fail $NAME "expected first run to fail on the lost response"
+assert_layout "$OUT" $NAME
 KEEP="$STATE"
 STORED_PW="$(state_env "$KEEP" paratrooper-web PARATROOPER_APP_TOKEN)"
 [ -n "$STORED_PW" ] || fail $NAME "web not created on the server before the lost response"
@@ -726,6 +759,7 @@ assert_contains "$OUT" "run ./install.sh again" $NAME "resume guidance"
 # The provisioner's own "error:" line is held off the spinner but still reaches the
 # screen on a failure, above the guidance (it is the "problem above" that is referenced).
 assert_contains "$OUT" "error:" $NAME "provisioner error line kept on screen"
+assert_layout "$OUT" $NAME
 [ "$(state_count "$STATE" services)" = 1 ] || fail $NAME "worker not created before failure"
 run 1 partial_resume "$NEW_INPUT"
 [ "$CODE" = 0 ] || fail $NAME "resume run exit $CODE"

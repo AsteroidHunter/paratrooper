@@ -511,21 +511,24 @@ validate_blueprint() {
 	if [ "$status" -eq 0 ]; then
 		printf '%s✓%s Blueprint is valid.\n' "$GREEN" "$RESET"
 	elif is_cloudflare_blueprint_block "$VALIDATION_OUT"; then
+		err ""
 		err "⚠ Render's Blueprint preflight was blocked by Cloudflare."
-		err "  Render has not checked the Blueprint. See $LOG for the block details."
+		err "Render has not checked the Blueprint. See $LOG for the block details."
 		if [ ! -t 0 ] || [ ! -t 1 ]; then
-			err "  Run interactively to choose whether to continue. No resources were created."
+			err "Run interactively to choose whether to continue. No resources were created."
 			rm -f "$VALIDATION_OUT"; VALIDATION_OUT=""
 			return 1
 		fi
-		printf 'Later Render API checks may still reject this setup after creating some resources.\n'
+		printf 'Later Render API checks may still reject this setup after creating some resources.\n\n'
 		if ! prompt_keypress "yn" "Continue without Render's preflight check? (y / n) " || [ "$REPLY" != y ]; then
+			err ""
 			err "Setup stopped before creating resources."
 			rm -f "$VALIDATION_OUT"; VALIDATION_OUT=""
 			return 1
 		fi
-		printf "⚠ Continuing without Render's Blueprint preflight.\n"
+		printf "\n⚠ Continuing without Render's Blueprint preflight.\n"
 	else
+		err ""
 		err "⚠ Validating blueprint ... failed. See $LOG for details."
 		rm -f "$VALIDATION_OUT"; VALIDATION_OUT=""
 		return 1
@@ -1169,14 +1172,16 @@ ACTIVE_CHILD_PID="$provision_pid"
 spin_pid "$provision_pid" "Setting up your app on Render and waiting for it to go live."
 wait_active_child || provision_status=$?
 if [ "$provision_status" -ne 0 ]; then
+	# The erased spinner leaves the cursor on an empty line under the intro's
+	# blank line, so a separating blank line is needed only after an error line.
 	if [ -s "$PROVISION_ERR" ]; then
 		cat "$PROVISION_ERR" >&2
+		err ""
 	fi
-	err ""
 	err "⚠ Setup did not finish. Fix the problem above"
-	err "  and run ./install.sh again."
-	err "  Nothing is lost, and if your app was created,"
-	err "  keep using the password you chose."
+	err "and run ./install.sh again."
+	err "Nothing is lost, and if your app was created,"
+	err "keep using the password you chose."
 	exit 1
 fi
 cat "$PROVISION_ERR" >>"$LOG"
@@ -1206,25 +1211,27 @@ fi
 
 # Say "ready" only when both deploys are live AND the app answered. Anything else
 # is created-but-unconfirmed: report it plainly, keep everything, exit non-zero.
+# The provisioning intro ended with a blank line and the erased spinners left the
+# cursor on an empty line, so each block below starts in place and ends with
+# its own blank line.
 if [ "$READY" = 1 ]; then
-	printf '\n%s✦%s Paratrooper is ready!\n\n' "$GREEN" "$RESET"
+	printf '%s✦%s Paratrooper is ready!\n\n' "$GREEN" "$RESET"
 else
-	printf '\n%s⚠%s Your Paratrooper resources were created,\n' "$BOLD" "$RESET"
-	printf '  but the deployment is not ready yet.\n'
+	printf '%s⚠%s Your Paratrooper resources were created,\n' "$BOLD" "$RESET"
+	printf 'but the deployment is not ready yet.\n'
 	printf '\n'
 	printf '%s' "$STATUS" | "$PY" -c '
 import sys
 from paratrooper.provision import wrap_installer_message
-print(wrap_installer_message(sys.stdin.read(), first_prefix="  Status: ", later_prefix="          "))
+print(wrap_installer_message(sys.stdin.read(), first_prefix="Status: "))
 '
 	printf '\n'
 fi
 
 # The app address is the only sign-in detail displayed, including on failure.
 if [ -n "$WEB_URL" ]; then
-	printf '  %sApp address:%s  %s\n' "$BOLD" "$RESET" "$WEB_URL"
+	printf '%sApp address:%s  %s\n\n' "$BOLD" "$RESET" "$WEB_URL"
 fi
-printf '\n'
 
 printf '%sOn your iPhone:%s\n\n' "$BOLD" "$RESET"
 printf '  %s1.%s Open the app address above in Safari.\n\n' "$BOLD" "$RESET"
@@ -1236,7 +1243,7 @@ printf '  %s4.%s Allow notifications when Paratrooper asks.\n\n' "$BOLD" "$RESET
 # A created-but-unconfirmed deployment is an incomplete install: exit non-zero so
 # a caller can tell, after pointing the way to finish. Nothing is removed.
 if [ "$READY" != 1 ]; then
-	printf '  Give it a few minutes, then check your app in the Render dashboard.\n'
-	printf '  Run ./install.sh again to retry; nothing is created twice.\n'
+	printf 'Give it a few minutes, then check your app in the Render dashboard.\n'
+	printf 'Run ./install.sh again to retry; nothing is created twice.\n'
 	exit 1
 fi

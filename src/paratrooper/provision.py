@@ -97,9 +97,12 @@ class ProvisionError(DeployError):
 
 
 def wrap_installer_message(
-    message: str, *, first_prefix: str = "", later_prefix: str = "  ", width: int = 72
+    message: str, *, first_prefix: str = "", later_prefix: str = "", width: int = 72
 ) -> str:
-    """Wrap variable status and error text without splitting a path or URL."""
+    """Wrap variable status and error text without splitting a path or URL.
+
+    Continuation lines start at column 0 by default, like the rest of the
+    installer's messages; a caller can still pass ``later_prefix`` to indent them."""
     lines = textwrap.wrap(
         message, width=width, initial_indent=first_prefix,
         subsequent_indent=later_prefix, break_long_words=False, break_on_hyphens=False,
