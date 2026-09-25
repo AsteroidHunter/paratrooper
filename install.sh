@@ -953,7 +953,7 @@ obtain_claude() {
 # installer, n (or a closed stdin) stops politely with the setup link.
 ensure_claude() {
 	if tool_usable claude; then
-		printf '%s✓%s claude found.\n' "$GREEN" "$RESET"
+		printf '%s✓%s Claude found.\n' "$GREEN" "$RESET"
 		return 0
 	fi
 	printf 'Claude Code is not installed. Its official installer places it under\n'

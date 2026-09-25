@@ -579,7 +579,7 @@ def exercise_token():
     offline.expect("Test again or paste a token? (r / p / n) ")
     offline.send("n")
     text = screen(offline.finish(1))
-    step = text[text.index("✓ claude found."):]
+    step = text[text.index("✓ Claude found."):]
     assert "\n\n\n" not in step, ("two blank lines in a row", step)
     assert len((offline.state / "claude_check.calls").read_text().splitlines()) == 2
     no_render_api_calls(offline)
