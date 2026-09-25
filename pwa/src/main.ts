@@ -197,7 +197,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.166"; // After a send, the empty message box shows its whole prompt again instead of a cut-off slice of it
+const APP_VERSION = "0.3.167"; // The older-messages spinner no longer shows in a chat that starts at its first message
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
@@ -1677,9 +1677,24 @@ function drainOlder(): void {
 // that can't scroll at all — it tops the bank back up.
 function tryApplyOlder(): void {
   if (threadTouching) return;
-  if (performance.now() - lastScrollAt < 140) return; // glide still running
+  // glide still running, unless the thread is no taller than its box: that one
+  // can't scroll, so nothing is gliding on it and no boundary would ever come
+  // to reopen this (the page's first 140 ms read as a glide too)
+  if (performance.now() - lastScrollAt < 140) {
+    const t = document.getElementById("thread");
+    if (!t || t.scrollHeight > t.clientHeight) return;
+  }
   drainOlder();
-  if (!historyDone && threadEl().scrollTop < 1200) void loadOlder();
+  if (!historyDone && threadEl().scrollTop < 1200) {
+    void loadOlder();
+    // loadOlder marks the top on the spot, with no fetch, when the oldest
+    // message held is the thread's first, so no page answer comes back to take
+    // the spinner out the way an empty one does. It goes here instead, at this
+    // same boundary and on that answer's terms: only for a reader at the
+    // spinner, and only the spinner, never a banked page. A short chat never
+    // scrolls, so without this it spun until a touch.
+    if (historyDone && !pendingOlder.length && threadEl().scrollTop <= 50) drainOlder();
+  }
 }
 
 // The server's own word on whether the thread holds any message at all (the
@@ -1701,6 +1716,19 @@ function noteServerEmpty(empty: boolean): void {
   // first message. With rows (a saved copy the server no longer has) it leaves
   // at the next boundary, replaySettle's included, like any drain.
   if (empty && !threadEl().querySelector(".evt")) drainOlder();
+}
+
+// The thread's first message is held (seq 1: the server numbers from 1 and
+// never gives a number out twice), so nothing older can exist, whatever a page
+// or a probe says. The top is reached, and the spinner goes now, outright, in
+// the same task as the rows that would turn it on, so it never paints. Called
+// wherever rows land outside the older-page drain: the saved copy, the replay's
+// one commit, and each socket frame. A page that brings seq 1 up from below
+// keeps drainOlder's farewell, as before.
+function noteThreadStart(): void {
+  if (oldestSeq !== 1) return;
+  historyDone = true;
+  document.getElementById("histspin")?.remove();
 }
 
 // --- pending attachments (picked but not yet sent) -----------------------------
@@ -4984,6 +5012,7 @@ function commitReplayBuffer(): void {
   replayBufferMax = 0;
   frames.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
   for (const m of frames) applyReplay(m);
+  noteThreadStart(); // in this same task: a catch-up from the first message never shows the spinner
   holdDiagRecord("batch-commit", { n: frames.length });
 }
 
@@ -5155,6 +5184,7 @@ function connect(): void {
       suppressAnim = false; // a genuinely new message: the boot era is over
       applyEvent(m);
     }
+    noteThreadStart(); // a thread's first message arriving here takes the spinner with it
     replaySettle();
   };
   ws.onclose = () => {
@@ -7785,6 +7815,7 @@ async function bootFromCache(): Promise<void> {
     const prevSuppress = suppressAnim;
     suppressAnim = true; // cached frames are history: no pops, no glides
     for (const m of cached.frames) applyEvent(m);
+    noteThreadStart(); // a saved copy from the first message paints with no spinner at all
     suppressAnim = prevSuppress;
     if (cached.lastSeq > lastSeq) lastSeq = cached.lastSeq; // a retracted tail still advances the cursor
     scrollToBottom(true);
