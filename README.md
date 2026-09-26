@@ -16,7 +16,9 @@ You can use your paratrooper instance as a simple chatbot or make it more functi
 
 Integrating an agent into iMessage costs >$200-1000/month. Building an agent around a modern, pleasant UI interface should not be that costly!
 
-https://github.com/user-attachments/assets/3b5e1510-7ad9-48f9-8af7-9c36c3f79289
+Here's a sample video of the PWA's interface (some parts of the video were sped up to cater to human attention spans):
+
+https://github.com/user-attachments/assets/75ecbdea-8f42-4471-a2af-dcdc1b7e10b8
 
 ## Set up
 
