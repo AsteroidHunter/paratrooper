@@ -36,7 +36,16 @@ function dispatch(kind: Kind, x: number, y: number): { claimed: number; prevente
   let prevented = false;
   const context = {
     startX: 0, startY: 0, peeking: null,
-    thread: { classList: { add() {} }, style: { setProperty() {} } },
+    thread: {
+      classList: { add() {} },
+      style: { setProperty() {} },
+      getBoundingClientRect: () => ({ top: 0, bottom: 800, height: 800 }),
+      querySelectorAll: () => [],
+    },
+    // the peek's pick-up (peek.ts): nothing on screen to move in this harness
+    peekPieces: [],
+    PEEK_PIECES: "",
+    piecesInView: () => [],
     noteThreadGesture() {},
     springFinger() {},
     claimResumeEra() { claimed += 1; },
