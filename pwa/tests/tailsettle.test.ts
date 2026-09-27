@@ -194,7 +194,11 @@ describe("the pad's wiring in main.ts: at the landing, same frame, announced", (
     // counter-translate, which is 0 for a chat that fills the screen)
     expect(src).toContain("  setLiftPad(up ? lift - drop : 0, drop);\n});");
     expect(src.match(/watchLiftLanding\(/g)).toHaveLength(1);
-    expect(src.match(/setLiftPad\(/g)).toHaveLength(2); // the definition and this one call
+    // the definition, this one call, and the glide boundary's landing of a pad
+    // parked mid-glide (landParkedPad, coastpad.test.ts), which is still this
+    // landing's own value, only held until the reader's motion is over
+    expect(src.match(/setLiftPad\(/g)).toHaveLength(3);
+    expect(src).toContain("if (parkedPad) setLiftPad(parkedPad.top, parkedPad.bottom);");
     const gate = src.slice(src.indexOf("watchKeyboard((up) => {"));
     expect(gate.slice(0, gate.indexOf("\n});"))).not.toContain("setLiftPad");
   });

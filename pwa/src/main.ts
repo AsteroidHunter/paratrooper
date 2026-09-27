@@ -148,6 +148,7 @@ import {
   settleBottom,
   settleMark,
   tailGapFrame,
+  threadCoasting,
 } from "./viewport";
 import type { BottomGeometry, SettleBurstMark, TailSettle } from "./viewport";
 import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
@@ -498,10 +499,27 @@ watchKeyboard((up) => {
 // bottom padding and the whole lift on top, exactly as it had before.
 let liftPad = 0; // the padding as applied, so a repeated landing writes nothing
 let liftPadB = 0; // the bottom half of it: the lift the list did not take
+// A landing that arrived while the reader's own motion owned the scroll (a
+// finger on the thread, or a glide still running: viewport.ts threadCoasting
+// holds why no write may land there). It waits here for the glide boundary
+// (landParkedPad below), and any newer word on the padding replaces it: the
+// next landing, or a keyboard edge, which sets the lift moving again.
+let parkedPad: { top: number; bottom: number } | null = null;
 
 function setLiftPad(next: number, nextB = 0): void {
   const t = document.getElementById("thread");
+  parkedPad = null; // this call is the newest word on the padding, whatever it decides
   if (!t || (next === liftPad && nextB === liftPadB)) return;
+  if (threadCoasting(threadTouching, lastScrollAt, performance.now())) {
+    parkedPad = { top: next, bottom: nextB };
+    holdDiagRecord("lift-pad", {
+      pad: Math.round(next),
+      padB: Math.round(nextB),
+      from: Math.round(t.scrollTop),
+      park: 1,
+    });
+    return;
+  }
   const delta = next - liftPad;
   liftPad = next;
   liftPadB = nextB;
@@ -532,6 +550,15 @@ function setLiftPad(next: number, nextB = 0): void {
     from: Math.round(st),
     to: Math.round(top),
   });
+}
+
+// The glide boundary's half of the landing: a padding parked mid-glide lands
+// here once the thread is at rest, through the same content-preserving write,
+// which checks the motion again (a finger put back down parks it once more).
+// Called where the older-history insert is: scrollend, the quiet debounce on an
+// engine without it, and the release check for a finger lifted with no glide.
+function landParkedPad(): void {
+  if (parkedPad) setLiftPad(parkedPad.top, parkedPad.bottom);
 }
 
 // The list's own share of the lift, and why it is not always the bar's.
@@ -677,6 +704,7 @@ watchLiftLanding((up, lift) => {
   setLiftPad(up ? lift - drop : 0, drop);
 });
 watchLiftEdge((edge) => {
+  parkedPad = null; // the lift is moving again: its own landing says what the padding is
   if (edge === "open") aimListLift();
   else if (edge === "close") reaimListLift();
   else retimeListLift();
@@ -1467,6 +1495,7 @@ function renderChat(): void {
         lastScrollAt = 0;
         springMotionAt = -Infinity; // the thread is at rest: his motion is over
         tryApplyOlder();
+        landParkedPad(); // a keyboard landing that came mid-glide lands now
       }, 100);
     }
   });
@@ -1475,6 +1504,7 @@ function renderChat(): void {
       lastScrollAt = 0; // the browser says the glide is over — authoritative
       springMotionAt = -Infinity; // ... and with it the motion his gesture threw
       tryApplyOlder();
+      landParkedPad(); // a keyboard landing that came mid-glide lands now
     });
   }
   document.getElementById("jump")!.addEventListener("click", () => {
@@ -1547,8 +1577,13 @@ function renderChat(): void {
     // check shortly after; the lastScrollAt gate skips real glides. NO special
     // at-top fast path: a release at the top starts the rubber-band snap-back,
     // which is itself a scroll animation — writing into it was the teleport.
-    // scrollend fires after the bounce settles and lands the page then.
-    setTimeout(tryApplyOlder, 200);
+    // scrollend fires after the bounce settles and lands the page then. A
+    // keyboard landing parked under the finger (setLiftPad) is checked at the
+    // same moment and on the same terms: a glide that followed parks it again.
+    setTimeout(() => {
+      tryApplyOlder();
+      landParkedPad();
+    }, 200);
   };
   thread.addEventListener("touchend", endPeek);
   thread.addEventListener("touchcancel", endPeek);
