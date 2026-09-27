@@ -210,7 +210,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.170"; // A drawer from the left edge lists the chats, the plus starts a new one, and each chat keeps its own thread
+const APP_VERSION = "0.3.171"; // A long thread stays smooth when older messages land, when peeking at the times, and when a reply arrives
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
