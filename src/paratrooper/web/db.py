@@ -13,10 +13,12 @@ import json
 import logging
 import sqlite3
 import threading
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
-from .models import ThreadEvent
+from .models import DEFAULT_THREAD_ID, EVENT_POLICY, ThreadEvent, ThreadSummary
 from .thumbs import image_blurhash, image_dims
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,16 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, seq);
 -- message is written last and dated where it was composed. seq is the tiebreak
 -- and the write watermark; both indexes earn their keep.
 CREATE INDEX IF NOT EXISTS idx_messages_order ON messages(thread_id, ts, seq);
+
+-- one row per chat. Only what the rows below cannot say for themselves: when
+-- the chat was made (an empty chat has no rows to date it by) and how far the
+-- owner has had it on screen. Title, preview and activity time are read off
+-- the chat's own messages when the list is asked for (thread_list).
+CREATE TABLE IF NOT EXISTS threads (
+    thread_id  TEXT PRIMARY KEY,
+    created_ts TEXT NOT NULL,
+    read_seq   INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS push_subscriptions (
     endpoint     TEXT PRIMARY KEY,
@@ -64,6 +76,49 @@ CREATE TABLE IF NOT EXISTS attachments (
 # columns added to `attachments` after the table shipped, and their types. Rows
 # created before each one exists carry NULL until something measures them.
 _ATTACHMENT_ADDED_COLUMNS = {"width": "INTEGER", "height": "INTEGER", "blurhash": "TEXT"}
+
+
+# The chat list's words. A chat is titled by its first user message that has
+# text; one with none yet is a new chat. Titles and previews are one line each,
+# whitespace collapsed, and cut at these lengths.
+NEW_CHAT_TITLE = "New chat"
+TITLE_CHARS = 80
+PREVIEW_CHARS = 120
+# kinds that draw nothing on the phone (bookkeeping and presence), so they are
+# never a chat's preview or its latest activity
+_UNDRAWN_KINDS = ("job", "working", "typing")
+# a board artifact's payload is not words (a screenshot's is a data URI of
+# several MB and is never even read for this), so the preview names it instead
+_PREVIEW_WORDS = {"screenshot": "Board preview", "pr": "Pull request"}
+# the agent kinds a chat counts as unread (EventPolicy.unread)
+_UNREAD_KINDS = tuple(kind for kind, policy in EVENT_POLICY.items() if policy.unread)
+# how many rows to look through for a title or a preview before giving up
+_SCAN_ROWS = 20
+
+
+def _one_line(text: str, limit: int) -> str:
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    return flat[: limit - 1].rstrip() + "\u2026"
+
+
+def _preview_line(role: str, kind: str | None, payload: Any, attachments: list) -> str | None:
+    """What the chat list says for one stored row, or None when the row draws
+    nothing a preview could name."""
+    if kind in _PREVIEW_WORDS:
+        return _PREVIEW_WORDS[kind]
+    text = _one_line(payload, PREVIEW_CHARS) if isinstance(payload, str) else ""
+    if text:
+        return text
+    if role == "user" and attachments:
+        return "Photo" if len(attachments) == 1 else f"{len(attachments)} Photos"
+    return None
+
+
+def new_thread_id() -> str:
+    """A fresh chat id: 16 hex characters, never a ':' (queue.py splits on it)."""
+    return uuid.uuid4().hex[:16]
 
 
 class ThumbMeta(NamedTuple):
@@ -100,6 +155,28 @@ class ThreadStore:
             self._migrate_body_to_payload()
             self._migrate_attachment_dims()
             self._migrate_backfill_thumb_dims()  # needs the columns above to exist
+            self._migrate_threads()
+
+    def _migrate_threads(self) -> None:
+        """Give every conversation that predates the chat list its row, once.
+
+        Runs only while the table is empty, which is exactly the first boot of
+        this schema (from then on the default chat's row is always there).
+        Every thread already in ``messages`` becomes a chat under its own id,
+        dated by its first row and marked read to its newest one: an upgrade
+        must not light up months of old replies as unread. The default chat is
+        ensured after, so a fresh install still opens on a chat."""
+        if self._conn.execute("SELECT 1 FROM threads LIMIT 1").fetchone():
+            return
+        self._conn.execute(
+            "INSERT OR IGNORE INTO threads(thread_id, created_ts, read_seq) "
+            "SELECT thread_id, MIN(ts), MAX(seq) FROM messages GROUP BY thread_id"
+        )
+        self._conn.execute(
+            "INSERT OR IGNORE INTO threads(thread_id, created_ts, read_seq) VALUES (?,?,0)",
+            (DEFAULT_THREAD_ID, datetime.now(UTC).isoformat()),
+        )
+        self._conn.commit()
 
     def _migrate_attachment_dims(self) -> None:
         """Additive columns (dimensions, blurhash) on DBs created before them.
@@ -198,8 +275,14 @@ class ThreadStore:
             raise
 
     def add_message(self, event: ThreadEvent) -> int:
-        """Persist an event verbatim; returns its sequence number."""
+        """Persist an event verbatim; returns its sequence number. A row for a
+        chat the list does not know yet makes that chat known in the same
+        commit, so no stored row can ever sit in an unlisted chat."""
         with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO threads(thread_id, created_ts, read_seq) VALUES (?,?,0)",
+                (event.thread_id, event.ts),
+            )
             cur = self._conn.execute(
                 "INSERT INTO messages(thread_id, role, kind, payload, attachments, ts) "
                 "VALUES (?,?,?,?,?,?)",
@@ -306,6 +389,97 @@ class ThreadStore:
                 """
             ).fetchall()
         return [(r["thread_id"], _event(r)) for r in rows]
+
+    # --- the chat list ---
+
+    def create_thread(self) -> ThreadSummary:
+        """Make a new, empty chat and return its list row."""
+        thread_id = new_thread_id()
+        created = datetime.now(UTC).isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO threads(thread_id, created_ts, read_seq) VALUES (?,?,0)",
+                (thread_id, created),
+            )
+            self._conn.commit()
+        return ThreadSummary(id=thread_id, title=NEW_CHAT_TITLE, preview="",
+                             updated=created, unread=0)
+
+    def mark_read(self, thread_id: str, seq: int) -> None:
+        """The owner has had this chat on screen up to ``seq``. Never moves
+        the watermark backwards."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE threads SET read_seq=? WHERE thread_id=? AND read_seq<?",
+                (seq, thread_id, seq),
+            )
+            self._conn.commit()
+
+    def mark_read_to_end(self, thread_id: str) -> None:
+        """The owner has this chat on screen now: read to its newest row."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS top FROM messages WHERE thread_id=?",
+                (thread_id,),
+            ).fetchone()
+            top = int(row["top"])
+            cur = self._conn.execute(
+                "UPDATE threads SET read_seq=? WHERE thread_id=? AND read_seq<?",
+                (top, thread_id, top),
+            )
+            if cur.rowcount:
+                self._conn.commit()
+
+    def thread_list(self) -> list[ThreadSummary]:
+        """Every chat, newest activity first, each with its title, a one-line
+        preview of its newest drawn row, that row's time, and its unread count.
+        All derived from the chat's own rows here, so none of it can drift."""
+        with self._lock:
+            threads = self._conn.execute(
+                "SELECT thread_id, created_ts, read_seq FROM threads"
+            ).fetchall()
+            out = [self._summary(t["thread_id"], t["created_ts"], t["read_seq"])
+                   for t in threads]
+        out.sort(key=lambda s: s.id)
+        out.sort(key=lambda s: s.updated, reverse=True)
+        return out
+
+    def _summary(self, thread_id: str, created_ts: str, read_seq: int) -> ThreadSummary:
+        # caller holds the lock
+        title = NEW_CHAT_TITLE
+        for r in self._conn.execute(
+            "SELECT payload FROM messages WHERE thread_id=? AND role='user' "
+            "ORDER BY ts, seq LIMIT ?",
+            (thread_id, _SCAN_ROWS),
+        ):
+            text = json.loads(r["payload"])
+            if isinstance(text, str) and text.strip():
+                title = _one_line(text, TITLE_CHARS)
+                break
+        preview, updated = "", created_ts
+        undrawn = ",".join("?" for _ in _UNDRAWN_KINDS)
+        for r in self._conn.execute(
+            # the payload of a board preview is never read: it is megabytes of
+            # picture and the preview only names it
+            "SELECT role, kind, attachments, ts, "
+            "CASE WHEN kind='screenshot' THEN 'null' ELSE payload END AS payload "
+            f"FROM messages WHERE thread_id=? AND (kind IS NULL OR kind NOT IN ({undrawn})) "
+            "ORDER BY ts DESC, seq DESC LIMIT ?",
+            (thread_id, *_UNDRAWN_KINDS, _SCAN_ROWS),
+        ):
+            line = _preview_line(r["role"], r["kind"], json.loads(r["payload"]),
+                                 json.loads(r["attachments"]))
+            if line is not None:
+                preview, updated = line, r["ts"]
+                break
+        kinds = ",".join("?" for _ in _UNREAD_KINDS)
+        unread = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM messages WHERE thread_id=? AND role='agent' "
+            f"AND seq>? AND kind IN ({kinds})",
+            (thread_id, read_seq, *_UNREAD_KINDS),
+        ).fetchone()["n"]
+        return ThreadSummary(id=thread_id, title=title, preview=preview,
+                             updated=updated, unread=int(unread))
 
     # --- attachment thumbnails (photo history survives the inbox TTL) ---
 

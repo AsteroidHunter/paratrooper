@@ -17,6 +17,16 @@ ResultKind = Literal["working", "typing", "log", "screenshot", "pr", "update", "
 # kinds the web service persists on its own authority (no ResultMessage behind them)
 SYSTEM_KINDS = ("job", "published")
 
+# The chat that existed before there were chats. It keeps this id for good, so
+# an upgrade loses nothing, and it is the chat a socket without a ``thread``
+# parameter and a push without a named chat belong to.
+DEFAULT_THREAD_ID = "default"
+
+# What a chat id may be made of. The results channel and the interrupt payload
+# are split on ':' (queue.py), so an id carrying one would be misread there.
+# The service mints its own ids (16 hex characters); this is the outer bound.
+THREAD_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+
 
 class EventPolicy(BaseModel):
     """Per-kind event behavior — the one row that used to be five scattered
@@ -33,6 +43,9 @@ class EventPolicy(BaseModel):
     notifies: bool = False  # does this kind wake the phone at all?
     terminal: bool = False  # ends the job: relay releases the thread's batch
     context: Literal["text", "pr_ref", "skip"] = "text"  # job-context projection
+    # an agent row of this kind draws a bubble, so it counts as unread in the
+    # chat list until its chat has been on screen past it
+    unread: bool = False
 
 
 EVENT_POLICY: dict[str, EventPolicy] = {
@@ -41,14 +54,14 @@ EVENT_POLICY: dict[str, EventPolicy] = {
     # must replay after a reopen. Renders nothing; never job context.
     "working": EventPolicy(context="skip"),
     "typing": EventPolicy(ephemeral=True, persist=False, context="skip"),
-    "log": EventPolicy(),
-    "update": EventPolicy(),
+    "log": EventPolicy(unread=True),
+    "update": EventPolicy(unread=True),
     # a screenshot payload is a multi-MB base64 data URI — it must never be
     # pasted into the agent prompt as "context"
-    "screenshot": EventPolicy(notifies=True, context="skip"),
-    "pr": EventPolicy(notifies=True, context="pr_ref"),
-    "done": EventPolicy(notifies=True, terminal=True),
-    "error": EventPolicy(notifies=True, terminal=True),
+    "screenshot": EventPolicy(notifies=True, context="skip", unread=True),
+    "pr": EventPolicy(notifies=True, context="pr_ref", unread=True),
+    "done": EventPolicy(notifies=True, terminal=True, unread=True),
+    "error": EventPolicy(notifies=True, terminal=True, unread=True),
     # system rows: the enqueue marker is bookkeeping, not chat content
     "job": EventPolicy(context="skip"),
     "published": EventPolicy(),
@@ -111,11 +124,23 @@ class SendRequest(BaseModel):
     with the same ``sent_at`` — resends in place instead of jumping to the end.
     Optional: a client too old to send one gets the server clock, as before."""
 
-    thread_id: str
+    thread_id: str = Field(pattern=THREAD_ID_PATTERN)
     text: str = ""
     attachments: list[str] = Field(default_factory=list)
     retract_seqs: list[int] = Field(default_factory=list)
     sent_at: str | None = None
+
+
+class ThreadSummary(BaseModel):
+    """One row of the chat list: what the drawer shows for a chat. Everything
+    but the id is derived from the chat's stored rows when the list is asked
+    for (db.py ``thread_list``), so it can never disagree with them."""
+
+    id: str
+    title: str  # the first user text, trimmed, or "New chat"
+    preview: str  # one line for the newest row that draws something
+    updated: str  # ISO-8601 time of that row, or when the chat was made
+    unread: int  # replies that draw a bubble, not yet on screen
 
 
 class PublishRequest(BaseModel):

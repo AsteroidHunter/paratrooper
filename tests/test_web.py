@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import threading
 
 import pytest
@@ -242,6 +243,16 @@ def test_default_window_is_seven_seconds():
     assert DEFAULT_WINDOW == 7.0
 
 
+def _push_text(payload):
+    """The words a push carries. A push from any chat but the default one also
+    names its chat (tests/test_threads.py), so the words are read out of that."""
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return payload
+    return data["body"] if isinstance(data, dict) else payload
+
+
 def _relay_state(tmp_path, coord):
     """AppState trimmed to what _relay_result touches (no render -> the
     suspend machinery short-circuits before ever reaching the queue)."""
@@ -332,7 +343,7 @@ def test_concurrent_terminal_pushes_keep_each_thread_and_job_payload_isolated(
     sent = []
 
     def record_send(_subscription, payload, _cfg):
-        sent.append(payload)
+        sent.append(_push_text(payload))
         return True
 
     monkeypatch.setattr(push, "send_push", record_send)
@@ -461,7 +472,7 @@ def test_slow_push_does_not_block_the_next_threads_terminal(tmp_path, monkeypatc
     release_push = threading.Event()
 
     def send(_subscription, payload, _cfg):
-        if payload == "slow reply":
+        if _push_text(payload) == "slow reply":
             push_started.set()
             assert release_push.wait(timeout=1)
         return True
@@ -677,7 +688,7 @@ def _presence_probe(tmp_path, monkeypatch):
     monkeypatch.setenv("VAPID_SUBJECT", "mailto:push@example.test")
     sent: list = []
     monkeypatch.setattr(
-        push, "send_push", lambda _sub, payload, _cfg: sent.append(payload) or True
+        push, "send_push", lambda _sub, payload, _cfg: sent.append(_push_text(payload)) or True
     )
     state = _relay_state(tmp_path, object())
     state.store.add_subscription("https://push.example/device", '{"endpoint":"x"}')
@@ -810,8 +821,12 @@ def test_the_relay_hands_the_push_the_results_own_thread(tmp_path, monkeypatch):
     _run(scenario())
     assert sent == ["sent"]  # the thread he is reading is the only one held back
     # the reply itself still reached the socket both times: this is the banner,
-    # not the message
-    assert [f["payload"] for f in reading.sent] == ["held"]
+    # not the message. The other chat's reply reaches it only as the chat
+    # list's nudge, never as a message.
+    assert [f["payload"] for f in reading.sent if "seq" in f] == ["held"]
+    assert [f for f in reading.sent if "seq" not in f] == [
+        {"kind": "threads", "thread_id": "elsewhere"}
+    ]
 
 
 def test_the_freshness_window_is_two_client_keepalives_plus_margin():

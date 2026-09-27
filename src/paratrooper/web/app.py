@@ -51,6 +51,7 @@ from redis import exceptions as redis_exc
 
 from ..agent.config import Config, ConfigError, app_token, load_config
 from . import push
+from .agents import WORKER, agent_for_thread
 from .auth import require_token, verify_token
 from .batching import ThreadCoordinator
 from .db import ThreadStore, ThumbMeta
@@ -62,12 +63,14 @@ from .headers import (
 )
 from .inbox import InboxStore, RedisInbox, new_key
 from .models import (
+    DEFAULT_THREAD_ID,
     EVENT_POLICY,
     JobMessage,
     PublishRequest,
     ResultMessage,
     SendRequest,
     ThreadEvent,
+    ThreadSummary,
     UploadResponse,
 )
 from .publish import (
@@ -404,7 +407,9 @@ async def _enqueue_job(
     job = JobMessage(
         job_id=job_id, thread_id=thread_id, text=text, attachments=attachments, context=context
     )
-    await state.queue.enqueue(job)
+    # which agent answers this chat is decided in one place (agents.py)
+    route = agent_for_thread(thread_id, state.queue)
+    await route.enqueue(job)
     # durable marker: every user message at/below this seq is covered by a job,
     # so boot-recovery knows exactly what a restart swallowed
     marker = ThreadEvent(
@@ -414,9 +419,17 @@ async def _enqueue_job(
     # and broadcast it: the Read flip derives from this row, and a client that
     # misses it live never gets it again (reconnect replay starts past its seq)
     await _send_to_sockets(state, thread_id, {"seq": seq, **marker.model_dump()})
-    if state.render:  # wake the worker; the job waits durably in the list meanwhile
+    # wake the worker; the job waits durably in the list meanwhile. The sleep
+    # and wake machinery is the worker's own, so only its route touches it.
+    if state.render and route.name == WORKER:
         _cancel_linger(state)  # new work: a pending suspend countdown must not fire now
         await state.render.resume_worker()
+
+
+async def _interrupt_job(state: AppState, thread_id: str, job_id: str) -> None:
+    """Stop a running job (STOP, or a newer message superseding it), sent to
+    the agent that answers the chat, like the job itself was."""
+    await agent_for_thread(thread_id, state.queue).interrupt(thread_id, job_id)
 
 
 async def recover_unprocessed(state: AppState) -> int:
@@ -568,6 +581,30 @@ async def _send_to_sockets(state: AppState, thread_id: str, data: dict) -> None:
             state.sockets.get(thread_id, set()).discard(ws)
 
 
+# The nudge: sockets are opened per chat, so a phone showing one chat never
+# sees the frames of another. When a reply lands in one chat, every socket open
+# on a different chat is told which chat has news, and the phone refreshes its
+# chat list (the header button's count, the drawer's dots). No ``seq`` on it, so
+# a build from before chats existed drops it the way it drops any keyless frame
+# it does not know.
+NUDGE_KIND = "threads"
+
+
+async def _nudge_other_chats(state: AppState, thread_id: str) -> None:
+    for other in [t for t in state.sockets if t != thread_id]:
+        await _send_to_sockets(state, other, {"kind": NUDGE_KIND, "thread_id": thread_id})
+
+
+def _push_payload(thread_id: str, text: str) -> str:
+    """The push body, naming its chat. The default chat's is the plain text it
+    was before there were chats, so a phone whose service worker predates them
+    still shows it right; any other chat exists only once the new build (and
+    its worker) has run, and sends the chat along for the tap to open."""
+    if thread_id == DEFAULT_THREAD_ID:
+        return text
+    return json.dumps({"body": text, "thread": thread_id})
+
+
 async def _maybe_push(state: AppState, thread_id: str, kind: str, payload: object = None) -> None:
     """Deliver one notifying result without doing database work in send threads."""
     cfg = push.config()
@@ -588,8 +625,9 @@ async def _maybe_push(state: AppState, thread_id: str, kind: str, payload: objec
     # stop awaiting a thread but cannot stop the thread itself; keeping all
     # store access on the event-loop task makes shutdown safe to close SQLite.
     subscriptions = state.store.subscriptions()
+    body = _push_payload(thread_id, text)
     results = await asyncio.gather(
-        *(asyncio.to_thread(push.send_push, sub, text, cfg) for sub in subscriptions),
+        *(asyncio.to_thread(push.send_push, sub, body, cfg) for sub in subscriptions),
         return_exceptions=True,
     )
     for sub, result in zip(subscriptions, results, strict=True):
@@ -672,6 +710,12 @@ async def _relay_result(state: AppState, thread_id: str, result: ResultMessage) 
     # broadcast the STORED event (+seq so clients advance their
     # catch-up cursor on live pushes) — replay re-sends this frame
     await _send_to_sockets(state, thread_id, {"seq": seq, **event.model_dump()})
+    if policy.unread:
+        # the chat on screen has just had this put in front of the reader; a
+        # chat that is not is news for the phone's chat list
+        if _on_screen(state, thread_id) is not None:
+            state.store.mark_read(thread_id, seq)
+        await _nudge_other_chats(state, thread_id)
     if policy.terminal:
         # Release the job before any notification work. A Redis failure while
         # checking whether to arm the idle timer still propagates so the relay
@@ -744,7 +788,7 @@ def _lifespan(injected: AppState | None, _config: Config | None = None):
             await _enqueue_job(app.state.app_state, thread_id, job_id, text, attachments)
 
         async def interrupt_cb(thread_id, job_id):
-            await queue.publish_interrupt(thread_id, job_id)
+            await _interrupt_job(app.state.app_state, thread_id, job_id)
 
         coordinator = ThreadCoordinator(enqueue_cb, interrupt_cb)
         state = AppState(
@@ -938,6 +982,18 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         meta = await asyncio.to_thread(_page_meta, st().store, rows)
         return {"messages": [_frame(seq, m, meta) for seq, m in rows]}
 
+    @app.get("/api/threads", dependencies=[Depends(require_token)])
+    async def threads() -> dict:
+        """The chat list, newest activity first (db.py ``thread_list``)."""
+        rows = await asyncio.to_thread(st().store.thread_list)
+        return {"threads": [r.model_dump() for r in rows]}
+
+    @app.post("/api/threads", dependencies=[Depends(require_token)])
+    async def new_thread() -> ThreadSummary:
+        """Make a new, empty chat. The id is minted here, never by the phone,
+        so it is always one the channel names can carry."""
+        return await asyncio.to_thread(st().store.create_thread)
+
     @app.get("/api/history/{thread_id}", dependencies=[Depends(require_token)])
     async def history(thread_id: str, before: int, limit: int = 50) -> dict:
         """One older page for pull-down-at-top (oldest-first, like the socket)."""
@@ -1099,7 +1155,7 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         if not verify_token(token):
             await websocket.close(code=4401)
             return
-        thread_id = websocket.query_params.get("thread", "default")
+        thread_id = websocket.query_params.get("thread", DEFAULT_THREAD_ID)
         since = int(websocket.query_params.get("since", "0"))
         await websocket.accept()
         state = st()
@@ -1125,6 +1181,10 @@ def create_app(injected: AppState | None = None) -> FastAPI:
                 frame = await websocket.receive_text()
                 if frame == PRESENCE_PING:
                     _note_presence(state, thread_id, websocket, on_screen=True)
+                    # on screen is read: the chat list's unread count for this
+                    # chat goes to nothing (one indexed read, a write only when
+                    # something was actually unread)
+                    await asyncio.to_thread(state.store.mark_read_to_end, thread_id)
                 elif frame == PRESENCE_AWAY:
                     _note_presence(state, thread_id, websocket, on_screen=False)
         except WebSocketDisconnect:
