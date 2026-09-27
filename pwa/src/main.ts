@@ -5713,6 +5713,8 @@ const MORPH_CORNER_PROPS = [
 ] as const;
 
 function armFieldMorph(textEl: HTMLTextAreaElement): FieldMorph | null {
+  // a big-emoji send has no bubble for the bar to become: its glyphs fly instead
+  if (isJumboEmoji(textEl.value)) return armGlyphMorph(textEl);
   const field = document.querySelector(".field");
   if (!field) return null;
   const barRect = field.getBoundingClientRect();
@@ -5863,6 +5865,108 @@ function tailShell(): HTMLDivElement {
     el.appendChild(face);
   }
   return el;
+}
+
+// --- the big-emoji send: the glyphs fly, not the bar ---------------------------
+// A message of 1 to 3 emoji lands with no bubble (styles.css .msg.jumbo), so the
+// bar morph above has nothing to become: it would turn the pill into an accent
+// bubble and then, on the landing frame, hand over to a row with no fill at all.
+// What travels instead is what the reader is looking at, the glyphs themselves.
+// They are copied into one fixed element standing exactly over where they were
+// typed, at the typed size, before the collapse clears the box (armFieldMorph's
+// arm point in send, so the order is the bar morph's own), and at launch they
+// rise into the seat on the send's beat and curve while a uniform scale grows
+// them from the typed size to the landed one. A uniform scale is honest here in
+// a way it is not for the bar: glyphs have no corners to squash. The shell is
+// laid out once at the landed size and width, so the landing frame is the row's
+// own layout, and the real row holds its seat hidden until that frame, exactly
+// as it does under the bar morph. Fixed and in <body> for the bar morph's
+// reason: the thread clips its children at its box, so nothing inside it could
+// start over the compose bar.
+function armGlyphMorph(textEl: HTMLTextAreaElement): FieldMorph {
+  const box = textEl.getBoundingClientRect();
+  const cs = getComputedStyle(textEl);
+  const padL = parseFloat(cs.paddingLeft) || 0;
+  const padR = parseFloat(cs.paddingRight) || 0;
+  const typedSize = parseFloat(cs.fontSize) || 17;
+  const typedLine = parseFloat(cs.lineHeight) || typedSize * 1.35;
+  // the typed glyphs' corner: the box's padding corner, less its own inner scroll
+  const from = {
+    left: box.left + padL,
+    top: box.top + (parseFloat(cs.paddingTop) || 0) - textEl.scrollTop,
+  };
+  const shell = document.createElement("div");
+  shell.className = "glyphflight";
+  shell.textContent = textEl.value.trim();
+  shell.style.fontSize = `${typedSize}px`;
+  shell.style.lineHeight = `${typedLine}px`;
+  shell.style.width = `${Math.max(box.width - padL - padR, 0)}px`;
+  shell.style.transform = `translate(${from.left}px, ${from.top}px)`;
+  document.body.appendChild(shell);
+  holdDiagRecord("flight", { phase: "glyph-arm" });
+  let raf = 0;
+  let up = false;
+  const settle = (msg: HTMLElement, phase: string): void => {
+    msg.style.removeProperty("opacity");
+    if (!msg.getAttribute("style")) msg.removeAttribute("style");
+    shell.remove();
+    holdDiagRecord("flight", { phase });
+    flightSettled();
+  };
+  return {
+    launched: () => up,
+    cancel(): void {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      shell.remove(); // never launched: nothing hidden, nothing airborne
+    },
+    launch(msg: HTMLElement): void {
+      up = true;
+      const ms = getComputedStyle(msg);
+      const size = parseFloat(ms.fontSize) || typedSize;
+      const line = parseFloat(ms.lineHeight) || size * 1.2;
+      const inL = parseFloat(ms.paddingLeft) || 0;
+      const inT = parseFloat(ms.paddingTop) || 0;
+      const seat0 = msg.getBoundingClientRect();
+      // the landed layout, once: the size, the line and the width the row has
+      shell.style.fontSize = `${size}px`;
+      shell.style.lineHeight = `${line}px`;
+      shell.style.width = `${Math.max(seat0.width - inL - (parseFloat(ms.paddingRight) || 0), 0)}px`;
+      const s0 = typedSize / size;
+      // the shrunk first line starts on the typed line's middle
+      const start = { left: from.left, top: from.top + typedLine / 2 - (line * s0) / 2 };
+      const place = (x: number, y: number, k: number): void => {
+        shell.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) scale(${k.toFixed(4)})`;
+      };
+      place(start.left, start.top, s0); // this frame: the glyphs where they were typed
+      msg.style.opacity = "0"; // the shell IS the message until it lands
+      flightsUp++;
+      holdDiagRecord("flight", {
+        phase: "glyph-launch",
+        dx: Math.round((seat0.left + inL - start.left) * 10) / 10,
+        dy: Math.round((seat0.top + inT - start.top) * 10) / 10,
+        s0: Math.round(s0 * 1000) / 1000,
+      });
+      const t0 = performance.now();
+      const step = (now: number): void => {
+        raf = 0;
+        if (!msg.isConnected) return settle(msg, "glyph-cancel"); // replay/teardown took the seat
+        const f = Math.min((now - t0) / FLIGHT_MS, 1);
+        const p = flightEase(f);
+        // re-read every frame: a second send's pin or a reply landing moves the seat
+        const seat = msg.getBoundingClientRect();
+        place(
+          start.left + (seat.left + inL - start.left) * p,
+          start.top + (seat.top + inT - start.top) * p,
+          s0 + (1 - s0) * p,
+        );
+        if (f < 1) raf = requestAnimationFrame(step);
+        // the landed frame paints once, then the swap (the bar morph's rule)
+        else raf = requestAnimationFrame(() => settle(msg, "glyph-finish"));
+      };
+      raf = requestAnimationFrame(step);
+    },
+  };
 }
 
 // --- the photo send morph: the picked squares leave the strip -----------------

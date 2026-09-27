@@ -200,3 +200,69 @@ describe("styles.css: a big emoji has no bubble and no tail", () => {
     expect(jumbo).toBeGreaterThan(css.indexOf(".msg.error {"));
   });
 });
+
+describe("the big-emoji send: its glyphs fly, not the bar (armGlyphMorph)", () => {
+  it("armFieldMorph hands a big-emoji value over before it builds the bar's shell", () => {
+    const body = fnBody("armFieldMorph");
+    const hand = body.indexOf("if (isJumboEmoji(textEl.value)) return armGlyphMorph(textEl);");
+    expect(hand).toBeGreaterThan(-1);
+    expect(hand).toBeLessThan(body.indexOf('document.querySelector(".field")'));
+  });
+
+  it("send and flyFromField are untouched: the glyph flight rides the bar morph's arm point and launch", () => {
+    const send = fnBody("send");
+    expect(send).toContain("text ? armFieldMorph(textEl) : null");
+    expect(send.indexOf("armFieldMorph(")).toBeLessThan(send.indexOf("collapseBar();"));
+    expect(send).not.toContain("armGlyphMorph");
+    expect(fnBody("flyFromField")).not.toContain("armGlyphMorph");
+  });
+
+  it("the glyphs stand where they were typed, measured before the collapse clears the box", () => {
+    const glyph = fnBody("armGlyphMorph");
+    expect(glyph).toContain("textEl.getBoundingClientRect()");
+    expect(glyph).toContain("textEl.scrollTop");
+    expect(glyph).toContain('shell.className = "glyphflight"');
+    expect(glyph).toContain("document.body.appendChild(shell)");
+  });
+
+  it("flies on the send's own beat and curve, re-reading the seat every frame", () => {
+    const glyph = fnBody("armGlyphMorph");
+    expect(glyph).toContain("FLIGHT_MS");
+    expect(glyph).toContain("const p = flightEase(f);");
+    const step = glyph.slice(glyph.indexOf("const step = "));
+    expect(step).toContain("msg.getBoundingClientRect()");
+    expect(step).toContain("s0 + (1 - s0) * p");
+    expect(step).toContain("requestAnimationFrame(step)");
+    // every frame is one transform write: the translate and the scale together
+    expect(glyph).toMatch(/shell\.style\.transform = `translate\(.*\) scale\(\$\{/);
+  });
+
+  it("grows by a uniform scale from the typed size: glyphs have no corners to distort", () => {
+    const glyph = fnBody("armGlyphMorph");
+    expect(glyph).toMatch(/const s0 = typedSize \/ size;/);
+    expect(glyph).not.toContain("scaleX");
+    expect(glyph).not.toContain("scaleY");
+  });
+
+  it("the real row is hidden until the landing, then handed back clean, and the flight is counted", () => {
+    const glyph = fnBody("armGlyphMorph");
+    expect(glyph).toContain('msg.style.opacity = "0"');
+    expect(glyph).toContain('msg.style.removeProperty("opacity")');
+    expect(glyph).toContain("flightsUp++");
+    expect(glyph).toContain("flightSettled()");
+    expect(glyph).toContain("if (!msg.isConnected)");
+    expect(glyph).toContain("shell.remove()");
+  });
+
+  it("has no bubble face of any kind, in flight or at the landing", () => {
+    const glyph = fnBody("armGlyphMorph");
+    expect(glyph).not.toContain("morph-face");
+    expect(glyph).not.toContain("tailShell");
+    const body = rule(".glyphflight");
+    expect(body).not.toMatch(/background/);
+    expect(body).toMatch(/position:\s*fixed/);
+    expect(body).toMatch(/pointer-events:\s*none/);
+    expect(body).toMatch(/transform-origin:\s*0 0/);
+    expect(body).toMatch(/white-space:\s*pre-wrap/);
+  });
+});

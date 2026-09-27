@@ -1770,6 +1770,22 @@ html, body {
   word-wrap: break-word;
   opacity: 0;
 }
+/* The big-emoji send's flight (main.ts armGlyphMorph): the glyphs alone, no
+   face, no tail, in one fixed box over everything for .morph's reason. Placed
+   and grown by a transform written each frame from the top left corner, which
+   is the corner the landed row's text starts at. */
+.glyphflight {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 7;
+  transform-origin: 0 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  color: var(--text);
+  pointer-events: none;
+  will-change: transform;
+}
 
 /* The picked photos in flight (main.ts armShotMorph). A sheet over the whole
    screen for the reason .morph is one: the thread clips its children at its
