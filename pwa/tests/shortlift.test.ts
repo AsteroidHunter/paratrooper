@@ -26,7 +26,7 @@
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { beforeAll, describe, expect, it } from "vitest";
-import { closingListLift, padShift } from "../src/viewport";
+import { closingListLift, padShift, threadCoasting } from "../src/viewport";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
@@ -212,6 +212,12 @@ function harness(rowHeights: number[]) {
     laidOutRows: () => rows(),
     closingListLift,
     padShift,
+    // the landing's motion gate (coastpad.test.ts owns it): nothing here
+    // scrolls under a finger or a glide, so every landing finds the thread at rest
+    threadCoasting,
+    threadTouching: false,
+    lastScrollAt: 0,
+    performance: { now: () => 0 },
     springDirty: false,
     springReseat: () => {},
     scrollGhostWrite: () => {},
@@ -598,7 +604,7 @@ describe("wiring", () => {
     expect(call).toBeLessThan(apply.indexOf('appEl.classList.toggle("kb", t.kb);'));
     expect(call).toBeLessThan(apply.indexOf('appEl.style.setProperty("--kb-inset"'));
     expect(main).toMatch(
-      /watchLiftEdge\(\(edge\) => \{\n\s*if \(edge === "open"\) aimListLift\(\);\n\s*else if \(edge === "close"\) reaimListLift\(\);\n\s*else retimeListLift\(\);\n\}\);/,
+      /watchLiftEdge\(\(edge\) => \{\n\s*parkedPad = null;[^\n]*\n\s*if \(edge === "open"\) aimListLift\(\);\n\s*else if \(edge === "close"\) reaimListLift\(\);\n\s*else retimeListLift\(\);\n\}\);/,
     );
     // and again, first, when a later report changes the keyboard's height
     expect(apply).toMatch(/onLiftEdge\?\.\("retime"\);\n\s*retimeLift\(inset\);/);

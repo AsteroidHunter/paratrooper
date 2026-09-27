@@ -239,6 +239,30 @@ export function padShift(scrollTop: number, delta: number): number {
   return Math.max(0, scrollTop + delta);
 }
 
+// Whether the reader's own motion owns the thread's scroll right now, which is
+// the other place, besides a keyboard edge, where the pad's write must not go.
+//
+// He flicks the thread and taps the compose field while it is still gliding.
+// The tap lands outside the scroller, so the glide runs on under the keyboard
+// and the lift, and the lift's landing arrives in the middle of it. Mid-glide
+// the offset is the phone's to set: the page reads one that trails the screen,
+// so "the offset plus the change" is written from a stale number and the view
+// jolts back by the lag, and iOS 26 and earlier stop the momentum dead on any
+// script write to the scroller. A finger resting on the thread is the same
+// case: WebKit puts the old offset back on the next touchmove (bug 310358).
+// That was the jagged motion (his report, 2026-09-26).
+//
+// So the landing parks the pad while this reads true, and the glide boundary
+// the older-history insert already waits for lands it (main.ts landParkedPad).
+// The quiet window is that insert's own: no scroll event for this long and no
+// finger down. lastScrollAt 0 is the rest mark scrollend and the quiet debounce
+// leave, so it reads as rest at any page age.
+export const GLIDE_QUIET_MS = 140;
+
+export function threadCoasting(touching: boolean, lastScrollAt: number, now: number): boolean {
+  return touching || (lastScrollAt > 0 && now - lastScrollAt < GLIDE_QUIET_MS);
+}
+
 // The list's share of the lift, asked again at the CLOSE (and before a later
 // report re-times the lift at a new keyboard height, main.ts retimeListLift).
 //

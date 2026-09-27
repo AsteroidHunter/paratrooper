@@ -39,7 +39,7 @@ import { FOLD_SLOP_PX, scrollFix } from "../src/photofit";
 import { springCreditsReader, springTakesCoastBack } from "../src/springown";
 import { TUNING, createSpringField, relaxLag, windowBounds } from "../src/springscroll";
 import type { SpringField } from "../src/springscroll";
-import { padShift } from "../src/viewport";
+import { GLIDE_QUIET_MS, padShift, threadCoasting } from "../src/viewport";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 
@@ -237,6 +237,7 @@ function harness(options: HarnessOptions = {}) {
     scrollFix,
     FOLD_SLOP_PX,
     padShift,
+    threadCoasting,
     createSpringField: field,
     createEndSpring,
     springCreditsReader,
@@ -355,6 +356,13 @@ function harness(options: HarnessOptions = {}) {
       return rows.filter((r) => r.top + r.height >= lo && r.top <= hi).map((r) => r.seq);
     },
     translated: () => rows.filter((r) => r.style.translate !== undefined).length,
+    /** the finger leaves the glass, through the app's own release (endPeek) */
+    release: () => {
+      context.threadTouching = false;
+      call<[]>("liftSpring")();
+    },
+    /** a glide boundary: the app's own lander for a padding parked mid-motion */
+    boundary: () => call<[]>("landParkedPad")(),
   };
 }
 
@@ -374,6 +382,13 @@ function drag(h: Harness, frames: number, pxPerMs: number, fingerY = 500): numbe
     h.tick();
   }
   return fingerY;
+}
+
+// The thread at rest, as the glide boundary reads it: no scroll event for the
+// whole quiet window, with the frames still running so the springs relax
+// through it the way they would on the phone.
+function quiet(h: Harness): void {
+  for (let i = 0; i < Math.ceil(GLIDE_QUIET_MS / FRAME); i++) h.tick();
 }
 
 // ---------------------------------------------------------------------------
@@ -497,23 +512,37 @@ describe("a photo's box changing shape while a finger is on the glass", () => {
 });
 
 describe("the keyboard's reachability padding", () => {
-  it("the open lands with the hold-off on, so there is nothing armed to carry", () => {
+  // The landing never writes under a finger or into a glide (coastpad.test.ts
+  // owns that rule): it parks, and the glide boundary lands it once the thread
+  // is at rest. What these cases keep asking is what the write owes the springs
+  // when it does land, and that the motion it waited out was left alone.
+  it("the open that lands under a finger waits for the release, then lands with nothing armed", () => {
     const h = harness();
     h.park(1400);
     h.keyboard(true); // shell.ts applies .kb at the viewport's own edge
     drag(h, 4, 0.5); // a finger cannot arm through the hold-off
     expect(h.field().armed()).toBe(false);
     const before = h.wroteAt();
+    const scrollBefore = h.thread.scrollTop;
 
-    h.liftPad(LIFT_PAD); // the open's landing (shell.ts watchLiftLanding)
+    h.liftPad(LIFT_PAD); // the open's landing (shell.ts watchLiftLanding), finger down
 
+    expect(h.thread.scrollTop).toBe(scrollBefore); // parked: nothing written
+    expect(h.wroteAt()).toBe(before);
+    expect(h.reseats).toEqual([]);
+
+    h.release();
+    quiet(h);
+    h.boundary();
+
+    expect(h.thread.scrollTop).toBe(scrollBefore + LIFT_PAD);
     expect(h.wroteAt()).toBeGreaterThan(before); // declared all the same
     expect(h.reseats).toEqual([LIFT_PAD]);
     expect(h.field().armed()).toBe(false);
     expect(h.field().displacements().size).toBe(0);
   });
 
-  it("the close lands with the hold-off already gone, and holds the reader's row", () => {
+  it("the close that lands mid-drag leaves the drag alone, and lands at rest holding the reader's row", () => {
     const h = harness();
     h.park(1400);
     h.keyboard(true);
@@ -523,24 +552,14 @@ describe("the keyboard's reachability padding", () => {
     expect(h.field().armed()).toBe(true);
     const steady = h.field().lag();
     expect(Math.abs(steady)).toBeGreaterThan(15);
-    const anchor = h.atFold();
-    const seenBefore = h.seen(anchor);
-    const worstBefore = h.worstRow();
     const scrollBefore = h.thread.scrollTop;
     h.reseats.length = 0;
 
-    h.liftPad(0); // the close's landing, mid-drag
+    h.liftPad(0); // the close's landing, mid-drag: parked
 
-    expect(h.thread.scrollTop).toBe(scrollBefore - LIFT_PAD);
-    expect(h.seen(anchor)).toBe(seenBefore); // nothing on screen moved
-    expect(h.reseats).toEqual([-LIFT_PAD]);
-
-    h.scrolled();
-    h.tick();
-    expect(h.field().lag()).toBeCloseTo(relaxLag(steady, 0, FRAME), 6);
-    expect(h.worstRow()).toBeLessThanOrEqual(worstBefore);
-    expect(h.moving()).toEqual(h.inWindow()); // and on the seats they are at now
-    // the drag carries on through it as one gesture
+    expect(h.thread.scrollTop).toBe(scrollBefore);
+    expect(h.reseats).toEqual([]);
+    // the drag carries on through it as one gesture, with nothing written into it
     let y = finger;
     for (let i = 0; i < 5; i++) {
       h.thread.scrollTop += 0.5 * FRAME;
@@ -550,25 +569,48 @@ describe("the keyboard's reachability padding", () => {
       h.tick();
       expect(h.worstRow()).toBeLessThanOrEqual(Math.abs(steady) + 1);
     }
+    expect(h.reseats).toEqual([]);
+
+    h.release();
+    quiet(h);
+    const anchor = h.atFold();
+    const seenBefore = h.seen(anchor);
+    const scrollAt = h.thread.scrollTop;
+    const worstBefore = h.worstRow();
+
+    h.boundary(); // the padding comes off now
+
+    expect(h.thread.scrollTop).toBe(scrollAt - LIFT_PAD);
+    expect(h.seen(anchor)).toBe(seenBefore); // nothing on screen moved
+    expect(h.reseats).toEqual([-LIFT_PAD]);
+    h.scrolled();
+    h.tick();
+    expect(h.worstRow()).toBeLessThanOrEqual(worstBefore);
+    expect(h.moving()).toEqual(h.inWindow().filter((seq) => h.moving().includes(seq)));
   });
 
-  it("declared but not reseated, the close's padding throws the rows", () => {
-    // SYNTHETIC COUNTERFACTUAL, as above
+  it("declared but not reseated, the close's padding still throws the rows at the boundary", () => {
+    // SYNTHETIC COUNTERFACTUAL, as above: the reseat thrown away. The landing
+    // now waits the motion out, and by the boundary the rows are home, but the
+    // field is still armed from the gesture, so a write it is not told about
+    // still reads as one frame of travel. The reseat is owed there too.
     const deaf = harness({ deaf: true });
     deaf.park(1400);
     deaf.keyboard(true);
     deaf.liftPad(LIFT_PAD);
     deaf.keyboard(false);
     drag(deaf, 8, 0.5);
-    const steady = deaf.field().lag();
-    const worstBefore = deaf.worstRow();
+    expect(Math.abs(deaf.field().lag())).toBeGreaterThan(15);
 
-    deaf.liftPad(0);
+    deaf.liftPad(0); // parked under the finger
+    deaf.release();
+    quiet(deaf);
+    expect(deaf.worstRow()).toBeLessThan(1); // home before the write
+    deaf.boundary();
     deaf.scrolled();
     deaf.tick();
 
-    expect(Math.abs(deaf.field().lag())).toBeGreaterThan(Math.abs(steady) * 3);
-    expect(deaf.worstRow()).toBeGreaterThan(worstBefore * 2);
+    expect(deaf.worstRow()).toBeGreaterThan(15);
   });
 
   it("announces the delta the scroller took when the range runs out", () => {
@@ -582,20 +624,22 @@ describe("the keyboard's reachability padding", () => {
     h.keyboard(false); // .kb off at the edge; the close's landing is still to come
     const finger = drag(h, 4, -0.4);
     expect(finger).toBeGreaterThan(500);
-    const steady = h.field().lag();
-    expect(Math.abs(steady)).toBeGreaterThan(5);
+    h.liftPad(0); // mid-drag: parked
+    h.release();
+    quiet(h);
     const scrollBefore = h.thread.scrollTop;
     expect(scrollBefore).toBeLessThan(LIFT_PAD);
+    const lagBefore = h.field().lag();
     h.reseats.length = 0;
 
-    h.liftPad(0);
+    h.boundary();
 
     expect(h.thread.scrollTop).toBe(0);
     expect(h.reseats).toEqual([-scrollBefore]); // not the -300 asked for
     h.scrolled();
     h.tick();
-    // and the difference is not injected as motion either: the lag relaxes
-    expect(h.field().lag()).toBeCloseTo(relaxLag(steady, 0, FRAME), 6);
+    // and the difference is not injected as motion either
+    expect(Math.abs(h.field().lag())).toBeLessThanOrEqual(Math.abs(lagBefore) + 1e-9);
   });
 });
 
@@ -632,11 +676,16 @@ describe("both pins as main.ts ships them: the switch is off", () => {
     h.park(1400);
     h.keyboard(false);
     drag(h, 8, 0.5);
+    const held = h.thread.scrollTop;
+    h.liftPad(0); // the close's landing, under the finger: parked
+    expect(h.thread.scrollTop).toBe(held);
+    h.release();
+    quiet(h);
     const anchor = h.atFold();
     const seenBefore = h.seen(anchor);
     const scrollBefore = h.thread.scrollTop;
 
-    h.liftPad(0); // the close's landing: the padding comes off
+    h.boundary(); // the padding comes off at the glide boundary
     h.scrolled();
     h.tick();
 
