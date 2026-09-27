@@ -134,6 +134,7 @@ import { springCreditsReader, springTakesCoastBack } from "./springown";
 import { createSpringField } from "./springscroll";
 import { seatBefore } from "./sendorder";
 import type { Standing } from "./sendorder";
+import { fmtStampDay, fmtTime, stampReads } from "./stamplabel";
 import { afterSocketClose, createTokenGate } from "./tokengate";
 import type { Fetcher, TokenGate } from "./tokengate";
 import {
@@ -3563,24 +3564,8 @@ function autosize(typed = false): void {
 // out-of-order inserts need no save/restore dance.
 const STAMP_GAP_MS = 60 * 60_000;
 
-function fmtTime(ms: number): string {
-  return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-}
-
-function fmtStampDay(ms: number): string {
-  const d = new Date(ms);
-  const now = new Date();
-  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  const days = Math.round((startOf(now) - startOf(d)) / 86_400_000);
-  if (days <= 0) return "Today";
-  if (days === 1) return "Yesterday";
-  if (days < 7) return d.toLocaleDateString([], { weekday: "long" });
-  return d.toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-    year: d.getFullYear() === now.getFullYear() ? undefined : "numeric",
-  });
-}
+// the row and stamp labels: stamplabel.ts (formatters built once, and the
+// check that spares a stamp already reading right from being rebuilt)
 
 // entrance animation + smooth scroll are for LIVE messages only; a reconnect
 // replaying fifty bubbles must not pop each one
@@ -3774,10 +3759,19 @@ function decorate(): void {
         stamp = document.createElement("div");
         stamp.className = "stamp";
       }
-      const day = document.createElement("b");
-      day.textContent = fmtStampDay(at);
-      stamp.replaceChildren(day, ` ${fmtTime(at)}`);
-      w.prepend(stamp);
+      // rebuilt and re-seated only when it is actually wrong: this fold runs
+      // over every wrapper on every applied frame, and rewriting a stamp that
+      // already reads right, or moving it to where it already stands, is a DOM
+      // mutation per stamp per frame for a picture that does not change
+      // (stamplabel.ts stampReads; the motion rig measured the page insert)
+      const dayText = fmtStampDay(at);
+      const timeText = ` ${fmtTime(at)}`;
+      if (!stampReads(stamp, dayText, timeText)) {
+        const day = document.createElement("b");
+        day.textContent = dayText;
+        stamp.replaceChildren(day, timeText);
+      }
+      if (w.firstChild !== stamp) w.prepend(stamp);
       // a stamp born on a LIVE arrival enters like the bubble it rides above
       // (the .anim row): the same fade-up the send path gives its newborn
       // stamp, so a reply that opens a new hour never pops. Replay, history
