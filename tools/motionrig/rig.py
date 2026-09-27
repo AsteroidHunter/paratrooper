@@ -930,23 +930,24 @@ def table(summary: dict[str, dict[str, float]]) -> str:
 
 
 def compare(a_path: Path, b_path: Path) -> None:
+    """Two summaries side by side: every column is before -> after (medians)."""
     a = json.loads(a_path.read_text())["summary"]
     b = json.loads(b_path.read_text())["summary"]
-    print(
-        "| flow | slow frames | longest frame ms | forced layouts | forced layout ms | long tasks |"
-    )
-    print("|---|---|---|---|---|---|")
+    cols = [
+        ("slow frames", "slow_frames", "{:.0f}"),
+        ("longest frame ms", "longest_frame_ms", "{:.0f}"),
+        ("long tasks", "long_tasks", "{:.0f}"),
+        ("longest task ms", "longest_task_ms", "{:.0f}"),
+        ("forced layout ms", "forced_layout_ms", "{:.1f}"),
+        ("dropped", "dropped", "{:.0f}"),
+    ]
+    print("| flow | " + " | ".join(c[0] for c in cols) + " |")
+    print("|---|" + "---|" * len(cols))
     for flow in a:
         if flow not in b:
             continue
-        x, y = a[flow], b[flow]
-        print(
-            f"| {flow} | {x['slow_frames']:.0f} -> {y['slow_frames']:.0f} "
-            f"| {x['longest_frame_ms']:.0f} -> {y['longest_frame_ms']:.0f} "
-            f"| {x['forced_layouts']:.0f} -> {y['forced_layouts']:.0f} "
-            f"| {x['forced_layout_ms']:.1f} -> {y['forced_layout_ms']:.1f} "
-            f"| {x['long_tasks']:.0f} -> {y['long_tasks']:.0f} |"
-        )
+        cells = [f"{fmt.format(a[flow][k])} -> {fmt.format(b[flow][k])}" for _, k, fmt in cols]
+        print(f"| {flow} | " + " | ".join(cells) + " |")
 
 
 async def main_async(args: argparse.Namespace) -> None:
