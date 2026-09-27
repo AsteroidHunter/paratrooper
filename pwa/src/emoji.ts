@@ -78,3 +78,119 @@ export function isJumboEmoji(text: string): boolean {
   const n = emojiCount(text);
   return n >= 1 && n <= JUMBO_MAX;
 }
+
+// --- the picker's data and its two list rules (emojipicker.ts draws them) -----
+// A curated static grid, not the full emoji set: a few rows of what a chat
+// about a website actually uses, in groups of whole eight-wide rows, and no
+// library or network behind it. Every cell is a single emoji by the rule above
+// (a test holds it), so a pick on its own is always a big emoji.
+
+export interface EmojiGroup {
+  name: string;
+  emoji: readonly string[];
+}
+
+export const EMOJI_GROUPS: readonly EmojiGroup[] = [
+  {
+    name: "Smileys",
+    emoji: [
+      "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣",
+      "🙂", "😉", "😊", "😇", "🥰", "😍", "🤩", "😘",
+      "😋", "😜", "🤪", "🤗", "🤔", "🫡", "🤨", "😐",
+      "🙄", "😏", "😬", "😌", "😴", "😎", "🤓", "🥳",
+    ],
+  },
+  {
+    name: "Feelings",
+    emoji: [
+      "😮", "😲", "😳", "🥺", "😢", "😭", "😤", "😡",
+      "🤯", "😱", "😕", "😟", "🫠", "🤐", "🤫", "😶",
+    ],
+  },
+  {
+    name: "Hands",
+    emoji: [
+      "👍", "👎", "👌", "🤌", "✌️", "🤞", "🤙", "👋",
+      "👏", "🙌", "🙏", "💪", "🫶", "👀", "🤝", "☝️",
+    ],
+  },
+  {
+    name: "Hearts and symbols",
+    emoji: [
+      "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍",
+      "💯", "✨", "🔥", "⭐", "⚡", "✅", "❌", "❓",
+    ],
+  },
+  {
+    name: "Things",
+    emoji: [
+      "🎉", "🎊", "🎈", "🎁", "🏆", "🚀", "💡", "📌",
+      "📷", "🖼️", "🎨", "🛠️", "🐛", "💻", "📱", "☕",
+    ],
+  },
+  {
+    name: "Nature and food",
+    emoji: [
+      "🌈", "☀️", "🌙", "🌸", "🌻", "🍀", "🐶", "🐱",
+      "🦄", "🦋", "🌊", "🍕", "🍰", "🍓", "🌮", "🍿",
+    ],
+  },
+];
+
+/** How many recent emoji the picker's top row holds: one row of the grid. */
+export const RECENT_CAP = 8;
+
+/** Where the recents live on this device. */
+export const RECENT_KEY = "paratrooper:emoji-recent";
+
+/** The row a fresh install shows before anything has been picked. */
+export const DEFAULT_RECENT: readonly string[] = ["👍", "❤️", "😂", "🙏", "🔥", "😊", "🎉", "👀"];
+
+/** The recents after a pick: the pick first, an earlier copy of it dropped, at most RECENT_CAP. */
+export function pushRecent(list: readonly string[], emoji: string, cap = RECENT_CAP): string[] {
+  return [emoji, ...list.filter((e) => e !== emoji)].slice(0, cap);
+}
+
+/**
+ * The stored recents, trusted for nothing: anything that is not a JSON list of
+ * single emoji reads as an empty list, a stray entry is dropped rather than
+ * failing the rest, repeats keep their first place, and the list is capped.
+ */
+export function readRecent(raw: string | null): string[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: string[] = [];
+  for (const e of parsed) {
+    if (typeof e !== "string" || e.length > 32 || emojiCount(e) !== 1 || out.includes(e)) continue;
+    out.push(e);
+    if (out.length === RECENT_CAP) break;
+  }
+  return out;
+}
+
+/** The row as drawn: the recents, then the defaults they do not already hold, always full. */
+export function recentRow(recent: readonly string[]): string[] {
+  return [...recent, ...DEFAULT_RECENT.filter((e) => !recent.includes(e))].slice(0, RECENT_CAP);
+}
+
+/**
+ * The text with an insert put over the selection [start, end), and where the
+ * caret goes after it. A selection the value no longer has is clamped to it,
+ * and a backwards one is read as a caret at its start.
+ */
+export function spliceAtCaret(
+  value: string,
+  start: number,
+  end: number,
+  insert: string,
+): { value: string; caret: number } {
+  const a = Math.min(Math.max(start, 0), value.length);
+  const b = Math.min(Math.max(end, a), value.length);
+  return { value: value.slice(0, a) + insert + value.slice(b), caret: a + insert.length };
+}

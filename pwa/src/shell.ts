@@ -1815,6 +1815,20 @@ export function bindSendShield(button: HTMLElement): void {
   });
 }
 
+// The same shield for the emoji picker (main.ts renderChat, emojipicker.ts):
+// the smiley and its whole panel, so no tap on either can take focus from the
+// composer. The rule is the ↑'s word for word, prevented only while an editor
+// (or the parked file input) holds focus and never from idle, so a pick with
+// the keyboard up keeps it up and a pick with it down raises nothing. On the
+// panel as a whole rather than per cell: one listener covers the grid, its
+// headings and the gaps between cells, and a prevented pointerdown does not
+// stop a touch scroll (touch-action decides that), so the grid still scrolls.
+export function bindFocusShield(el: HTMLElement): void {
+  el.addEventListener("pointerdown", (e) => {
+    if (preservesFocus(readWorld())) e.preventDefault();
+  });
+}
+
 // The gesture's unit, read from the document root: 1rem is the app's own font
 // size, so DISMISS_TRAVEL_REM is a length in the same currency as every length
 // in the sheet and follows the phone's text size instead of a number fitted to
