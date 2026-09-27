@@ -208,7 +208,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.169"; // An emoji picker sits beside the compose bar, and a message of 1 to 3 emoji shows as big emoji with no bubble
+const APP_VERSION = "0.3.170"; // A drawer from the left edge lists the chats, the plus starts a new one, and each chat keeps its own thread
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
