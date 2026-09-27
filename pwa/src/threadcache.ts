@@ -167,6 +167,15 @@ export async function del(id: string): Promise<void> {
   });
 }
 
+// drop every chat's record at once (logout): each one is credentialed content
+export async function clear(): Promise<void> {
+  const db = await openDB();
+  if (!db) return;
+  await write(db, (store) => {
+    store.clear();
+  });
+}
+
 // --- write scheduling (pure, injectable timer base — unit-tested) -------------
 // The cache is rewritten debounced, not per apply: a replay burst lands fifty
 // frames in one beat and must cost one write, a few seconds after the last.

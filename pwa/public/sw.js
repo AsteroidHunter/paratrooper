@@ -71,8 +71,31 @@ self.addEventListener("fetch", (event) => {
 // it on focus.
 let unread = 0;
 
+// The chat a push is about. The service sends the default chat's push as the
+// plain text it always was (so a worker from before chats existed still shows
+// it right), and any other chat's as {"body", "thread"}. Plain text is
+// therefore the default chat; anything that does not read as that object is
+// treated as plain text too. The id rule is the page's (chatlist.ts isThreadId).
+const DEFAULT_THREAD = "default";
+const THREAD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function readPush(text) {
+  if (text.startsWith("{")) {
+    try {
+      const data = JSON.parse(text);
+      if (data && typeof data.body === "string" && typeof data.thread === "string"
+          && THREAD_ID_RE.test(data.thread)) {
+        return { body: data.body, thread: data.thread };
+      }
+    } catch {
+      /* not the chat-naming shape: the words are the text itself */
+    }
+  }
+  return { body: text, thread: DEFAULT_THREAD };
+}
+
 self.addEventListener("push", (event) => {
-  const body = event.data ? event.data.text() : "Paratrooper update";
+  const { body, thread } = readPush(event.data ? event.data.text() : "Paratrooper update");
   // One waitUntil around the whole chain: the client lookup is async, so the
   // worker must stay alive from the visibility check through the notification.
   event.waitUntil(
@@ -87,6 +110,7 @@ self.addEventListener("push", (event) => {
           body,
           icon: "/icon-192.png",
           badge: "/icon-192.png",
+          data: { thread }, // the tap opens this chat (notificationclick below)
         }),
         "setAppBadge" in navigator ? navigator.setAppBadge(unread).catch(() => {}) : Promise.resolve(),
       ]);
@@ -115,14 +139,27 @@ self.addEventListener("message", (event) => {
   }
 });
 
+// A tap opens the app on the chat the notification is about: a running app is
+// told which chat to open and brought forward, and a closed one is opened at
+// /?thread=<id>, which the page reads at boot. A notification with no chat on
+// it (shown by a worker from before chats existed) opens the app as it is.
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  const data = event.notification.data;
+  const thread = data && typeof data.thread === "string" && THREAD_ID_RE.test(data.thread)
+    ? data.thread
+    : null;
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {
-        if ("focus" in client) return client.focus();
+        if ("focus" in client) {
+          if (thread && "postMessage" in client) {
+            client.postMessage({ kind: "open-thread", thread });
+          }
+          return client.focus();
+        }
       }
-      return self.clients.openWindow("/");
+      return self.clients.openWindow(thread ? `/?thread=${encodeURIComponent(thread)}` : "/");
     })
   );
 });

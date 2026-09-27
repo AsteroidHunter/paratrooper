@@ -358,7 +358,7 @@ describe("write wiring — debounced after applies, flushed on hidden, gone on l
     expect(src).toMatch(/visibilitychange[\s\S]{0,200}cacheWrites\.flush\(\)/);
   });
 
-  it("logout cancels the pending write and deletes the record", () => {
+  it("logout cancels the pending write and deletes every chat's record", () => {
     // logout and a token the server has stopped accepting leave the chat the
     // same way, through one teardown, so the pin follows it there
     const logout = src.indexOf('getElementById("confirm-yes")');
@@ -367,7 +367,7 @@ describe("write wiring — debounced after applies, flushed on hidden, gone on l
     const body = fnBody("leaveChat");
     expect(body.indexOf("cacheWrites.cancel()")).toBeGreaterThan(-1);
     // cancel BEFORE delete: a pending write must not resurrect the record
-    expect(body.indexOf("cacheWrites.cancel()")).toBeLessThan(body.indexOf("cacheDel(THREAD_ID)"));
+    expect(body.indexOf("cacheWrites.cancel()")).toBeLessThan(body.indexOf("cacheClear()"));
     // and the other way out reaches the same teardown
     expect(fnBody("probeAfterClose")).toContain("leaveChat()");
   });

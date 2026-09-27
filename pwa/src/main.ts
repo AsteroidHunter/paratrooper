@@ -9,6 +9,8 @@ import { createBootGate } from "./bootgate";
 import { bubbleLineWidths, fitBubbles, fitScale } from "./bubblefit";
 import type { FitBubble } from "./bubblefit";
 import { caretCountsAsComposing } from "./caret";
+import { DEFAULT_THREAD, bootThread, createChatList, isThreadId, readChats } from "./chatlist";
+import type { ChatSummary } from "./chatlist";
 import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
 import { isJumboEmoji } from "./emoji";
@@ -154,13 +156,18 @@ import {
   threadCoasting,
 } from "./viewport";
 import type { BottomGeometry, SettleBurstMark, TailSettle } from "./viewport";
-import { del as outboxDelete, getAll as outboxGetAll, put as outboxPut } from "./outbox";
+import {
+  del as outboxDelete,
+  forThread as outboxForThread,
+  getAll as outboxGetAll,
+  put as outboxPut,
+} from "./outbox";
 import type { OutboxRecord } from "./outbox";
 import {
   CACHE_FRAMES,
   SCHEMA_VERSION as CACHE_SCHEMA_VERSION,
+  clear as cacheClear,
   createWriteScheduler,
-  del as cacheDel,
   get as cacheGet,
   put as cachePut,
 } from "./threadcache";
@@ -221,7 +228,12 @@ const PROMPTS = [
 ];
 
 const TOKEN_KEY = "paratrooper_token";
-const THREAD_ID = "default"; // single user, single thread in v1
+// The chat on screen. It was a constant while the app had one chat; the name
+// stayed, so every path that reads it reads the chat on screen. Which chat a
+// boot opens is chatlist.ts's rule (a notification tap's ?thread=, else the one
+// open last time, else the default chat); after boot openThread is its only writer.
+const THREAD_KEY = "paratrooper_thread";
+let THREAD_ID = bootThread(location.search, localStorage.getItem(THREAD_KEY));
 let token = localStorage.getItem(TOKEN_KEY) ?? "";
 let lastSeq = 0;
 let oldestSeq = 0; // lowest seq applied; the ?before= cursor for older pages
@@ -245,6 +257,11 @@ let ws: WebSocket | null = null;
 let closingOnPurpose = false; // logout: suppress the auto-reconnect
 let retryTimer: ReturnType<typeof setTimeout> | null = null; // the blind two-second reconnect
 let restoredOutbox = false; // once-per-session guard for the durable-outbox restore
+// Moves on every chat switch (openThread). A request made for one chat can
+// answer after another is on screen; each async path notes this before it
+// asks and drops the answer if it moved, so no page, tail or take-back of the
+// chat that was left ever lands in the chat that replaced it.
+let threadEpoch = 0;
 // Replay batching (one-commit catch-up): while the boot ledger says the
 // backlog is still streaming, socket replay frames buffer here instead of
 // touching the DOM, and the caughtUp edge applies the whole buffer in ONE
@@ -1225,7 +1242,10 @@ function leaveChat(): void {
   ws?.close();
   ws = null;
   cacheWrites.cancel(); // a pending write must not resurrect the record deleted next
-  void cacheDel(THREAD_ID); // the cached thread is credentialed content
+  void cacheClear(); // every chat's cached thread is credentialed content
+  THREAD_ID = DEFAULT_THREAD; // the next sign-in opens on the default chat
+  localStorage.removeItem(THREAD_KEY);
+  chats.forget(); // and the list of chats goes with the session that fetched it
   if (probeFallback) clearTimeout(probeFallback);
   probeFallback = null;
   if (retryTimer) clearTimeout(retryTimer); // nothing is left armed to reconnect
@@ -1234,9 +1254,94 @@ function leaveChat(): void {
 
 // --- chat shell --------------------------------------------------------------
 
+// Switching chats (chatlist.ts owns the list, its rules and its gestures) is a
+// fresh shell for another thread: the same renderChat and bootFromCache a
+// sign-in runs, so every piece of per-chat state (the store, the cursors, the
+// replay ledger, the hold, the springs, the receipts, the outbox restore) is
+// reset by the code that already resets it, and the chat opens exactly the way
+// a cold open would: its saved copy first, then its own socket. Sockets are
+// one per chat (the service groups sockets, presence and replay by chat), so
+// the one for the chat being left is closed on purpose, with no retry.
+let switchingChat = false; // renderChat: a switch keeps the session's own setup
+
+function rememberThread(id: string): void {
+  try {
+    localStorage.setItem(THREAD_KEY, id);
+  } catch {
+    /* private mode can refuse storage: the next boot opens the default chat */
+  }
+}
+
+// a notification tap opened the app at /?thread=<id>: the chat was taken from
+// it at boot (bootThread); remember it, and put the address back to plain
+function keepBootThread(): void {
+  rememberThread(THREAD_ID);
+  if (new URLSearchParams(location.search).has("thread")) {
+    history.replaceState(null, "", location.pathname + location.hash);
+  }
+}
+
+function openThread(id: string): void {
+  if (!token || !isThreadId(id)) return;
+  if (id === THREAD_ID) {
+    chats.close();
+    return;
+  }
+  cacheWrites.flush(); // the leaving chat's snapshot lands under its own id, first
+  closingOnPurpose = true;
+  dropSocket(); // its handlers go with it: nothing of that chat arrives after this
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
+  if (probeFallback) clearTimeout(probeFallback);
+  probeFallback = null;
+  threadEpoch += 1; // answers still out for the chat being left are dropped on arrival
+  THREAD_ID = id;
+  rememberThread(id);
+  lastSeq = 0; // the next chat's cursor comes from its own saved copy, or a fresh window
+  loadingOlder = false;
+  failedSends.clear(); // their wrappers leave with the old shell; the outbox keeps them
+  pendingFiles = []; // staged photos are not carried into another chat
+  switchingChat = true;
+  try {
+    renderChat();
+  } finally {
+    switchingChat = false;
+  }
+  renderPending(); // the tray lets go of what was staged, blob urls included
+  void bootFromCache();
+  chats.close(); // over the new chat, which is painting from its saved copy underneath
+}
+
+const chats = createChatList({
+  current: () => THREAD_ID,
+  choose: openThread,
+  fetchList: async (): Promise<ChatSummary[] | null> => {
+    if (!token) return null;
+    const r = await fetch("/api/threads", { headers: authHeaders() });
+    return r.ok ? readChats(await r.json()) : null;
+  },
+  create: async (): Promise<ChatSummary | null> => {
+    if (!token) return null;
+    const r = await fetch("/api/threads", { method: "POST", headers: authHeaders() });
+    if (!r.ok) return null;
+    const [made] = readChats({ threads: [await r.json()] }) ?? [];
+    return made ?? null;
+  },
+  // never during the photo picker's settling window (shell.ts owns that window)
+  canOpen: () => Boolean(token) && !app.classList.contains("settling"),
+  opening: () => {
+    document.getElementById("menu")?.classList.remove("open");
+    // the list covers the chat: the keyboard goes down the approved way, a blur
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active.id === "text") active.blur();
+  },
+});
+
 function renderChat(): void {
   app.innerHTML = `
     <header class="bar">
+      <button type="button" id="chats-btn" class="chatsbtn" title="Chats" aria-label="Chats"><span
+        class="chatsbtn-count" hidden></span></button>
       <div class="contact">
         <img class="avatar" src="/topbar-logo.png" alt="" />
         <div class="ident">
@@ -1332,9 +1437,13 @@ function renderChat(): void {
     beginPushDialogExit();
     pushNotifications?.dismiss();
   });
-  armPushDialogEntrance();
-  startPushNotifications();
-  void loadPrLinkPrefix(); // which pull request links this session may link
+  if (!switchingChat) {
+    // the session's own setup, not the chat's: a switch keeps the notification
+    // prompt's state (its Not Now included) and the repository already asked for
+    armPushDialogEntrance();
+    startPushNotifications();
+    void loadPrLinkPrefix(); // which pull request links this session may link
+  }
   // Log Out is gated behind the same centred alert the notification card comes
   // up in, so a stray tap can't log out: Cancel is the quiet pill, Log Out the
   // one the box is asking for. Both answers play the box out before anything
@@ -1545,6 +1654,7 @@ function renderChat(): void {
       startX = e.touches[0].clientX;
       startY = e.touches[0].clientY;
       peeking = null;
+      chats.pullStart(startX); // the chat list's pull from the left edge (chatlist.ts)
       threadTouching = true; // no history inserts under a resting finger
       noteThreadGesture();
       armSpring(e.touches[0].clientY, true); // the finger is the springs' anchor
@@ -1558,6 +1668,12 @@ function renderChat(): void {
       springFinger(e.touches[0].clientY); // the anchor tracks the finger
       const dx = e.touches[0].clientX - startX;
       const dy = e.touches[0].clientY - startY;
+      // decided before the peek: a touch that starts at the left edge and moves
+      // decisively right pulls the chat list in, and the thread does not scroll
+      if (chats.pullMove(dx, dy)) {
+        e.preventDefault();
+        return;
+      }
       if (peeking === null) {
         // under the threshold the direction is not decided yet, and a finger
         // wandering inside it is a hold: neither is travel to claim on
@@ -1586,6 +1702,7 @@ function renderChat(): void {
   const endPeek = () => {
     thread.classList.remove("dragging");
     thread.style.setProperty("--peek", "0px");
+    chats.pullEnd(); // a pull in progress settles open or closed from here
     threadTouching = false;
     liftSpring(); // the lag rides the momentum, melting with its speed, from where the finger lifted
     // a release with no glide (a still hold) fires no scroll/scrollend —
@@ -1645,6 +1762,9 @@ function renderChat(): void {
   // one seated by its own compose time, so the server replay (kicked off right
   // after) interleaves with them exactly as a reload draws it
   void restoreOutbox();
+  // the chat list, rebuilt into this shell (after the markup, so .liftclip stays
+  // the template's last element) with its header button bound
+  chats.mount(app);
 }
 
 // --- older history (recent-first: the socket sends a window, we page back) ----
@@ -1662,12 +1782,14 @@ async function loadOlder(): Promise<void> {
     return;
   }
   loadingOlder = true;
+  const epoch = threadEpoch; // a chat switch while this is out leaves the page behind
   try {
     const r = await fetch(`/api/history/${THREAD_ID}?before=${before}&limit=${HISTORY_PAGE}`, {
       headers: authHeaders(),
     });
     if (!r.ok) return;
     const { messages } = (await r.json()) as { messages: ServerMsg[] };
+    if (epoch !== threadEpoch) return; // another chat's page
     if (!messages.length) {
       historyDone = true; // true top; the spinner comes out on the next drain
     } else {
@@ -1675,8 +1797,9 @@ async function loadOlder(): Promise<void> {
       fetchCursor = Math.min(...messages.map((m) => m.seq ?? before));
     }
   } finally {
-    loadingOlder = false;
+    if (epoch === threadEpoch) loadingOlder = false; // a switch already reset it
   }
+  if (epoch !== threadEpoch) return;
   // a completed fetch may land ONLY for someone visibly waiting at the
   // spinner — landing on every fetch while parked streamed the whole thread
   // in 25s ("too many per turn"); everyone else gets pages at glide ends
@@ -5023,6 +5146,7 @@ async function checkServerVersion(): Promise<void> {
 // re-probes.
 async function probeReplayTail(): Promise<void> {
   const sock = ws; // a reconnect or a login replaces it: then this answer is stale
+  const epoch = threadEpoch; // and a chat switch makes it another chat's answer
   let empty: boolean | null = null; // the server's answer, when it gave one
   let tail: number;
   try {
@@ -5038,6 +5162,9 @@ async function probeReplayTail(): Promise<void> {
   } catch {
     tail = Math.max(lastSeq, replayBufferMax); // whatever has arrived, buffered included
   }
+  // another chat's tail is no ceiling for this chat's backlog: the new socket
+  // asks its own question from its own onopen
+  if (epoch !== threadEpoch) return;
   if (empty !== null && sock === ws) noteServerEmpty(empty);
   bootGate.tailKnown(tail);
   replaySettle();
@@ -5084,6 +5211,7 @@ function commitReplayBuffer(): void {
 // it may be frames landing this instant, seqs below it are beyond one cheap
 // fetch — and removal rides the same applyRetract path a live take-back uses.
 async function reconcileRetracts(): Promise<void> {
+  const epoch = threadEpoch;
   let messages: ServerMsg[];
   try {
     const r = await fetch(
@@ -5095,6 +5223,9 @@ async function reconcileRetracts(): Promise<void> {
   } catch {
     return; // reconcile is best-effort; the next settle gets another look
   }
+  // seqs are numbered across every chat, so another chat's page spans rows of
+  // this one it does not hold, and would read them as taken back
+  if (epoch !== threadEpoch) return;
   if (!document.getElementById("thread")) return;
   // the page in hand is also the server's authoritative copy of every row it
   // spans: give stored frames from a poorer era their attachment fields back
@@ -5206,6 +5337,9 @@ function connect(): void {
     // every (re)connect re-checks version: a deploy drops the socket, so the
     // reconnect is exactly when a live page may have gone stale
     void checkServerVersion();
+    // and the chat list's counts: whatever happened in other chats while this
+    // socket was down arrived as nudges on no socket at all
+    void chats.refresh();
   };
   ws.onmessage = (e) => {
     if (!document.getElementById("thread")) return; // gate is showing; don't consume
@@ -5221,6 +5355,8 @@ function connect(): void {
       // ephemeral kinds bypass the store: they are presence, not history.
       // (working is keyed now — the stored row drives the Read receipt)
       if (m.kind === "typing") showTyping(); // dots self-expire if it wasn't for you
+      // another chat has news (the service's nudge): the list and the header count
+      else if (m.kind === "threads") chats.nudged();
       return;
     }
     // the finished reply must not land under his thumbs: mid-composition it
@@ -7141,6 +7277,12 @@ async function showUploadRefusal(response: Response): Promise<void> {
 async function transmit(
   w: HTMLElement, text: string, files: File[], retractSeqs: number[] = [],
 ): Promise<void> {
+  // the chat this send belongs to, fixed now. A switch while it is out
+  // (openThread) leaves this wrapper behind with the old shell: the message
+  // still lands in its own chat, and a failure is kept for that chat's outbox.
+  const epoch = threadEpoch;
+  const thread = THREAD_ID;
+  w.dataset.thread = thread;
   const keys: string[] = [];
   for (const file of files) {
     const fd = new FormData();
@@ -7166,7 +7308,7 @@ async function transmit(
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({
-        thread_id: THREAD_ID, text, attachments: keys, retract_seqs: retractSeqs,
+        thread_id: thread, text, attachments: keys, retract_seqs: retractSeqs,
         // the compose time, straight off the bubble that has been standing in
         // the thread since the tap. The server stores it as this message's own
         // ts, so a Try Again — which reaches this line again with the same
@@ -7185,6 +7327,9 @@ async function transmit(
   // the ACK is the finished frame, the same one history returns for this seq
   // (enrich.ts holds the guard that says so), with status riding beside it
   const ack = (await resp.json()) as ServerMsg & { status?: string };
+  // switched away while it was out: the row is stored in its own chat and
+  // replays when that chat opens; nothing of it belongs in this one's store
+  if (epoch !== threadEpoch) return;
   const seq = ack.seq;
   if (seq) {
     if (store.has(seq)) {
@@ -7267,14 +7412,14 @@ function newId(): string {
 // persist a failed send's bytes for durability across an app close. Fire and
 // forget: reading the File bytes or the IndexedDB write can fail on iOS, and a
 // failed persist must never break the in-memory failed-send UI above it.
-function persistFailed(id: string, ts: number, text: string, files: File[]): void {
+function persistFailed(id: string, ts: number, text: string, files: File[], thread: string): void {
   void (async () => {
     try {
       const stored: OutboxRecord["files"] = [];
       for (const f of files) {
         stored.push({ name: f.name, type: f.type, buf: await f.arrayBuffer() });
       }
-      await outboxPut({ id, text, files: stored, ts });
+      await outboxPut({ id, text, files: stored, ts, thread });
     } catch {
       /* storage is best-effort; the in-memory failed send still stands */
     }
@@ -7289,7 +7434,10 @@ function markFailed(w: HTMLElement, text: string, files: File[]): void {
   failedSends.set(w, { id, text, files });
   // persist with the wrapper's own send time so a restored record keeps its
   // original timestamp instead of drifting forward on each re-persist
-  persistFailed(id, Number(w.dataset.ts) || Date.now(), text, files);
+  persistFailed(id, Number(w.dataset.ts) || Date.now(), text, files, w.dataset.thread ?? THREAD_ID);
+  // its chat was switched away mid-send: the record brings it back there, and
+  // there is no bubble on screen to mark
+  if (w.isConnected === false) return;
   w.classList.add("failed");
   // NOTHING MOVES. A failure is news about a message, not a new place for it:
   // the row keeps the slot its compose time gave it, and a frame the server
@@ -7360,12 +7508,15 @@ function deleteFailed(w: HTMLElement): void {
 async function restoreOutbox(): Promise<void> {
   if (restoredOutbox) return; // once per session; a reconnect must not re-add them
   restoredOutbox = true;
+  const epoch = threadEpoch;
   let records: OutboxRecord[];
   try {
-    records = await outboxGetAll();
+    // this chat's failed sends only; one from before chats existed is the default chat's
+    records = outboxForThread(await outboxGetAll(), THREAD_ID);
   } catch {
     return; // a broken or unavailable store must never block boot
   }
+  if (epoch !== threadEpoch) return; // the chat changed while the store was read
   if (!records.length || !document.getElementById("thread")) return;
   // oldest first, and the id settling any tie: the ordinals handed out below
   // then come in one fixed order, so two records written in the same
@@ -7380,6 +7531,7 @@ async function restoreOutbox(): Promise<void> {
     // comes back among them, exactly where a live failure would be standing
     const w = localWrapper("user", rec.ts);
     w.dataset.outboxId = rec.id; // reuse the stored id, not a fresh one
+    w.dataset.thread = THREAD_ID;
     for (const file of files) {
       const div = rowEl(w, "user", "shot", rec.ts);
       const img = document.createElement("img");
@@ -7809,6 +7961,12 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {
     try {
       pushRegistration = await navigator.serviceWorker.register("/sw.js");
+      // a notification tap for a chat while the app was already running
+      // (sw.js notificationclick posts it): open that chat
+      navigator.serviceWorker.addEventListener("message", (event) => {
+        const data = event.data as { kind?: unknown; thread?: unknown } | null;
+        if (data?.kind === "open-thread" && isThreadId(data.thread)) openThread(data.thread);
+      });
       startPushNotifications();
     } catch {
       /* push/SW are best-effort */
@@ -7969,7 +8127,9 @@ async function bootFromCache(): Promise<void> {
   // preview in it may only be drawn if this deployment is known to have a board.
   // Nothing was remembered means the artifacts wait for health, not that they
   // are gone: reconcileProfileArtifacts paints them when the answer arrives.
-  profile = restoreProfile();
+  // A chat switch keeps what this deployment already said: the record names the
+  // chat it was written under, and a switch is not a new deployment.
+  profile = restoreProfile() ?? profile;
   const t0 = performance.now();
   const cached = await cacheGet<ServerMsg>(THREAD_ID).catch(() => null);
   const readMs = Math.round(performance.now() - t0);
@@ -8003,6 +8163,7 @@ async function bootFromCache(): Promise<void> {
 }
 
 if (token) {
+  keepBootThread();
   renderChat();
   void bootFromCache(); // the cached thread paints first, then the socket connects
 } else {

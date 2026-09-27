@@ -42,6 +42,8 @@ function dispatch(kind: Kind, x: number, y: number): { claimed: number; prevente
     claimResumeEra() { claimed += 1; },
     cancelGlide() {},
     armSpring() {},
+    // the chat list's edge pull (chatlist.ts) leaves every gesture here to the thread
+    chats: { pullMove: () => false },
   } as Record<string, unknown>;
   runInNewContext(js, context);
   (context.handler as (event: unknown) => void)({

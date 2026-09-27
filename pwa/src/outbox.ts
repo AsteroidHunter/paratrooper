@@ -32,6 +32,17 @@ export interface OutboxRecord {
   text: string;
   files: OutboxFile[];
   ts: number;
+  // the chat the send was written in. Absent on a record from before there
+  // were chats, which can only have been the default chat's.
+  thread?: string;
+}
+
+// the chat a record written before chats existed belongs to (chatlist.ts DEFAULT_THREAD)
+const DEFAULT_THREAD = "default";
+
+/** The records of one chat: a failed send comes back only in the chat it was written in. */
+export function forThread(records: readonly OutboxRecord[], thread: string): OutboxRecord[] {
+  return records.filter((r) => (r.thread ?? DEFAULT_THREAD) === thread);
 }
 
 // The open is attempted once and its result (a handle, or null when IndexedDB

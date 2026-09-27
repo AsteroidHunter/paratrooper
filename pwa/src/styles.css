@@ -741,6 +741,52 @@ html, body {
   line-height: 1.2;
 }
 
+/* chats: the bar's left button, the settings button's glass circle with a
+   list glyph, and the count of unread replies in the other chats (chatlist.ts) */
+.chatsbtn {
+  grid-column: 1;
+  justify-self: start;
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 50%;
+  border: none;
+  background-color: var(--glass-bg);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow: var(--glass-stack-sm);
+  color: var(--muted);
+  cursor: pointer;
+}
+/* three rules drawn as geometry, for the same reason the ⋯ beside it is */
+.chatsbtn::before {
+  content: "";
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  box-shadow: 0 -5px 0 currentColor, 0 5px 0 currentColor;
+}
+.chatsbtn-count {
+  position: absolute;
+  top: -4px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+.chatsbtn-count[hidden] { display: none; }
+
 /* settings: circular glass button, small glass dropdown under it */
 .settings {
   grid-column: 3;
@@ -2291,3 +2337,148 @@ html, body {
   font-weight: 600; /* the safe default gets the bold, per Apple's alerts */
 }
 .sheet-item + .sheet-item { border-top: 0.5px solid var(--hairline); }
+
+/* the chat list (chatlist.ts): a panel from the left edge over a dimmed chat.
+   Inside #app and absolutely placed over all of it, so it rides the box the
+   keyboard shell corrects; only transform and opacity ever move, never the box.
+   Closed, it takes no touches at all; while a finger drags it, it follows with
+   no transition, and on release the transition plays it home from there. */
+.chats {
+  position: absolute;
+  inset: 0;
+  z-index: 12; /* over the bar (5) and its menu (6), under the alerts (18) */
+  pointer-events: none;
+}
+.chats.open,
+.chats.dragging { pointer-events: auto; }
+.chats-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.28);
+  opacity: 0;
+  transition: opacity 0.32s ease;
+}
+.chats.open .chats-scrim { opacity: 1; }
+.chats-panel {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(84vw, 340px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  box-shadow: 0 0 24px rgba(0, 0, 0, 0.18);
+  transform: translateX(calc(-100% - 24px));
+  transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+  will-change: transform;
+}
+.chats.open .chats-panel { transform: none; }
+.chats.dragging .chats-panel,
+.chats.dragging .chats-scrim,
+.chats.instant .chats-panel,
+.chats.instant .chats-scrim { transition: none; }
+.chats-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: max(0.75rem, env(safe-area-inset-top)) 0.75rem 0.5rem 1rem;
+}
+.chats-title {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+/* the plus: the same glass circle, a cross in the accent drawn as geometry */
+.chats-new {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 50%;
+  border: none;
+  background-color: var(--glass-bg);
+  box-shadow: var(--glass-stack-sm);
+  color: var(--accent);
+  cursor: pointer;
+}
+.chats-new::before,
+.chats-new::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+}
+.chats-new::after { transform: rotate(90deg); }
+.chats-new:disabled { opacity: 0.5; }
+.chats-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y; /* the page opts out of panning; the list opts back in */
+  padding: 0.25rem 0.5rem max(0.5rem, env(safe-area-inset-bottom));
+}
+.chat-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 10px 10px 4px;
+  border: none;
+  border-radius: 12px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-row.is-current { background: var(--menu-bg); }
+.chat-row:active { background: var(--received); }
+/* the unread mark: Messages' dot, in the colour of a sent bubble */
+.chat-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  visibility: hidden;
+}
+.chat-row.is-unread .chat-dot { visibility: visible; }
+.chat-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.chat-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.chat-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.chat-time {
+  flex: none;
+  color: var(--muted);
+  font-size: 15px;
+}
+.chat-preview {
+  color: var(--muted);
+  font-size: 15px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

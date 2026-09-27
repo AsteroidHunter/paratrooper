@@ -1078,11 +1078,13 @@ describe("service-worker notification behavior", () => {
       body: "first reply",
       icon: "/icon-192.png",
       badge: "/icon-192.png",
+      data: { thread: "default" }, // plain text is the default chat's push
     });
     expect(h.showNotification).toHaveBeenNthCalledWith(2, "New message", {
       body: "second reply",
       icon: "/icon-192.png",
       badge: "/icon-192.png",
+      data: { thread: "default" }, // plain text is the default chat's push
     });
     expect(h.showNotification.mock.calls.map(([title]) => title)).not.toContain("Paratrooper");
     expect(MANIFEST.icons.some((icon) => icon.src === "/icon-192.png")).toBe(true);
@@ -1107,6 +1109,7 @@ describe("service-worker notification behavior", () => {
       body: "away reply",
       icon: "/icon-192.png",
       badge: "/icon-192.png",
+      data: { thread: "default" }, // plain text is the default chat's push
     });
     expect(h.setAppBadge.mock.calls.map(([count]) => count)).toEqual([1]);
   });
@@ -1120,6 +1123,7 @@ describe("service-worker notification behavior", () => {
       body: "nobody home",
       icon: "/icon-192.png",
       badge: "/icon-192.png",
+      data: { thread: "default" }, // plain text is the default chat's push
     });
     expect(h.setAppBadge.mock.calls.map(([count]) => count)).toEqual([1]);
   });
@@ -1242,6 +1246,65 @@ describe("service-worker notification behavior", () => {
   it("opens Paratrooper when no existing window can be focused", async () => {
     const h = serviceWorkerHarness();
     await h.dispatch("notificationclick", { notification: { close: vi.fn() } });
+    expect(h.openWindow).toHaveBeenCalledWith("/");
+  });
+
+  // --- pushes that name their chat (chatlist.ts, web/app.py _push_payload) ---
+
+  it("reads the chat a push names and shows only its words", async () => {
+    const h = serviceWorkerHarness();
+    const named = JSON.stringify({ body: "reply in the new chat", thread: "0123456789abcdef" });
+    await h.dispatch("push", { data: { text: () => named } });
+    expect(h.showNotification).toHaveBeenCalledWith("New message", {
+      body: "reply in the new chat",
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+      data: { thread: "0123456789abcdef" },
+    });
+  });
+
+  it("shows anything that is not the chat-naming shape as plain text for the default chat", async () => {
+    for (const text of ['{"body": "no chat named"}', '{"body": "x", "thread": "a:b"}', "{not json"]) {
+      const h = serviceWorkerHarness();
+      await h.dispatch("push", { data: { text: () => text } });
+      expect(h.showNotification).toHaveBeenCalledWith("New message", {
+        body: text,
+        icon: "/icon-192.png",
+        badge: "/icon-192.png",
+        data: { thread: "default" },
+      });
+    }
+  });
+
+  it("tells a running app which chat to open, then brings it forward", async () => {
+    const h = serviceWorkerHarness();
+    const order: string[] = [];
+    const postMessage = vi.fn(() => order.push("post"));
+    const focus = vi.fn(async () => {
+      order.push("focus");
+    });
+    h.matchAll.mockResolvedValue([{ focus, postMessage }]);
+    await h.dispatch("notificationclick", {
+      notification: { close: vi.fn(), data: { thread: "0123456789abcdef" } },
+    });
+    expect(postMessage).toHaveBeenCalledWith({ kind: "open-thread", thread: "0123456789abcdef" });
+    expect(order).toEqual(["post", "focus"]);
+    expect(h.openWindow).not.toHaveBeenCalled();
+  });
+
+  it("opens a closed app at the chat the tap names", async () => {
+    const h = serviceWorkerHarness();
+    await h.dispatch("notificationclick", {
+      notification: { close: vi.fn(), data: { thread: "0123456789abcdef" } },
+    });
+    expect(h.openWindow).toHaveBeenCalledWith("/?thread=0123456789abcdef");
+  });
+
+  it("never opens an address built from a chat id the page would refuse", async () => {
+    const h = serviceWorkerHarness();
+    await h.dispatch("notificationclick", {
+      notification: { close: vi.fn(), data: { thread: "../../elsewhere" } },
+    });
     expect(h.openWindow).toHaveBeenCalledWith("/");
   });
 });
