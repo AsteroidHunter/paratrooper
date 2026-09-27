@@ -894,14 +894,26 @@ html, body {
    rows/stamps direct flex items of the thread (layout-invisible grouping) */
 .evt { display: contents; }
 
-/* swipe-to-peek: visible thread pieces track --peek (set by JS during the
-   drag) and spring back through the transition. Targeted by class because .evt
-   wrappers generate no boxes for a `>` selector to catch. */
-.thread :where(.row, .stamp, .receipt, .typing, .empty, .sendfail) {
+/* swipe-to-peek: the pieces on screen track --peek (written on each of them by
+   JS during the drag) and spring back through the transition. Only the pieces
+   the drag picked up (.peeked, main.ts with peek.ts) carry a transform, and
+   only while the pull is in play. A standing transform on every row, even
+   translateX(0), made each row its own paint chunk and transform node, so any
+   repaint anywhere in a thread a few hundred rows deep re-layered all of them
+   (peek.ts has the numbers). --peek does not inherit: the thread carries the
+   pull too, for the diagnostics, and a change on the thread must not restyle
+   every row under it. Targeted by class because .evt wrappers generate no
+   boxes for a `>` selector to catch. */
+@property --peek {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+.thread .peeked {
   transform: translateX(var(--peek, 0px));
   transition: transform 0.25s ease;
 }
-.thread.dragging :where(.row, .stamp, .receipt, .typing, .empty, .sendfail) { transition: none; }
+.thread.dragging .peeked { transition: none; }
 
 /* one full-width row per bubble; the timestamp sits just past the row's right
    edge, clipped by the thread until the pull slides it into view */

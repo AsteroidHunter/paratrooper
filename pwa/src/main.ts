@@ -135,6 +135,7 @@ import { createSpringField } from "./springscroll";
 import { seatBefore } from "./sendorder";
 import type { Standing } from "./sendorder";
 import { fmtStampDay, fmtTime, stampReads } from "./stamplabel";
+import { PEEK_PIECES, piecesInView, releasePeek } from "./peek";
 import { afterSocketClose, createTokenGate } from "./tokengate";
 import type { Fetcher, TokenGate } from "./tokengate";
 import {
@@ -1648,6 +1649,7 @@ function renderChat(): void {
   let startX = 0;
   let startY = 0;
   let peeking: boolean | null = null; // null = gesture direction undecided
+  let peekPieces: HTMLElement[] = []; // what this pull moves: the pieces on screen (peek.ts)
   thread.addEventListener(
     "touchstart",
     (e) => {
@@ -1680,7 +1682,17 @@ function renderChat(): void {
         // wandering inside it is a hold: neither is travel to claim on
         if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
         peeking = dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.5;
-        if (peeking) thread.classList.add("dragging");
+        if (peeking) {
+          thread.classList.add("dragging");
+          // only what is on screen moves, and only it carries a transform
+          // while the pull is in play (peek.ts says why)
+          const box = thread.getBoundingClientRect();
+          peekPieces = piecesInView(
+            Array.from(thread.querySelectorAll<HTMLElement>(PEEK_PIECES)),
+            box.top, box.bottom, box.height / 2,
+          );
+          for (const piece of peekPieces) piece.classList.add("peeked");
+        }
       }
       if (!peeking) {
         // The verdict above rules out a LEFTWARD peek and nothing else, so a
@@ -1696,7 +1708,12 @@ function renderChat(): void {
       e.preventDefault(); // we own this gesture; vertical scroll stays native
       // resistance: tracks the finger at first, then fights back toward 64px
       const pull = 64 * Math.tanh(Math.max(-dx, 0) / 110);
-      thread.style.setProperty("--peek", `-${pull.toFixed(1)}px`);
+      const shift = `-${pull.toFixed(1)}px`;
+      for (const piece of peekPieces) piece.style.setProperty("--peek", shift);
+      // the thread keeps the pull too, for the diagnostics that read it there
+      // (blankprobe.ts); --peek is registered non-inheriting (styles.css), so
+      // this restyles the thread's own box and none of the rows under it
+      thread.style.setProperty("--peek", shift);
     },
     { passive: false },
   );
@@ -1704,6 +1721,10 @@ function renderChat(): void {
     thread.classList.remove("dragging");
     thread.style.setProperty("--peek", "0px");
     chats.pullEnd(); // a pull in progress settles open or closed from here
+    // home through the transition, and the transform put down once they are
+    for (const piece of peekPieces) piece.style.setProperty("--peek", "0px");
+    releasePeek(peekPieces);
+    peekPieces = [];
     threadTouching = false;
     liftSpring(); // the lag rides the momentum, melting with its speed, from where the finger lifted
     // a release with no glide (a still hold) fires no scroll/scrollend —
