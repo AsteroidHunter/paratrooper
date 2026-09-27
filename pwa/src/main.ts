@@ -1830,7 +1830,7 @@ function drainOlder(): void {
   const prevHeight = t.scrollHeight;
   const prevSuppress = suppressAnim;
   suppressAnim = true; // a page of history must not pop bubble-by-bubble
-  if (page) for (const m of page) applyEvent(m);
+  if (page) foldOnce(() => { for (const m of page) applyEvent(m); });
   suppressAnim = prevSuppress;
   t.scrollTop = prevScroll + (t.scrollHeight - prevHeight); // visible row stays put
   springReseat(t.scrollTop - prevScroll); // ... and the springs are told it was not a scroll
@@ -3087,6 +3087,9 @@ function scrollToBottom(force = false): void {
   // to, and the ride re-reads that bottom every frame, so the reply landing
   // right now is ridden to rather than jumped to (resume.ts).
   if (resumeHolding()) return;
+  // inside a batch (foldOnce) the bottom is still moving: its caller pins once
+  // at the end, and a pin per frame here was a forced layout per frame
+  if (foldHeld) return;
   const t = threadEl();
   const top = t.scrollHeight;
   // replay bursts (suppressAnim) and the resume window jump instantly; live
@@ -3571,6 +3574,9 @@ const STAMP_GAP_MS = 60 * 60_000;
 // replaying fifty bubbles must not pop each one
 let suppressAnim = true;
 
+// set only inside foldOnce: a batch of frames folds and pins once, at its end
+let foldHeld = false;
+
 // Each event renders into one .evt wrapper (display: contents — invisible to
 // the thread's flex layout, so rows/stamps stay direct flex items visually).
 // The wrapper is the unit of ordering (data-seq), idempotent re-render, and
@@ -3808,6 +3814,26 @@ function decorate(): void {
   jankSpan("decorate", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
 }
 
+// A batch of frames applied in one task (a history page, the saved copy at
+// boot) folds the thread once, at its end, instead of once per frame. Each
+// applyEvent otherwise walks every row (decorate), re-derives the receipt and
+// re-pins the bottom, and each pin forces a layout of a thread the next frame
+// is about to change again: twenty-five whole-thread passes for one history
+// page over a thread of a few hundred rows, which the motion rig measured as
+// the stall at the end of a scroll back through history. Nothing paints
+// between the frames of a batch, so the thread it leaves is the same. Its
+// caller pins once afterwards, as both callers always did.
+function foldOnce(apply: () => void): void {
+  foldHeld = true;
+  try {
+    apply();
+  } finally {
+    foldHeld = false;
+  }
+  decorate();
+  updateReceipt();
+}
+
 // applyEvent(): THE one path every keyed frame takes — live push, reconnect
 // replay, and older history pages alike. Idempotent by seq, ordered by seq.
 function applyEvent(m: ServerMsg): void {
@@ -3856,7 +3882,7 @@ function applyEvent(m: ServerMsg): void {
   // a plain structural reorder, which seatNew does when the row lands last.
   threadEl().appendChild(wrapper);
   seatNew(wrapper);
-  decorate();
+  if (!foldHeld) decorate(); // a batch folds once, at its end (foldOnce)
   // the newborn bubble ends at its longest line rather than at the 75% cap —
   // queued, so a history page's whole batch is one pass, and drained in the
   // frame that first paints it, so it is never seen wide (bubblefit.ts)
@@ -3878,7 +3904,9 @@ function applyEvent(m: ServerMsg): void {
     else if (followTail) scrollToBottom();
   }
   if (m.kind === "published") flipCorrelatedPr(m);
-  updateReceipt(); // any event can move the watermark (user row, job row, working)
+  // any event can move the watermark (user row, job row, working); a batch
+  // derives it once, at its end (foldOnce)
+  if (!foldHeld) updateReceipt();
   cacheWrites.bump(); // the cold-open snapshot trails every applied frame, debounced
 }
 
@@ -8132,7 +8160,8 @@ async function bootFromCache(): Promise<void> {
     holdDiagRecord("cache-read", { frames: cached.frames.length, ms: readMs });
     const prevSuppress = suppressAnim;
     suppressAnim = true; // cached frames are history: no pops, no glides
-    for (const m of cached.frames) applyEvent(m);
+    // one fold and one pin for the whole saved copy (foldOnce), not fifty
+    foldOnce(() => { for (const m of cached.frames) applyEvent(m); });
     noteThreadStart(); // a saved copy from the first message paints with no spinner at all
     suppressAnim = prevSuppress;
     if (cached.lastSeq > lastSeq) lastSeq = cached.lastSeq; // a retracted tail still advances the cursor

@@ -222,6 +222,8 @@ function harness(options: HarnessOptions = {}) {
     armBootFrameGuard: () => {},
     holdDiagRecord: () => {},
     cacheGet: async () => (options.frames ? { lastSeq: 9, frames: options.frames } : null),
+    // the saved copy applies as one batch; the fold it ends with is not this test's
+    foldOnce: (apply: () => void) => apply(),
     THREAD_ID: "default",
     CACHE_SCHEMA_VERSION: SCHEMA_VERSION,
     suppressAnim: false,

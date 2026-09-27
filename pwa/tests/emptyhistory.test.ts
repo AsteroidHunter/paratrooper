@@ -276,6 +276,9 @@ function harness(options: { pageAge?: number } = {}) {
       t.rows.push(m.seq);
       if (isTail) t.scrollTop = t.scrollHeight; // the open follows the tail down
     },
+    // a page and the saved copy each apply as one batch (foldOnce); the fold
+    // it ends with draws runs and receipts, which nothing here reads
+    foldOnce: (apply: () => void) => apply(),
     replyHold: { maybeHold: () => false, reset: () => {} },
     replayAnimates: () => false,
     loadingScreen: { lifted: () => true },

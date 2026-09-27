@@ -107,6 +107,7 @@ describe("resume bottom pins through the production functions", () => {
       resumeWindowOpen: () => true,
       suppressAnim: false,
       pinInstant: false,
+      foldHeld: false, // no batch in flight: the pin is written
       springAppWroteAt: -Infinity,
       performance: { now: () => 1000 },
       springFreeze: () => { frozen += 1; },

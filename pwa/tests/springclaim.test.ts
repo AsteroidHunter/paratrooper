@@ -253,6 +253,7 @@ function harness(options: HarnessOptions = {}) {
     threadEl: () => thread,
     suppressAnim: false,
     pinInstant: false,
+    foldHeld: false, // no batch in flight: the pin is written
     startGlide: () => void rides.push("glide"),
     followTail: true,
     scrolledUpByHand: false,
