@@ -188,6 +188,8 @@ function harness(options: HarnessOptions = {}) {
     requestAnimationFrame: (fn: () => void) => void fn(),
     setTimeout,
     // --- renderer collaborators
+    // the text row's class (big emoji or not): these frames are never emoji
+    textCls: () => "text",
     rowEl: (wrapper: FakeEl, role: string, kind: string) => {
       const row = new FakeEl("div");
       row.className = `${role} ${kind}`;

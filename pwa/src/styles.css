@@ -1011,6 +1011,27 @@ html, body {
 
 .msg.error { --fill: var(--error-bg); background: var(--error-bg); color: var(--error-text); }
 
+/* Big emoji (main.ts textCls, emoji.ts isJumboEmoji): a text of 1 to 3 emoji
+   and nothing else is drawn as the glyphs alone, the way Messages draws it: no
+   balloon, no tail, the glyphs about three times the text's size. The row
+   keeps its side and its spacing, so it still reads as whose it is. One size
+   for all three counts; Messages on iOS 18 and later draws a lone emoji at
+   72pt against 48pt for two or three, and this token is where that would
+   change. The tail is taken away twice over: its paint is transparent, and
+   the pseudo itself is removed at a specificity above the tail rule's own
+   (which carries a :not(:has()) and so outranks a plain .jumbo.tail). After
+   the role rules on purpose: same specificity, later wins. */
+.msg.jumbo {
+  --jumbo-size: 48px;
+  --fill: transparent;
+  background: none;
+  padding: 0 2px;
+  font-size: var(--jumbo-size);
+  line-height: 1.2;
+  color: var(--text);
+}
+.msg.jumbo.tail:not(:has(img.waiting))::after { content: none; }
+
 .msg.shot { padding: 0; background: none; }
 /* height:auto + the width/height attributes = the box's aspect ratio is
    reserved before decode, so a landing photo can never shove the scroll.

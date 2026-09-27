@@ -11,6 +11,7 @@ import type { FitBubble } from "./bubblefit";
 import { caretCountsAsComposing } from "./caret";
 import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
+import { isJumboEmoji } from "./emoji";
 import type { Glide } from "./downbtn";
 import { createEndSpring } from "./endspring";
 import { ackFrame, enrichFrame } from "./enrich";
@@ -3577,6 +3578,16 @@ function rowEl(wrapper: HTMLElement, role: string, cls: string, at: number): HTM
   return div;
 }
 
+// A text row's class: a message of 1 to 3 emoji and nothing else is drawn as
+// big glyphs with no bubble (styles.css .msg.jumbo, emoji.ts has the rule).
+// Decided before the row is built rather than added after, because rowEl hands
+// the dots' box only to a plain "text" row (arrival.ts arrivalShape): a reply
+// that grew out of the grey dots and then dropped its bubble mid-growth would
+// be two motions, so a big-emoji reply pops in the ordinary way instead.
+function textCls(value: string): string {
+  return isJumboEmoji(value) ? "text jumbo" : "text";
+}
+
 // A photo's tail is cut from the photo (styles.css .msg.shot.tail::after reads
 // --shot). The url goes on the bubble from the two places a photo's pixels can
 // be: the fold below, for a photo already drawn when it is seated (a send's
@@ -4397,7 +4408,7 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
     photoQueue.hold(img, thumbUrl(key));
     div.appendChild(img);
   });
-  if (value) rowEl(wrapper, "user", "text", at).textContent = value;
+  if (value) rowEl(wrapper, "user", textCls(value), at).textContent = value;
 }
 
 // The one moment a photo's box changes shape, and the last time this photo
@@ -4618,7 +4629,7 @@ function renderAgentText(m: ServerMsg, wrapper: HTMLElement, at: number, value: 
       && isDuplicateAgentText(m.seq, value.trim())) {
     return; // consecutive duplicate of the same reply
   }
-  rowEl(wrapper, "agent", "text", at).textContent = value;
+  rowEl(wrapper, "agent", textCls(value), at).textContent = value;
 }
 
 const agentRenderers: Record<string, Renderer> = {
@@ -6945,7 +6956,7 @@ async function send(): Promise<void> {
     img.addEventListener("click", () => openLightbox(img.src, img));
     div.appendChild(img);
   }
-  if (text) rowEl(w, "user", "text", Date.now()).textContent = text;
+  if (text) rowEl(w, "user", textCls(text), Date.now()).textContent = text;
   suppressAnim = prevSuppress;
   decorate();
   // the sent bubble ends at its longest line, and it does so BEFORE anything
@@ -7263,7 +7274,7 @@ async function restoreOutbox(): Promise<void> {
       img.addEventListener("click", () => openLightbox(img.src, img));
       div.appendChild(img);
     }
-    if (rec.text) rowEl(w, "user", "text", rec.ts).textContent = rec.text;
+    if (rec.text) rowEl(w, "user", textCls(rec.text), rec.ts).textContent = rec.text;
     markFailed(w, rec.text, files); // red badge + Not Delivered + in-memory entry
     scheduleBubbleFit(w);
   }

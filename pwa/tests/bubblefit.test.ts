@@ -416,7 +416,7 @@ describe("main.ts wiring: where the fit runs", () => {
     const send = fnBody("send");
     const fit = send.indexOf("fitBubblesNow(w)");
     expect(fit).toBeGreaterThan(-1);
-    expect(fit).toBeGreaterThan(send.indexOf('rowEl(w, "user", "text"')); // after the text
+    expect(fit).toBeGreaterThan(send.indexOf('rowEl(w, "user", textCls(text)')); // after the text
     expect(fit).toBeLessThan(send.indexOf("flyFromField(")); // and before the launch
     expect(fit).toBeLessThan(send.indexOf("scrollToBottom(true); // instant pin first"));
   });
