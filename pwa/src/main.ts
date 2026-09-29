@@ -14,7 +14,6 @@ import type { ChatSummary } from "./chatlist";
 import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
 import { isJumboEmoji } from "./emoji";
-import { bindEmojiPicker } from "./emojipicker";
 import type { Glide } from "./downbtn";
 import { createEndSpring } from "./endspring";
 import { ackFrame, enrichFrame } from "./enrich";
@@ -108,7 +107,6 @@ import {
   bindComposeDismiss,
   bindGateFlight,
   bindLift,
-  bindFocusShield,
   bindPicker,
   bindSendShield,
   closeCorrectionNeeded,
@@ -1386,7 +1384,6 @@ function renderChat(): void {
         <main id="thread" class="thread">
           <div id="histspin" class="histspin" aria-hidden="true"><span class="ring"></span></div>
         </main>
-        <div id="emojipanel" class="emojipanel" role="group" aria-label="Emoji"></div>
         <div id="pending" class="pending"></div>
         <form id="compose" class="compose">
           <button type="button" id="attach" class="attach" title="Attach">＋</button>
@@ -1398,9 +1395,6 @@ function renderChat(): void {
               placeholder="${PROMPTS[Math.floor(Math.random() * PROMPTS.length)]}"></textarea>
             <button type="submit" id="sendbtn" class="send">↑</button>
           </div>
-          <button type="button" id="emoji" class="emojibtn" title="Emoji" aria-label="Emoji"
-            aria-expanded="false" aria-controls="emojipanel"><span
-            class="emojiglyph" aria-hidden="true">🙂</span></button>
           <button type="button" id="jump" class="jump" title="Jump to latest"><span
             class="jump-glyph">↓</span></button>
         </form>
@@ -1497,14 +1491,6 @@ function renderChat(): void {
   // on every send); the shield mirrors the ＋'s, and shell.ts owns the rule
   bindSendShield(document.getElementById("sendbtn")!);
   const textEl = document.getElementById("text") as HTMLTextAreaElement;
-  // the emoji picker (emojipicker.ts): the smiley and the whole panel wear the
-  // ↑'s shield, so no pick ever moves focus (the keyboard stays up if it was
-  // up and never rises if it was not), and a pick lands in this box at its caret
-  const emojiBtn = document.getElementById("emoji") as HTMLButtonElement;
-  const emojiPanel = document.getElementById("emojipanel")!;
-  bindFocusShield(emojiBtn);
-  bindFocusShield(emojiPanel);
-  bindEmojiPicker(emojiBtn, emojiPanel, textEl);
   // the swipe down the bar that puts the keyboard away (Messages' gesture;
   // shell.ts owns the rule, the thresholds and the long-draft refusal). On the
   // FORM, so the whole bar carries it, and here rather than at module level
