@@ -67,11 +67,14 @@ from .models import (
     EVENT_POLICY,
     JobMessage,
     PublishRequest,
+    Reaction,
+    ReactRequest,
     ResultMessage,
     SendRequest,
     ThreadEvent,
     ThreadSummary,
     UploadResponse,
+    normalize_reaction,
 )
 from .publish import (
     PublishError,
@@ -261,6 +264,92 @@ def context_line(event: ThreadEvent) -> str | None:
     return f"{event.role}: {text}" if text else None
 
 
+# --- reactions (tapbacks) -------------------------------------------------------
+#
+# A reaction is state about a message, kept in its own table (db.py), and it
+# travels as two keyless frames: every change as a "reaction" frame to its
+# chat's sockets, and the whole chat's reactions as one "reactions" frame after
+# every socket replay, so a phone that was away converges on removals too.
+# Neither carries a top-level seq, so a build from before reactions drops them
+# the way it drops any keyless frame it does not know. A reaction never starts
+# a job and never sends a push.
+REACTION_KIND = "reaction"
+REACTIONS_KIND = "reactions"
+NOT_A_REACTION = "a reaction is one of the six tapbacks or one emoji"
+NO_SUCH_MESSAGE = "no message with that number in this chat can take a reaction"
+
+# how a tapback reads in the agent's context; any other reaction is its emoji
+TAPBACK_WORDS = {
+    "heart": "a heart", "like": "a thumbs up", "dislike": "a thumbs down",
+    "haha": "ha ha", "emphasize": "!!", "question": "?",
+}
+# a quoted message in a reaction line is cut to this many characters
+REACTION_QUOTE_CHARS = 60
+
+
+def _reaction_frame(thread_id: str, target: int, role: str, reaction: str | None, ts: str) -> dict:
+    """The live frame for one change. ``reaction`` None means taken off."""
+    return {"kind": REACTION_KIND, "thread_id": thread_id, "target": target,
+            "role": role, "reaction": reaction, "ts": ts}
+
+
+def _snapshot_frame(thread_id: str, rows: list[Reaction]) -> dict:
+    return {"kind": REACTIONS_KIND, "thread_id": thread_id,
+            "reactions": [r.model_dump() for r in rows]}
+
+
+def _quote(text: str) -> str:
+    flat = " ".join(text.split())
+    if len(flat) <= REACTION_QUOTE_CHARS:
+        return flat
+    return flat[: REACTION_QUOTE_CHARS - 1].rstrip() + "\u2026"
+
+
+def reaction_line(reaction: Reaction, target: ThreadEvent) -> str:
+    """One reaction as a line of the job's recent thread, e.g.
+    ``user reacted with a heart to agent's message "Added it."``."""
+    what = TAPBACK_WORDS.get(reaction.reaction, reaction.reaction)
+    whose = f"{target.role}'s"
+    text = target.payload if isinstance(target.payload, str) else ""
+    if target.kind == "screenshot":
+        thing = f"{whose} board preview"
+    elif target.kind == "pr":
+        thing = f"{whose} pull request"
+    elif text.strip():
+        thing = f'{whose} message "{_quote(text)}"'
+    elif target.attachments:
+        thing = f"{whose} photo" if len(target.attachments) == 1 else f"{whose} photos"
+    else:
+        thing = f"{whose} message"
+    return f"{reaction.role} reacted with {what} to {thing}"
+
+
+def _when(ts: str) -> datetime:
+    try:
+        stamped = datetime.fromisoformat(ts)
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    return stamped if stamped.tzinfo else stamped.replace(tzinfo=UTC)
+
+
+def job_context(store: ThreadStore, thread_id: str, n: int = 33) -> list[str]:
+    """The job's [recent thread]: the last ``n`` rows projected by their
+    kinds' policy (context_line), with a line for every reaction on one of
+    those rows, placed at the moment it was set. The agent learns his
+    reactions here and nowhere else; its own are here too, so it can see which
+    emoji it has already used."""
+    rows = store.messages_page(thread_id, limit=n)
+    by_seq = {seq: event for seq, event in rows}
+    timed: list[tuple[datetime, int, int, str]] = []
+    for i, (_, event) in enumerate(rows):
+        if (line := context_line(event)) is not None:
+            timed.append((_when(event.ts), 0, i, line))
+    for j, reaction in enumerate(store.reactions_on(thread_id, list(by_seq))):
+        timed.append((_when(reaction.ts), 1, j, reaction_line(reaction, by_seq[reaction.target])))
+    timed.sort(key=lambda item: item[:3])
+    return [line for *_, line in timed]
+
+
 # a drained worker lingers awake this long before suspending, so the next turn
 # of an active conversation doesn't pay the ~30-60s cold boot
 DEFAULT_LINGER_S = 300.0
@@ -400,12 +489,11 @@ def _on_screen(state: AppState, thread_id: str) -> float | None:
 async def _enqueue_job(
     state: AppState, thread_id: str, job_id: str, text: str, attachments: list[str]
 ) -> None:
-    context = [
-        line for m in state.store.recent(thread_id, n=33)
-        if (line := context_line(m)) is not None
-    ]
+    context = job_context(state.store, thread_id)
     job = JobMessage(
-        job_id=job_id, thread_id=thread_id, text=text, attachments=attachments, context=context
+        job_id=job_id, thread_id=thread_id, text=text, attachments=attachments, context=context,
+        # his last few messages, so the agent's reaction tool can name one
+        reactable=state.store.reactable_messages(thread_id),
     )
     # which agent answers this chat is decided in one place (agents.py)
     route = agent_for_thread(thread_id, state.queue)
@@ -698,6 +786,9 @@ async def _relay_result(state: AppState, thread_id: str, result: ResultMessage) 
             await state.coordinator.job_finished(thread_id)
             await _maybe_suspend_worker(state)
         return
+    if result.kind == REACTION_KIND:
+        await _relay_reaction(state, thread_id, result)
+        return
     event = _to_event(thread_id, result)
     if policy.ephemeral:  # sockets only: never persisted, never replayed
         _diag.info("holddiag relay ephemeral kind=%s job=%s thread=%s sockets=%d",
@@ -731,6 +822,32 @@ async def _relay_result(state: AppState, thread_id: str, result: ResultMessage) 
             _schedule_push(state, thread_id, result.kind, result.payload)
     else:
         _schedule_push(state, thread_id, result.kind, result.payload)
+
+
+async def _relay_reaction(state: AppState, thread_id: str, result: ResultMessage) -> None:
+    """The agent's reaction on one of his messages (react_to_message): stored
+    as the agent's, sent to the chat's sockets, and nothing else. The worker
+    resolved the message from the job's targets; this checks it again against
+    the store, because the payload crossed a queue: a message that is not one
+    of his in this chat, or a value that is not a reaction, is dropped with a
+    log line and reaches no socket."""
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    seq = payload.get("seq")
+    raw = payload.get("reaction")
+    reaction = None if raw is None else normalize_reaction(raw)
+    if not isinstance(seq, int) or isinstance(seq, bool) or (raw is not None and reaction is None):
+        logger.warning("relay: dropped a malformed reaction on thread %s", thread_id)
+        return
+    ts = _now()
+    placed = await asyncio.to_thread(
+        state.store.set_reaction, thread_id, seq, "agent", reaction,
+        ts=ts, target_roles=("user",),
+    )
+    if not placed:
+        logger.warning("relay: dropped a reaction on seq %d, not his message in %s",
+                       seq, thread_id)
+        return
+    await _send_to_sockets(state, thread_id, _reaction_frame(thread_id, seq, "agent", reaction, ts))
 
 
 async def _result_relay(state: AppState) -> None:
@@ -976,6 +1093,28 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         meta = await asyncio.to_thread(_page_meta, state.store, [(seq, msg)])
         return {"status": status, **_frame(seq, msg, meta)}
 
+    @app.post("/api/react", dependencies=[Depends(require_token)])
+    async def react(req: ReactRequest) -> dict:
+        """His reaction on one message: set, replaced, or taken off (None).
+        The phone decides the toggle and sends the state it wants, so a retry
+        is harmless. Stored per chat, sent to that chat's sockets, and that is
+        all: a reaction is never a message, never a job and never a push."""
+        state = st()
+        reaction = None
+        if req.reaction:
+            reaction = normalize_reaction(req.reaction)
+            if reaction is None:
+                raise HTTPException(status_code=400, detail=NOT_A_REACTION)
+        ts = _now()
+        placed = await asyncio.to_thread(
+            state.store.set_reaction, req.thread_id, req.seq, "user", reaction, ts=ts,
+        )
+        if not placed:
+            raise HTTPException(status_code=404, detail=NO_SUCH_MESSAGE)
+        frame = _reaction_frame(req.thread_id, req.seq, "user", reaction, ts)
+        await _send_to_sockets(state, req.thread_id, frame)
+        return frame
+
     @app.get("/api/thread/{thread_id}", dependencies=[Depends(require_token)])
     async def thread(thread_id: str, since: int = 0) -> dict:
         rows = await asyncio.to_thread(st().store.messages, thread_id, since_seq=since)
@@ -1171,6 +1310,10 @@ def create_app(injected: AppState | None = None) -> FastAPI:
         meta = await asyncio.to_thread(_page_meta, state.store, rows)
         for seq, m in rows:
             await websocket.send_json(_frame(seq, m, meta))
+        # then the chat's reactions, whole, after every replay: a phone that was
+        # away learns what changed while it was, removals included
+        reactions = await asyncio.to_thread(state.store.reactions, thread_id)
+        await websocket.send_json(_snapshot_frame(thread_id, reactions))
         _diag.info("holddiag ws open thread=%s since=%d replayed=%d sockets=%d",
                    thread_id, since, len(rows), len(state.sockets.get(thread_id, set())))
         try:

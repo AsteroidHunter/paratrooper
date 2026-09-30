@@ -18,7 +18,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from .models import DEFAULT_THREAD_ID, EVENT_POLICY, ThreadEvent, ThreadSummary
+from .models import (
+    DEFAULT_THREAD_ID,
+    EVENT_POLICY,
+    Reaction,
+    ReactionTarget,
+    ThreadEvent,
+    ThreadSummary,
+)
 from .thumbs import image_blurhash, image_dims
 
 logger = logging.getLogger(__name__)
@@ -47,6 +54,19 @@ CREATE TABLE IF NOT EXISTS threads (
     thread_id  TEXT PRIMARY KEY,
     created_ts TEXT NOT NULL,
     read_seq   INTEGER NOT NULL DEFAULT 0
+);
+
+-- reactions (tapbacks): one per person per message, per chat. State about a
+-- message rather than a message, so it is not a row of the thread above: it is
+-- never a title, a preview, an unread reply or boot recovery's unanswered row.
+-- A new pick replaces the old one on the key; clearing deletes it.
+CREATE TABLE IF NOT EXISTS reactions (
+    thread_id TEXT NOT NULL,
+    seq       INTEGER NOT NULL,   -- the message reacted to (messages.seq)
+    role      TEXT NOT NULL,      -- who reacted: 'user' or 'agent'
+    reaction  TEXT NOT NULL,      -- a tapback name or one emoji (models.normalize_reaction)
+    ts        TEXT NOT NULL,      -- when it was set, server clock
+    PRIMARY KEY (thread_id, seq, role)
 );
 
 CREATE TABLE IF NOT EXISTS push_subscriptions (
@@ -94,6 +114,24 @@ _PREVIEW_WORDS = {"screenshot": "Board preview", "pr": "Pull request"}
 _UNREAD_KINDS = tuple(kind for kind, policy in EVENT_POLICY.items() if policy.unread)
 # how many rows to look through for a title or a preview before giving up
 _SCAN_ROWS = 20
+# The agent kinds that draw a bubble can carry a reaction, and so can every row
+# of his. The same set the chat list counts as unread, for the same reason:
+# EventPolicy.unread is "this kind draws a bubble".
+_REACTABLE_AGENT_KINDS = _UNREAD_KINDS
+# the snapshot a socket gets is every reaction in its chat, newest first up to
+# this many rows (two people, so about half as many messages)
+REACTION_SNAPSHOT_ROWS = 4000
+
+
+def _target_words(payload: Any, attachments: list) -> str:
+    """How one of his messages reads when the agent is offered it to react to:
+    its words on one line, or what it was when it had none."""
+    text = _one_line(payload, 200) if isinstance(payload, str) else ""
+    if text:
+        return text
+    if attachments:
+        return "a photo" if len(attachments) == 1 else f"{len(attachments)} photos"
+    return "a message"
 
 
 def _one_line(text: str, limit: int) -> str:
@@ -314,6 +352,11 @@ class ThreadStore:
                 self._conn.execute(
                     f"DELETE FROM messages WHERE seq IN ({hitmarks})", tuple(deleted)
                 )
+                # a reply taken back takes its reactions with it, in the same commit
+                self._conn.execute(
+                    f"DELETE FROM reactions WHERE thread_id=? AND seq IN ({hitmarks})",
+                    (thread_id, *deleted),
+                )
                 self._conn.commit()
         return deleted
 
@@ -389,6 +432,91 @@ class ThreadStore:
                 """
             ).fetchall()
         return [(r["thread_id"], _event(r)) for r in rows]
+
+    # --- reactions (tapbacks) ---
+
+    def set_reaction(
+        self,
+        thread_id: str,
+        seq: int,
+        role: str,
+        reaction: str | None,
+        *,
+        ts: str,
+        target_roles: tuple[str, ...] = ("user", "agent"),
+    ) -> bool:
+        """Put ``role``'s reaction on message ``seq`` of this chat, replacing
+        the one it had; None takes it off. False, and nothing written, when the
+        message is not a drawn row of this chat whose sender is in
+        ``target_roles`` (the agent reacts to his messages only). The value is
+        stored as given: normalising it is the caller's (models.py)."""
+        kinds = ",".join("?" for _ in _REACTABLE_AGENT_KINDS)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT role FROM messages WHERE seq=? AND thread_id=? AND ("
+                "(role='user' AND kind IS NULL) OR "
+                f"(role='agent' AND kind IN ({kinds})))",
+                (seq, thread_id, *_REACTABLE_AGENT_KINDS),
+            ).fetchone()
+            if row is None or row["role"] not in target_roles:
+                return False
+            if reaction is None:
+                self._conn.execute(
+                    "DELETE FROM reactions WHERE thread_id=? AND seq=? AND role=?",
+                    (thread_id, seq, role),
+                )
+            else:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO reactions(thread_id, seq, role, reaction, ts) "
+                    "VALUES (?,?,?,?,?)",
+                    (thread_id, seq, role, reaction, ts),
+                )
+            self._conn.commit()
+        return True
+
+    def reactions(self, thread_id: str, *, limit: int = REACTION_SNAPSHOT_ROWS) -> list[Reaction]:
+        """Every reaction in one chat (the newest ``limit`` by message), in
+        message order: the snapshot a socket gets after its replay."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM (SELECT * FROM reactions WHERE thread_id=? "
+                "ORDER BY seq DESC, role LIMIT ?) ORDER BY seq, role",
+                (thread_id, limit),
+            ).fetchall()
+        return [Reaction(target=r["seq"], role=r["role"], reaction=r["reaction"], ts=r["ts"])
+                for r in rows]
+
+    def reactions_on(self, thread_id: str, seqs: list[int]) -> list[Reaction]:
+        """The reactions on these messages of one chat (the job context's window)."""
+        if not seqs:
+            return []
+        marks = ",".join("?" for _ in seqs)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM reactions WHERE thread_id=? AND seq IN ({marks}) "
+                "ORDER BY ts, seq, role",
+                (thread_id, *seqs),
+            ).fetchall()
+        return [Reaction(target=r["seq"], role=r["role"], reaction=r["reaction"], ts=r["ts"])
+                for r in rows]
+
+    def reactable_messages(self, thread_id: str, *, n: int = 10) -> list[ReactionTarget]:
+        """His last ``n`` messages in this chat, oldest first: what a job may
+        put the agent's reaction on."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM (SELECT seq, payload, attachments, ts FROM messages "
+                "WHERE thread_id=? AND role='user' AND kind IS NULL "
+                "ORDER BY seq DESC LIMIT ?) ORDER BY ts, seq",
+                (thread_id, n),
+            ).fetchall()
+        return [
+            ReactionTarget(
+                seq=r["seq"],
+                text=_target_words(json.loads(r["payload"]), json.loads(r["attachments"])),
+            )
+            for r in rows
+        ]
 
     # --- the chat list ---
 
