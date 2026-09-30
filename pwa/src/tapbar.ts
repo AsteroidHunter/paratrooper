@@ -199,8 +199,14 @@ export function createTapbar(deps: TapbarDeps): Tapbar {
       return;
     }
     const b = lifted.getBoundingClientRect();
-    if (b.bottom < view.top || b.top > view.bottom) {
-      close(); // carried out of sight (a reply pinned the thread): nothing to point at
+    // carried out of sight (a reply pinned the thread under it): nothing to
+    // point at. Not while he is typing his emoji, though: the keyboard's own
+    // lift carries a bubble from the top half of the screen under the header,
+    // and closing then would take the keyboard down under his finger. The bar
+    // stays, clamped into the visible part, until he picks or taps away.
+    const typing = el.classList.contains("keying");
+    if (!typing && (b.bottom < view.top || b.top > view.bottom)) {
+      close();
       return;
     }
     const h = host.getBoundingClientRect();

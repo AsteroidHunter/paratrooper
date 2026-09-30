@@ -204,6 +204,12 @@ describe("the bar", () => {
     expect(fnBody(bar, "place")).toContain("barPlacement(");
   });
 
+  it("never closes under his finger while he types his emoji", () => {
+    // the keyboard's lift can carry the bubble out of sight: that close is
+    // for a bubble a reply carried away, not for one the keyboard moved
+    expect(fnBody(bar, "place")).toMatch(/!typing && \(b\.bottom < view\.top/);
+  });
+
   it("closes when the chat list opens, or the app goes to the background", () => {
     expect(main).toMatch(/opening: \(\) => \{[\s\S]*?tapbar\.close\(\);/);
     const at = main.lastIndexOf('document.addEventListener("visibilitychange"');
