@@ -1730,7 +1730,9 @@ def test_build_tool_server(tmp_path):
     # the old in-process git tools stay gone: local git is the agent's own shell
     for gone in ("start_branch", "git_commit", "git_push", "open_pr"):
         assert f"mcp__paratrooper__{gone}" not in names
-    assert len(names) == 12
+    # the agent's tapback on his messages, on this profile and the plain one
+    assert "mcp__paratrooper__react_to_message" in names
+    assert len(names) == 13
 
 
 def test_the_two_optional_tools_are_dropped_rather_than_registered_broken(tmp_path):
@@ -1745,10 +1747,10 @@ def test_the_two_optional_tools_are_dropped_rather_than_registered_broken(tmp_pa
     no_screenshot = _tool_names(no_shot, spotify=True)
     neither = _tool_names(no_shot, spotify=False)
 
-    assert len(both) == 12
-    assert len(no_spotify) == 11
-    assert len(no_screenshot) == 11
-    assert len(neither) == 10
+    assert len(both) == 13
+    assert len(no_spotify) == 12
+    assert len(no_screenshot) == 12
+    assert len(neither) == 11
 
     spotify_name = "mcp__paratrooper__resolve_spotify"
     screenshot_name = "mcp__paratrooper__screenshot_board"
@@ -1758,7 +1760,8 @@ def test_the_two_optional_tools_are_dropped_rather_than_registered_broken(tmp_pa
     assert spotify_name not in neither and screenshot_name not in neither
     # everything else is untouched in all four
     for always in ("place_pin", "move_pin", "push_branch", "open_pull_request",
-                   "list_pull_requests", "post_update", "append_changelog"):
+                   "list_pull_requests", "post_update", "react_to_message",
+                   "append_changelog"):
         for names in (both, no_spotify, no_screenshot, neither):
             assert f"mcp__paratrooper__{always}" in names, always
 
@@ -3741,10 +3744,10 @@ def _no_spotify():
 
 def test_the_plain_session_declares_exactly_the_two_web_tools(tmp_path, monkeypatch):
     """The whole tool posture of a plain deployment, in one assertion set: the
-    base set is the two web built-ins, the shell and the file tools are refused
-    by name as well as absent, no hook is registered because there is nothing for
-    one to guard, and the session still answers permission questions from its own
-    list."""
+    base set is the two web built-ins, beside them only the in process reaction
+    tool, the shell and the file tools are refused by name as well as absent, no
+    hook is registered because there is nothing for one to guard, and the session
+    still answers permission questions from its own list."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
     import paratrooper.agent.worker as worker_mod
@@ -3755,12 +3758,15 @@ def test_the_plain_session_declares_exactly_the_two_web_tools(tmp_path, monkeypa
     options = run["options"]
 
     assert options.tools == ["WebSearch", "WebFetch"]
-    assert options.allowed_tools == ["WebSearch", "WebFetch"]  # no Spotify configured
+    # no Spotify configured: the web tools and the reaction tool
+    assert options.allowed_tools == [
+        "WebSearch", "WebFetch", "mcp__paratrooper__react_to_message",
+    ]
     assert options.disallowed_tools == [
         "Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep", "Task",
     ]
     assert not options.hooks  # no shell, no file tool: nothing to fence
-    assert options.mcp_servers == {}
+    assert set(options.mcp_servers) == {"paratrooper"}
     assert options.model == cfg.model
     assert options.permission_mode == "dontAsk"
     assert options.include_partial_messages is True
@@ -3817,9 +3823,9 @@ def test_the_plain_session_writes_the_shared_isolation_switch(
 
 
 def test_the_plain_session_registers_spotify_only_when_it_is_configured(tmp_path, monkeypatch):
-    """The one custom tool a plain session can have. With credentials it is
-    registered, named in the allowed list and mentioned in the prompt; without
-    them there is no server at all rather than a server with nothing on it."""
+    """The one optional custom tool a plain session can have. With credentials
+    it is registered, named in the allowed list and mentioned in the prompt;
+    without them the server carries the reaction tool alone."""
     import paratrooper.agent.worker as worker_mod
     from paratrooper.agent import prompt as prompt_module
 
@@ -3827,7 +3833,7 @@ def test_the_plain_session_registers_spotify_only_when_it_is_configured(tmp_path
     job = worker_mod.Job(job_id="p4", thread_id="t1", text="play me something")
 
     without = _plain_run(monkeypatch, cfg, job)
-    assert without["options"].mcp_servers == {}
+    assert set(without["options"].mcp_servers) == {"paratrooper"}
     assert "resolve_spotify" not in "".join(without["options"].allowed_tools)
     assert without["options"].system_prompt == prompt_module.PLAIN_SYSTEM_PROMPT
 
@@ -3835,6 +3841,7 @@ def test_the_plain_session_registers_spotify_only_when_it_is_configured(tmp_path
     assert set(with_creds["options"].mcp_servers) == {"paratrooper"}
     assert with_creds["options"].allowed_tools == [
         "WebSearch", "WebFetch", "mcp__paratrooper__resolve_spotify",
+        "mcp__paratrooper__react_to_message",
     ]
     assert with_creds["options"].system_prompt == prompt_module.plain_system_prompt(spotify=True)
     # the prompt and the tool come from the one fact, so the agent is never told
@@ -3849,11 +3856,11 @@ def test_the_plain_tool_server_builds_no_pinboard_state():
     from paratrooper.agent.tools import build_plain_tool_server
 
     server, names = build_plain_tool_server(None)
-    assert server is None and names == []
+    assert server is not None and names == ["mcp__paratrooper__react_to_message"]
 
     server, names = build_plain_tool_server(("id", "secret"))
     assert server is not None
-    assert names == ["mcp__paratrooper__resolve_spotify"]
+    assert names == ["mcp__paratrooper__resolve_spotify", "mcp__paratrooper__react_to_message"]
 
 
 def test_a_plain_turn_sends_the_photos_first_then_one_text_block(tmp_path, monkeypatch):
@@ -4132,8 +4139,9 @@ def test_importing_the_worker_needs_no_jwt_and_no_browser(with_spotify):
         "    assert messages[0]['message']['content'] == [{'type': 'text', 'text': 'hello'}]\n"
         "    expected = ['WebSearch', 'WebFetch']\n"
         "    if with_spotify: expected.append('mcp__paratrooper__resolve_spotify')\n"
+        "    expected.append('mcp__paratrooper__react_to_message')\n"
         "    assert options.allowed_tools == expected\n"
-        "    assert bool(options.mcp_servers) == with_spotify\n"
+        "    assert set(options.mcp_servers) == {'paratrooper'}\n"
         "    yield ResultMessage(subtype='success', duration_ms=1, duration_api_ms=1,\n"
         "                        is_error=False, num_turns=1, session_id='fake', result='reply')\n"
         "w.run_session = fake_session\n"

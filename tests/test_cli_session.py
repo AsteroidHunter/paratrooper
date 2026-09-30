@@ -152,7 +152,7 @@ def test_the_configured_model_and_effort_reach_the_model(worker, monkeypatch, tm
 
 
 def test_the_plain_session_on_the_real_cli(worker, monkeypatch, tmp_path):
-    """A plain turn as the CLI sees it: the two web tools and nothing else, the
+    """A plain turn as the CLI sees it: the two web tools and the reaction tool, the
     photo arriving as an image block ahead of the text, and a shell or file
     call answered as a tool that does not exist. The CLI also writes its own
     copy of the photo and names it to the model; that copy is gone once the
@@ -171,7 +171,9 @@ def test_the_plain_session_on_the_real_cli(worker, monkeypatch, tmp_path):
     result, events, api = _run(worker, monkeypatch, tmp_path, cfg, job, script)
 
     first = api.model_requests()[0]
-    assert fakeapi.tool_names(first) == {"WebSearch", "WebFetch"}
+    assert fakeapi.tool_names(first) == {
+        "WebSearch", "WebFetch", "mcp__paratrooper__react_to_message",
+    }
     user = first["messages"][0]["content"]
     image, texts = user[0], [block["text"] for block in user[1:]]
     assert image["type"] == "image"
@@ -273,3 +275,34 @@ def _running(pid: int) -> bool:
     state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
                            capture_output=True, text=True).stdout.strip()
     return bool(state) and not state.startswith("Z")
+
+
+@pytest.mark.parametrize("profile", ["pinboard", "plain"])
+def test_the_reaction_tool_runs_on_the_real_cli(worker, monkeypatch, tmp_path, profile):
+    """react_to_message through the bundled CLI on both profiles: the call is
+    offered, answered, and leaves the turn as a 'reaction' result ahead of the
+    reply; a quote that names nothing comes back to the model as an error."""
+    cfg = _pinboard(tmp_path) if profile == "pinboard" else plain_config(tmp_path)
+    if profile == "plain":
+        cfg.require_inbox().mkdir(parents=True)
+    job = worker.Job(job_id="c9", thread_id="t1", text="perfect, thanks",
+                     reactable=[{"seq": 41, "text": "move it left"},
+                                {"seq": 42, "text": "perfect, thanks"}])
+    script = _steps(
+        fakeapi.tool_use("mcp__paratrooper__react_to_message", {"reaction": "heart"}),
+        fakeapi.tool_use("mcp__paratrooper__react_to_message",
+                         {"reaction": "😂", "message": "the lake one"}),
+        final="Glad it works.",
+    )
+    result, events, api = _run(worker, monkeypatch, tmp_path, cfg, job, script)
+
+    first, second = _results(api)
+    assert not first[0] and json.loads(first[1])["sent"] is True
+    assert second[0] and "perfect, thanks" in second[1]
+    assert "mcp__paratrooper__react_to_message" in fakeapi.tool_names(api.model_requests()[0])
+    kinds = [e["kind"] for e in events if e["kind"] != "typing"]
+    assert kinds == ["reaction", "done"]
+    assert events[[e["kind"] for e in events].index("reaction")]["payload"] == {
+        "seq": 42, "reaction": "heart",
+    }
+    assert result.status == "done"

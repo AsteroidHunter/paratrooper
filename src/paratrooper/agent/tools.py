@@ -33,6 +33,7 @@ import anyio
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from ..placement import NewItem, check_overlaps, place_pin, sanity_check
+from ..web.models import TAPBACKS, normalize_reaction
 from . import github, images, pins, screenshot, spotify
 from .config import OPENED_ASSET, PREVIEW_ASSET, Config, PinboardConfig
 from .hooks import base_denial, normalize_prefix, push_denial
@@ -74,6 +75,12 @@ class ToolContext:
     # live channel to the phone: async callable(text) publishing an 'update'
     # result mid-job. None on offline/CLI runs — post_update degrades to a no-op.
     emit_update: Any = None
+    # the reaction tool's two inputs: the owner's recent messages this job may
+    # react to ({"seq", "text"}, newest last) and the live channel,
+    # async callable(seq, reaction) publishing a 'reaction' result. Both empty
+    # on offline runs, where the tool says so instead of failing.
+    reactable: list = field(default_factory=list)
+    emit_reaction: Any = None
 
     def __post_init__(self) -> None:
         # loud here rather than as an AttributeError inside a tool handler: a
@@ -161,21 +168,111 @@ def spotify_handler(creds: tuple[str, str] | None):
     return resolve_spotify_tool
 
 
-def build_plain_tool_server(spotify_creds: tuple[str, str] | None):
-    """The plain profile's custom tools: Spotify when it is configured, and
-    nothing else ever.
+# --- reactions (tapbacks) on his messages -------------------------------------
 
-    Returns ``(None, [])`` when there is no credential, because a server with no
-    tools on it is a server the session would declare and the CLI would start for
-    no reason. Nothing here builds a :class:`ToolContext`: the pinboard handlers
-    need a site root, a changelog and a pin layout, and a plain deployment has
-    none of the three, so it must not be constructing objects that require them.
+REACTION_TOOL = "react_to_message"
+# characters stripped off the ends of a quote before it is looked for: the
+# model tends to wrap what it quotes, and a trailing full stop is noise
+_QUOTE_EDGES = " \t\n\"'\u201c\u201d\u2018\u2019.,!?;:"
+
+
+def _match_words(text: str) -> str:
+    return " ".join(text.casefold().split()).strip(_QUOTE_EDGES)
+
+
+def pick_reaction_target(targets: list, quote: str) -> dict | None:
+    """Which of the job's reactable messages a quote names: the newest one when
+    there is no quote, else the newest whose words hold the quote (or, for a
+    short message, are held by it). None when nothing matches."""
+    if not targets:
+        return None
+    if not _match_words(quote):
+        return targets[-1]
+    wanted = _match_words(quote)
+    for target in reversed(targets):
+        words = _match_words(str(target.get("text", "")))
+        if words and (wanted in words or words in wanted):
+            return target
+    return None
+
+
+def reaction_handler(targets: list, emit: Any, whom: str, possessive: str):
+    """The ``react_to_message`` tool, one factory for both profiles.
+
+    ``targets`` are the job's reactable messages (``{"seq", "text"}``, newest
+    last) and ``emit`` the live channel, async callable(seq, reaction or None).
+    The message is resolved HERE, against the targets, so a quote that names
+    nothing comes straight back to the model as an error listing what it can
+    pick, in the same turn, instead of vanishing on the service. When to react
+    is the model's call entirely: nothing here judges whether it should."""
+    names = ", ".join(TAPBACKS)
+    schema = {
+        "type": "object",
+        "properties": {
+            "reaction": {
+                "type": "string",
+                "description": f"One of the tapbacks {names}, or any single emoji. "
+                               "none takes your reaction off.",
+            },
+            "message": {
+                "type": "string",
+                "description": f"A few words quoted from {possessive} message. "
+                               f"Leave it out for {possessive} newest message.",
+            },
+        },
+        "required": ["reaction"],
+    }
+
+    @tool(REACTION_TOOL, f"Put your reaction on one of {whom}'s recent messages in this chat, "
+          f"the way a tapback works in Messages: it shows as a small badge on {possessive} "
+          "bubble. One per message; a new one replaces yours. Args: reaction, optional "
+          "message.", schema)
+    async def react_tool(args: dict) -> dict:
+        raw = str(args.get("reaction", "")).strip()
+        removing = raw.casefold() == "none"
+        reaction = None if removing else normalize_reaction(raw)
+        if reaction is None and not removing:
+            return _err(f"{raw!r} is not a reaction: use one of {names}, or one single emoji")
+        if not targets:
+            return _err(f"there is no message of {possessive} in this chat to react to")
+        target = pick_reaction_target(targets, str(args.get("message") or ""))
+        if target is None:
+            recent = "; ".join(f'"{str(t.get("text", ""))[:60]}"' for t in targets[-5:])
+            return _err(f"none of {possessive} recent messages matches that quote. "
+                        f"The recent ones: {recent}")
+        if emit is None:
+            return _ok({"sent": False, "note": "no live channel on this run"})
+        try:
+            await emit(int(target["seq"]), reaction)
+        except Exception as exc:
+            return _err(f"react_to_message failed: {exc}")
+        return _ok({"sent": True, "reaction": reaction or "removed",
+                    "message": str(target.get("text", ""))[:60]})
+
+    return react_tool
+
+
+def build_plain_tool_server(
+    spotify_creds: tuple[str, str] | None,
+    *,
+    reactable: list | None = None,
+    emit_reaction: Any = None,
+):
+    """The plain profile's custom tools: the reaction tool always, and Spotify
+    when it is configured.
+
+    Always a server now, since the reaction tool needs nothing but the job's own
+    messages and the live channel. Nothing here builds a :class:`ToolContext`:
+    the pinboard handlers need a site root, a changelog and a pin layout, and a
+    plain deployment has none of the three, so it must not be constructing
+    objects that require them.
     """
-    if not wants_spotify_tool(spotify_creds):
-        return None, []
-    handler = spotify_handler(spotify_creds)
-    server = create_sdk_mcp_server(name=SERVER_NAME, version="0.1.0", tools=[handler])
-    return server, [f"mcp__{SERVER_NAME}__{handler.name}"]
+    handlers = [
+        *([spotify_handler(spotify_creds)] if wants_spotify_tool(spotify_creds) else []),
+        reaction_handler(reactable or [], emit_reaction, "the person", "their"),
+    ]
+    server = create_sdk_mcp_server(name=SERVER_NAME, version="0.1.0", tools=handlers)
+    return server, [f"mcp__{SERVER_NAME}__{h.name}" for h in handlers]
 
 
 def build_tool_server(ctx: ToolContext):
@@ -429,6 +526,8 @@ def build_tool_server(ctx: ToolContext):
         except Exception as exc:
             return _err(f"post_update failed: {exc}")
 
+    react_tool = reaction_handler(ctx.reactable, ctx.emit_reaction, owner, "his")
+
     @tool("fetch_history", "Read older changelog entries. Args: optional n, optional "
           "start, optional end.", {"n": int, "start": int, "end": int})
     async def fetch_history_tool(args: dict) -> dict:
@@ -465,6 +564,7 @@ def build_tool_server(ctx: ToolContext):
         list_pull_requests_tool,
         *([screenshot_board_tool] if wants_screenshot_tool(ctx.config) else []),
         post_update_tool,
+        react_tool,
         fetch_history_tool,
         append_changelog_tool,
     ]

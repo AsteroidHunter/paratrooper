@@ -472,3 +472,186 @@ def test_an_older_job_message_without_targets_still_parses():
 
     job = JobMessage.model_validate({"job_id": "j", "thread_id": "t"})
     assert job.reactable == []
+
+
+# --- the worker's tool: react_to_message ---------------------------------------------
+
+TARGETS = [
+    {"seq": 11, "text": "can you move the hiking photo to the top"},
+    {"seq": 14, "text": "a photo"},
+    {"seq": 17, "text": "Perfect, thanks!"},
+]
+
+
+def _react_tool(targets=TARGETS, emit=None):
+    from paratrooper.agent.tools import reaction_handler
+
+    return reaction_handler(targets, emit, "Sam", "his")
+
+
+def _out(result) -> str:
+    return result["content"][0]["text"]
+
+
+def test_react_to_message_goes_on_his_newest_message_by_default():
+    sent = []
+
+    async def emit(seq, reaction):
+        sent.append((seq, reaction))
+
+    tool = _react_tool(emit=emit)
+    assert tool.name == "react_to_message"
+    result = _run(tool.handler({"reaction": "heart"}))
+    assert not result.get("is_error")
+    assert sent == [(17, "heart")]
+
+
+def test_react_to_message_finds_the_message_it_quotes():
+    sent = []
+
+    async def emit(seq, reaction):
+        sent.append((seq, reaction))
+
+    tool = _react_tool(emit=emit)
+    _run(tool.handler({"reaction": "👍", "message": "the Hiking photo"}))
+    _run(tool.handler({"reaction": "😂", "message": "a photo"}))
+    _run(tool.handler({"reaction": "!!", "message": '"perfect, thanks"'}))
+    assert sent == [(11, "like"), (14, "😂"), (17, "emphasize")]
+
+
+def test_react_to_message_takes_none_as_taking_its_reaction_off():
+    sent = []
+
+    async def emit(seq, reaction):
+        sent.append((seq, reaction))
+
+    _run(_react_tool(emit=emit).handler({"reaction": "none"}))
+    assert sent == [(17, None)]
+
+
+def test_react_to_message_refuses_what_it_cannot_do():
+    sent = []
+
+    async def emit(seq, reaction):
+        sent.append((seq, reaction))
+
+    tool = _react_tool(emit=emit)
+    bad = _run(tool.handler({"reaction": "great job"}))
+    assert bad.get("is_error") and "heart" in _out(bad)
+    missing = _run(tool.handler({"reaction": "heart", "message": "the lake one"}))
+    assert missing.get("is_error")
+    assert "Perfect, thanks!" in _out(missing)  # it says what it can pick from
+    empty = _run(_react_tool(targets=[], emit=emit).handler({"reaction": "heart"}))
+    assert empty.get("is_error")
+    assert sent == []
+
+
+def test_react_to_message_without_a_live_channel_says_so_quietly():
+    result = _run(_react_tool(emit=None).handler({"reaction": "heart"}))
+    assert not result.get("is_error") and '"sent": false' in _out(result)
+
+
+def test_both_profiles_register_the_tool(tmp_path):
+    from paratrooper.agent import memory
+    from paratrooper.agent.tools import ToolContext, build_plain_tool_server, build_tool_server
+
+    cfg = pinboard_config(tmp_path)
+    ctx = ToolContext(config=cfg, changelog=memory.Changelog(cfg.pinboard.changelog))
+    assert "mcp__paratrooper__react_to_message" in build_tool_server(ctx)[1]
+    server, names = build_plain_tool_server(None)
+    assert server is not None and names == ["mcp__paratrooper__react_to_message"]
+    server, names = build_plain_tool_server(("id", "secret"))
+    assert names == ["mcp__paratrooper__resolve_spotify", "mcp__paratrooper__react_to_message"]
+
+
+def _session_calls_react(monkeypatch, worker_mod, captured):
+    """A stand-in session that calls the reaction tool the worker built, found
+    by capturing the tools handed to the in process server."""
+    import paratrooper.agent.tools as tools_mod
+
+    original = tools_mod.create_sdk_mcp_server
+
+    def capture(name, version, tools):
+        captured["tools"] = {t.name: t for t in tools}
+        return original(name=name, version=version, tools=tools)
+
+    async def fake_session(*, prompt, options):
+        captured["options"] = options
+        tool = captured["tools"]["react_to_message"]
+        await tool.handler({"reaction": "❤️", "message": "ship it"})
+        if False:
+            yield
+
+    monkeypatch.setattr(tools_mod, "create_sdk_mcp_server", capture)
+    monkeypatch.setattr(worker_mod, "configure_auth", lambda mode: "api")
+    monkeypatch.setattr(worker_mod, "run_session", fake_session)
+
+
+@pytest.mark.parametrize("profile", ["pinboard", "plain"])
+def test_the_reaction_reaches_the_result_channel_on_both_profiles(tmp_path, monkeypatch, profile):
+    import paratrooper.agent.worker as worker_mod
+    from confighelpers import plain_config
+    from paratrooper.agent.config import ConfigError
+
+    def no_spotify():
+        raise ConfigError("no Spotify")
+
+    monkeypatch.setattr(worker_mod, "spotify_credentials", no_spotify)
+    monkeypatch.setattr(worker_mod, "installation_token", lambda cfg: None)
+    captured: dict = {}
+    _session_calls_react(monkeypatch, worker_mod, captured)
+    if profile == "pinboard":
+        cfg = pinboard_config(tmp_path)
+        cfg.pinboard.site_root.mkdir(parents=True)
+    else:
+        cfg = plain_config(tmp_path)
+    job = worker_mod.Job(job_id="j9", thread_id="t1", text="ship it",
+                         reactable=[{"seq": 5, "text": "ship it"}])
+    events: list[dict] = []
+    result = _run(worker_mod.run_job(job, config=cfg, on_event=events.append))
+    assert result.status == "done"
+    reaction = next(e for e in events if e["kind"] == "reaction")
+    assert reaction == {"job_id": "j9", "kind": "reaction", "payload": {"seq": 5, "reaction": "❤️"}}
+    assert [e["kind"] for e in events].index("reaction") < [e["kind"] for e in events].index("done")
+    assert "mcp__paratrooper__react_to_message" in captured["options"].allowed_tools
+    assert "react_to_message" in captured["options"].system_prompt
+
+
+def test_the_runner_carries_his_messages_into_the_job(tmp_path, monkeypatch):
+    import paratrooper.web.worker_runner as runner
+    from paratrooper.web.models import JobMessage, ReactionTarget
+
+    seen = {}
+
+    async def fake_run_job(job, **kwargs):
+        seen["job"] = job
+
+    class Queue:
+        r = None
+
+        async def publish_result(self, thread_id, result):
+            pass
+
+    monkeypatch.setattr(runner, "run_job", fake_run_job)
+    monkeypatch.setattr(runner, "RedisInbox", lambda r, ttl: None)
+    worker = runner.Worker(Queue(), config=example_config(inbox=tmp_path / "inbox"))
+    msg = JobMessage(job_id="j", thread_id="t", text="hi",
+                     reactable=[ReactionTarget(seq=3, text="hi")])
+    _run(worker._run_one(msg))
+    assert seen["job"].reactable == [{"seq": 3, "text": "hi"}]
+
+
+def test_both_prompts_carry_the_reaction_etiquette():
+    from paratrooper.agent import prompt as prompt_mod
+    from paratrooper.agent.prompt import render_system_prompt
+
+    pinboard = render_system_prompt(pinboard_config().pinboard)
+    plain = prompt_mod.PLAIN_SYSTEM_PROMPT
+    for text in (pinboard, plain, prompt_mod.plain_system_prompt(spotify=True)):
+        assert "`react_to_message`" in text
+        assert "REACTIONS" in text
+        assert "reacted with a heart" in text  # how his reactions read in the thread
+        lowered = text.lower()
+        assert "never react to a message that is itself only a reaction" in lowered
+        assert "same emoji" in lowered
+        assert "acknowledgement" in lowered

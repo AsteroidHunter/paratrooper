@@ -150,6 +150,7 @@ class Worker:
             attachments=msg.attachments,
             context=msg.context,
             pin_hint=msg.pin_hint,
+            reactable=[target.model_dump() for target in msg.reactable],
         )
 
         async def on_event(event: dict) -> None:

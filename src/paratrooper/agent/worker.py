@@ -61,7 +61,13 @@ from .hooks import make_file_guard_hook, make_main_guard_hook
 from .memory import Changelog, format_digest
 from .prompt import build_system_prompt
 from .siterepo import SiteRepo
-from .tools import SERVER_NAME, ToolContext, build_plain_tool_server, build_tool_server
+from .tools import (
+    SERVER_NAME,
+    ToolContext,
+    build_plain_tool_server,
+    build_tool_server,
+    wants_spotify_tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +203,9 @@ class Job:
     attachments: list[str] = field(default_factory=list)  # inbox keys
     context: list[str] = field(default_factory=list)  # recent thread lines
     pin_hint: str | None = None  # optional pin id, for the branch name
+    # his recent messages in this chat, {"seq", "text"}, newest last: what the
+    # react_to_message tool may put the agent's reaction on
+    reactable: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -444,6 +453,11 @@ async def _run_pinboard_job(
         # the post_update tool's live channel: an agent-authored interim bubble
         await emit("update", text)
 
+    async def emit_reaction(seq: int, reaction: str | None) -> None:
+        # the react_to_message tool's live channel: the agent's tapback on one
+        # of his messages, relayed as state about that message, not a bubble
+        await emit("reaction", {"seq": seq, "reaction": reaction})
+
     # No branch/PR yet: the agent branches (or continues an open PR's branch)
     # in its own shell only when it actually changes the board, and the push
     # and pull request tools record what they did — pure conversation never
@@ -453,6 +467,8 @@ async def _run_pinboard_job(
         changelog=changelog,
         spotify_creds=spotify_creds,
         emit_update=emit_update,
+        reactable=job.reactable,
+        emit_reaction=emit_reaction,
         github_token=gh_token,
     )
     server, tool_names = build_tool_server(ctx)
@@ -621,17 +637,23 @@ async def _run_plain_job(
             job.job_id, len(vision), sum(len(v.data) for v in vision) // 1024,
         )
 
-    server, tool_names = build_plain_tool_server(spotify_creds)
+    async def emit_reaction(seq: int, reaction: str | None) -> None:
+        # the react_to_message tool's live channel, the same as pinboard's
+        await emit("reaction", {"seq": seq, "reaction": reaction})
+
+    server, tool_names = build_plain_tool_server(
+        spotify_creds, reactable=job.reactable, emit_reaction=emit_reaction
+    )
     # the one list of what this session may run, declared to the CLI AND used as
     # the permission gate's answer, same as pinboard
     session_tools = PLAIN_TOOLS + tool_names
 
     options = ClaudeAgentOptions(
         model=config.model,
-        system_prompt=build_system_prompt(config, spotify=bool(tool_names)),
+        system_prompt=build_system_prompt(config, spotify=wants_spotify_tool(spotify_creds)),
         cwd=str(inbox),
         env=session_env(config),
-        mcp_servers={SERVER_NAME: server} if server is not None else {},
+        mcp_servers={SERVER_NAME: server},
         tools=list(PLAIN_TOOLS),
         allowed_tools=session_tools,
         disallowed_tools=list(PLAIN_DENIED_TOOLS),
@@ -681,6 +703,7 @@ def main() -> None:
         attachments=payload.get("attachments", []),
         context=payload.get("context", []),
         pin_hint=payload.get("pin_hint"),
+        reactable=payload.get("reactable", []),
     )
     result = asyncio.run(run_job(job))
     print(json.dumps(result.__dict__, indent=2))
