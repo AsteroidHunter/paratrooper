@@ -70,7 +70,8 @@ describe("threadcache put/get/del round-trips", () => {
   it("put then get round-trips frames verbatim with the lastSeq cursor", async () => {
     const frames = [frame(1), frame(2), frame(3)];
     await cache.put({ id: "default", lastSeq: 3, frames });
-    expect(await cache.get("default")).toEqual({ id: "default", lastSeq: 3, frames });
+    // reactions ride beside the frames (reactions.test.ts); none were saved here
+    expect(await cache.get("default")).toEqual({ id: "default", lastSeq: 3, frames, reactions: [] });
   });
 
   it("get with no record is null (first ever run: the cacheless boot)", async () => {

@@ -45,11 +45,18 @@ export const CACHE_FRAMES = 50;
 export const WRITE_DEBOUNCE_MS = 3000;
 
 // one cached thread. frames are the caller's raw ServerMsg objects, stored
-// verbatim; this module never looks inside them.
-export interface ThreadSnapshot<F = unknown> {
+// verbatim; this module never looks inside them. reactions are the chat's
+// reactions as the reaction book lists them (reactions.ts), stored verbatim
+// too, so a cold open paints the badges before the socket's snapshot arrives.
+// A record written before reactions existed has none and reads back as none:
+// the field is additive and the socket's snapshot corrects it within a second
+// of the open, so it crosses no era (throwing every saved thread away to store
+// nothing new would cost more than the one socket round it saves).
+export interface ThreadSnapshot<F = unknown, R = unknown> {
   id: string;
   lastSeq: number;
   frames: F[];
+  reactions?: R[];
 }
 
 type StoredRecord = ThreadSnapshot & { schema: number };
@@ -132,6 +139,7 @@ export async function put(snapshot: ThreadSnapshot): Promise<void> {
     schema: SCHEMA_VERSION,
     lastSeq: snapshot.lastSeq,
     frames: snapshot.frames.slice(-CACHE_FRAMES),
+    reactions: snapshot.reactions ?? [],
   };
   await write(db, (store) => {
     const jankT0 = performance.now(); // TEMP DIAGNOSTIC (scroll-jank): the put clones every frame synchronously here
@@ -143,7 +151,9 @@ export async function put(snapshot: ThreadSnapshot): Promise<void> {
 // the thread's cached snapshot, or null when there is none. A record from
 // another schema era (or one that lost its shape) is deleted here, wholesale,
 // and reads back as null — the boot proceeds cacheless.
-export async function get<F = unknown>(id: string): Promise<ThreadSnapshot<F> | null> {
+export async function get<F = unknown, R = unknown>(
+  id: string,
+): Promise<ThreadSnapshot<F, R> | null> {
   const db = await openDB();
   if (!db) return null;
   const rec = await readOne(db, id);
@@ -155,7 +165,8 @@ export async function get<F = unknown>(id: string): Promise<ThreadSnapshot<F> | 
     });
     return null;
   }
-  return { id: rec.id, lastSeq: rec.lastSeq, frames: rec.frames as F[] };
+  const reactions = Array.isArray(rec.reactions) ? (rec.reactions as R[]) : [];
+  return { id: rec.id, lastSeq: rec.lastSeq, frames: rec.frames as F[], reactions };
 }
 
 // drop the thread's record (logout); a missing id is a no-op

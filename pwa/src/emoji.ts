@@ -77,3 +77,21 @@ export function isJumboEmoji(text: string): boolean {
   const n = emojiCount(text);
   return n >= 1 && n <= JUMBO_MAX;
 }
+
+/**
+ * The first emoji in a text, whole (a flag, a skin tone, a keycap or a joined
+ * family is one), when the text starts with one after any whitespace; null
+ * when the first thing in it is anything else. The reaction bar's smiley reads
+ * what he typed on his own keyboard with this: the first emoji is the reaction,
+ * and a letter typed first is not one.
+ */
+export function leadingEmoji(text: string): string | null {
+  TOKEN.lastIndex = 0;
+  while (TOKEN.lastIndex < text.length) {
+    const m = TOKEN.exec(text);
+    if (!m) return null;
+    if (m[1] !== undefined) continue;
+    return drawnAsEmoji(m[0]) ? m[0] : null;
+  }
+  return null;
+}
