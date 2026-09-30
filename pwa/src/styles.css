@@ -2650,10 +2650,22 @@ html, body {
 .tapbadge.mine { background: var(--accent); }
 .tapbadge.theirs { background: var(--received); }
 .tapbadge .tb { font-size: 16px; }
-.tapbadge .tb-haha { font-size: 8.5px; -webkit-text-stroke: 0.45px #1b84e8; }
+.tapbadge .tb-haha { font-size: 9.5px; -webkit-text-stroke: 0.35px #1b84e8; }
 .tapbadge .tb-emphasize { font-size: 17px; }
 .tapbadge .tb-question { font-size: 19px; }
 .tapbadge.pop { animation: tapbadge-pop 0.32s cubic-bezier(0.2, 0.8, 0.25, 1); }
 @keyframes tapbadge-pop {
   from { opacity: 0; transform: scale(0.4); }
+}
+/* On his own badge the accent is the ground, so the three drawn glyphs take
+   their light end: the same gradients, lifted */
+.tapbadge.mine .tb-haha {
+  background-image: linear-gradient(180deg, #ffffff 0%, #e3f6ff 55%, #b5e4ff 100%);
+  -webkit-text-stroke-width: 0; /* an outline at this size reads as hollow letters */
+}
+.tapbadge.mine .tb-question {
+  background-image: linear-gradient(180deg, #ffffff 0%, #eadcff 55%, #cfb2ff 100%);
+}
+.tapbadge.mine .tb-emphasize {
+  background-image: linear-gradient(180deg, #ffd0d4 0%, #ff6b7d 50%, #ff2e4f 100%);
 }
