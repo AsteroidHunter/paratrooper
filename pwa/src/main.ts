@@ -4677,6 +4677,9 @@ async function sendReaction(
   }
   // an answer for the chat that was left changes nothing on this one
   if (ok || epoch !== threadEpoch) return;
+  // a newer pick on this message has already replaced this one: the revert is
+  // that pick's to make, not this stale answer's
+  if ((reactionBook.get(seq)?.user ?? null) !== next) return;
   // refused or unreachable: put back what the service still has
   if (reactionBook.set(seq, "user", previous)) {
     paintReactions(seq, true);

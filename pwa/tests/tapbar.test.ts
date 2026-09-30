@@ -161,6 +161,11 @@ describe("his pick", () => {
     expect(send).toContain("thread_id: thread");
     expect(send).toContain("epoch !== threadEpoch");
     expect(send).toMatch(/reactionBook\.set\(seq, "user", previous\)/);
+    // a failed answer never undoes a newer pick on the same message
+    expect(send.indexOf('?.user ?? null) !== next) return')).toBeGreaterThan(-1);
+    expect(send.indexOf('?.user ?? null) !== next) return')).toBeLessThan(
+      send.indexOf('reactionBook.set(seq, "user", previous)'),
+    );
   });
 
   it("remembers the emoji outside the six as recents, and logout forgets them", () => {
