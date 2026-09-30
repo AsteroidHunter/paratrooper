@@ -224,7 +224,7 @@ import { bindWiden, composeWidenDeps, createWiden } from "./widen";
 declare const __BUILT_AT__: string;
 declare const __SERVER_VERSION__: string; // server commit this bundle was built against
 
-const APP_VERSION = "0.3.172"; // The emoji picker beside the compose bar is gone; the keyboard's own emoji key covers it
+const APP_VERSION = "0.3.173"; // Double tap any message to react with a tapback or any emoji, and the agent can react too
 
 // compose placeholder: one of these, picked at random each time the chat
 // renders — app-voice dispatch prompts, ellipses spaced per Akash's spec.
