@@ -302,6 +302,9 @@ function harness(options: { pageAge?: number } = {}) {
     jankSpan: () => {},
     // bootFromCache's collaborators: the saved record, the pin, and nothing else that decides
     cacheGet: async () => saved,
+    // the saved badges (reactions.ts): nothing here draws one
+    reactionBook: { replaceAll: () => [] },
+    forgetReactionRecents: () => {},
     armBootFrameGuard: () => {},
     restoreProfile: () => null,
     profile: null,

@@ -224,8 +224,14 @@ export const TAP_MAX_MS = 350;
 export type TapVerdict = "single" | "double" | null;
 
 export interface DoubleTap {
-  /** a finger lands; key is the message under it, null for none */
-  down(key: number | null, x: number, y: number, t: number): void;
+  /**
+   * a finger lands; key is the message under it, null for none. True when
+   * this touch could be the second of a double tap: the caller holds back the
+   * first tap's waiting action (a photo opening) from here, because the
+   * window is measured to the second touch's START, and a photo that opened
+   * while the second finger was still down would open under the bar.
+   */
+  down(key: number | null, x: number, y: number, t: number): boolean;
   move(x: number, y: number): void;
   /** the finger lifts: a first tap, the second of a double, or no tap */
   up(x: number, y: number, t: number): TapVerdict;
@@ -239,6 +245,10 @@ export function createDoubleTap(): DoubleTap {
   return {
     down(key, x, y, t) {
       press = { key, x, y, t, moved: false };
+      return (
+        key !== null && last !== null && last.key === key && t - last.upAt <= DOUBLE_TAP_MS &&
+        Math.hypot(x - last.x, y - last.y) <= DOUBLE_TAP_REACH_PX
+      );
     },
     move(x, y) {
       if (press && Math.hypot(x - press.x, y - press.y) > TAP_SLOP_PX) press.moved = true;

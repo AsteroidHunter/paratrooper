@@ -384,7 +384,8 @@ describe("the content settle's wiring", () => {
 
   it("every content settle carries its own trigger name onto the trail", () => {
     const names = [...src.matchAll(/settleContent\("([a-z]+)"\)/g)].map((m) => m[1]);
-    expect(names.sort()).toEqual(["delete", "retract", "typing"]);
+    // a reaction badge coming off a row takes its room with it (tapbar.test.ts)
+    expect(names.sort()).toEqual(["delete", "reaction", "retract", "typing"]);
   });
 
   it("nothing here waits on a clock, and nothing reads a scroll event", () => {

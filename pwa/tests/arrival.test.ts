@@ -220,7 +220,8 @@ describe("the timeout case is untouched: dots that led nowhere still settle", ()
 
   it("still the only three content settles the app has", () => {
     const names = [...src.matchAll(/settleContent\("([a-z]+)"\)/g)].map((m) => m[1]);
-    expect(names.sort()).toEqual(["delete", "retract", "typing"]);
+    // a reaction badge coming off a row takes its room with it (tapbar.test.ts)
+    expect(names.sort()).toEqual(["delete", "reaction", "retract", "typing"]);
   });
 
   it("the morph adds no compensating scroll write of its own", () => {

@@ -221,6 +221,19 @@ describe("the double tap", () => {
     expect(tap(d, 4, 200)).toBe("single");
   });
 
+  it("says at the second touch's start that it could complete the pair", () => {
+    const d = createDoubleTap();
+    expect(d.down(4, 100, 200, 0)).toBe(false);
+    d.up(100, 200, 60);
+    expect(d.down(4, 105, 200, 60 + DOUBLE_TAP_MS)).toBe(true);
+    d.up(105, 200, 380);
+    expect(d.down(4, 100, 200, 400)).toBe(false); // a third touch is a fresh first
+    d.up(100, 200, 450);
+    expect(d.down(5, 100, 200, 500)).toBe(false); // another message
+    d.up(100, 200, 550);
+    expect(d.down(5, 100, 200, 550 + DOUBLE_TAP_MS + 1)).toBe(false); // too late
+  });
+
   it("the window is a quarter second", () => {
     expect(DOUBLE_TAP_MS).toBe(250);
     expect(TAP_SLOP_PX).toBe(10);

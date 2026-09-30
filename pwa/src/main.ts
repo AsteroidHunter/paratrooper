@@ -14,6 +14,22 @@ import type { ChatSummary } from "./chatlist";
 import { moveTypingAfter, placeTyping } from "./dots";
 import { createDownButton, createGlide } from "./downbtn";
 import { isJumboEmoji } from "./emoji";
+import {
+  RECENTS_KEY,
+  barItems,
+  createDoubleTap,
+  createReactionBook,
+  createTapWait,
+  glyphOf,
+  isTapback,
+  nextReaction,
+  normalizeReaction,
+  reactionLabel,
+  readRecents,
+  rememberRecent,
+} from "./reactions";
+import type { ReactionEntry, ReactionRole } from "./reactions";
+import { createTapbar } from "./tapbar";
 import type { Glide } from "./downbtn";
 import { createEndSpring } from "./endspring";
 import { ackFrame, enrichFrame } from "./enrich";
@@ -751,7 +767,8 @@ function writeThreadCache(): void {
   if (!token || store.size === 0) return; // an empty snapshot must never clobber a good one
   const jankT0 = performance.now(); // TEMP DIAGNOSTIC (scroll-jank): the snapshot build is sync main-thread work
   const seqs = [...store.keys()].sort((a, b) => a - b).slice(-CACHE_FRAMES);
-  void cachePut({ id: THREAD_ID, lastSeq, frames: seqs.map((s) => store.get(s)!) });
+  void cachePut({ id: THREAD_ID, lastSeq, frames: seqs.map((s) => store.get(s)!),
+    reactions: reactionBook.entries() }); // the badges paint from the saved copy too
   jankSpan("cache-write", jankT0); // TEMP DIAGNOSTIC (scroll-jank)
 }
 const cacheWrites = createWriteScheduler(writeThreadCache);
@@ -1245,6 +1262,7 @@ function leaveChat(): void {
   void cacheClear(); // every chat's cached thread is credentialed content
   THREAD_ID = DEFAULT_THREAD; // the next sign-in opens on the default chat
   localStorage.removeItem(THREAD_KEY);
+  forgetReactionRecents(); // his recent reaction emoji go with the session
   chats.forget(); // and the list of chats goes with the session that fetched it
   if (probeFallback) clearTimeout(probeFallback);
   probeFallback = null;
@@ -1331,6 +1349,7 @@ const chats = createChatList({
   canOpen: () => Boolean(token) && !app.classList.contains("settling"),
   opening: () => {
     document.getElementById("menu")?.classList.remove("open");
+    tapbar.close();
     // the list covers the chat: the keyboard goes down the approved way, a blur
     const active = document.activeElement;
     if (active instanceof HTMLElement && active.id === "text") active.blur();
@@ -1727,8 +1746,17 @@ function renderChat(): void {
   };
   thread.addEventListener("touchend", endPeek);
   thread.addEventListener("touchcancel", endPeek);
+  // the double tap that opens the reaction bar, on its own listeners beside
+  // the peek's (bindReactionGestures has the rule)
+  bindReactionGestures(thread);
   // fresh thread DOM: the store must match (login/logout re-renders the shell)
   store.clear();
+  // and so must the reactions: the chat being opened brings its own, from its
+  // saved copy and then its socket's snapshot
+  tapbar.close();
+  reactionBook.clear();
+  photoTapWait.clear();
+  doubleTap.cancel();
   // the springy transcript belonged to the old thread's rows: drop it whole
   if (springRaf) cancelAnimationFrame(springRaf);
   springRaf = 0;
@@ -3317,7 +3345,8 @@ function settleTail(via: string, quiet = false): void {
 // transforms, the sibling shift, laidOutRows and the row-width read are all
 // looking at, which is a great deal more than this fix. The three sites are the
 // three places a whole block leaves the conversation: hideTyping, applyRetract
-// and deleteFailed. A gap stamp leaving inside decorate() is the one shrink left
+// and deleteFailed. A fourth is smaller: a reaction's badge coming off a row
+// takes the room the row kept for it (paintReactions). A gap stamp leaving inside decorate() is the one shrink left
 // unnamed, and it is a few pixels that only ever moves while applyEvent or
 // rerender is already writing the scroll around it.
 //
@@ -3877,6 +3906,7 @@ function applyEvent(m: ServerMsg): void {
   wrapper.dataset.seq = String(seq);
   wrapper.dataset.ord = String(++rowOrd);
   renderInto(wrapper, m); // writes data-ts: the compose time this row is placed by
+  paintReactionsInto(wrapper, seq, false); // its badges, from the reaction book
   const morphing = takeDotsOffer();
   if (endsDots && !morphing) hideTyping(); // nothing grew into them: the old removal
   // one rule for every frame, live or replayed: the row goes where its own
@@ -3943,6 +3973,7 @@ function rerender(seq: number): void {
   suppressAnim = true; // a state flip must not replay the entrance pop
   w.replaceChildren();
   renderInto(w, m);
+  paintReactionsInto(w, seq, false);
   suppressAnim = prevSuppress;
   decorate();
   scheduleBubbleFit(w); // fresh elements, so the old caps went with the old DOM
@@ -4368,6 +4399,291 @@ function isDuplicateAgentText(seq: number, text: string): boolean {
   return false;
 }
 
+// --- reactions (tapbacks) -----------------------------------------------------
+// Double tap any bubble, his or the agent's, text, photo or big emoji: the
+// bubble lifts and the reaction bar opens over it (tapbar.ts). One reaction per
+// person per message, shown as a badge docked on the bubble's top corner, the
+// one away from the sender. The rules are reactions.ts; this is the wiring.
+//
+// The book is the phone's copy of the chat's reactions. It is filled from the
+// saved copy at a cold open, replaced whole by the socket's snapshot after
+// every replay, changed by each live frame and by his own picks, and painted
+// into every row as it is rendered. A pick paints at once and is sent; a
+// refusal puts back what the service still has. A reaction never makes a
+// message, a job or a push.
+
+const reactionBook = createReactionBook();
+const doubleTap = createDoubleTap();
+const photoTapWait = createTapWait();
+let reactionRecents = readRecents(safeLocal(RECENTS_KEY));
+
+function safeLocal(k: string): string | null {
+  try {
+    return localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+}
+
+function forgetReactionRecents(): void {
+  reactionRecents = [];
+  try {
+    localStorage.removeItem(RECENTS_KEY);
+  } catch {
+    /* private mode can refuse storage: there was nothing kept either */
+  }
+}
+
+interface ReactionFrame {
+  kind: "reaction";
+  thread_id?: string;
+  target?: unknown;
+  role?: unknown;
+  reaction?: unknown;
+}
+
+interface ReactionSnapshot {
+  kind: "reactions";
+  thread_id?: string;
+  reactions?: unknown;
+}
+
+const tapbar = createTapbar({
+  host: () => app,
+  view: () => {
+    const t = document.getElementById("thread");
+    if (!t) return null;
+    const box = t.getBoundingClientRect();
+    const head = app.querySelector("header.bar")?.getBoundingClientRect();
+    const form = document.getElementById("compose")?.getBoundingClientRect();
+    return {
+      top: Math.max(box.top, head?.bottom ?? box.top),
+      bottom: Math.min(box.bottom, form?.top ?? box.bottom),
+      left: box.left,
+      right: box.right,
+    };
+  },
+  items: () => barItems(reactionRecents),
+  current: (seq) => reactionBook.get(seq)?.user,
+  pick: reactTo,
+});
+
+/** The bubble a touch or click landed on, if it is one that takes a reaction. */
+function reactionBubble(
+  target: EventTarget | null,
+): { bubble: HTMLElement; seq: number; side: ReactionRole } | null {
+  if (!(target instanceof Element)) return null;
+  // a link opens on its own first tap, and a control is a control
+  if (target.closest("a, button, input, textarea")) return null;
+  const bubble = target.closest<HTMLElement>(".msg");
+  if (!bubble || bubble.classList.contains("system") || bubble.classList.contains("arriving")) {
+    return null;
+  }
+  const w = bubble.closest<HTMLElement>(".evt");
+  const seq = Number(w?.dataset.seq);
+  if (!w || !Number.isInteger(seq) || seq <= 0) return null; // a send not yet numbered
+  return { bubble, seq, side: w.dataset.role === "user" ? "user" : "agent" };
+}
+
+// The double tap, on the thread's own touches (reactions.ts createDoubleTap
+// holds the timing and why). The first touch is never prevented, so a link,
+// a photo, a scroll, the peek and a long press see exactly what they always
+// saw; only the second touch's END is taken, which in WebKit means no mouse
+// events, no click and no double click for it, and so no word selected by it.
+// A photo's own single tap is held back from the second touch's START
+// (photoTap below), because the window is measured to that start.
+function bindReactionGestures(list: HTMLElement): void {
+  list.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length > 1) {
+        doubleTap.cancel(); // a pinch or a two finger touch is not a tap
+        return;
+      }
+      const t = e.touches[0];
+      const hit = reactionBubble(e.target);
+      const pairs = doubleTap.down(hit?.seq ?? null, t.clientX, t.clientY, e.timeStamp);
+      if (pairs && hit) photoTapWait.claim(hit.seq); // the photo's open waits no longer
+    },
+    { passive: true },
+  );
+  list.addEventListener(
+    "touchmove",
+    (e) => {
+      const t = e.touches[0];
+      if (t) doubleTap.move(t.clientX, t.clientY);
+    },
+    { passive: true },
+  );
+  list.addEventListener("touchend", (e) => {
+    const t = e.changedTouches[0];
+    if (!t || doubleTap.up(t.clientX, t.clientY, e.timeStamp) !== "double") return;
+    const hit = reactionBubble(e.target);
+    if (!hit) return;
+    e.preventDefault(); // the second tap is ours: no click, no double click, no word
+    openReactionBar(hit);
+  });
+  list.addEventListener("touchcancel", () => doubleTap.cancel(), { passive: true });
+  // a mouse double click (and any double click the engine still synthesises):
+  // the second press would select a word, so on a bubble it opens the bar
+  list.addEventListener("mousedown", (e) => {
+    if (e.detail < 2) return;
+    const hit = reactionBubble(e.target);
+    if (!hit) return;
+    e.preventDefault();
+    photoTapWait.claim(hit.seq);
+    if (tapbar.openSeq() !== hit.seq) openReactionBar(hit);
+  });
+}
+
+function clearBubbleSelection(bubble: HTMLElement): void {
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0 && sel.anchorNode && bubble.contains(sel.anchorNode)) {
+    sel.removeAllRanges();
+  }
+}
+
+function openReactionBar(hit: { bubble: HTMLElement; seq: number; side: ReactionRole }): void {
+  if (!token) return;
+  document.getElementById("menu")?.classList.remove("open");
+  clearBubbleSelection(hit.bubble);
+  // and once more on the next frame, for an engine that selects after the touch
+  requestAnimationFrame(() => clearBubbleSelection(hit.bubble));
+  tapbar.open(hit.bubble, hit.seq, hit.side);
+}
+
+/** A photo's single tap: at once for a photo with no number, else after the window. */
+function photoTap(seq: number | undefined, open: () => void): void {
+  if (!seq) {
+    open();
+    return;
+  }
+  photoTapWait.after(seq, open);
+}
+
+/**
+ * Draw one message's badges into its first row, from the book. A zero width
+ * dock right after the bubble (before it on his side, by flex order) holds a
+ * badge per reaction, so the bubble itself, its width fit, its tail and its
+ * text selection never see them. True when the row's layout changed.
+ */
+function paintReactionsInto(w: HTMLElement, seq: number, live: boolean): boolean {
+  const row = w.querySelector<HTMLElement>(":scope > .row");
+  if (!row || !row.firstElementChild?.classList.contains("msg")) return false;
+  const pair = reactionBook.get(seq);
+  const had = row.querySelector<HTMLElement>(":scope > .tapdock");
+  if (!pair) {
+    if (!had) return false;
+    had.remove();
+    row.classList.remove("reacted");
+    return true;
+  }
+  const dock = document.createElement("span");
+  dock.className = "tapdock";
+  // behind first, front last: his own sits in front, nearest the corner
+  const badges: [ReactionRole, string][] = [];
+  if (pair.agent) badges.push(["agent", pair.agent]);
+  if (pair.user) badges.push(["user", pair.user]);
+  badges.forEach(([role, reaction], i) => {
+    const badge = document.createElement("span");
+    const behind = badges.length > 1 && i === 0 ? " back" : "";
+    const was = had?.querySelector(`.tapbadge.${role === "user" ? "mine" : "theirs"}`);
+    const fresh = live && was?.getAttribute("data-reaction") !== reaction ? " pop" : "";
+    badge.className = `tapbadge ${role === "user" ? "mine" : "theirs"}${behind}${fresh}`;
+    badge.dataset.reaction = reaction;
+    badge.setAttribute("role", "img");
+    badge.setAttribute("aria-label",
+      `${role === "user" ? "You" : "Paratrooper"} reacted: ${reactionLabel(reaction)}`);
+    const g = glyphOf(reaction);
+    const face = document.createElement("span");
+    face.className = g.cls;
+    face.textContent = g.text;
+    face.setAttribute("aria-hidden", "true");
+    badge.appendChild(face);
+    dock.appendChild(badge);
+  });
+  if (had) had.replaceWith(dock);
+  else row.append(dock);
+  const grew = !row.classList.contains("reacted");
+  row.classList.add("reacted");
+  return grew;
+}
+
+/** A live change to one message's badges, keeping the reader's place. */
+function paintReactions(seq: number, live: boolean): void {
+  const w = wrapperFor(seq);
+  const row = w?.querySelector<HTMLElement>(":scope > .row");
+  if (!w || !row) return;
+  keepView(row, () => paintReactionsInto(w, seq, live));
+  settleContent("reaction");
+}
+
+function applyReactionFrame(f: ReactionFrame): void {
+  if (f.thread_id !== THREAD_ID) return;
+  const seq = Number(f.target);
+  const role = f.role === "user" || f.role === "agent" ? f.role : null;
+  const reaction = typeof f.reaction === "string" ? normalizeReaction(f.reaction) : null;
+  if (!Number.isInteger(seq) || seq <= 0 || !role) return;
+  if (f.reaction !== null && reaction === null) return; // not a reaction this build can draw
+  if (!reactionBook.set(seq, role, reaction)) return;
+  paintReactions(seq, true);
+  if (tapbar.openSeq() === seq) tapbar.refresh();
+  cacheWrites.bump();
+}
+
+function applyReactionSnapshot(f: ReactionSnapshot): void {
+  if (f.thread_id !== THREAD_ID || !Array.isArray(f.reactions)) return;
+  const changed = reactionBook.replaceAll(f.reactions as ReactionEntry[]);
+  for (const seq of changed) paintReactions(seq, false);
+  if (changed.length) cacheWrites.bump();
+}
+
+/** His pick in the bar: toggle his one reaction, paint it, send it. */
+function reactTo(seq: number, picked: string): void {
+  const previous = reactionBook.get(seq)?.user ?? null;
+  const next = nextReaction(previous, picked);
+  if (next !== null && !isTapback(next)) {
+    reactionRecents = rememberRecent(reactionRecents, next);
+    try {
+      localStorage.setItem(RECENTS_KEY, JSON.stringify(reactionRecents));
+    } catch {
+      /* private mode: the recents last as long as the page */
+    }
+  }
+  if (reactionBook.set(seq, "user", next)) {
+    paintReactions(seq, true);
+    cacheWrites.bump();
+  }
+  void sendReaction(THREAD_ID, threadEpoch, seq, next, previous);
+}
+
+async function sendReaction(
+  thread: string,
+  epoch: number,
+  seq: number,
+  next: string | null,
+  previous: string | null,
+): Promise<void> {
+  let ok = false;
+  try {
+    const r = await fetch("/api/react", {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: thread, seq, reaction: next }),
+    });
+    ok = r.ok;
+  } catch {
+    ok = false;
+  }
+  // an answer for the chat that was left changes nothing on this one
+  if (ok || epoch !== threadEpoch) return;
+  // refused or unreachable: put back what the service still has
+  if (reactionBook.set(seq, "user", previous)) {
+    paintReactions(seq, true);
+    cacheWrites.bump();
+  }
+}
+
 // --- per-kind renderers: DOM = pure projection of one stored event -------------
 
 type Renderer = (m: ServerMsg, wrapper: HTMLElement, at: number, value: string) => void;
@@ -4567,7 +4883,9 @@ function renderUser(m: ServerMsg, wrapper: HTMLElement, at: number, value: strin
         img.remove();
       });
     };
-    img.addEventListener("click", () => openLightbox(img.src, img));
+    // the photo opens once the double tap window has passed without a second
+    // tap (photoTap): a double tap on a photo is a reaction, not a zoom
+    img.addEventListener("click", () => photoTap(m.seq, () => openLightbox(img.src, img)));
     // the url is PARKED, not fetched (photolazy.ts): a photo far from the
     // screen never opens a connection, and the box reserved above sits grey
     // with a ring in it until the reader comes within a screen of it
@@ -4727,7 +5045,7 @@ function pngDims(dataUri: string): [number, number] | null {
   }
 }
 
-function renderScreenshot(_m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
+function renderScreenshot(m: ServerMsg, wrapper: HTMLElement, at: number, value: string): void {
   if (!value) return;
   const div = rowEl(wrapper, "agent", "shot", at);
   const img = document.createElement("img");
@@ -4750,7 +5068,7 @@ function renderScreenshot(_m: ServerMsg, wrapper: HTMLElement, at: number, value
   img.onload = () => {
     if (followTail) scrollToBottom(true); // height lands after decode; never glide
   };
-  img.addEventListener("click", () => openLightbox(value, img));
+  img.addEventListener("click", () => photoTap(m.seq, () => openLightbox(value, img)));
   div.appendChild(img);
 }
 
@@ -5386,6 +5704,9 @@ function connect(): void {
       if (m.kind === "typing") showTyping(); // dots self-expire if it wasn't for you
       // another chat has news (the service's nudge): the list and the header count
       else if (m.kind === "threads") chats.nudged();
+      // reactions: one change, or the whole chat's after the replay
+      else if (m.kind === "reaction") applyReactionFrame(m as unknown as ReactionFrame);
+      else if (m.kind === "reactions") applyReactionSnapshot(m as unknown as ReactionSnapshot);
       return;
     }
     // the finished reply must not land under his thumbs: mid-composition it
@@ -5761,6 +6082,7 @@ window.addEventListener("pageshow", (e) => {
 function applyRetract(seq: number): void {
   const wasHeld = replyHold.drop(seq);
   const hadStore = store.delete(seq);
+  reactionBook.drop(seq); // the service took its reactions with it
   if (hadStore) cacheWrites.bump(); // the deleted reply must leave the cold-open snapshot too
   const w = wrapperFor(seq);
   if (w) {
@@ -7981,6 +8303,7 @@ document.addEventListener("visibilitychange", () => {
   } else {
     cacheWrites.flush(); // hidden: the pending snapshot lands before iOS can freeze the page
     resumeHidden(); // remember where the reader was, and stop the keep-alive
+    tapbar.close(); // the reaction bar does not outlive the screen it was on
   }
 });
 clearBadge();
@@ -8160,11 +8483,13 @@ async function bootFromCache(): Promise<void> {
   // chat it was written under, and a switch is not a new deployment.
   profile = restoreProfile() ?? profile;
   const t0 = performance.now();
-  const cached = await cacheGet<ServerMsg>(THREAD_ID).catch(() => null);
+  const cached = await cacheGet<ServerMsg, ReactionEntry>(THREAD_ID).catch(() => null);
   const readMs = Math.round(performance.now() - t0);
   const t = document.getElementById("thread");
   if (cached && cached.frames.length && t) {
     holdDiagRecord("cache-read", { frames: cached.frames.length, ms: readMs });
+    // the saved badges first, so each frame below paints its own as it lands
+    reactionBook.replaceAll(cached.reactions ?? []);
     const prevSuppress = suppressAnim;
     suppressAnim = true; // cached frames are history: no pops, no glides
     // one fold and one pin for the whole saved copy (foldOnce), not fifty

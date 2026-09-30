@@ -223,7 +223,8 @@ describe("the saved-thread cache per chat", () => {
 
   it("writes under the chat on screen and reads the chat being opened", () => {
     expect(fnBody("writeThreadCache")).toContain("cachePut({ id: THREAD_ID");
-    expect(fnBody("bootFromCache")).toContain("cacheGet<ServerMsg>(THREAD_ID)");
+    // the chat's saved reactions ride the same record (reactions.test.ts)
+    expect(fnBody("bootFromCache")).toContain("cacheGet<ServerMsg, ReactionEntry>(THREAD_ID)");
   });
 });
 

@@ -2379,3 +2379,281 @@ html, body {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+
+/* --- reactions (tapbacks) ------------------------------------------------------
+   Messages' reaction bar and badges (main.ts and tapbar.ts draw them,
+   reactions.ts holds the rules), after the owner's screenshot of Messages on
+   iOS 26: a white capsule over the tapped bubble, which turns bright and lifts
+   where it stands, and nothing else dims (iOS 26 dropped the dimming). */
+:root {
+  --tapbar-bg: #ffffff;
+  --tapbar-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 26px rgba(0, 0, 0, 0.16);
+  --tapback-on: rgba(69, 56, 255, 0.16); /* his current one, the accent at a tint */
+  --tapface: #9a9aa0; /* the smiley's line, a control's grey */
+  --lift-bright: 1.1; /* the grey reply turns white, as in the screenshot */
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --tapbar-bg: #2c2c2e;
+    --tapbar-shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 26px rgba(0, 0, 0, 0.55);
+    --tapback-on: rgba(125, 116, 255, 0.34);
+    --tapface: #8e8e93;
+    --lift-bright: 1.35;
+  }
+}
+
+/* The tapped bubble, lifted: brighter, a soft shadow that follows its own
+   shape (tail included, being the bubble's own pseudo-element), and a little
+   larger. `scale` rather than `transform`, so the entrance pop and any other
+   transform on the bubble compose with it instead of being replaced.
+   .droplift eases it back down as the bar leaves. */
+.msg.lifted {
+  filter: brightness(var(--lift-bright)) drop-shadow(0 6px 14px rgba(0, 0, 0, 0.14));
+  scale: 1.02;
+  z-index: 1;
+  transition: filter 0.2s ease, scale 0.2s ease;
+}
+.msg.droplift { transition: filter 0.18s ease, scale 0.18s ease; }
+
+/* The bar. tapbar.ts writes left, top and width from the bubble's box every
+   frame it is open; it lives in the shell, over the header if it has to be,
+   under the lightbox and the chat list. */
+.tapbar {
+  position: absolute;
+  z-index: 8;
+  height: 56px;
+  transform-origin: 20% 100%;
+  animation: tapbar-in 0.22s cubic-bezier(0.2, 0.8, 0.25, 1);
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.tapbar.mine { transform-origin: 80% 100%; }
+.tapbar.below { transform-origin: 20% 0; }
+.tapbar.mine.below { transform-origin: 80% 0; }
+.tapbar.out {
+  animation: tapbar-out 0.16s ease-in forwards;
+  pointer-events: none;
+}
+@keyframes tapbar-in {
+  from { opacity: 0; transform: scale(0.82); }
+}
+@keyframes tapbar-out {
+  to { opacity: 0; transform: scale(0.9); }
+}
+.tapbar-pill {
+  position: absolute;
+  inset: 0;
+  border-radius: 28px;
+  background: var(--tapbar-bg);
+  box-shadow: var(--tapbar-shadow);
+  overflow: hidden;
+}
+/* his recents run on past the six and scroll sideways, as in the screenshot */
+.tapbar-row {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  touch-action: pan-x;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.tapbar-row::-webkit-scrollbar { display: none; }
+.tapback {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin: 0 1px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition: background-color 0.15s ease, scale 0.15s ease;
+}
+.tapback:active { scale: 1.15; }
+.tapback.on { background: var(--tapback-on); }
+
+/* The glyphs. The heart and the thumbs are the system's own emoji, which on
+   the phone are the glossy tapback glyphs (the thumbs down leans orange, as in
+   the screenshot); HA HA, !! and ? are rounded heavy type filled with the
+   tapbacks' own gradients, so none of the six is ever plain grey. */
+.tb {
+  display: block;
+  font-size: 27px;
+  line-height: 1;
+  font-style: normal;
+  text-align: center;
+}
+.tb-heart, .tb-like, .tb-dislike, .tb-emoji {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
+.tb-dislike { filter: hue-rotate(-12deg) saturate(1.35); }
+.tb-haha, .tb-emphasize, .tb-question {
+  font-family: ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", system-ui, sans-serif;
+  font-weight: 900;
+  color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+.tb-haha {
+  white-space: pre;
+  font-size: 14px;
+  line-height: 0.9;
+  letter-spacing: -0.02em;
+  background-image: linear-gradient(180deg, #d4f1ff 0%, #7fcfff 45%, #2f9df6 100%);
+  -webkit-text-stroke: 0.7px #1b84e8;
+}
+.tb-emphasize {
+  font-size: 29px;
+  letter-spacing: -0.12em;
+  padding-right: 0.12em; /* the tracking's own trailing gap, given back */
+  background-image: linear-gradient(180deg, #ffa3a8 0%, #ff4057 48%, #d70a33 100%);
+}
+.tb-question {
+  font-size: 31px;
+  background-image: linear-gradient(180deg, #e9d6ff 0%, #b98aff 48%, #8546f0 100%);
+}
+
+/* The smiley bubble hanging off the bar's right end, with the thought trail
+   Messages draws under it. Its tap raises his own keyboard (tapbar.ts). One
+   drop shadow over the three circles, so they cast one shape. */
+.tapbar-more {
+  position: absolute;
+  right: 36px;
+  top: 40px;
+  width: 44px;
+  height: 44px;
+  filter: drop-shadow(0 3px 8px rgba(0, 0, 0, 0.14));
+}
+.tapbar-more::before,
+.tapbar-more::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  background: var(--tapbar-bg);
+  pointer-events: none;
+}
+.tapbar-more::before { width: 14px; height: 14px; right: -3px; bottom: -1px; }
+.tapbar-more::after { width: 7px; height: 7px; right: -10px; bottom: -10px; }
+/* On his side the bubble stands at the right, so the smiley hangs off the
+   other end, mirrored: always at the end away from the sender, like the badges,
+   where it never covers a short bubble. */
+.tapbar.mine .tapbar-more { right: auto; left: 36px; }
+.tapbar.mine .tapbar-more::before { right: auto; left: -3px; }
+.tapbar.mine .tapbar-more::after { right: auto; left: -10px; }
+.tapbar-smiley {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--tapbar-bg);
+  cursor: pointer;
+}
+/* the face, drawn in line: a ring, two eyes and an open smile */
+.tapbar-face {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  border: 2px solid var(--tapface);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 38%, var(--tapface) 0 1.6px, transparent 2.1px),
+    radial-gradient(circle at 66% 38%, var(--tapface) 0 1.6px, transparent 2.1px);
+}
+.tapbar-face::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 55%;
+  width: 12px;
+  height: 6px;
+  translate: -50% 0;
+  border: 2px solid var(--tapface);
+  border-radius: 1px 1px 7px 7px;
+}
+.tapbar.keying .tapbar-face { --tapface: var(--accent); }
+/* The field the keyboard types into: focusable, so it must not be display:none
+   or hidden, but never seen and never tapped. 16px, or iOS zooms on focus. */
+.tapbar-key {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  font-size: 16px;
+  pointer-events: none;
+}
+
+/* The badges: a zero width dock right after the bubble in its row (before it
+   on his side), so the bubble's width fit, its tail and its text selection
+   never see them, and a badge per reaction hanging off the bubble's top corner
+   away from the sender, ringed in the page colour the way Messages cuts its
+   badge into the bubble. His in the accent, the agent's in the received grey;
+   his in front. A reacted row takes room above for them. */
+.row.reacted { padding-top: 18px; }
+.tapdock {
+  position: relative;
+  flex: none;
+  align-self: flex-start;
+  width: 0;
+  height: 0;
+  z-index: 2;
+}
+.row.user > .tapdock { order: -1; }
+.tapbadge {
+  position: absolute;
+  top: -22px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bg);
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* the badge's own little trail down to the bubble's rounded corner, where no
+   text ever sits (the text is inset 16px from the side) */
+.tapbadge::after {
+  content: "";
+  position: absolute;
+  bottom: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: inherit;
+  box-shadow: 0 0 0 1.5px var(--bg);
+  z-index: -1;
+}
+.row.agent > .tapdock .tapbadge { left: -10px; }
+.row.agent > .tapdock .tapbadge::after { left: -1px; }
+.row.user > .tapdock .tapbadge { right: -10px; }
+.row.user > .tapdock .tapbadge::after { right: -1px; }
+/* the one behind, when both have reacted, sits further out from the corner */
+.row.agent > .tapdock .tapbadge.back { left: 12px; }
+.row.user > .tapdock .tapbadge.back { right: 12px; }
+.tapbadge.mine { background: var(--accent); }
+.tapbadge.theirs { background: var(--received); }
+.tapbadge .tb { font-size: 16px; }
+.tapbadge .tb-haha { font-size: 8.5px; -webkit-text-stroke: 0.45px #1b84e8; }
+.tapbadge .tb-emphasize { font-size: 17px; }
+.tapbadge .tb-question { font-size: 19px; }
+.tapbadge.pop { animation: tapbadge-pop 0.32s cubic-bezier(0.2, 0.8, 0.25, 1); }
+@keyframes tapbadge-pop {
+  from { opacity: 0; transform: scale(0.4); }
+}
