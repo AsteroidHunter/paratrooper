@@ -472,8 +472,8 @@ describe("presentation — original glass, fixed arrow, right-tangent seat", () 
 
   it("seated at the bar's right end: disc and pill right edges flush", () => {
     const composeRule = css.match(/\n\.compose \{([^}]*)\}/)?.[1] ?? "";
-    expect(composeRule).toContain("padding: 0.5rem 0.75rem var(--pad-b)"); // the pill's right edge: 0.75rem in
-    expect(jumpRule).toContain("right: 0.75rem"); // the same inset = the two right edges tangent
+    expect(composeRule).toContain("padding: 0.5rem var(--pad-r) var(--pad-b) var(--pad-l)"); // the pill's right edge: --pad-r in
+    expect(jumpRule).toContain("right: var(--pad-r)"); // the same inset = the two right edges tangent
     expect(jumpRule).not.toContain("left:"); // off the ＋'s column for good
     // raised seat: the pill's live height + one 0.75rem gap of air (~12.5px
     // clear of the pill, roughly double the old 36.5px + 0.5rem carry-over's
@@ -595,10 +595,10 @@ describe("presentation — the seat rides the pill's live height", () => {
   });
 
   it("the right edge never moved: still tangent to the pill's outer right edge", () => {
-    expect(jumpRule).toContain("right: 0.75rem");
+    expect(jumpRule).toContain("right: var(--pad-r)");
     expect(jumpRule).not.toContain("left:");
     const composeRule = css.match(/\n\.compose \{([^}]*)\}/)?.[1] ?? "";
-    expect(composeRule).toContain("padding: 0.5rem 0.75rem var(--pad-b)");
+    expect(composeRule).toContain("padding: 0.5rem var(--pad-r) var(--pad-b) var(--pad-l)");
   });
 
   it("autosize publishes the pill's MEASURED height on every resize", () => {

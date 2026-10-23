@@ -1098,7 +1098,7 @@ describe("presentation — the lift rides the keyboard's clock; the box and the 
 
   it("the home-indicator gap no longer collapses under .kb, so no reader of it moves at an edge", () => {
     expect(rule("#app.kb")).not.toMatch(/--pad-b:/); // it reads the gap for the lift, never sets it
-    expect(rule("#app")).toContain("--pad-b: max(0.5rem, env(safe-area-inset-bottom))");
+    expect(rule("#app")).toContain("--pad-b: max(0.5rem, calc(env(safe-area-inset-bottom) - 8px))");
     const consumers = rules.filter((r) => r.body.includes("var(--pad-b)")).map((r) => r.sel);
     expect(consumers).toContain(".compose"); // the pill and the ＋
     expect(consumers).toContain(".jump"); // on screen exactly when the thread is scrolled away
