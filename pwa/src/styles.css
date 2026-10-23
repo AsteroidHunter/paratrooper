@@ -178,8 +178,8 @@ html, body {
      clearance itself, the ＋ (a smaller circle) 1px further in, so both follow
      the corner's curve. With no bottom inset (a desktop browser, an iPhone
      with a home button) all three resolve to the old 0.5rem and 0.75rem, so
-     those layouts do not move. Read by the compose bar, the ＋'s file input,
-     the jump chevron and the staged-photo strip. */
+     those layouts do not move. Read by the compose bar, the ＋'s file input
+     and the jump chevron. */
   --pad-b: max(0.5rem, calc(env(safe-area-inset-bottom) - 8px));
   --pad-r: max(0.75rem, var(--pad-b));
   --pad-l: max(0.75rem, calc(var(--pad-b) + 1px));
@@ -1897,7 +1897,8 @@ html, body {
   display: none;
   gap: 0.4rem;
   flex-wrap: wrap;
-  padding: 0.4rem var(--pad-r) 0 var(--pad-l); /* the bar's side gaps: the first square over the ＋ */
+  /* 0.75rem, not the bar's inset gaps: five squares a row on a 375pt phone */
+  padding: 0.4rem 0.75rem 0;
   /* the frame a cancelled square is parked in (.pthumb.leaving below): the
      square holds its place in the strip's own coordinates, so it stays with
      the strip while the strip moves. Nothing about this layout changes. */
